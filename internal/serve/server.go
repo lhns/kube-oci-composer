@@ -5,7 +5,7 @@
 // push credentials anywhere, and no node configuration — an ordinary Service behind the
 // cluster's existing ingress and certificate is enough for containerd to pull over HTTPS.
 //
-// Storage is deliberately disposable. Composition is deterministic, so the controller can always
+// Storage is pluggable and deliberately disposable. Composition is deterministic, so the controller can always
 // re-assemble an artifact from its spec; losing the blob directory costs a rebuild, not data.
 // That is why there is no PVC here and nothing to back up. A registry has to persist bytes; a
 // deterministic composer does not.
@@ -32,11 +32,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/registry"
+
+	"github.com/lhns/kube-oci-composer/internal/store"
 )
 
 // Server hosts the read-only OCI endpoint plus its backing blob store.
@@ -48,30 +48,33 @@ type Server struct {
 	// Addr is the listen address, e.g. ":5000".
 	Addr string
 
-	// dir backs the blob store.
-	dir string
+	// Blobs is where blob content lives. Exposed so garbage collection can enumerate and delete
+	// through the same store the endpoint serves from.
+	Blobs store.Store
 
 	handler http.Handler
 }
 
-// New creates a Server storing blobs under dir. The directory is created if missing and may be
-// ephemeral: it is a cache of reproducible content, not a system of record.
-func New(host, addr, dir string) (*Server, error) {
+// New creates a Server serving blobs out of the given Store.
+//
+// presign redirects blob reads straight to object storage when the backend supports it. It is
+// off by default because it exposes the object-store endpoint to every pulling client.
+func New(host, addr string, blobs store.Store, presign bool) (*Server, error) {
 	if host == "" {
 		return nil, fmt.Errorf("serving host must be set: it is what status.artifact.ref is built from")
 	}
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return nil, fmt.Errorf("creating blob directory %q: %w", dir, err)
+	if blobs == nil {
+		return nil, fmt.Errorf("a blob store is required")
 	}
 
 	h := registry.New(
-		registry.WithBlobHandler(registry.NewDiskBlobHandler(filepath.Clean(dir))),
+		registry.WithBlobHandler(NewBlobHandler(blobs, presign)),
 		// Referrers support is on so SBOM, provenance and signature artifacts can attach to a
 		// manifest by subject, the same way they would on a real registry.
 		registry.WithReferrersSupport(true),
 	)
 
-	return &Server{Host: host, Addr: addr, dir: dir, handler: h}, nil
+	return &Server{Host: host, Addr: addr, Blobs: blobs, handler: h}, nil
 }
 
 // Handler exposes the distribution endpoint.

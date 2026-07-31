@@ -25,6 +25,7 @@ import (
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 	"github.com/lhns/kube-oci-composer/internal/oci"
 	"github.com/lhns/kube-oci-composer/internal/serve"
+	"github.com/lhns/kube-oci-composer/internal/store"
 )
 
 func testScheme(t *testing.T) *runtime.Scheme {
@@ -79,7 +80,11 @@ func contentServer(t *testing.T, files map[string]string) (url, digest string) {
 func servingReconciler(t *testing.T, objs ...*ociv1alpha1.ImageComposition) (*ImageCompositionReconciler, string) {
 	t.Helper()
 
-	srv, err := serve.New("oci.test", ":0", t.TempDir())
+	blobs, err := store.NewDisk(t.TempDir())
+	if err != nil {
+		t.Fatalf("creating blob store: %v", err)
+	}
+	srv, err := serve.New("oci.test", ":0", blobs, false)
 	if err != nil {
 		t.Fatalf("creating server: %v", err)
 	}

@@ -33,6 +33,27 @@ var (
 	date    = "unknown"
 )
 
+// Storage backend names, kept as constants so the flag validation and the selection cannot drift.
+const (
+	backendDisk = "disk"
+	backendS3   = "s3"
+)
+
+// newBlobStore picks where served blobs live.
+func newBlobStore(backend, dir string, s3 store.Store) (store.Store, error) {
+	switch backend {
+	case backendS3:
+		if s3 == nil {
+			return nil, fmt.Errorf("storage backend %q requires S3 to be configured", backend)
+		}
+		return s3, nil
+	case backendDisk:
+		return store.NewDisk(dir)
+	default:
+		return nil, fmt.Errorf("unknown storage backend %q", backend)
+	}
+}
+
 var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
@@ -51,6 +72,7 @@ func main() {
 		showVersion          bool
 		servingHost          string
 		servingAddr          string
+		storageBackend       string
 		storageDir           string
 		cacheDir             string
 		s3Endpoint           string
@@ -58,6 +80,7 @@ func main() {
 		s3Prefix             string
 		s3Region             string
 		s3PathStyle          bool
+		s3Presign            bool
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "Address the metric endpoint binds to.")
@@ -69,6 +92,11 @@ func main() {
 			"Required unless every ImageComposition sets spec.push, because it is what "+
 			"status.artifact.ref is built from.")
 	flag.StringVar(&servingAddr, "serving-bind-address", ":5000", "Address the OCI endpoint binds to.")
+	flag.StringVar(&storageBackend, "storage-backend", backendDisk,
+		"Where served blobs live: \"disk\" or \"s3\". S3 requires --s3-endpoint. Note this only "+
+			"moves the blobs; manifests are held in memory by the registry implementation and are "+
+			"rebuilt at startup either way, so S3 here saves re-uploading layers after a restart "+
+			"rather than removing the rebuild.")
 	flag.StringVar(&storageDir, "storage-dir", "/var/lib/oci-composer",
 		"Directory backing the served blobs. An emptyDir is fine: composition is deterministic, so "+
 			"anything lost is rebuilt by the reconcile that runs at startup. Note that rebuilding "+
@@ -91,6 +119,11 @@ func main() {
 	flag.BoolVar(&s3PathStyle, "s3-path-style", true,
 		"Use path-style addressing (host/bucket/key) instead of virtual-host style. Required by "+
 			"most self-hosted gateways, whose certificate does not cover per-bucket subdomains.")
+
+	flag.BoolVar(&s3Presign, "s3-presign-blobs", false,
+		"Redirect blob pulls to a presigned S3 URL so the bytes do not stream through the "+
+			"controller. Off by default because it exposes the object-store endpoint to every "+
+			"pulling client, which on a private gateway may not be reachable from every node.")
 
 	flag.BoolVar(&showVersion, "version", false, "Print version information and exit.")
 
@@ -120,6 +153,12 @@ func main() {
 
 	// Validate before building the manager, so a typo in chart values fails immediately rather
 	// than producing a controller that reports Ready and cannot cache anything.
+	if storageBackend != backendDisk && storageBackend != backendS3 {
+		setupLog.Error(nil, "invalid --storage-backend", "value", storageBackend,
+			"expected", []string{backendDisk, backendS3})
+		os.Exit(1)
+	}
+
 	var remote store.Store
 	if s3Endpoint != "" {
 		s3, err := store.NewS3(s3Config)
@@ -132,6 +171,15 @@ func main() {
 			"endpoint", s3Endpoint, "bucket", s3Bucket, "prefix", s3Prefix, "pathStyle", s3PathStyle)
 	} else if s3Bucket != "" {
 		setupLog.Error(nil, "--s3-bucket is set but --s3-endpoint is not; the cache would stay local")
+		os.Exit(1)
+	}
+
+	if storageBackend == backendS3 && remote == nil {
+		setupLog.Error(nil, "--storage-backend=s3 needs --s3-endpoint")
+		os.Exit(1)
+	}
+	if s3Presign && remote == nil {
+		setupLog.Error(nil, "--s3-presign-blobs needs an S3 backend")
 		os.Exit(1)
 	}
 
@@ -164,7 +212,12 @@ func main() {
 
 	var server *serve.Server
 	if servingHost != "" {
-		server, err = serve.New(servingHost, servingAddr, storageDir)
+		blobStore, err := newBlobStore(storageBackend, storageDir, remote)
+		if err != nil {
+			setupLog.Error(err, "unable to set up blob storage")
+			os.Exit(1)
+		}
+		server, err = serve.New(servingHost, servingAddr, blobStore, s3Presign)
 		if err != nil {
 			setupLog.Error(err, "unable to set up the serving endpoint")
 			os.Exit(1)
