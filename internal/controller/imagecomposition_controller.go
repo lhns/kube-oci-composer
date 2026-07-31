@@ -121,7 +121,7 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		interval = time.Hour
 	}
 
-	art, err := r.reconcileArtifact(ctx, &obj)
+	art, inputHash, err := r.reconcileArtifact(ctx, &obj)
 	if err != nil {
 		var te *terminalError
 		if errors.As(err, &te) {
@@ -153,6 +153,7 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	if err := r.patchStatus(ctx, &obj, func(o *ociv1alpha1.ImageComposition) {
 		o.Status.Artifact = art
+		o.Status.InputHash = inputHash
 		o.Status.ObservedGeneration = o.Generation
 		o.Status.LastHandledReconcileAt = o.Annotations[ReconcileRequestAnnotation]
 		setCondition(o, ociv1alpha1.ReadyCondition, metav1.ConditionTrue,
@@ -168,67 +169,40 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 // reconcileArtifact does the work and returns what is published.
 //
-// The ordering matters: everything cheap and verifiable happens before anything expensive or
-// side-effecting. Inputs are fetched and digest-checked, the target digest is computed, and only
-// if it differs from what is already published is anything written.
-func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj *ociv1alpha1.ImageComposition) (*ociv1alpha1.ArtifactStatus, error) {
-	workDir, err := os.MkdirTemp("", "oci-composer-work-*")
-	if err != nil {
-		return nil, fmt.Errorf("creating work dir: %w", err)
-	}
-	defer os.RemoveAll(workDir)
-
+// The ordering is the important part, and it is ordered by cost. The input hash is computed from
+// the spec alone, so the cheapest possible check — one HEAD, no network transfer — comes first
+// and covers the overwhelmingly common case of nothing having changed. Only past that point does
+// anything get fetched, and only past the digest comparison does anything get written.
+func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj *ociv1alpha1.ImageComposition) (*ociv1alpha1.ArtifactStatus, string, error) {
+	// Built from the spec only; Path is filled in later, after we know a build is actually
+	// needed. InputHash deliberately ignores Path for exactly this reason.
 	inputs := make([]oci.LayerInput, 0, len(obj.Spec.Layers))
 	for _, l := range obj.Spec.Layers {
 		if l.URLSource == nil {
 			// v0.1 supports url entries only. The union is already CEL-validated, so this is a
 			// guard against a source kind the CRD allows but this build cannot handle.
-			return nil, terminal("layer %q: only url sources are supported in this version", l.Name)
-		}
-		path, err := r.Fetcher.FetchURL(ctx, l.URL, l.Digest)
-		if err != nil {
-			var dm *oci.ErrDigestMismatch
-			if errors.As(err, &dm) {
-				// Terminal on purpose: the declared digest and the served bytes disagree, and
-				// no amount of retrying reconciles that. Retrying would also mean repeatedly
-				// pulling content we have already decided not to trust.
-				return nil, terminal("layer %q: %s", l.Name, dm.Error())
-			}
-			return nil, fmt.Errorf("layer %q: %w", l.Name, err)
+			return nil, "", terminal("layer %q: only url sources are supported in this version", l.Name)
 		}
 		inputs = append(inputs, oci.LayerInput{
 			Name:   l.Name,
-			Path:   path,
+			URL:    l.URL,
 			Digest: l.Digest,
 			Unpack: oci.UnpackMode(orDefault(string(l.Unpack), "none")),
 			Target: orDefault(l.Target, "/"),
 		})
 	}
-	defer func() {
-		for _, in := range inputs {
-			os.Remove(in.Path)
-		}
-	}()
 
-	img, err := oci.Assemble(inputs, configFrom(obj.Spec.Config), workDir)
-	if err != nil {
-		return nil, terminal("assembling: %v", err)
-	}
-
-	digest, err := img.Digest()
-	if err != nil {
-		return nil, fmt.Errorf("computing digest: %w", err)
-	}
+	cfg := configFrom(obj.Spec.Config)
+	inputHash := oci.InputHash(inputs, cfg)
 
 	tgt, err := r.target(obj)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	contentTag := fmt.Sprintf("%s-%s", tgt.tag, strings.TrimPrefix(digest.String(), "sha256:")[:12])
 
 	opts, err := r.remoteOptions(ctx, obj)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	// name.Insecure applies ONLY to the loopback serving endpoint. Applying it unconditionally
@@ -241,22 +215,75 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 
 	movingRef, err := name.ParseReference(fmt.Sprintf("%s:%s", tgt.writeRepo, tgt.tag), refOpts...)
 	if err != nil {
-		return nil, terminal("invalid reference %s:%s: %v", tgt.writeRepo, tgt.tag, err)
+		return nil, "", terminal("invalid reference %s:%s: %v", tgt.writeRepo, tgt.tag, err)
 	}
 
-	// Convergence check. If the moving pointer already resolves to this digest there is nothing
-	// to do, so a steady-state reconcile costs one HEAD rather than a rebuild and a push.
-	// A HEAD failure is not an error here — the ordinary cause is that the tag does not exist.
+	// A HEAD failure is not an error here — the ordinary cause is that the tag does not exist,
+	// or that the serving store was emptied by a restart.
 	existing, headErr := remote.Head(movingRef, opts...)
+
+	// The cheap path. Same inputs, and what is published is still exactly what those inputs
+	// produced last time, so there is nothing to do. This is what makes reconciling on an
+	// interval nearly free: without it, the output digest could only be learned by downloading
+	// every layer and assembling them, every hour, forever.
+	if prev := obj.Status.Artifact; prev != nil &&
+		obj.Status.InputHash == inputHash &&
+		headErr == nil && existing.Digest.String() == prev.Digest {
+		return prev.DeepCopy(), inputHash, nil
+	}
+
+	workDir, err := os.MkdirTemp("", "oci-composer-work-*")
+	if err != nil {
+		return nil, "", fmt.Errorf("creating work dir: %w", err)
+	}
+	defer os.RemoveAll(workDir)
+
+	for i := range inputs {
+		path, err := r.Fetcher.FetchURL(ctx, inputs[i].URL, inputs[i].Digest)
+		if err != nil {
+			var dm *oci.ErrDigestMismatch
+			if errors.As(err, &dm) {
+				// Terminal on purpose: the declared digest and the served bytes disagree, and
+				// no amount of retrying reconciles that. Retrying would also mean repeatedly
+				// pulling content we have already decided not to trust.
+				return nil, "", terminal("layer %q: %s", inputs[i].Name, dm.Error())
+			}
+			return nil, "", fmt.Errorf("layer %q: %w", inputs[i].Name, err)
+		}
+		inputs[i].Path = path
+	}
+	defer func() {
+		for _, in := range inputs {
+			if in.Path != "" {
+				os.Remove(in.Path)
+			}
+		}
+	}()
+
+	img, err := oci.Assemble(inputs, cfg, workDir)
+	if err != nil {
+		return nil, "", terminal("assembling: %v", err)
+	}
+
+	digest, err := img.Digest()
+	if err != nil {
+		return nil, "", fmt.Errorf("computing digest: %w", err)
+	}
+
+	contentTag := fmt.Sprintf("%s-%s", tgt.tag, strings.TrimPrefix(digest.String(), "sha256:")[:12])
+
+	// Second convergence check, now against the real output digest. The input hash can differ
+	// while the output does not — a cosmetic spec change, or a controller that lost its recorded
+	// hash — and there is no reason to republish identical bytes.
 	if headErr == nil && existing.Digest == digest {
-		return artifactStatus(tgt, contentTag, digest), nil
+		return artifactStatus(tgt, contentTag, digest), inputHash, nil
 	}
 
 	if obj.Spec.Push != nil && obj.Spec.Push.Immutable && headErr == nil {
 		// Opt-in guard for people using the tag as a version rather than a pointer. Terminal,
 		// because silently changing what a tag means is the failure mode that leaves nodes
 		// running different bytes under the same name. Checked before anything is written.
-		return nil, terminal(
+		return nil, "", terminal(
 			"tag %s already resolves to %s but this spec produces %s; bump the tag or unset immutable",
 			tgt.tag, existing.Digest, digest)
 	}
@@ -265,20 +292,20 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	// addressable even after the pointer moves on.
 	contentRef, err := name.ParseReference(fmt.Sprintf("%s:%s", tgt.writeRepo, contentTag), refOpts...)
 	if err != nil {
-		return nil, terminal("invalid reference %s:%s: %v", tgt.writeRepo, contentTag, err)
+		return nil, "", terminal("invalid reference %s:%s: %v", tgt.writeRepo, contentTag, err)
 	}
 	if err := remote.Write(contentRef, img, opts...); err != nil {
-		return nil, fmt.Errorf("publishing %s: %w", contentRef, err)
+		return nil, "", fmt.Errorf("publishing %s: %w", contentRef, err)
 	}
 
 	if err := remote.Write(movingRef, img, opts...); err != nil {
-		return nil, fmt.Errorf("publishing %s: %w", movingRef, err)
+		return nil, "", fmt.Errorf("publishing %s: %w", movingRef, err)
 	}
 
 	r.event(obj, corev1.EventTypeNormal, ociv1alpha1.ReasonSucceeded,
 		fmt.Sprintf("Published %s (%s)", contentRef, digest))
 
-	return artifactStatus(tgt, contentTag, digest), nil
+	return artifactStatus(tgt, contentTag, digest), inputHash, nil
 }
 
 // target is where an artifact is written and how it should be referenced. The two differ in

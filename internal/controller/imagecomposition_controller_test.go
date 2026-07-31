@@ -116,6 +116,20 @@ func composition(name string, layers ...ociv1alpha1.Layer) *ociv1alpha1.ImageCom
 	}
 }
 
+// build runs one build and writes the result back into obj.Status the way Reconcile does.
+// Threading the status through matters: it is what lets the inputHash short-circuit engage on a
+// second call, so tests exercise the same path production takes rather than a simplified one.
+func build(t *testing.T, r *ImageCompositionReconciler, obj *ociv1alpha1.ImageComposition, what string) *ociv1alpha1.ArtifactStatus {
+	t.Helper()
+	art, hash, err := r.reconcileArtifact(context.Background(), obj)
+	if err != nil {
+		t.Fatalf("%s: %v", what, err)
+	}
+	obj.Status.Artifact = art
+	obj.Status.InputHash = hash
+	return art
+}
+
 func urlLayer(name, url, digest, target string) ociv1alpha1.Layer {
 	return ociv1alpha1.Layer{
 		Name:      name,
@@ -134,10 +148,7 @@ func TestServingModePublishesAndIsIdempotent(t *testing.T) {
 	obj := composition("plugins", urlLayer("core", url, digest, "/core"))
 	r, host := servingReconciler(t, obj)
 
-	art, err := r.reconcileArtifact(context.Background(), obj)
-	if err != nil {
-		t.Fatalf("first reconcile: %v", err)
-	}
+	art := build(t, r, obj, "first reconcile")
 	if art.Digest == "" {
 		t.Fatal("no digest recorded")
 	}
@@ -169,10 +180,7 @@ func TestServingModePublishesAndIsIdempotent(t *testing.T) {
 		}
 	}
 
-	second, err := r.reconcileArtifact(context.Background(), obj)
-	if err != nil {
-		t.Fatalf("second reconcile: %v", err)
-	}
+	second := build(t, r, obj, "second reconcile")
 	if second.Digest != art.Digest {
 		t.Fatalf("digest changed on re-reconcile: %s then %s", art.Digest, second.Digest)
 	}
@@ -186,7 +194,7 @@ func TestDigestMismatchIsTerminalAndPublishesNothing(t *testing.T) {
 	obj := composition("tampered", urlLayer("core", url, wrong, "/core"))
 	r, host := servingReconciler(t, obj)
 
-	_, err := r.reconcileArtifact(context.Background(), obj)
+	_, _, err := r.reconcileArtifact(context.Background(), obj)
 	if err == nil {
 		t.Fatal("expected an error for a mismatched digest")
 	}
@@ -218,25 +226,16 @@ func TestConvergenceOnChangedContent(t *testing.T) {
 	obj := composition("converge", urlLayer("core", urlA, digestA, "/core"))
 	r, _ := servingReconciler(t, obj)
 
-	first, err := r.reconcileArtifact(context.Background(), obj)
-	if err != nil {
-		t.Fatalf("reconcile A: %v", err)
-	}
+	first := build(t, r, obj, "reconcile A")
 
 	obj.Spec.Layers[0] = urlLayer("core", urlB, digestB, "/core")
-	changed, err := r.reconcileArtifact(context.Background(), obj)
-	if err != nil {
-		t.Fatalf("reconcile B: %v", err)
-	}
+	changed := build(t, r, obj, "reconcile B")
 	if changed.Digest == first.Digest {
 		t.Fatal("changing the content did not change the digest")
 	}
 
 	obj.Spec.Layers[0] = urlLayer("core", urlA, digestA, "/core")
-	reverted, err := r.reconcileArtifact(context.Background(), obj)
-	if err != nil {
-		t.Fatalf("reconcile A again: %v", err)
-	}
+	reverted := build(t, r, obj, "reconcile A again")
 	if reverted.Digest != first.Digest {
 		t.Fatalf("reverting gave %s, want the original %s", reverted.Digest, first.Digest)
 	}
@@ -252,17 +251,11 @@ func TestOldContentTagSurvivesRebuild(t *testing.T) {
 	obj := composition("dual", urlLayer("core", urlA, digestA, "/core"))
 	r, host := servingReconciler(t, obj)
 
-	first, err := r.reconcileArtifact(context.Background(), obj)
-	if err != nil {
-		t.Fatalf("first: %v", err)
-	}
+	first := build(t, r, obj, "first")
 	oldContentTag := fmt.Sprintf("%s/dual:main-%s", host, strings.TrimPrefix(first.Digest, "sha256:")[:12])
 
 	obj.Spec.Layers[0] = urlLayer("core", urlB, digestB, "/core")
-	second, err := r.reconcileArtifact(context.Background(), obj)
-	if err != nil {
-		t.Fatalf("second: %v", err)
-	}
+	second := build(t, r, obj, "second")
 	if second.Digest == first.Digest {
 		t.Fatal("rebuild produced the same digest")
 	}
@@ -299,10 +292,7 @@ func TestTagListingWorks(t *testing.T) {
 	obj := composition("listing", urlLayer("core", url, digest, "/core"))
 	r, host := servingReconciler(t, obj)
 
-	art, err := r.reconcileArtifact(context.Background(), obj)
-	if err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
+	art := build(t, r, obj, "reconcile")
 
 	repo, err := name.NewRepository(host+"/listing", name.Insecure)
 	if err != nil {
@@ -342,7 +332,7 @@ func TestServingModeWithoutServerIsTerminal(t *testing.T) {
 		Fetcher:  oci.NewFetcher(),
 	}
 
-	_, err := r.reconcileArtifact(context.Background(), obj)
+	_, _, err := r.reconcileArtifact(context.Background(), obj)
 	var te *terminalError
 	if err == nil || !errors.As(err, &te) {
 		t.Fatalf("expected a terminal error, got %v", err)

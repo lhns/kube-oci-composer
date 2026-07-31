@@ -3,6 +3,8 @@ package oci
 import (
 	"archive/tar"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -26,6 +28,63 @@ import (
 // reconcile into a needless push. 1970-01-01 is used rather than "now" for exactly that reason.
 var epoch = time.Unix(0, 0).UTC()
 
+// AssemblyVersion identifies the output format produced by Assemble.
+//
+// It is folded into InputHash, which is what lets the reconciler skip a build whose inputs have
+// not changed. BUMP THIS whenever Assemble's output changes for identical inputs — entry
+// ordering, header normalisation, media types, the config it stamps. Forgetting to means an
+// upgraded controller looks at an artifact built by the old algorithm, sees an unchanged input
+// hash, and keeps serving it forever.
+const AssemblyVersion = 1
+
+// InputHash returns a stable hash of everything that determines the assembled output.
+//
+// Only the fields that actually affect the result are included: the ordered layer digests, their
+// unpack modes and targets, the config, and AssemblyVersion. LayerInput.Name and .Path are
+// excluded deliberately — the name appears only in error messages, and the path is a temporary
+// location that differs on every reconcile. Including either would defeat the whole point by
+// producing a different hash for identical content.
+//
+// Fields are length-prefixed rather than delimiter-joined so that no combination of targets or
+// label values can produce the same byte stream as a different combination.
+func InputHash(inputs []LayerInput, cfg Config) string {
+	h := sha256.New()
+	writeField := func(s string) {
+		fmt.Fprintf(h, "%d:", len(s))
+		h.Write([]byte(s))
+	}
+
+	writeField(fmt.Sprintf("assembly-v%d", AssemblyVersion))
+
+	fmt.Fprintf(h, "layers=%d;", len(inputs))
+	for _, in := range inputs {
+		writeField(in.Digest)
+		writeField(string(in.Unpack))
+		writeField(in.Target)
+	}
+
+	// Labels are a map, so they need a stable order. Everything else is already a slice and
+	// carries its own.
+	keys := make([]string, 0, len(cfg.Labels))
+	for k := range cfg.Labels {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	fmt.Fprintf(h, "labels=%d;", len(keys))
+	for _, k := range keys {
+		writeField(k)
+		writeField(cfg.Labels[k])
+	}
+	for _, group := range [][]string{cfg.Env, cfg.Entrypoint, cfg.Cmd} {
+		fmt.Fprintf(h, "n=%d;", len(group))
+		for _, v := range group {
+			writeField(v)
+		}
+	}
+
+	return "sha256:" + hex.EncodeToString(h.Sum(nil))
+}
+
 // UnpackMode mirrors the API's Unpack field.
 type UnpackMode string
 
@@ -35,11 +94,17 @@ const (
 	UnpackTarGz UnpackMode = "tar.gz"
 )
 
-// LayerInput is one resolved content contribution, ready to be turned into a layer.
+// LayerInput is one content contribution.
+//
+// It is built from the spec first, with Path empty, so InputHash can be computed before anything
+// is downloaded. Path is filled in only once a build is known to be needed.
 type LayerInput struct {
-	// Name of the entry, used in error messages and provenance.
+	// Name of the entry, used in error messages and provenance. Not part of the output.
 	Name string
-	// Path to the fetched content on local disk.
+	// URL the content is fetched from. Not part of the output: two URLs serving the same
+	// digest are interchangeable by definition.
+	URL string
+	// Path to the fetched content on local disk. Empty until fetched.
 	Path string
 	// Digest of the fetched content, already verified.
 	Digest string

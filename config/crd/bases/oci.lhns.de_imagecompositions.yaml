@@ -3,7 +3,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.16.5
+    controller-gen.kubebuilder.io/version: v0.19.0
   name: imagecompositions.oci.lhns.de
 spec:
   group: oci.lhns.de
@@ -323,6 +323,18 @@ spec:
                   - type
                   type: object
                 type: array
+              inputHash:
+                description: |-
+                  InputHash summarises everything that determines the output: the ordered layer digests,
+                  their unpack modes and targets, the config, and the assembly algorithm version. When it is
+                  unchanged and the published artifact still resolves, the controller skips the whole build
+                  — no fetch, no assembly, one HEAD.
+
+                  This is NOT the same idea as ImageBuild's planned inputHash. There the hash IS the
+                  identity, because a Dockerfile's output digest cannot be known without building. Here the
+                  output digest remains the identity and this is only a short-circuit; the guarantee is
+                  unchanged, the work is skipped. See ADR 0002.
+                type: string
               lastHandledReconcileAt:
                 description: |-
                   LastHandledReconcileAt echoes the reconcile.fluxcd.io/requestedAt annotation, so

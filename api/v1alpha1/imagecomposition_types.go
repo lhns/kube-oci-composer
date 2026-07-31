@@ -149,6 +149,18 @@ type ImageCompositionStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
+	// InputHash summarises everything that determines the output: the ordered layer digests,
+	// their unpack modes and targets, the config, and the assembly algorithm version. When it is
+	// unchanged and the published artifact still resolves, the controller skips the whole build
+	// — no fetch, no assembly, one HEAD.
+	//
+	// This is NOT the same idea as ImageBuild's planned inputHash. There the hash IS the
+	// identity, because a Dockerfile's output digest cannot be known without building. Here the
+	// output digest remains the identity and this is only a short-circuit; the guarantee is
+	// unchanged, the work is skipped. See ADR 0002.
+	// +optional
+	InputHash string `json:"inputHash,omitempty"`
+
 	// Conditions follow kstatus: Ready, Reconciling, Stalled.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
