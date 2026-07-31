@@ -1,0 +1,46 @@
+version: 2
+
+updates:
+  # Go module dependencies (operator code).
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - go
+    groups:
+      # Group k8s.io/* and sigs.k8s.io/* together — they move in lockstep
+      # (controller-runtime pins specific k8s.io versions).
+      kubernetes:
+        patterns:
+          - "k8s.io/*"
+          - "sigs.k8s.io/*"
+      # Anything else, lumped into one PR per week.
+      go-deps:
+        patterns:
+          - "*"
+
+  # GitHub Actions used in the workflows.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions
+
+  # Container base images in the Dockerfile.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - docker

@@ -1,0 +1,16 @@
+# Keep the build context minimal — only cmd/, internal/, go.mod, go.sum are
+# needed by the Dockerfile.
+charts/
+config/
+docs/
+.github/
+bin/
+dist/
+*.md
+LICENSE
+NOTICE
+.gitignore
+.dockerignore
+.git/
+*.tgz
+release.yaml

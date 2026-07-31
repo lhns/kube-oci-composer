@@ -1,0 +1,22 @@
+# Binaries
+bin/
+*.exe
+*.test
+*.out
+
+# Go workspace
+go.work
+go.work.sum
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Build artifacts
+dist/
+/release.yaml
+*.tgz
+
+# envtest assets
+testbin/
