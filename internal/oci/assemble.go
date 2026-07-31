@@ -72,18 +72,23 @@ type tarEntry struct {
 // The result is byte-for-byte reproducible: entries are sorted, timestamps are fixed, and
 // ownership is normalised. Two calls with the same inputs produce the same digest, which is what
 // lets the reconciler skip work by comparing digests instead of rebuilding.
-func Assemble(inputs []LayerInput, cfg Config) (v1.Image, error) {
+//
+// workDir holds the assembled layer files. They must outlive this call — go-containerregistry
+// reads them lazily when the image is written — so the CALLER owns the directory and must remove
+// it only after the image has been consumed. An empty workDir uses the system temp directory,
+// which leaves the files behind; pass a real directory in any long-running process.
+func Assemble(inputs []LayerInput, cfg Config, workDir string) (v1.Image, error) {
 	img := empty.Image
 	img = mutate.MediaType(img, types.OCIManifestSchema1)
 	img = mutate.ConfigMediaType(img, types.OCIConfigJSON)
 
 	for _, in := range inputs {
-		layerPath, err := buildLayerTarGz(in)
+		layerPath, err := buildLayerTarGz(in, workDir)
 		if err != nil {
 			return nil, fmt.Errorf("layer %q: %w", in.Name, err)
 		}
-		// The temp layer file must outlive this function: go-containerregistry reads it lazily
-		// when the image is written. The caller removes the working directory.
+		// The layer file must outlive this function: go-containerregistry reads it lazily when
+		// the image is written. The caller removes workDir once the image has been consumed.
 		layer, err := tarball.LayerFromFile(layerPath, tarball.WithMediaType(types.OCILayer))
 		if err != nil {
 			return nil, fmt.Errorf("layer %q: reading assembled tar: %w", in.Name, err)
@@ -126,8 +131,9 @@ func Assemble(inputs []LayerInput, cfg Config) (v1.Image, error) {
 	return img, nil
 }
 
-// buildLayerTarGz converts one input into a deterministic gzipped tar and returns its path.
-func buildLayerTarGz(in LayerInput) (string, error) {
+// buildLayerTarGz converts one input into a deterministic gzipped tar under workDir and returns
+// its path.
+func buildLayerTarGz(in LayerInput, workDir string) (string, error) {
 	entries, err := collectEntries(in)
 	if err != nil {
 		return "", err
@@ -137,7 +143,7 @@ func buildLayerTarGz(in LayerInput) (string, error) {
 	// order, which is exactly the kind of incidental variation determinism must exclude.
 	sort.Slice(entries, func(i, j int) bool { return entries[i].name < entries[j].name })
 
-	out, err := os.CreateTemp("", "oci-composer-layer-*.tar.gz")
+	out, err := os.CreateTemp(workDir, "layer-*.tar.gz")
 	if err != nil {
 		return "", fmt.Errorf("creating layer file: %w", err)
 	}

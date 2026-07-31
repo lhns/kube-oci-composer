@@ -52,7 +52,7 @@ func TestAssembleIsDeterministic(t *testing.T) {
 	digestOf := func() string {
 		img, err := Assemble([]LayerInput{{
 			Name: "core", Path: src, Unpack: UnpackTarGz, Target: "/core",
-		}}, Config{Labels: map[string]string{"a": "b"}})
+		}}, Config{Labels: map[string]string{"a": "b"}}, t.TempDir())
 		if err != nil {
 			t.Fatalf("assemble: %v", err)
 		}
@@ -78,7 +78,7 @@ func TestAssembleDigestChangesWithContent(t *testing.T) {
 	b := writeTarGz(t, map[string]string{"lib/a.jar": "different"})
 
 	digestOf := func(src, target string) string {
-		img, err := Assemble([]LayerInput{{Name: "l", Path: src, Unpack: UnpackTarGz, Target: target}}, Config{})
+		img, err := Assemble([]LayerInput{{Name: "l", Path: src, Unpack: UnpackTarGz, Target: target}}, Config{}, t.TempDir())
 		if err != nil {
 			t.Fatalf("assemble: %v", err)
 		}
@@ -104,7 +104,7 @@ func TestAssembleLayerOrderMatters(t *testing.T) {
 	b := writeTarGz(t, map[string]string{"b": "2"})
 
 	mk := func(inputs []LayerInput) string {
-		img, err := Assemble(inputs, Config{})
+		img, err := Assemble(inputs, Config{}, t.TempDir())
 		if err != nil {
 			t.Fatalf("assemble: %v", err)
 		}
@@ -131,7 +131,7 @@ func TestAssemblePlacesContentAtTarget(t *testing.T) {
 
 	img, err := Assemble([]LayerInput{{
 		Name: "core", Path: src, Unpack: UnpackTarGz, Target: "/core",
-	}}, Config{})
+	}}, Config{}, t.TempDir())
 	if err != nil {
 		t.Fatalf("assemble: %v", err)
 	}
