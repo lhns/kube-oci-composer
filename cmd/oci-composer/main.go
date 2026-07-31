@@ -53,8 +53,9 @@ func main() {
 			"status.artifact.ref is built from.")
 	flag.StringVar(&servingAddr, "serving-bind-address", ":5000", "Address the OCI endpoint binds to.")
 	flag.StringVar(&storageDir, "storage-dir", "/var/lib/oci-composer",
-		"Directory backing the served blobs. May be ephemeral: composition is deterministic, so "+
-			"anything lost is re-assembled from the spec.")
+		"Directory backing the served blobs. An emptyDir is fine: composition is deterministic, so "+
+			"anything lost is rebuilt by the reconcile that runs at startup. Note that rebuilding "+
+			"re-fetches every layer from upstream, and the pod stays unready until it has.")
 
 	opts := zap.Options{Development: false}
 	opts.BindFlags(flag.CommandLine)
@@ -102,21 +103,33 @@ func main() {
 		setupLog.Info("no serving host configured; only ImageCompositions with spec.push will reconcile")
 	}
 
+	readiness := &controller.Readiness{Client: mgr.GetClient()}
+
 	if err := (&controller.ImageCompositionReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("imagecomposition-controller"),
-		Server:   server,
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		Recorder:  mgr.GetEventRecorderFor("imagecomposition-controller"),
+		Server:    server,
+		Readiness: readiness,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ImageComposition")
 		os.Exit(1)
 	}
 
+	// Liveness stays a bare ping. A standby replica is alive and must not be restarted just
+	// because it is not the leader.
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)
 	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+
+	// Readiness gates on the served store being warm, so the pod does not join the Service and
+	// answer 404 to pulls while it is still rebuilding after a restart.
+	readyCheck := healthz.Ping
+	if server != nil {
+		readyCheck = readiness.Check
+	}
+	if err := mgr.AddReadyzCheck("readyz", readyCheck); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}

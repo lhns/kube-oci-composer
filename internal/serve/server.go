@@ -5,10 +5,18 @@
 // push credentials anywhere, and no node configuration — an ordinary Service behind the
 // cluster's existing ingress and certificate is enough for containerd to pull over HTTPS.
 //
-// Storage is deliberately disposable. Composition is deterministic, so the controller can
-// always re-assemble an artifact from its spec; losing the blob directory costs a rebuild, not
-// data. That is why there is no PVC here and nothing to back up. A registry has to persist
-// bytes; a deterministic composer does not.
+// Storage is deliberately disposable. Composition is deterministic, so the controller can always
+// re-assemble an artifact from its spec; losing the blob directory costs a rebuild, not data.
+// That is why there is no PVC here and nothing to back up. A registry has to persist bytes; a
+// deterministic composer does not.
+//
+// Note what "disposable" does NOT mean: this endpoint does not build on demand. A pull for
+// something that is not on disk returns 404, exactly as a registry would. What refills the store
+// is the reconcile that fires for every object once the cache syncs at startup — the digest
+// comparison finds nothing published and republishes. Rebuilding therefore costs a re-fetch of
+// every layer from upstream, which is not instant, so controller.Readiness holds the pod out of
+// the Service until that has happened. Serving 404s to a workload that is merely waiting for a
+// restart would put it into ImagePullBackOff for no reason.
 //
 // UPSTREAM CAVEAT, stated rather than buried: go-containerregistry describes pkg/registry as
 // aimed at tests, with production use invited but not claimed. It is used here because it is a
@@ -83,6 +91,16 @@ func (s *Server) LocalRef(name, tag string) string {
 func (s *Server) PublicRef(name, tag string) string {
 	return fmt.Sprintf("%s/%s:%s", s.Host, name, tag)
 }
+
+// NeedLeaderElection reports true so the endpoint runs only on the leader.
+//
+// This is the default for an unmarked Runnable, but it is stated explicitly because it is load
+// bearing rather than incidental: the blob store is node-local, so a standby replica would serve
+// an empty store. It stays out of the Service because it never reports ready — see
+// controller.Readiness — so active/standby works without a second mechanism. Sharing the store
+// between replicas would need a shared backend, and manifests are held in memory by the upstream
+// registry package, so a shared backend alone would not be enough.
+func (s *Server) NeedLeaderElection() bool { return true }
 
 // Start runs the endpoint until ctx is cancelled, satisfying manager.Runnable so the
 // controller-runtime manager owns its lifecycle. A listener failure therefore takes the whole

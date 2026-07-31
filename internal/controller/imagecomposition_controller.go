@@ -55,6 +55,10 @@ type ImageCompositionReconciler struct {
 
 	// Fetcher retrieves layer content.
 	Fetcher *oci.Fetcher
+
+	// Readiness gates the pod's readiness probe until the served store is warm. Optional; when
+	// nil, readiness is not tracked.
+	Readiness *Readiness
 }
 
 // The controller never creates or deletes ImageCompositions — it only observes them and patches
@@ -77,7 +81,16 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	var obj ociv1alpha1.ImageComposition
 	if err := r.Get(ctx, req.NamespacedName, &obj); err != nil {
+		if apierrors.IsNotFound(err) && r.Readiness != nil {
+			r.Readiness.Forget(req.NamespacedName)
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	// Recorded on the way out of every branch, so readiness reflects "this object has been
+	// through a reconcile" rather than "this object is healthy". See Readiness.Observe.
+	if r.Readiness != nil {
+		defer r.Readiness.Observe(req.NamespacedName)
 	}
 
 	if !obj.DeletionTimestamp.IsZero() {
