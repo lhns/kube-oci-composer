@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
+	"github.com/lhns/kube-oci-composer/internal/cache"
 	"github.com/lhns/kube-oci-composer/internal/oci"
 	"github.com/lhns/kube-oci-composer/internal/serve"
 )
@@ -53,8 +54,12 @@ type ImageCompositionReconciler struct {
 	// Server is the built-in endpoint used when spec.push is unset.
 	Server *serve.Server
 
-	// Fetcher retrieves layer content.
+	// Fetcher retrieves layer content from its origin.
 	Fetcher *oci.Fetcher
+
+	// Cache resolves layer digests to local files, falling back to Fetcher on a miss. Optional;
+	// without it every build fetches from the origin.
+	Cache *cache.Cache
 
 	// Readiness gates the pod's readiness probe until the served store is warm. Optional; when
 	// nil, readiness is not tracked.
@@ -239,7 +244,7 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	defer os.RemoveAll(workDir)
 
 	for i := range inputs {
-		path, err := r.Fetcher.FetchURL(ctx, inputs[i].URL, inputs[i].Digest)
+		path, err := r.resolveLayer(ctx, inputs[i])
 		if err != nil {
 			var dm *oci.ErrDigestMismatch
 			if errors.As(err, &dm) {
@@ -252,13 +257,6 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 		}
 		inputs[i].Path = path
 	}
-	defer func() {
-		for _, in := range inputs {
-			if in.Path != "" {
-				os.Remove(in.Path)
-			}
-		}
-	}()
 
 	img, err := oci.Assemble(inputs, cfg, workDir)
 	if err != nil {
@@ -306,6 +304,21 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 		fmt.Sprintf("Published %s (%s)", contentRef, digest))
 
 	return artifactStatus(tgt, contentTag, digest), inputHash, nil
+}
+
+// resolveLayer returns a local path holding the layer's content.
+//
+// With a cache configured this is usually a hit and costs nothing; the fetch is the fallback.
+// Note that the returned path is owned by the cache and must NOT be removed by the caller —
+// deleting it would evict the entry that was just populated and guarantee a miss next time.
+func (r *ImageCompositionReconciler) resolveLayer(ctx context.Context, in oci.LayerInput) (string, error) {
+	fetch := func(ctx context.Context, digest string) (string, error) {
+		return r.Fetcher.FetchURL(ctx, in.URL, digest)
+	}
+	if r.Cache == nil {
+		return fetch(ctx, in.Digest)
+	}
+	return r.Cache.Path(ctx, in.Digest, fetch)
 }
 
 // target is where an artifact is written and how it should be referenced. The two differ in
