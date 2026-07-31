@@ -70,18 +70,16 @@ func (r *Readiness) observed(key types.NamespacedName) bool {
 	return ok
 }
 
-// Check is a healthz.Checker reporting whether every locally served artifact has been built.
-func (r *Readiness) Check(req *http.Request) error {
-	timeout := r.Timeout
-	if timeout <= 0 {
-		timeout = 5 * time.Second
-	}
-	ctx, cancel := context.WithTimeout(req.Context(), timeout)
-	defer cancel()
-
+// Pending returns the locally served objects that have not yet been through a reconcile.
+//
+// Also the safety gate for garbage collection. The collector decides what to delete by marking
+// what every object references, so an object it has not seen contributes nothing to the live set
+// and its content looks like garbage. An empty result means the controller's view is complete
+// and marking can be trusted.
+func (r *Readiness) Pending(ctx context.Context) ([]string, error) {
 	var list ociv1alpha1.ImageCompositionList
 	if err := r.Client.List(ctx, &list); err != nil {
-		return fmt.Errorf("listing ImageCompositions: %w", err)
+		return nil, fmt.Errorf("listing ImageCompositions: %w", err)
 	}
 
 	var pending []string
@@ -100,9 +98,24 @@ func (r *Readiness) Check(req *http.Request) error {
 			pending = append(pending, key.String())
 		}
 	}
+	sort.Strings(pending)
+	return pending, nil
+}
 
+// Check is a healthz.Checker reporting whether every locally served artifact has been built.
+func (r *Readiness) Check(req *http.Request) error {
+	timeout := r.Timeout
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(req.Context(), timeout)
+	defer cancel()
+
+	pending, err := r.Pending(ctx)
+	if err != nil {
+		return err
+	}
 	if len(pending) > 0 {
-		sort.Strings(pending)
 		return fmt.Errorf("blob store is still warming up; %d artifact(s) not built yet: %s",
 			len(pending), strings.Join(pending, ", "))
 	}

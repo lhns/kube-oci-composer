@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -22,6 +23,7 @@ import (
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 	"github.com/lhns/kube-oci-composer/internal/cache"
 	"github.com/lhns/kube-oci-composer/internal/controller"
+	gcpkg "github.com/lhns/kube-oci-composer/internal/gc"
 	"github.com/lhns/kube-oci-composer/internal/serve"
 	"github.com/lhns/kube-oci-composer/internal/store"
 )
@@ -81,6 +83,10 @@ func main() {
 		s3Region             string
 		s3PathStyle          bool
 		s3Presign            bool
+		gcInterval           time.Duration
+		gcGrace              time.Duration
+		gcKeepBuilds         int
+		gcDryRun             bool
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "Address the metric endpoint binds to.")
@@ -124,6 +130,20 @@ func main() {
 		"Redirect blob pulls to a presigned S3 URL so the bytes do not stream through the "+
 			"controller. Off by default because it exposes the object-store endpoint to every "+
 			"pulling client, which on a private gateway may not be reachable from every node.")
+
+	flag.DurationVar(&gcInterval, "gc-interval", gcpkg.DefaultInterval,
+		"How often to reclaim blobs and cache entries nothing references. Zero disables collection.")
+	flag.DurationVar(&gcGrace, "gc-grace", gcpkg.DefaultGrace,
+		"Never reclaim anything written more recently than this. A build writes its blobs before "+
+			"recording them in status, so a sweep landing in that window would delete content that "+
+			"is moments from being referenced.")
+	flag.IntVar(&gcKeepBuilds, "gc-keep-builds", controller.DefaultHistoryLimit,
+		"How many past builds to retain per ImageComposition, unless the object overrides it. "+
+			"Retention is the ONLY thing keeping an old digest pullable, so reverting a commit or "+
+			"rescheduling a pod pinned to an older build both depend on it. Layers are shared "+
+			"between builds, so a generous value costs far less than the count suggests.")
+	flag.BoolVar(&gcDryRun, "gc-dry-run", false,
+		"Log what garbage collection would reclaim without deleting anything.")
 
 	flag.BoolVar(&showVersion, "version", false, "Print version information and exit.")
 
@@ -237,15 +257,38 @@ func main() {
 	readiness := &controller.Readiness{Client: mgr.GetClient()}
 
 	if err := (&controller.ImageCompositionReconciler{
-		Client:    mgr.GetClient(),
-		Scheme:    mgr.GetScheme(),
-		Recorder:  mgr.GetEventRecorderFor("imagecomposition-controller"),
-		Server:    server,
-		Readiness: readiness,
-		Cache:     layerCache,
+		Client:       mgr.GetClient(),
+		Scheme:       mgr.GetScheme(),
+		Recorder:     mgr.GetEventRecorderFor("imagecomposition-controller"),
+		Server:       server,
+		Readiness:    readiness,
+		Cache:        layerCache,
+		HistoryLimit: gcKeepBuilds,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ImageComposition")
 		os.Exit(1)
+	}
+
+	if gcInterval > 0 {
+		collector := &gcpkg.Collector{
+			Client:   mgr.GetClient(),
+			Cache:    layerCache.Local,
+			Pending:  readiness,
+			Interval: gcInterval,
+			Grace:    gcGrace,
+			DryRun:   gcDryRun,
+		}
+		if server != nil {
+			collector.Blobs = server.Blobs
+		}
+		if err := collector.SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to set up garbage collection")
+			os.Exit(1)
+		}
+		setupLog.Info("garbage collection enabled",
+			"interval", gcInterval, "grace", gcGrace, "keepBuilds", gcKeepBuilds, "dryRun", gcDryRun)
+	} else {
+		setupLog.Info("garbage collection disabled; blobs and cache entries will accumulate")
 	}
 
 	// Liveness stays a bare ping. A standby replica is alive and must not be restarted just

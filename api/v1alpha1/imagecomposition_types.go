@@ -169,6 +169,12 @@ type ImageCompositionStatus struct {
 	// +optional
 	Artifact *ArtifactStatus `json:"artifact,omitempty"`
 
+	// History records past builds, newest first, capped at the retention count. It is the live
+	// set garbage collection marks from: anything in storage that no retained build references
+	// is reclaimable. See ADR 0011.
+	// +optional
+	History []BuildRecord `json:"history,omitempty"`
+
 	// LastHandledReconcileAt echoes the reconcile.fluxcd.io/requestedAt annotation, so
 	// `flux reconcile` works out of the box.
 	// +optional

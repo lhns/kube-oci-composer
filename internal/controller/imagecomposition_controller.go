@@ -64,6 +64,10 @@ type ImageCompositionReconciler struct {
 	// Readiness gates the pod's readiness probe until the served store is warm. Optional; when
 	// nil, readiness is not tracked.
 	Readiness *Readiness
+
+	// HistoryLimit is how many past builds to retain per object when the object does not say.
+	// Zero means DefaultHistoryLimit.
+	HistoryLimit int
 }
 
 // The controller never creates or deletes ImageCompositions — it only observes them and patches
@@ -126,7 +130,7 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		interval = time.Hour
 	}
 
-	art, inputHash, err := r.reconcileArtifact(ctx, &obj)
+	result, err := r.reconcileArtifact(ctx, &obj)
 	if err != nil {
 		var te *terminalError
 		if errors.As(err, &te) {
@@ -157,12 +161,13 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	if err := r.patchStatus(ctx, &obj, func(o *ociv1alpha1.ImageComposition) {
-		o.Status.Artifact = art
-		o.Status.InputHash = inputHash
+		o.Status.Artifact = result.Artifact
+		o.Status.InputHash = result.InputHash
+		o.Status.History = recordHistory(o.Status.History, result.Record, r.historyLimit(o))
 		o.Status.ObservedGeneration = o.Generation
 		o.Status.LastHandledReconcileAt = o.Annotations[ReconcileRequestAnnotation]
 		setCondition(o, ociv1alpha1.ReadyCondition, metav1.ConditionTrue,
-			ociv1alpha1.ReasonSucceeded, fmt.Sprintf("Published %s", art.Ref))
+			ociv1alpha1.ReasonSucceeded, fmt.Sprintf("Published %s", result.Artifact.Ref))
 		removeCondition(o, ociv1alpha1.ReconcilingCondition)
 		removeCondition(o, ociv1alpha1.StalledCondition)
 	}); err != nil {
@@ -172,13 +177,56 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	return ctrl.Result{RequeueAfter: interval}, nil
 }
 
+// buildResult is what one reconcile produced.
+type buildResult struct {
+	// Artifact is the published reference. Always set on success.
+	Artifact *ociv1alpha1.ArtifactStatus
+	// InputHash is the hash of everything that determined the output.
+	InputHash string
+	// Record describes a NEW build, and is nil when the reconcile converged without publishing.
+	// Garbage collection reads status.history, so appending on a no-op would grow the retention
+	// list with duplicates and evict genuinely distinct builds.
+	Record *ociv1alpha1.BuildRecord
+}
+
+// buildRecord captures the blobs a build is composed of, so garbage collection can tell what is
+// still live without inferring it from what happens to be in storage.
+func buildRecord(img v1.Image, contentTag string, digest v1.Hash) (*ociv1alpha1.BuildRecord, error) {
+	cfg, err := img.ConfigName()
+	if err != nil {
+		return nil, fmt.Errorf("config digest: %w", err)
+	}
+	layers, err := img.Layers()
+	if err != nil {
+		return nil, fmt.Errorf("layers: %w", err)
+	}
+
+	blobs := make([]string, 0, len(layers)+1)
+	blobs = append(blobs, cfg.String())
+	for _, l := range layers {
+		d, err := l.Digest()
+		if err != nil {
+			return nil, fmt.Errorf("layer digest: %w", err)
+		}
+		blobs = append(blobs, d.String())
+	}
+
+	now := metav1.Now()
+	return &ociv1alpha1.BuildRecord{
+		ContentTag: contentTag,
+		Digest:     digest.String(),
+		Blobs:      blobs,
+		Time:       &now,
+	}, nil
+}
+
 // reconcileArtifact does the work and returns what is published.
 //
 // The ordering is the important part, and it is ordered by cost. The input hash is computed from
 // the spec alone, so the cheapest possible check — one HEAD, no network transfer — comes first
 // and covers the overwhelmingly common case of nothing having changed. Only past that point does
 // anything get fetched, and only past the digest comparison does anything get written.
-func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj *ociv1alpha1.ImageComposition) (*ociv1alpha1.ArtifactStatus, string, error) {
+func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj *ociv1alpha1.ImageComposition) (buildResult, error) {
 	// Built from the spec only; Path is filled in later, after we know a build is actually
 	// needed. InputHash deliberately ignores Path for exactly this reason.
 	inputs := make([]oci.LayerInput, 0, len(obj.Spec.Layers))
@@ -186,7 +234,7 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 		if l.URLSource == nil {
 			// v0.1 supports url entries only. The union is already CEL-validated, so this is a
 			// guard against a source kind the CRD allows but this build cannot handle.
-			return nil, "", terminal("layer %q: only url sources are supported in this version", l.Name)
+			return buildResult{}, terminal("layer %q: only url sources are supported in this version", l.Name)
 		}
 		inputs = append(inputs, oci.LayerInput{
 			Name:   l.Name,
@@ -202,12 +250,12 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 
 	tgt, err := r.target(obj)
 	if err != nil {
-		return nil, "", err
+		return buildResult{}, err
 	}
 
 	opts, err := r.remoteOptions(ctx, obj)
 	if err != nil {
-		return nil, "", err
+		return buildResult{}, err
 	}
 
 	// name.Insecure applies ONLY to the loopback serving endpoint. Applying it unconditionally
@@ -220,7 +268,7 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 
 	movingRef, err := name.ParseReference(fmt.Sprintf("%s:%s", tgt.writeRepo, tgt.tag), refOpts...)
 	if err != nil {
-		return nil, "", terminal("invalid reference %s:%s: %v", tgt.writeRepo, tgt.tag, err)
+		return buildResult{}, terminal("invalid reference %s:%s: %v", tgt.writeRepo, tgt.tag, err)
 	}
 
 	// A HEAD failure is not an error here — the ordinary cause is that the tag does not exist,
@@ -234,12 +282,12 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	if prev := obj.Status.Artifact; prev != nil &&
 		obj.Status.InputHash == inputHash &&
 		headErr == nil && existing.Digest.String() == prev.Digest {
-		return prev.DeepCopy(), inputHash, nil
+		return buildResult{Artifact: prev.DeepCopy(), InputHash: inputHash}, nil
 	}
 
 	workDir, err := os.MkdirTemp("", "oci-composer-work-*")
 	if err != nil {
-		return nil, "", fmt.Errorf("creating work dir: %w", err)
+		return buildResult{}, fmt.Errorf("creating work dir: %w", err)
 	}
 	defer os.RemoveAll(workDir)
 
@@ -251,21 +299,21 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 				// Terminal on purpose: the declared digest and the served bytes disagree, and
 				// no amount of retrying reconciles that. Retrying would also mean repeatedly
 				// pulling content we have already decided not to trust.
-				return nil, "", terminal("layer %q: %s", inputs[i].Name, dm.Error())
+				return buildResult{}, terminal("layer %q: %s", inputs[i].Name, dm.Error())
 			}
-			return nil, "", fmt.Errorf("layer %q: %w", inputs[i].Name, err)
+			return buildResult{}, fmt.Errorf("layer %q: %w", inputs[i].Name, err)
 		}
 		inputs[i].Path = path
 	}
 
 	img, err := oci.Assemble(inputs, cfg, workDir)
 	if err != nil {
-		return nil, "", terminal("assembling: %v", err)
+		return buildResult{}, terminal("assembling: %v", err)
 	}
 
 	digest, err := img.Digest()
 	if err != nil {
-		return nil, "", fmt.Errorf("computing digest: %w", err)
+		return buildResult{}, fmt.Errorf("computing digest: %w", err)
 	}
 
 	contentTag := fmt.Sprintf("%s-%s", tgt.tag, strings.TrimPrefix(digest.String(), "sha256:")[:12])
@@ -274,14 +322,14 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	// while the output does not — a cosmetic spec change, or a controller that lost its recorded
 	// hash — and there is no reason to republish identical bytes.
 	if headErr == nil && existing.Digest == digest {
-		return artifactStatus(tgt, contentTag, digest), inputHash, nil
+		return buildResult{Artifact: artifactStatus(tgt, contentTag, digest), InputHash: inputHash}, nil
 	}
 
 	if obj.Spec.Push != nil && obj.Spec.Push.Immutable && headErr == nil {
 		// Opt-in guard for people using the tag as a version rather than a pointer. Terminal,
 		// because silently changing what a tag means is the failure mode that leaves nodes
 		// running different bytes under the same name. Checked before anything is written.
-		return nil, "", terminal(
+		return buildResult{}, terminal(
 			"tag %s already resolves to %s but this spec produces %s; bump the tag or unset immutable",
 			tgt.tag, existing.Digest, digest)
 	}
@@ -290,20 +338,81 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	// addressable even after the pointer moves on.
 	contentRef, err := name.ParseReference(fmt.Sprintf("%s:%s", tgt.writeRepo, contentTag), refOpts...)
 	if err != nil {
-		return nil, "", terminal("invalid reference %s:%s: %v", tgt.writeRepo, contentTag, err)
+		return buildResult{}, terminal("invalid reference %s:%s: %v", tgt.writeRepo, contentTag, err)
 	}
 	if err := remote.Write(contentRef, img, opts...); err != nil {
-		return nil, "", fmt.Errorf("publishing %s: %w", contentRef, err)
+		return buildResult{}, fmt.Errorf("publishing %s: %w", contentRef, err)
 	}
 
 	if err := remote.Write(movingRef, img, opts...); err != nil {
-		return nil, "", fmt.Errorf("publishing %s: %w", movingRef, err)
+		return buildResult{}, fmt.Errorf("publishing %s: %w", movingRef, err)
 	}
 
 	r.event(obj, corev1.EventTypeNormal, ociv1alpha1.ReasonSucceeded,
 		fmt.Sprintf("Published %s (%s)", contentRef, digest))
 
-	return artifactStatus(tgt, contentTag, digest), inputHash, nil
+	record, err := buildRecord(img, contentTag, digest)
+	if err != nil {
+		// The artifact is published and usable; only the retention record is missing. Failing
+		// here would leave storage holding blobs that nothing records as live, which is worse
+		// than reporting the build and logging the gap.
+		return buildResult{}, fmt.Errorf("recording build %s: %w", digest, err)
+	}
+
+	return buildResult{
+		Artifact:  artifactStatus(tgt, contentTag, digest),
+		InputHash: inputHash,
+		Record:    record,
+	}, nil
+}
+
+// DefaultHistoryLimit is how many past builds are retained when nothing says otherwise.
+//
+// Not 1, and not unbounded. Layers are shared between builds so the marginal cost of retaining
+// one is small, while the cost of having reclaimed one too eagerly is a workload that cannot pull
+// the digest it is pinned to. See ADR 0011.
+const DefaultHistoryLimit = 10
+
+// historyLimit resolves the retention count for one object.
+func (r *ImageCompositionReconciler) historyLimit(obj *ociv1alpha1.ImageComposition) int {
+	if obj.Spec.Publish != nil && obj.Spec.Publish.History != nil {
+		return int(*obj.Spec.Publish.History)
+	}
+	if r.HistoryLimit > 0 {
+		return r.HistoryLimit
+	}
+	return DefaultHistoryLimit
+}
+
+// recordHistory prepends a new build and trims to the limit.
+//
+// A nil record means the reconcile converged without publishing, and must not touch history.
+// Appending on every interval would fill the retention list with duplicates of the current build
+// and evict genuinely distinct older ones within hours, quietly breaking the guarantee retention
+// exists to provide.
+func recordHistory(history []ociv1alpha1.BuildRecord, record *ociv1alpha1.BuildRecord, limit int) []ociv1alpha1.BuildRecord {
+	if record == nil {
+		return history
+	}
+	if limit < 1 {
+		limit = 1
+	}
+
+	// A rebuild that reproduces an earlier digest moves that entry to the front rather than
+	// duplicating it. Reverting a change and reverting it back is ordinary, and each round trip
+	// would otherwise burn two retention slots on one distinct artifact.
+	out := make([]ociv1alpha1.BuildRecord, 0, limit)
+	out = append(out, *record)
+	for _, h := range history {
+		if h.Digest == record.Digest {
+			continue
+		}
+		if len(out) == limit {
+			break
+		}
+		out = append(out, h)
+	}
+	return out
 }
 
 // resolveLayer returns a local path holding the layer's content.

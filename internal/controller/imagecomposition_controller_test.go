@@ -126,13 +126,14 @@ func composition(name string, layers ...ociv1alpha1.Layer) *ociv1alpha1.ImageCom
 // second call, so tests exercise the same path production takes rather than a simplified one.
 func build(t *testing.T, r *ImageCompositionReconciler, obj *ociv1alpha1.ImageComposition, what string) *ociv1alpha1.ArtifactStatus {
 	t.Helper()
-	art, hash, err := r.reconcileArtifact(context.Background(), obj)
+	res, err := r.reconcileArtifact(context.Background(), obj)
 	if err != nil {
 		t.Fatalf("%s: %v", what, err)
 	}
-	obj.Status.Artifact = art
-	obj.Status.InputHash = hash
-	return art
+	obj.Status.Artifact = res.Artifact
+	obj.Status.InputHash = res.InputHash
+	obj.Status.History = recordHistory(obj.Status.History, res.Record, r.historyLimit(obj))
+	return res.Artifact
 }
 
 func urlLayer(name, url, digest, target string) ociv1alpha1.Layer {
@@ -199,7 +200,7 @@ func TestDigestMismatchIsTerminalAndPublishesNothing(t *testing.T) {
 	obj := composition("tampered", urlLayer("core", url, wrong, "/core"))
 	r, host := servingReconciler(t, obj)
 
-	_, _, err := r.reconcileArtifact(context.Background(), obj)
+	_, err := r.reconcileArtifact(context.Background(), obj)
 	if err == nil {
 		t.Fatal("expected an error for a mismatched digest")
 	}
@@ -337,7 +338,7 @@ func TestServingModeWithoutServerIsTerminal(t *testing.T) {
 		Fetcher:  oci.NewFetcher(),
 	}
 
-	_, _, err := r.reconcileArtifact(context.Background(), obj)
+	_, err := r.reconcileArtifact(context.Background(), obj)
 	var te *terminalError
 	if err == nil || !errors.As(err, &te) {
 		t.Fatalf("expected a terminal error, got %v", err)

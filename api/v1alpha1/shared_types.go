@@ -62,6 +62,43 @@ type Publish struct {
 	// +kubebuilder:default="latest"
 	// +optional
 	Tag string `json:"tag,omitempty"`
+
+	// History is how many past builds to keep before garbage collection reclaims their blobs.
+	// Defaults to the controller's --gc-keep-builds.
+	//
+	// Old builds are worth keeping for three independent reasons: reverting a commit must find
+	// the old digest still pullable; a pod pinned to a digest that gets rescheduled must be able
+	// to pull it again; and hand-pinning a content tag is the supported fallback when image
+	// automation is not in use. Layers are shared between builds, so a generous value costs far
+	// less than the count suggests. See ADR 0011.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	History *int32 `json:"history,omitempty"`
+}
+
+// BuildRecord is one past build, retained so garbage collection knows what is still live.
+//
+// Kept in status rather than inferred from what is in storage. Inference would mean deciding an
+// object is garbage because nothing appears to point at it, which is exactly the reasoning that
+// deletes live data when the controller's view is incomplete. An explicit record also makes
+// retention visible in `kubectl get -o yaml`.
+type BuildRecord struct {
+	// ContentTag is the immutable tag this build was published under.
+	// +optional
+	ContentTag string `json:"contentTag,omitempty"`
+
+	// Digest of the manifest.
+	// +optional
+	Digest string `json:"digest,omitempty"`
+
+	// Blobs are the config and layer digests this build is composed of. These are the objects
+	// garbage collection must not reclaim while this build is retained.
+	// +optional
+	Blobs []string `json:"blobs,omitempty"`
+
+	// Time the build was published.
+	// +optional
+	Time *metav1.Time `json:"time,omitempty"`
 }
 
 // Push describes an external registry to publish to. Optional: omit it to use the built-in
