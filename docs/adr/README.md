@@ -26,14 +26,34 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0015](0015-base-images-are-platform-pinned.md) | Base images are platform-pinned; config inheritance is opt-in | Accepted |
 | [0016](0016-the-scope-line-is-determinism.md) | The scope line is determinism, not Dockerfile parity | Accepted, supersedes 0004 and part of 0003 |
 
+## Open questions
+
+Recorded in the same format, because the shape fits — context, options, consequences — even
+though nothing is decided. Each states **what would decide it**, which is the part that otherwise
+gets lost: an open question with no exit criterion just becomes background noise.
+
+`Open` is not `Proposed`. A Proposed record is a plan waiting to be built; an Open one is a
+question waiting for evidence.
+
+| # | Question | Status |
+|---|---|---|
+| [0017](0017-updating-the-consumed-digest.md) | How does a workload's digest reference get updated? | Open |
+| [0018](0018-multi-architecture-output.md) | Multi-architecture output | Open |
+| [0019](0019-pod-reference-protection-revisited.md) | Should garbage collection protect Pod-referenced digests? | Open, reopened |
+| [0020](0020-is-the-supply-chain-work-worth-building.md) | Is the supply-chain work worth building? | Open |
+| [0021](0021-active-standby-or-shared-storage.md) | Is active/standby enough for the serving endpoint? | Open |
+
 ## Format
 
     # NNNN. Title
-    ## Status
+    ## Status          — Accepted | Proposed | Open | Superseded by NNNN
     ## Context      — the forces, including measurements where they exist
     ## Decision     — what we do
     ## Consequences — what this costs, stated plainly
     ## Alternatives rejected — and why
+
+Open records carry a **What would decide it** section instead of a Decision. If a question cannot
+be given one, it is usually not yet a question — it is a preference.
 
 Measurements beat assertions. Where a record says something was tried and did not work, it was
 actually tried; see 0011 for an example of a feature that was built, measured to have no effect,
