@@ -35,27 +35,31 @@ Multi-architecture *output* is a separate feature and remains unimplemented. Whe
 will mean building one composition per platform and publishing an index, with the platforms named
 in the spec — not the controller guessing.
 
-### Config inheritance is opt-in via `config.from`
+### Config inheritance is opt-in via `config.inherit`
 
 The result of composing over a base is only runnable if it keeps the base's entrypoint, env, user
 and working directory. Without them the image starts and immediately fails.
 
-The tempting answer is to inherit automatically from whichever entry is an image. Rejected for the
-reason in ADR 0003: it makes an image entry special, and the rule stops being explainable as soon
-as a composition has two image entries or one that is not first. It is also wrong for the common
-case — a bundle that is only ever mounted should have an empty config, and silently acquiring an
-entrypoint from a base would be surprising.
+The tempting answer is to inherit automatically whenever a base is set. Rejected because it is
+wrong for the common case: a bundle that is only ever mounted should have an empty config, and
+silently acquiring an entrypoint from a base would be surprising.
 
-So `config.from` names the entry to inherit from. Naming a non-image entry, or one that does not
-exist, is an error rather than a silent empty config: both are typos, and the symptom otherwise
-appears much later as a container that will not start.
+So `config.inherit` is an explicit boolean. Setting it without a base is an error rather than a
+silent empty config, because the symptom otherwise appears much later as a container that will not
+start.
+
+This originally named a layer entry (`config.from`), which was itself evidence that the base was
+never an ordinary entry — see ADR 0016. With the base hoisted there is only one thing to inherit
+from, so a boolean says everything a name did.
 
 **The platform is inherited too.** Claiming `linux/amd64` over an `arm64` base produces an image
 the kubelet refuses to run, with an error that points at the workload rather than at the
 composition that caused it.
 
-**`config.from` is part of the input hash.** It selects which config is inherited, so it changes
-the output. It was absent from that hash while `From` was unimplemented, which was a latent bug.
+**The whole config surface is part of the input hash.** Every field lands in the image config and
+therefore in the output digest, so omitting any of them would mean skipping a rebuild that was
+genuinely needed. `config.from` was absent from that hash while it was unimplemented, which was a
+latent bug of exactly that kind.
 
 ### Pull credentials are separate from push credentials
 
@@ -77,8 +81,8 @@ your own layers.
 **Resolve the index for the user.** One line, and it makes the output depend on the controller
 instead of the spec.
 
-**Infer the config from the first image entry.** See ADR 0003; the same objection applies. Being
-convenient in the two-entry case is not worth a rule that cannot be stated simply.
+**Inherit automatically whenever a base is set.** Convenient, and wrong for every artifact that is
+only ever mounted — which is the majority of them.
 
 **Merge the base config with explicit fields instead of replacing it.** Considered. Explicit
 `labels`, `env`, `entrypoint` and `cmd` already override the inherited values, which covers the

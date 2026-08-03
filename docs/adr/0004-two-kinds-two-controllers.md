@@ -2,8 +2,12 @@
 
 ## Status
 
-Accepted. `ImageBuild` is not implemented and may never be; this record exists so that v0.1 does
-not make it impossible.
+**Superseded by [0016](0016-the-scope-line-is-determinism.md).** `ImageBuild` was dropped from the
+roadmap: it would not replace this controller, it would replace it with something weaker, and
+building software from source is already well served by ordinary CI.
+
+The reasoning below is kept because it is still the argument for why the two guarantees cannot be
+mixed — it just now applies to rejecting the builder outright rather than to isolating it.
 
 ## Context
 

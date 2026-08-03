@@ -2,7 +2,14 @@
 
 ## Status
 
-Accepted.
+**Partly superseded by [0016](0016-the-scope-line-is-determinism.md).** The base image is now
+hoisted out of the layer list, reversing the central claim below. Implementation produced three
+exceptions to "an image entry is an ordinary entry" — the config had to name it, it contributes
+many layers rather than one, and multi-architecture resolves only it per platform — which is
+enough to conclude the abstraction was wrong.
+
+What still holds: ordering is declaration order, nothing among the layers is implicitly first,
+"scratch" is an absence rather than a keyword, and entries are a discriminated union.
 
 ## Context
 

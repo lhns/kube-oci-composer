@@ -10,6 +10,13 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/types"
 )
 
+// ErrBadReference marks a pull failure that a retry cannot fix — a malformed reference, or a
+// multi-architecture index where a platform-specific digest is required. Typed rather than
+// string-matched, so the caller can map it to Stalled without inspecting the message.
+type ErrBadReference struct{ Reason string }
+
+func (e *ErrBadReference) Error() string { return e.Reason }
+
 // PullImage fetches a digest-pinned image whose layers become part of the composition.
 //
 // The reference is always built from the digest, never a tag, so what is pulled is exactly what
@@ -22,7 +29,9 @@ import (
 func PullImage(ctx context.Context, repository, digest string, opts ...remote.Option) (v1.Image, error) {
 	ref, err := name.NewDigest(repository + "@" + digest)
 	if err != nil {
-		return nil, fmt.Errorf("invalid image reference %s@%s: %w", repository, digest, err)
+		return nil, &ErrBadReference{
+			Reason: fmt.Sprintf("invalid image reference %s@%s: %v", repository, digest, err),
+		}
 	}
 
 	desc, err := remote.Get(ref, append(opts, remote.WithContext(ctx))...)
@@ -39,9 +48,9 @@ func PullImage(ctx context.Context, repository, digest string, opts ...remote.Op
 	// how to find it.
 	switch desc.MediaType {
 	case types.OCIImageIndex, types.DockerManifestList:
-		return nil, fmt.Errorf(
+		return nil, &ErrBadReference{Reason: fmt.Sprintf(
 			"%s is a multi-architecture index; pin a platform-specific digest instead "+
-				"(crane digest --platform linux/amd64 %s)", ref, repository)
+				"(crane digest --platform linux/amd64 %s)", ref, repository)}
 	}
 
 	img, err := desc.Image()

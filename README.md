@@ -14,15 +14,17 @@ spec:
   interval: 1h
   layers:
     - name: core
-      url: https://github.com/.../core-1.1.1.tgz
-      digest: sha256:6f2e…
-      unpack: tar.gz
-      target: /core
+      fetch:
+        url: https://github.com/.../core-1.1.1.tgz
+        digest: sha256:6f2e…
+        unpack: tar.gz
+      to: /core
     - name: s3
-      url: https://github.com/.../s3-1.1.1.tgz
-      digest: sha256:9a4c…
-      unpack: tar.gz
-      target: /s3
+      fetch:
+        url: https://github.com/.../s3-1.1.1.tgz
+        digest: sha256:9a4c…
+        unpack: tar.gz
+      to: /s3
   publish:
     name: kafka-tiered-storage
     tag: main
@@ -113,84 +115,83 @@ helm install kube-oci-composer oci://ghcr.io/lhns/charts/kube-oci-composer \
 
 **v0.1, and honest about its limits.**
 
-Implemented: `url`, `image`, `sourceRef` and `configMapRef` layer sources; config inheritance from
-a base image; the built-in serving endpoint; external push with `secretRef`; the input-hash
+Implemented: base images with layer reuse and config inheritance; `fetch`, `configMap`,
+`sourceRef` and `remove` layer verbs; ownership, modes and archive subpaths; the full OCI config
+surface; the built-in serving endpoint; external push with `secretRef`; the input-hash
 short-circuit; a two-tier layer cache with optional S3; manifest persistence across restarts; and
 garbage collection.
 
-Not implemented: multi-architecture output (a base image must be a platform-specific digest, not
-an index); SBOM, provenance and signing ([ADR 0008](docs/adr/0008-supply-chain.md) is Proposed,
-not built — and signing is theatre until something verifies it at admission).
+Not implemented: multi-architecture output (a base must be a platform-specific digest, not an
+index); SBOM, provenance and signing ([ADR 0008](docs/adr/0008-supply-chain.md) is Proposed, not
+built — and signing is theatre until something verifies it at admission).
 
-### Layer sources
+**It will never run a Dockerfile.** That is the scope line, and everything else follows from it:
+the output digest is a pure function of the spec, so reconciling is cheap, provenance is exact,
+and nothing privileged runs. Compiling source belongs in ordinary CI. See
+[ADR 0016](docs/adr/0016-the-scope-line-is-determinism.md).
 
-```yaml
-layers:
-  # A URL, with the digest declared in the spec.
-  - name: core
-    url: https://github.com/.../core-1.1.1.tgz
-    digest: sha256:6f2e…
-    unpack: tar.gz
-    target: /core
-
-  # Files from a Flux source. No digest here: source-controller has already content-addressed
-  # the revision, so the controller RESOLVES it from status.artifact.
-  - name: config
-    sourceRef:
-      kind: GitRepository
-      name: k0s-flux
-      namespace: flux-system
-      path: ./overlays/kafka       # optional; defaults to the whole artifact
-    target: /config
-
-  # A ConfigMap. Each key becomes one file; the digest is resolved by hashing the content, so an
-  # edit rebuilds. ConfigMap keys cannot contain "/", so nested layouts need a sourceRef.
-  - name: settings
-    configMapRef:
-      name: kafka-settings
-    target: /settings
-```
-
-**Layers are contributed in declaration order.** No entry type is special or implicitly first.
-
-### Two ways to use the result
-
-A composition can produce a **bundle** to mount, or a **runnable image**.
+### The shape
 
 ```yaml
-# Bundle: no base image. Mount it with spec.volumes[].image into a container that already exists.
-# The workload's own image stays whatever upstream ships, so a Kafka upgrade needs nothing here.
 spec:
-  layers:
-    - name: plugins
-      url: https://.../core-1.1.1.tgz
-      digest: sha256:…
-      unpack: tar.gz
-      target: /plugins
-```
+  # Optional. Absent = scratch, which is right for a bundle that is only ever mounted.
+  base:
+    image: quay.io/strimzi/kafka
+    digest: sha256:…             # platform-specific, not a multi-arch index
+    secretRef: {name: kafka-pull}
 
-```yaml
-# Runnable image: a base plus your content, used as the container's `image:`.
-# config.from inherits the base's entrypoint, env, user and working directory — without it the
-# result starts and immediately fails.
-spec:
+  # Ordered. Each entry produces exactly one layer. Later entries overlay earlier ones.
   layers:
-    - name: base
-      image:
-        repository: quay.io/strimzi/kafka
-      digest: sha256:…            # a platform-specific digest, not a multi-arch index
-    - name: plugins
-      url: https://.../core-1.1.1.tgz
-      digest: sha256:…
-      unpack: tar.gz
-      target: /plugins
+    # Fetch over HTTP. The digest is DECLARED, because nothing else addresses an arbitrary URL.
+    - name: core
+      fetch:
+        url: https://.../core-1.1.1.tgz
+        digest: sha256:…
+        unpack: tar.gz
+        subpath: core-1.1.1      # strip a version-named wrapper directory
+      to: /plugins
+      owner: {uid: 1001, gid: 0}
+      mode: {file: "0644", dir: "0755"}
+
+    # A ConfigMap. Each key becomes one file; the digest is RESOLVED by hashing the content, so
+    # an edit rebuilds. Keys cannot contain "/", so nested layouts need a sourceRef.
+    - name: settings
+      configMap: {name: kafka-settings}
+      to: /config
+
+    # A Flux source. The digest is RESOLVED from its status.artifact.
+    - name: overlay
+      sourceRef:
+        kind: GitRepository
+        name: k0s-flux
+        namespace: flux-system
+        subpath: overlays/kafka
+      to: /etc/kafka
+
+    # Delete something the base shipped. Takes absolute paths; no to/owner/mode.
+    - name: prune
+      remove: [/opt/kafka/libs/deprecated.jar]
+
   config:
-    from: base
+    inherit: true                # take the base's entrypoint, env, user, workdir, ports, signal
+    user: "1001"
+    workingDir: /opt/kafka
+    exposedPorts: ["9092/tcp"]
 ```
 
-The trade-off is coupling. A bundle is independent of the base image's release cadence; a runnable
-image means every upstream bump is a base digest to update here. Base layers are reused verbatim
-rather than repacked, so the rebuild only uploads your own layers.
+Exactly one of `fetch`, `configMap`, `sourceRef` or `remove` per entry, each carrying its own
+options. `to` is required for content entries and forbidden for `remove`.
+
+**Layers are contributed in declaration order.** The base is hoisted out of the list because it is
+not an ordinary entry — see [ADR 0016](docs/adr/0016-the-scope-line-is-determinism.md).
+
+### Bundle or runnable image
+
+The same artifact format serves both. A composition with no `base` is a bundle of files, mounted
+with `spec.volumes[].image` into a container that keeps its upstream image — so an upstream release
+changes nothing here. A composition with a `base` and `config.inherit` is a runnable image, used as
+the container's `image:` — one artifact, no volume, at the cost of a base digest to bump on every
+upstream release.
 
 Note for `configMapGenerator` users: kustomize appends a content hash to the generated name and
 rewrites references, but only in fields it knows about — **not** `layers[].configMapRef.name`.

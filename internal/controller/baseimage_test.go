@@ -52,12 +52,14 @@ func publishBaseImage(t *testing.T, host, repo string, layers int, cfg *v1.Confi
 	return host + "/" + repo, digest.String()
 }
 
-func imageLayer(name, repository, digest string) ociv1alpha1.Layer {
-	return ociv1alpha1.Layer{
-		Name:   name,
-		Image:  &ociv1alpha1.ImageSource{Repository: repository},
-		Digest: digest,
-	}
+// withBase sets the hoisted base image. It is no longer a layer entry — see ADR 0016.
+func withBase(obj *ociv1alpha1.ImageComposition, repository, digest string) {
+	obj.Spec.Base = &ociv1alpha1.BaseImage{Image: repository, Digest: digest}
+}
+
+// removeLayer deletes paths inherited from the base.
+func removeLayer(name string, paths ...string) ociv1alpha1.Layer {
+	return ociv1alpha1.Layer{Name: name, Remove: paths}
 }
 
 // TestBaseImageLayersAreContributed is the Kafka-plus-plugins case: an upstream image, with our
@@ -69,8 +71,8 @@ func TestBaseImageLayersAreContributed(t *testing.T) {
 	r, host := servingReconciler(t, obj)
 
 	baseRepo, baseDigest := publishBaseImage(t, host, "kafka", 3, nil)
+	withBase(obj, baseRepo, baseDigest)
 	obj.Spec.Layers = []ociv1alpha1.Layer{
-		imageLayer("base", baseRepo, baseDigest),
 		urlLayer("plugins", origin.url, origin.digest, "/plugins"),
 	}
 
@@ -114,35 +116,42 @@ func TestBaseImageLayersAreContributed(t *testing.T) {
 	}
 }
 
-// TestLayerOrderPlacesTheBaseWhereItIsDeclared — an image entry is not implicitly first. Putting
-// one second must put its layers second. See ADR 0003.
-func TestLayerOrderPlacesTheBaseWhereItIsDeclared(t *testing.T) {
+// TestBaseAlwaysComesFirst — hoisting the base out of the list means its layers are always
+// underneath, which is what "base" means. Nothing in the spec can reorder that.
+func TestBaseAlwaysComesFirst(t *testing.T) {
 	origin := newCountingOrigin(t, map[string]string{"a.txt": "a"})
 
 	obj := composition("order")
 	r, host := servingReconciler(t, obj)
 	baseRepo, baseDigest := publishBaseImage(t, host, "base", 2, nil)
 
-	first := func() string {
-		obj.Spec.Layers = []ociv1alpha1.Layer{
-			imageLayer("base", baseRepo, baseDigest),
-			urlLayer("files", origin.url, origin.digest, "/files"),
-		}
-		obj.Status = ociv1alpha1.ImageCompositionStatus{}
-		return build(t, r, obj, "base first").Digest
-	}()
+	withBase(obj, baseRepo, baseDigest)
+	obj.Spec.Layers = []ociv1alpha1.Layer{urlLayer("files", origin.url, origin.digest, "/files")}
+	art := build(t, r, obj, "build")
 
-	second := func() string {
-		obj.Spec.Layers = []ociv1alpha1.Layer{
-			urlLayer("files", origin.url, origin.digest, "/files"),
-			imageLayer("base", baseRepo, baseDigest),
-		}
-		obj.Status = ociv1alpha1.ImageCompositionStatus{}
-		return build(t, r, obj, "base second").Digest
-	}()
+	img, err := remote.Image(mustRef(t, host+"/order@"+art.Digest))
+	if err != nil {
+		t.Fatalf("pulling: %v", err)
+	}
+	layers, err := img.Layers()
+	if err != nil {
+		t.Fatalf("layers: %v", err)
+	}
+	if len(layers) != 3 {
+		t.Fatalf("got %d layers, want 3 (2 base + 1 added)", len(layers))
+	}
 
-	if first == second {
-		t.Fatal("moving the image entry did not change the output; order is not being honoured")
+	base, err := remote.Image(mustRef(t, baseRepo+"@"+baseDigest))
+	if err != nil {
+		t.Fatalf("pulling base: %v", err)
+	}
+	baseLayers, _ := base.Layers()
+	for i, bl := range baseLayers {
+		want, _ := bl.Digest()
+		got, _ := layers[i].Digest()
+		if got != want {
+			t.Fatalf("layer %d is not the base's: %s vs %s", i, got, want)
+		}
 	}
 }
 
@@ -161,11 +170,11 @@ func TestConfigFromInheritsTheBase(t *testing.T) {
 		WorkingDir: "/opt/kafka",
 	})
 
+	withBase(obj, baseRepo, baseDigest)
 	obj.Spec.Layers = []ociv1alpha1.Layer{
-		imageLayer("base", baseRepo, baseDigest),
 		urlLayer("plugins", origin.url, origin.digest, "/plugins"),
 	}
-	obj.Spec.Config = &ociv1alpha1.ImageConfig{From: "base"}
+	obj.Spec.Config = &ociv1alpha1.ImageConfig{Inherit: true}
 
 	art := build(t, r, obj, "compose with inherited config")
 
@@ -203,9 +212,10 @@ func TestWithoutConfigFromTheConfigStaysEmpty(t *testing.T) {
 	baseRepo, baseDigest := publishBaseImage(t, host, "kafka", 1, &v1.Config{
 		Entrypoint: []string{"/entrypoint.sh"},
 	})
-	obj.Spec.Layers = []ociv1alpha1.Layer{imageLayer("base", baseRepo, baseDigest)}
+	withBase(obj, baseRepo, baseDigest)
+	obj.Spec.Layers = []ociv1alpha1.Layer{removeLayer("noop", "/nonexistent-placeholder")}
 
-	art := build(t, r, obj, "compose without config.from")
+	art := build(t, r, obj, "compose without inherit")
 
 	img, err := remote.Image(mustRef(t, host+"/bundle@"+art.Digest))
 	if err != nil {
@@ -220,29 +230,16 @@ func TestWithoutConfigFromTheConfigStaysEmpty(t *testing.T) {
 	}
 }
 
-// TestConfigFromMustNameAnImage — naming a url layer is a spec mistake, and silently ignoring it
-// would leave the user with a non-runnable image and no explanation.
-func TestConfigFromMustNameAnImage(t *testing.T) {
+// TestInheritWithoutABaseIsRejected — there is nothing to inherit from, and silently producing
+// an empty config would leave a non-runnable image with no explanation.
+func TestInheritWithoutABaseIsRejected(t *testing.T) {
 	origin := newCountingOrigin(t, map[string]string{"a": "1"})
-	obj := composition("badfrom", urlLayer("files", origin.url, origin.digest, "/files"))
-	obj.Spec.Config = &ociv1alpha1.ImageConfig{From: "files"}
+	obj := composition("noinherit", urlLayer("files", origin.url, origin.digest, "/files"))
+	obj.Spec.Config = &ociv1alpha1.ImageConfig{Inherit: true}
 	r, _ := servingReconciler(t, obj)
 
 	_, err := r.reconcileArtifact(context.Background(), obj)
-	if err == nil || !strings.Contains(err.Error(), "not an image source") {
-		t.Fatalf("expected a clear error, got %v", err)
-	}
-}
-
-// TestConfigFromMustExist — a typo must not silently produce an empty config.
-func TestConfigFromMustExist(t *testing.T) {
-	origin := newCountingOrigin(t, map[string]string{"a": "1"})
-	obj := composition("missingfrom", urlLayer("files", origin.url, origin.digest, "/files"))
-	obj.Spec.Config = &ociv1alpha1.ImageConfig{From: "nope"}
-	r, _ := servingReconciler(t, obj)
-
-	_, err := r.reconcileArtifact(context.Background(), obj)
-	if err == nil || !strings.Contains(err.Error(), "does not exist") {
+	if err == nil || !strings.Contains(err.Error(), "no base to inherit from") {
 		t.Fatalf("expected a clear error, got %v", err)
 	}
 }
@@ -253,7 +250,8 @@ func TestBaseImageIsNotPulledWhenNothingChanged(t *testing.T) {
 	obj := composition("steady-base")
 	r, host := servingReconciler(t, obj)
 	baseRepo, baseDigest := publishBaseImage(t, host, "kafka", 1, nil)
-	obj.Spec.Layers = []ociv1alpha1.Layer{imageLayer("base", baseRepo, baseDigest)}
+	withBase(obj, baseRepo, baseDigest)
+	obj.Spec.Layers = []ociv1alpha1.Layer{removeLayer("noop", "/nonexistent-placeholder")}
 
 	first := build(t, r, obj, "first build")
 
@@ -287,7 +285,8 @@ func TestMultiArchIndexIsRejected(t *testing.T) {
 		t.Fatalf("publishing index: %v", err)
 	}
 
-	obj.Spec.Layers = []ociv1alpha1.Layer{imageLayer("base", host+"/multi", digest.String())}
+	withBase(obj, host+"/multi", digest.String())
+	obj.Spec.Layers = []ociv1alpha1.Layer{removeLayer("noop", "/placeholder")}
 
 	_, err = r.reconcileArtifact(context.Background(), obj)
 	if err == nil {
@@ -302,13 +301,26 @@ func TestMultiArchIndexIsRejected(t *testing.T) {
 	}
 }
 
-// TestConfigFromIsInTheInputHash — it selects which config is inherited, so it changes the output
-// and must move the hash. It was absent while From was unimplemented.
-func TestConfigFromIsInTheInputHash(t *testing.T) {
+// TestConfigSurfaceIsInTheInputHash — every config field lands in the image config and therefore
+// in the output digest, so all of them must move the hash.
+func TestConfigSurfaceIsInTheInputHash(t *testing.T) {
 	layers := []oci.LayerInput{{Digest: "sha256:11", Unpack: oci.UnpackNone, Target: "/x"}}
+	baseline := oci.InputHash(layers, oci.Config{})
 
-	if oci.InputHash(layers, oci.Config{}) == oci.InputHash(layers, oci.Config{From: "base"}) {
-		t.Fatal("config.from does not affect the input hash")
+	variants := map[string]oci.Config{
+		"inherit":      {Inherit: true},
+		"user":         {User: "1001"},
+		"workingDir":   {WorkingDir: "/opt/kafka"},
+		"stopSignal":   {StopSignal: "SIGTERM"},
+		"exposedPorts": {ExposedPorts: []string{"9092/tcp"}},
+		"volumes":      {Volumes: []string{"/data"}},
+	}
+	for name, cfg := range variants {
+		t.Run(name, func(t *testing.T) {
+			if oci.InputHash(layers, cfg) == baseline {
+				t.Fatalf("%s does not affect the input hash", name)
+			}
+		})
 	}
 }
 

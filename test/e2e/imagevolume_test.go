@@ -111,9 +111,9 @@ spec:
   interval: 1m
   layers:
     - name: config
-      configMapRef:
+      configMap:
         name: plugin-files
-      target: /plugins
+      to: /plugins
   publish:
     name: e2e-artifact
     tag: main
@@ -232,9 +232,9 @@ spec:
   interval: 10s
   layers:
     - name: settings
-      configMapRef:
+      configMap:
         name: settings
-      target: /config
+      to: /config
   publish:
     name: rebuild
     tag: main

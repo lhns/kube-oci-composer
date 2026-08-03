@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 	"github.com/lhns/kube-oci-composer/internal/oci"
@@ -14,37 +17,41 @@ import (
 // declared.
 //
 // Ordering is preserved exactly: layers are contributed in declaration order and nothing here
-// reorders, groups or promotes any entry. See ADR 0003.
+// reorders, groups or promotes any entry.
 //
-// url and image entries carry their digest in the spec. sourceRef and configMapRef do not, and
-// their digest is resolved here — from the Flux source's status.artifact, or by hashing the
-// ConfigMap's content. Resolution happens BEFORE the input hash is computed, so a change to a
-// referenced source or ConfigMap changes the hash and triggers a rebuild, exactly as editing a
-// declared digest would. See ADR 0002.
+// `fetch` carries its digest in the spec. `sourceRef` and `configMap` do not, and theirs is
+// resolved here — from the Flux source's status.artifact, or by hashing the ConfigMap's content.
+// Resolution happens BEFORE the input hash is computed, so a change to a referenced source or
+// ConfigMap moves the hash and triggers a rebuild, exactly as editing a declared digest would.
+// See ADR 0002.
 //
-// Path is deliberately left empty: nothing is fetched until the short-circuit has decided a build
-// is actually needed.
+// Path is deliberately left empty for remote sources: nothing is fetched until the short-circuit
+// has decided a build is actually needed.
 func (r *ImageCompositionReconciler) resolveInputs(ctx context.Context, obj *ociv1alpha1.ImageComposition, workDir string) ([]oci.LayerInput, error) {
 	inputs := make([]oci.LayerInput, 0, len(obj.Spec.Layers))
 
 	for _, l := range obj.Spec.Layers {
-		in := oci.LayerInput{
-			Name:   l.Name,
-			Unpack: oci.UnpackMode(orDefault(string(l.Unpack), "none")),
-			Target: orDefault(l.Target, "/"),
+		in := oci.LayerInput{Name: l.Name, Target: l.To}
+
+		if l.Owner != nil {
+			in.UID, in.GID = l.Owner.UID, l.Owner.GID
+		}
+		if l.Mode != nil {
+			var err error
+			if in.FileMode, err = parseMode(l.Name, "file", l.Mode.File); err != nil {
+				return nil, err
+			}
+			if in.DirMode, err = parseMode(l.Name, "dir", l.Mode.Dir); err != nil {
+				return nil, err
+			}
 		}
 
 		switch {
-		case l.URLSource != nil:
-			in.URL = l.URL
-			in.Digest = l.Digest
-
-		case l.Image != nil:
-			// Only the repository is recorded here. The pull happens later, with the fetches,
-			// so an unchanged spec still costs one HEAD rather than a registry round trip per
-			// base image on every interval.
-			in.ImageRepository = l.Image.Repository
-			in.Digest = l.Digest
+		case l.Fetch != nil:
+			in.URL = l.Fetch.URL
+			in.Digest = l.Fetch.Digest
+			in.Unpack = oci.UnpackMode(orDefault(string(l.Fetch.Unpack), "none"))
+			in.Subpath = l.Fetch.Subpath
 
 		case l.SourceRef != nil:
 			art, err := r.resolveFluxSource(ctx, obj, l.SourceRef)
@@ -53,14 +60,13 @@ func (r *ImageCompositionReconciler) resolveInputs(ctx context.Context, obj *oci
 			}
 			in.URL = art.URL
 			in.Digest = art.Digest
-			// source-controller always publishes a gzipped tar, whatever the source kind. An
-			// explicit unpack on the layer would be meaningless here, so the resolved value wins.
+			// source-controller always publishes a gzipped tar, whatever the source kind.
 			in.Unpack = oci.UnpackTarGz
-			in.Subpath = l.SourceRef.Path
+			in.Subpath = l.SourceRef.Subpath
 
-		case l.ConfigMapRef != nil:
+		case l.ConfigMap != nil:
 			resolved, err := source.ConfigMap(ctx, r.Client, obj.Namespace,
-				l.ConfigMapRef.Name, l.ConfigMapRef.Optional, workDir)
+				l.ConfigMap.Name, l.ConfigMap.Optional, workDir)
 			if err != nil {
 				var nf *source.ErrNotFound
 				if errors.As(err, &nf) {
@@ -72,17 +78,20 @@ func (r *ImageCompositionReconciler) resolveInputs(ctx context.Context, obj *oci
 			}
 			if resolved.Empty {
 				// An optional ConfigMap that is absent, or one with no entries. Contributing an
-				// empty layer would still change the output digest, so skip it entirely and let
-				// the composition be exactly what it would have been without the entry.
+				// empty layer would still change the output digest, so skip the entry entirely
+				// and let the composition be exactly what it would have been without it.
 				continue
 			}
 			in.Digest = resolved.Digest
 			in.Path = resolved.Path
 			in.Unpack = oci.UnpackTarGz
 
+		case len(l.Remove) > 0:
+			in.Remove = l.Remove
+
 		default:
-			// CEL already enforces the union, so this only fires for a source kind the CRD
-			// permits and this build does not implement.
+			// CEL already enforces the union, so this only fires for a verb the CRD permits and
+			// this build does not implement.
 			return nil, terminal("layer %q: no supported source is set", l.Name)
 		}
 
@@ -95,8 +104,50 @@ func (r *ImageCompositionReconciler) resolveInputs(ctx context.Context, obj *oci
 	return inputs, nil
 }
 
+// parseMode converts an octal string from the spec into a mode.
+func parseMode(layer, which, value string) (int64, error) {
+	if value == "" {
+		return 0, nil
+	}
+	mode, err := strconv.ParseInt(value, 8, 32)
+	if err != nil {
+		// Terminal: CEL already constrains the pattern, so reaching here means a spec that
+		// somehow passed validation and still cannot be interpreted.
+		return 0, terminal("layer %q: %s mode %q is not octal", layer, which, value)
+	}
+	return mode, nil
+}
+
+// resolveBase pulls the base image, if one is declared.
+//
+// Called after the short-circuit, so an unchanged spec costs one HEAD rather than a registry
+// round trip per base image on every interval.
+func (r *ImageCompositionReconciler) resolveBase(ctx context.Context, obj *ociv1alpha1.ImageComposition) (v1.Image, error) {
+	if obj.Spec.Base == nil {
+		return nil, nil
+	}
+	base := obj.Spec.Base
+
+	opts, err := r.pullOptions(ctx, obj.Namespace, base.SecretRef)
+	if err != nil {
+		return nil, err
+	}
+
+	img, err := source.PullImage(ctx, base.Image, base.Digest, opts...)
+	if err != nil {
+		var badRef *source.ErrBadReference
+		if errors.As(err, &badRef) {
+			// A malformed reference or a multi-architecture index needs a spec change, so
+			// retrying would only repeat the same failure on an interval.
+			return nil, terminal("base image: %v", err)
+		}
+		return nil, fmt.Errorf("base image: %w", err)
+	}
+	return img, nil
+}
+
 // resolveFluxSource reads the referenced source's published artifact.
-func (r *ImageCompositionReconciler) resolveFluxSource(ctx context.Context, obj *ociv1alpha1.ImageComposition, ref *ociv1alpha1.SourceRef) (source.FluxArtifact, error) {
+func (r *ImageCompositionReconciler) resolveFluxSource(ctx context.Context, obj *ociv1alpha1.ImageComposition, ref *ociv1alpha1.SourceRefSource) (source.FluxArtifact, error) {
 	ns := ref.Namespace
 	if ns == "" {
 		ns = obj.Namespace

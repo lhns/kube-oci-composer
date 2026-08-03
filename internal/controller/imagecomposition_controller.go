@@ -29,7 +29,6 @@ import (
 	"github.com/lhns/kube-oci-composer/internal/cache"
 	"github.com/lhns/kube-oci-composer/internal/oci"
 	"github.com/lhns/kube-oci-composer/internal/serve"
-	"github.com/lhns/kube-oci-composer/internal/source"
 )
 
 // ReconcileRequestAnnotation matches Flux's, so `flux reconcile` and `kubectl annotate` both
@@ -316,14 +315,8 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 			continue
 		}
 
-		// An image entry is pulled rather than downloaded to a file: its layers are already
-		// content-addressed and are contributed as they are.
-		if inputs[i].ImageRepository != "" {
-			base, err := r.pullBaseImage(ctx, obj, &inputs[i])
-			if err != nil {
-				return buildResult{}, err
-			}
-			inputs[i].Image = base
+		// A remove entry has no content to fetch; it produces whiteouts from the spec alone.
+		if len(inputs[i].Remove) > 0 {
 			continue
 		}
 
@@ -341,7 +334,12 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 		inputs[i].Path = path
 	}
 
-	img, err := oci.Assemble(inputs, cfg, workDir)
+	base, err := r.resolveBase(ctx, obj)
+	if err != nil {
+		return buildResult{}, err
+	}
+
+	img, err := oci.Assemble(base, inputs, cfg, workDir)
 	if err != nil {
 		return buildResult{}, terminal("assembling: %v", err)
 	}
@@ -461,34 +459,6 @@ func recordHistory(history []ociv1alpha1.BuildRecord, record *ociv1alpha1.BuildR
 	return out
 }
 
-// pullBaseImage fetches an image entry's layers.
-func (r *ImageCompositionReconciler) pullBaseImage(ctx context.Context, obj *ociv1alpha1.ImageComposition, in *oci.LayerInput) (v1.Image, error) {
-	var secretRef *ociv1alpha1.LocalObjectReference
-	for _, l := range obj.Spec.Layers {
-		if l.Name == in.Name && l.Image != nil {
-			secretRef = l.Image.SecretRef
-			break
-		}
-	}
-
-	opts, err := r.pullOptions(ctx, obj.Namespace, secretRef)
-	if err != nil {
-		return nil, err
-	}
-
-	img, err := source.PullImage(ctx, in.ImageRepository, in.Digest, opts...)
-	if err != nil {
-		// A malformed reference or a multi-architecture index needs a spec change, so retrying
-		// would only repeat the same failure on an interval.
-		if strings.Contains(err.Error(), "invalid image reference") ||
-			strings.Contains(err.Error(), "multi-architecture index") {
-			return nil, terminal("layer %q: %v", in.Name, err)
-		}
-		return nil, fmt.Errorf("layer %q: %w", in.Name, err)
-	}
-	return img, nil
-}
-
 // resolveLayer returns a local path holding the layer's content.
 //
 // With a cache configured this is usually a hit and costs nothing; the fetch is the fallback.
@@ -594,7 +564,16 @@ func configFrom(c *ociv1alpha1.ImageConfig) oci.Config {
 		return oci.Config{}
 	}
 	return oci.Config{
-		From: c.From, Labels: c.Labels, Env: c.Env, Entrypoint: c.Entrypoint, Cmd: c.Cmd,
+		Inherit:      c.Inherit,
+		Labels:       c.Labels,
+		Env:          c.Env,
+		Entrypoint:   c.Entrypoint,
+		Cmd:          c.Cmd,
+		User:         c.User,
+		WorkingDir:   c.WorkingDir,
+		ExposedPorts: c.ExposedPorts,
+		Volumes:      c.Volumes,
+		StopSignal:   c.StopSignal,
 	}
 }
 
@@ -696,7 +675,7 @@ func (r *ImageCompositionReconciler) compositionsForConfigMap(ctx context.Contex
 	for i := range list.Items {
 		item := &list.Items[i]
 		for _, l := range item.Spec.Layers {
-			if l.ConfigMapRef != nil && l.ConfigMapRef.Name == obj.GetName() {
+			if l.ConfigMap != nil && l.ConfigMap.Name == obj.GetName() {
 				out = append(out, reconcile.Request{
 					NamespacedName: types.NamespacedName{Namespace: item.Namespace, Name: item.Name},
 				})

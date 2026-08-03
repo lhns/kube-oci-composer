@@ -62,11 +62,19 @@ func InputHash(inputs []LayerInput, cfg Config) string {
 		writeField(string(in.Unpack))
 		writeField(in.Subpath)
 		writeField(in.Target)
+		fmt.Fprintf(h, "u=%d;g=%d;fm=%d;dm=%d;", in.UID, in.GID, in.FileMode, in.DirMode)
+		fmt.Fprintf(h, "rm=%d;", len(in.Remove))
+		for _, r := range in.Remove {
+			writeField(r)
+		}
 	}
 
-	// config.from selects which base image's config is inherited, so it changes the output and
-	// must move the hash. It was absent from this hash while From was unimplemented.
-	writeField(cfg.From)
+	// Every config field lands in the image config and therefore in the output digest, so all of
+	// them must move the hash.
+	fmt.Fprintf(h, "inherit=%t;", cfg.Inherit)
+	writeField(cfg.User)
+	writeField(cfg.WorkingDir)
+	writeField(cfg.StopSignal)
 
 	// Labels are a map, so they need a stable order. Everything else is already a slice and
 	// carries its own.
@@ -80,7 +88,7 @@ func InputHash(inputs []LayerInput, cfg Config) string {
 		writeField(k)
 		writeField(cfg.Labels[k])
 	}
-	for _, group := range [][]string{cfg.Env, cfg.Entrypoint, cfg.Cmd} {
+	for _, group := range [][]string{cfg.Env, cfg.Entrypoint, cfg.Cmd, cfg.ExposedPorts, cfg.Volumes} {
 		fmt.Fprintf(h, "n=%d;", len(group))
 		for _, v := range group {
 			writeField(v)
@@ -119,26 +127,31 @@ type LayerInput struct {
 	// Used by sourceRef layers, where the artifact is a whole repository and usually only one
 	// directory of it belongs in the image.
 	Subpath string
-	// ImageRepository is set for image entries, and names where to pull from. The digest still
-	// comes from Digest, so the pull is content-addressed like everything else.
-	ImageRepository string
-	// Image is the pulled image, populated during fetching. Its layers are contributed as they
-	// are, rather than being rebuilt from files — they are already content-addressed, and
-	// repacking them would change their digests for no reason.
-	Image v1.Image
 	// Target is the absolute path inside the image.
 	Target string
+	// Remove lists absolute paths to delete. Mutually exclusive with a content source; an entry
+	// with Remove set produces a whiteout-only layer.
+	Remove []string
+	// UID and GID own the contributed files. Zero is the default and the common case.
+	UID, GID int64
+	// FileMode and DirMode override the normalised permissions when non-zero.
+	FileMode, DirMode int64
 }
 
 // Config is the OCI config to stamp on the produced image.
 type Config struct {
-	// From names the layer entry whose image config is inherited. Empty means an empty config,
-	// which is correct for artifacts that are mounted rather than executed.
-	From       string
-	Labels     map[string]string
-	Env        []string
-	Entrypoint []string
-	Cmd        []string
+	// Inherit starts from the base image's config rather than an empty one.
+	Inherit bool
+
+	Labels       map[string]string
+	Env          []string
+	Entrypoint   []string
+	Cmd          []string
+	User         string
+	WorkingDir   string
+	ExposedPorts []string
+	Volumes      []string
+	StopSignal   string
 }
 
 // tarEntry is a file destined for the layer, collected before writing so the archive can be
@@ -161,28 +174,18 @@ type tarEntry struct {
 // reads them lazily when the image is written — so the CALLER owns the directory and must remove
 // it only after the image has been consumed. An empty workDir uses the system temp directory,
 // which leaves the files behind; pass a real directory in any long-running process.
-func Assemble(inputs []LayerInput, cfg Config, workDir string) (v1.Image, error) {
+func Assemble(base v1.Image, inputs []LayerInput, cfg Config, workDir string) (v1.Image, error) {
+	// The base's layers come first and are reused verbatim: they are already content-addressed,
+	// so repacking them would change their digests, break sharing with anything else on the same
+	// base, and re-upload content the registry already holds.
 	img := empty.Image
+	if base != nil {
+		img = base
+	}
 	img = mutate.MediaType(img, types.OCIManifestSchema1)
 	img = mutate.ConfigMediaType(img, types.OCIConfigJSON)
 
 	for _, in := range inputs {
-		// An image entry contributes its existing layers. Order is preserved: they land exactly
-		// where the entry sits in the list, which for a base image is usually first but is not
-		// required to be. See ADR 0003.
-		if in.Image != nil {
-			layers, err := in.Image.Layers()
-			if err != nil {
-				return nil, fmt.Errorf("layer %q: reading image layers: %w", in.Name, err)
-			}
-			for _, l := range layers {
-				if img, err = mutate.AppendLayers(img, l); err != nil {
-					return nil, fmt.Errorf("layer %q: appending: %w", in.Name, err)
-				}
-			}
-			continue
-		}
-
 		layerPath, err := buildLayerTarGz(in, workDir)
 		if err != nil {
 			return nil, fmt.Errorf("layer %q: %w", in.Name, err)
@@ -205,34 +208,40 @@ func Assemble(inputs []LayerInput, cfg Config, workDir string) (v1.Image, error)
 	}
 	cf = cf.DeepCopy()
 
-	// config.from inherits the base image's config. This is what makes a composed image
-	// RUNNABLE: without the entrypoint, env, user and working directory the base declared, the
-	// result is a pile of layers that starts and immediately fails. Inheritance is opt-in
-	// because for a bundle that is only ever mounted, an empty config is the correct answer and
-	// silently adopting an entrypoint would be surprising. See ADR 0003.
+	// Inheritance is opt-in. An artifact that is only ever mounted should have an empty config,
+	// and silently acquiring a base's entrypoint would be surprising. See ADR 0015.
 	os, arch := "linux", "amd64"
-	if cfg.From != "" {
-		base, err := findImageInput(inputs, cfg.From)
-		if err != nil {
-			return nil, err
+	if cfg.Inherit {
+		if base == nil {
+			return nil, fmt.Errorf("config.inherit is set but there is no base to inherit from")
 		}
-		baseConfig, err := base.Image.ConfigFile()
+		baseConfig, err := base.ConfigFile()
 		if err != nil {
-			return nil, fmt.Errorf("reading config of %q: %w", cfg.From, err)
+			return nil, fmt.Errorf("reading the base config: %w", err)
 		}
 		inherited := baseConfig.DeepCopy()
-		// Diff IDs and history belong to the assembled image, not the base, and the layer set
-		// here is the base's plus ours.
+		// RootFS and History describe the assembled image, not the base.
 		inherited.RootFS = cf.RootFS
 		cf = inherited
-		// The platform comes from the base too. Claiming linux/amd64 over an arm64 base would
-		// produce an image the kubelet refuses to run for a reason that points nowhere useful.
+		// The platform comes from the base too. Claiming linux/amd64 over an arm64 base produces
+		// an image the kubelet refuses to run, for a reason that points nowhere useful.
 		if baseConfig.OS != "" {
 			os = baseConfig.OS
 		}
 		if baseConfig.Architecture != "" {
 			arch = baseConfig.Architecture
 		}
+	} else if base != nil {
+		// Not inheriting, but the platform must still describe the layers underneath.
+		if baseConfig, err := base.ConfigFile(); err == nil {
+			if baseConfig.OS != "" {
+				os = baseConfig.OS
+			}
+			if baseConfig.Architecture != "" {
+				arch = baseConfig.Architecture
+			}
+		}
+		cf.Config = v1.Config{}
 	}
 
 	cf.Created = v1.Time{Time: epoch}
@@ -251,6 +260,21 @@ func Assemble(inputs []LayerInput, cfg Config, workDir string) (v1.Image, error)
 	if len(cfg.Cmd) > 0 {
 		cf.Config.Cmd = cfg.Cmd
 	}
+	if cfg.User != "" {
+		cf.Config.User = cfg.User
+	}
+	if cfg.WorkingDir != "" {
+		cf.Config.WorkingDir = cfg.WorkingDir
+	}
+	if cfg.StopSignal != "" {
+		cf.Config.StopSignal = cfg.StopSignal
+	}
+	if len(cfg.ExposedPorts) > 0 {
+		cf.Config.ExposedPorts = toSet(cfg.ExposedPorts)
+	}
+	if len(cfg.Volumes) > 0 {
+		cf.Config.Volumes = toSet(cfg.Volumes)
+	}
 	// History entries carry timestamps; drop them rather than stamp them, so nothing
 	// non-deterministic leaks into the config digest.
 	cf.History = nil
@@ -262,18 +286,13 @@ func Assemble(inputs []LayerInput, cfg Config, workDir string) (v1.Image, error)
 	return img, nil
 }
 
-// findImageInput resolves a config.from reference to an image entry.
-func findImageInput(inputs []LayerInput, name string) (*LayerInput, error) {
-	for i := range inputs {
-		if inputs[i].Name != name {
-			continue
-		}
-		if inputs[i].Image == nil {
-			return nil, fmt.Errorf("config.from names layer %q, which is not an image source", name)
-		}
-		return &inputs[i], nil
+// toSet converts a list into the map-of-empty-struct shape the OCI config uses.
+func toSet(items []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(items))
+	for _, i := range items {
+		out[i] = struct{}{}
 	}
-	return nil, fmt.Errorf("config.from names layer %q, which does not exist", name)
+	return out
 }
 
 // buildLayerTarGz converts one input into a deterministic gzipped tar under workDir and returns
@@ -306,13 +325,21 @@ func buildLayerTarGz(in LayerInput, workDir string) (string, error) {
 		}
 		seen[e.name] = true
 
+		mode := e.mode
+		switch {
+		case e.dir && in.DirMode != 0:
+			mode = in.DirMode
+		case !e.dir && e.link == "" && in.FileMode != 0:
+			mode = in.FileMode
+		}
+
 		hdr := &tar.Header{
 			Name:     e.name,
-			Mode:     e.mode,
+			Mode:     mode,
 			ModTime:  epoch,
 			Format:   tar.FormatPAX,
-			Uid:      0,
-			Gid:      0,
+			Uid:      int(in.UID),
+			Gid:      int(in.GID),
 			Uname:    "",
 			Gname:    "",
 			Typeflag: tar.TypeReg,
@@ -349,6 +376,22 @@ func buildLayerTarGz(in LayerInput, workDir string) (string, error) {
 
 // collectEntries turns one input into the set of files it contributes.
 func collectEntries(in LayerInput) ([]tarEntry, error) {
+	// A remove entry produces whiteouts and nothing else. OCI expresses deletion as a ".wh."
+	// sibling, so the bytes remain in the layer below and this hides a path rather than
+	// reclaiming its space.
+	if len(in.Remove) > 0 {
+		var out []tarEntry
+		for _, p := range in.Remove {
+			clean := strings.TrimPrefix(path.Clean("/"+p), "/")
+			if clean == "" || clean == "." {
+				return nil, fmt.Errorf("cannot remove the root directory")
+			}
+			dir, base := path.Split(clean)
+			out = append(out, tarEntry{name: dir + ".wh." + base, mode: 0o644})
+		}
+		return out, nil
+	}
+
 	target := strings.TrimPrefix(path.Clean("/"+in.Target), "/")
 
 	switch in.Unpack {

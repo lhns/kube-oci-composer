@@ -198,9 +198,13 @@ func (c *Collector) mark(items []ociv1alpha1.ImageComposition) (blobs, inputs, m
 
 		// Spec layers, not just status: a layer that has been declared but not yet built is
 		// already in the cache, and reclaiming it would force an immediate re-fetch.
+		//
+		// Only fetch entries have a spec-declared digest. sourceRef and configMap digests are
+		// resolved at build time and appear in the cache under whatever they resolved to, so they
+		// are covered by the grace period until the next build records them.
 		for _, l := range obj.Spec.Layers {
-			if l.Digest != "" {
-				inputs[l.Digest] = struct{}{}
+			if l.Fetch != nil && l.Fetch.Digest != "" {
+				inputs[l.Fetch.Digest] = struct{}{}
 			}
 		}
 

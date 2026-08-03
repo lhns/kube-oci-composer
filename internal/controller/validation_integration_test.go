@@ -39,168 +39,186 @@ func apply(t *testing.T, name string, spec ociv1alpha1.ImageCompositionSpec) err
 	return err
 }
 
-func urlLayerSpec(name, url, digest string) ociv1alpha1.Layer {
+const validDigest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+func fetchLayer(name string) ociv1alpha1.Layer {
 	return ociv1alpha1.Layer{
-		Name:      name,
-		URLSource: &ociv1alpha1.URLSource{URL: url},
-		Digest:    digest,
-		Target:    "/x",
+		Name:  name,
+		Fetch: &ociv1alpha1.FetchSource{URL: "https://example.com/a.tgz", Digest: validDigest},
+		To:    "/x",
 	}
 }
-
-const validDigest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
 
 // TestIntegrationValidSpecIsAccepted anchors the negative cases below: without it, a rule that
 // rejected everything would look like a complete pass.
 func TestIntegrationValidSpecIsAccepted(t *testing.T) {
-	err := apply(t, "valid", ociv1alpha1.ImageCompositionSpec{
-		Layers:  []ociv1alpha1.Layer{urlLayerSpec("core", "https://example.com/a.tgz", validDigest)},
+	if err := apply(t, "valid", ociv1alpha1.ImageCompositionSpec{
+		Layers:  []ociv1alpha1.Layer{fetchLayer("core")},
 		Publish: &ociv1alpha1.Publish{Name: "valid", Tag: "main"},
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatalf("a valid spec was rejected: %v", err)
 	}
 }
 
-// TestIntegrationLayerUnionIsEnforced — exactly one source. This is the rule that keeps the
-// discriminated union honest, and nothing else checks it.
-func TestIntegrationLayerUnionIsEnforced(t *testing.T) {
-	t.Run("no source", func(t *testing.T) {
-		err := apply(t, "no-source", ociv1alpha1.ImageCompositionSpec{
-			Layers: []ociv1alpha1.Layer{{Name: "empty", Target: "/x"}},
+// TestIntegrationVerbUnionIsEnforced — exactly one of fetch, configMap, sourceRef, remove. This
+// keeps the discriminated union honest, and nothing else checks it.
+func TestIntegrationVerbUnionIsEnforced(t *testing.T) {
+	t.Run("no verb", func(t *testing.T) {
+		err := apply(t, "no-verb", ociv1alpha1.ImageCompositionSpec{
+			Layers: []ociv1alpha1.Layer{{Name: "empty", To: "/x"}},
 		})
 		if err == nil {
-			t.Fatal("a layer with no source was accepted")
+			t.Fatal("a layer with no verb was accepted")
 		}
 		if !strings.Contains(err.Error(), "exactly one of") {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
 
-	t.Run("two sources", func(t *testing.T) {
-		err := apply(t, "two-sources", ociv1alpha1.ImageCompositionSpec{
+	t.Run("two verbs", func(t *testing.T) {
+		if err := apply(t, "two-verbs", ociv1alpha1.ImageCompositionSpec{
 			Layers: []ociv1alpha1.Layer{{
-				Name:         "both",
-				URLSource:    &ociv1alpha1.URLSource{URL: "https://example.com/a.tgz"},
-				ConfigMapRef: &ociv1alpha1.ConfigMapRef{Name: "cm"},
-				Digest:       validDigest,
-				Target:       "/x",
+				Name:      "both",
+				Fetch:     &ociv1alpha1.FetchSource{URL: "https://example.com/a.tgz", Digest: validDigest},
+				ConfigMap: &ociv1alpha1.ConfigMapSource{Name: "cm"},
+				To:        "/x",
 			}},
-		})
-		if err == nil {
-			t.Fatal("a layer with two sources was accepted")
+		}); err == nil {
+			t.Fatal("a layer with two verbs was accepted")
 		}
 	})
 }
 
-// TestIntegrationDigestRuleMatchesTheSourceKind — declared for url, resolved for the rest. A url
-// without a digest would break the guarantee in ADR 0002; a digest on a configMapRef would be
-// ignored, which is worse than being refused because it looks like it is doing something.
-func TestIntegrationDigestRuleMatchesTheSourceKind(t *testing.T) {
-	t.Run("url without a digest is rejected", func(t *testing.T) {
-		err := apply(t, "url-no-digest", ociv1alpha1.ImageCompositionSpec{
+// TestIntegrationPlacementRules — `to` is required for content and forbidden for remove, and
+// owner/mode do not apply to remove. One CEL rule covers all of it; this checks each arm.
+func TestIntegrationPlacementRules(t *testing.T) {
+	t.Run("content without to is rejected", func(t *testing.T) {
+		if err := apply(t, "no-to", ociv1alpha1.ImageCompositionSpec{
 			Layers: []ociv1alpha1.Layer{{
-				Name:      "core",
-				URLSource: &ociv1alpha1.URLSource{URL: "https://example.com/a.tgz"},
-				Target:    "/x",
+				Name:  "core",
+				Fetch: &ociv1alpha1.FetchSource{URL: "https://example.com/a.tgz", Digest: validDigest},
 			}},
-		})
-		if err == nil {
-			t.Fatal("a url layer without a digest was accepted")
+		}); err == nil {
+			t.Fatal("a content layer without 'to' was accepted")
 		}
 	})
 
-	t.Run("configMapRef with a digest is rejected", func(t *testing.T) {
-		err := apply(t, "cm-with-digest", ociv1alpha1.ImageCompositionSpec{
-			Layers: []ociv1alpha1.Layer{{
-				Name:         "settings",
-				ConfigMapRef: &ociv1alpha1.ConfigMapRef{Name: "cm"},
-				Digest:       validDigest,
-				Target:       "/x",
-			}},
-		})
-		if err == nil {
-			t.Fatal("a configMapRef layer with a declared digest was accepted")
+	t.Run("remove with to is rejected", func(t *testing.T) {
+		if err := apply(t, "remove-to", ociv1alpha1.ImageCompositionSpec{
+			Layers: []ociv1alpha1.Layer{{Name: "prune", Remove: []string{"/a"}, To: "/x"}},
+		}); err == nil {
+			t.Fatal("a remove layer with 'to' was accepted")
 		}
 	})
 
-	t.Run("configMapRef without a digest is accepted", func(t *testing.T) {
-		err := apply(t, "cm-no-digest", ociv1alpha1.ImageCompositionSpec{
+	t.Run("remove with owner is rejected", func(t *testing.T) {
+		if err := apply(t, "remove-owner", ociv1alpha1.ImageCompositionSpec{
 			Layers: []ociv1alpha1.Layer{{
-				Name:         "settings",
-				ConfigMapRef: &ociv1alpha1.ConfigMapRef{Name: "cm"},
-				Target:       "/x",
+				Name: "prune", Remove: []string{"/a"},
+				Owner: &ociv1alpha1.Ownership{UID: 1001},
 			}},
-		})
-		if err != nil {
-			t.Fatalf("a valid configMapRef layer was rejected: %v", err)
+		}); err == nil {
+			t.Fatal("a remove layer with 'owner' was accepted")
 		}
 	})
 
-	t.Run("sourceRef without a digest is accepted", func(t *testing.T) {
-		err := apply(t, "src-no-digest", ociv1alpha1.ImageCompositionSpec{
+	t.Run("remove with mode is rejected", func(t *testing.T) {
+		if err := apply(t, "remove-mode", ociv1alpha1.ImageCompositionSpec{
 			Layers: []ociv1alpha1.Layer{{
-				Name:      "config",
-				SourceRef: &ociv1alpha1.SourceRef{Kind: "GitRepository", Name: "repo"},
-				Target:    "/x",
+				Name: "prune", Remove: []string{"/a"},
+				Mode: &ociv1alpha1.FileMode{File: "0644"},
 			}},
-		})
-		if err != nil {
-			t.Fatalf("a valid sourceRef layer was rejected: %v", err)
+		}); err == nil {
+			t.Fatal("a remove layer with 'mode' was accepted")
+		}
+	})
+
+	t.Run("a plain remove is accepted", func(t *testing.T) {
+		if err := apply(t, "remove-ok", ociv1alpha1.ImageCompositionSpec{
+			Layers: []ociv1alpha1.Layer{{Name: "prune", Remove: []string{"/opt/old.jar"}}},
+		}); err != nil {
+			t.Fatalf("a valid remove layer was rejected: %v", err)
 		}
 	})
 }
 
-// TestIntegrationImageSourceIsAccepted — a base image plus content on top, which is the shape
-// that produces a runnable image rather than a bundle to mount.
-func TestIntegrationImageSourceIsAccepted(t *testing.T) {
-	err := apply(t, "image-source", ociv1alpha1.ImageCompositionSpec{
+// TestIntegrationResolvedSourcesNeedNoDigest — sourceRef and configMap are content-addressed by
+// the cluster, so their digests are resolved rather than declared. See ADR 0002.
+func TestIntegrationResolvedSourcesNeedNoDigest(t *testing.T) {
+	if err := apply(t, "resolved", ociv1alpha1.ImageCompositionSpec{
 		Layers: []ociv1alpha1.Layer{
+			{Name: "settings", ConfigMap: &ociv1alpha1.ConfigMapSource{Name: "cm"}, To: "/config"},
 			{
-				Name:   "base",
-				Image:  &ociv1alpha1.ImageSource{Repository: "gcr.io/distroless/static"},
-				Digest: validDigest,
-				Target: "/",
+				Name: "overlay", To: "/etc",
+				SourceRef: &ociv1alpha1.SourceRefSource{Kind: "GitRepository", Name: "repo"},
 			},
-			urlLayerSpec("plugins", "https://example.com/plugins.tgz", validDigest),
 		},
-		Config:  &ociv1alpha1.ImageConfig{From: "base"},
-		Publish: &ociv1alpha1.Publish{Name: "image-source", Tag: "main"},
-	})
-	if err != nil {
-		t.Fatalf("a base-image composition was rejected: %v", err)
+	}); err != nil {
+		t.Fatalf("resolved-digest sources were rejected: %v", err)
 	}
 }
 
-// TestIntegrationImageSourceStillNeedsADigest — an image entry is content-addressed like every
-// other source. A tag here would make the output depend on when it was built.
-func TestIntegrationImageSourceStillNeedsADigest(t *testing.T) {
-	err := apply(t, "image-no-digest", ociv1alpha1.ImageCompositionSpec{
-		Layers: []ociv1alpha1.Layer{{
-			Name:  "base",
-			Image: &ociv1alpha1.ImageSource{Repository: "gcr.io/distroless/static"},
-		}},
+// TestIntegrationBaseNeedsADigest — the base is content-addressed like every other input.
+func TestIntegrationBaseNeedsADigest(t *testing.T) {
+	if err := apply(t, "base-no-digest", ociv1alpha1.ImageCompositionSpec{
+		Base:   &ociv1alpha1.BaseImage{Image: "quay.io/strimzi/kafka"},
+		Layers: []ociv1alpha1.Layer{fetchLayer("core")},
+	}); err == nil {
+		t.Fatal("a base without a digest was accepted")
+	}
+}
+
+// TestIntegrationInheritNeedsABase — there is nothing to inherit from otherwise, and a silently
+// empty config would leave a non-runnable image with no explanation.
+func TestIntegrationInheritNeedsABase(t *testing.T) {
+	err := apply(t, "inherit-no-base", ociv1alpha1.ImageCompositionSpec{
+		Layers: []ociv1alpha1.Layer{fetchLayer("core")},
+		Config: &ociv1alpha1.ImageConfig{Inherit: true},
 	})
 	if err == nil {
-		t.Fatal("an image layer without a digest was accepted")
+		t.Fatal("config.inherit without a base was accepted")
+	}
+	if !strings.Contains(err.Error(), "requires a base") {
+		t.Fatalf("the error does not explain why: %v", err)
 	}
 }
 
-// TestIntegrationPushAndPublishAreMutuallyExclusive — setting both would leave it ambiguous where
-// the artifact goes and what status.artifact.ref should say.
+// TestIntegrationBaseWithInheritIsAccepted — the runnable-image shape.
+func TestIntegrationBaseWithInheritIsAccepted(t *testing.T) {
+	if err := apply(t, "runnable", ociv1alpha1.ImageCompositionSpec{
+		Base: &ociv1alpha1.BaseImage{
+			Image:     "quay.io/strimzi/kafka",
+			Digest:    validDigest,
+			SecretRef: &ociv1alpha1.LocalObjectReference{Name: "kafka-pull"},
+		},
+		Layers: []ociv1alpha1.Layer{fetchLayer("plugins")},
+		Config: &ociv1alpha1.ImageConfig{
+			Inherit:      true,
+			User:         "1001",
+			WorkingDir:   "/opt/kafka",
+			ExposedPorts: []string{"9092/tcp"},
+			StopSignal:   "SIGTERM",
+		},
+		Publish: &ociv1alpha1.Publish{Name: "runnable", Tag: "main"},
+	}); err != nil {
+		t.Fatalf("the runnable-image shape was rejected: %v", err)
+	}
+}
+
+// TestIntegrationPushAndPublishAreMutuallyExclusive — setting both leaves it ambiguous where the
+// artifact goes and what status.artifact.ref should say.
 func TestIntegrationPushAndPublishAreMutuallyExclusive(t *testing.T) {
-	err := apply(t, "both-targets", ociv1alpha1.ImageCompositionSpec{
-		Layers:  []ociv1alpha1.Layer{urlLayerSpec("core", "https://example.com/a.tgz", validDigest)},
+	if err := apply(t, "both-targets", ociv1alpha1.ImageCompositionSpec{
+		Layers:  []ociv1alpha1.Layer{fetchLayer("core")},
 		Publish: &ociv1alpha1.Publish{Name: "x", Tag: "main"},
 		Push:    &ociv1alpha1.Push{Repository: "ghcr.io/example/x", Tag: "main"},
-	})
-	if err == nil {
+	}); err == nil {
 		t.Fatal("both push and publish were accepted")
 	}
 }
 
 // TestIntegrationEmptyLayersIsRejected — an empty list is far more likely to be a templating
-// accident than a deliberate empty artifact. See ADR 0003.
+// accident than a deliberate empty artifact.
 func TestIntegrationEmptyLayersIsRejected(t *testing.T) {
 	if err := apply(t, "no-layers", ociv1alpha1.ImageCompositionSpec{
 		Publish: &ociv1alpha1.Publish{Name: "x", Tag: "main"},
@@ -213,36 +231,45 @@ func TestIntegrationEmptyLayersIsRejected(t *testing.T) {
 func TestIntegrationMalformedValuesAreRejected(t *testing.T) {
 	cases := map[string]ociv1alpha1.Layer{
 		"non-sha256 digest": {
-			Name: "x", URLSource: &ociv1alpha1.URLSource{URL: "https://example.com/a.tgz"},
-			Digest: "md5:abcd", Target: "/x",
+			Name: "x", To: "/x",
+			Fetch: &ociv1alpha1.FetchSource{URL: "https://example.com/a.tgz", Digest: "md5:abcd"},
 		},
 		"short digest": {
-			Name: "x", URLSource: &ociv1alpha1.URLSource{URL: "https://example.com/a.tgz"},
-			Digest: "sha256:abcd", Target: "/x",
+			Name: "x", To: "/x",
+			Fetch: &ociv1alpha1.FetchSource{URL: "https://example.com/a.tgz", Digest: "sha256:abcd"},
 		},
 		"non-http url": {
-			Name: "x", URLSource: &ociv1alpha1.URLSource{URL: "ftp://example.com/a.tgz"},
-			Digest: validDigest, Target: "/x",
+			Name: "x", To: "/x",
+			Fetch: &ociv1alpha1.FetchSource{URL: "ftp://example.com/a.tgz", Digest: validDigest},
 		},
-		"relative target": {
-			Name: "x", URLSource: &ociv1alpha1.URLSource{URL: "https://example.com/a.tgz"},
-			Digest: validDigest, Target: "relative/path",
+		"relative to": {
+			Name: "x", To: "relative/path",
+			Fetch: &ociv1alpha1.FetchSource{URL: "https://example.com/a.tgz", Digest: validDigest},
 		},
 		"unknown unpack mode": {
-			Name: "x", URLSource: &ociv1alpha1.URLSource{URL: "https://example.com/a.tgz"},
-			Digest: validDigest, Target: "/x", Unpack: "zip",
+			Name: "x", To: "/x",
+			Fetch: &ociv1alpha1.FetchSource{
+				URL: "https://example.com/a.tgz", Digest: validDigest, Unpack: "zip",
+			},
 		},
 		"unknown source kind": {
-			Name: "x", SourceRef: &ociv1alpha1.SourceRef{Kind: "HelmRepository", Name: "r"},
-			Target: "/x",
+			Name: "x", To: "/x",
+			SourceRef: &ociv1alpha1.SourceRefSource{Kind: "HelmRepository", Name: "r"},
+		},
+		"non-octal file mode": {
+			Name: "x", To: "/x",
+			Fetch: &ociv1alpha1.FetchSource{URL: "https://example.com/a.tgz", Digest: validDigest},
+			Mode:  &ociv1alpha1.FileMode{File: "rw-r--r--"},
+		},
+		"empty remove list": {
+			Name: "x", Remove: []string{},
 		},
 	}
 
 	for name, layer := range cases {
 		t.Run(name, func(t *testing.T) {
-			err := apply(t, "malformed-"+strings.ReplaceAll(name, " ", "-"),
-				ociv1alpha1.ImageCompositionSpec{Layers: []ociv1alpha1.Layer{layer}})
-			if err == nil {
+			if err := apply(t, "malformed-"+strings.ReplaceAll(name, " ", "-"),
+				ociv1alpha1.ImageCompositionSpec{Layers: []ociv1alpha1.Layer{layer}}); err == nil {
 				t.Fatal("accepted")
 			}
 		})
@@ -256,9 +283,9 @@ func TestIntegrationDefaultsAreApplied(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "defaults", Namespace: "default"},
 		Spec: ociv1alpha1.ImageCompositionSpec{
 			Layers: []ociv1alpha1.Layer{{
-				Name:      "core",
-				URLSource: &ociv1alpha1.URLSource{URL: "https://example.com/a.tgz"},
-				Digest:    validDigest,
+				Name:  "core",
+				Fetch: &ociv1alpha1.FetchSource{URL: "https://example.com/a.tgz", Digest: validDigest},
+				To:    "/x",
 			}},
 			Publish: &ociv1alpha1.Publish{Name: "defaults"},
 		},
@@ -271,11 +298,8 @@ func TestIntegrationDefaultsAreApplied(t *testing.T) {
 	if obj.Spec.Interval.Duration.Hours() != 1 {
 		t.Errorf("interval defaulted to %v, want 1h", obj.Spec.Interval.Duration)
 	}
-	if obj.Spec.Layers[0].Unpack != ociv1alpha1.UnpackNone {
-		t.Errorf("unpack defaulted to %q, want none", obj.Spec.Layers[0].Unpack)
-	}
-	if obj.Spec.Layers[0].Target != "/" {
-		t.Errorf("target defaulted to %q, want /", obj.Spec.Layers[0].Target)
+	if obj.Spec.Layers[0].Fetch.Unpack != ociv1alpha1.UnpackNone {
+		t.Errorf("unpack defaulted to %q, want none", obj.Spec.Layers[0].Fetch.Unpack)
 	}
 	if obj.Spec.Publish.Tag != "latest" {
 		t.Errorf("publish tag defaulted to %q, want latest", obj.Spec.Publish.Tag)

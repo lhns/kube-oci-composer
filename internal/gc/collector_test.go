@@ -208,9 +208,9 @@ func TestCacheEntriesAreMarkedFromSpec(t *testing.T) {
 
 	obj := composition("app")
 	obj.Spec.Layers = []ociv1alpha1.Layer{{
-		Name:      "core",
-		URLSource: &ociv1alpha1.URLSource{URL: "https://example/x.tgz"},
-		Digest:    declared,
+		Name:  "core",
+		Fetch: &ociv1alpha1.FetchSource{URL: "https://example/x.tgz", Digest: declared},
+		To:    "/x",
 	}}
 
 	c := newCollector(t, nil, staticPending{}, obj)

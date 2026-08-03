@@ -11,8 +11,8 @@ alternatives are not padding — they are the part that stops the same argument 
 |---|---|---|
 | [0001](0001-compose-dont-build.md) | Compose, don't build | Accepted |
 | [0002](0002-content-addressed-inputs.md) | Every input is content-addressed; the output digest is a pure function of the spec | Accepted |
-| [0003](0003-one-ordered-layers-list.md) | One ordered `layers` list, no separate `base` field | Accepted |
-| [0004](0004-two-kinds-two-controllers.md) | Two kinds, two controllers, two charts, one repo | Accepted |
+| [0003](0003-one-ordered-layers-list.md) | One ordered `layers` list, no separate `base` field | Partly superseded by 0016 |
+| [0004](0004-two-kinds-two-controllers.md) | Two kinds, two controllers, two charts, one repo | Superseded by 0016 |
 | [0005](0005-go-controller-runtime.md) | Go and controller-runtime | Accepted |
 | [0006](0006-push-is-optional.md) | `push` is optional; a built-in endpoint means no registry is required | Accepted |
 | [0007](0007-packaging.md) | Packaging: OCI chart and image published to ghcr | Accepted |
@@ -24,6 +24,7 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0013](0013-persist-manifests.md) | Persist manifests so published builds survive a restart | Accepted |
 | [0014](0014-pluggable-storage.md) | Pluggable storage and a two-tier input cache | Accepted |
 | [0015](0015-base-images-are-platform-pinned.md) | Base images are platform-pinned; config inheritance is opt-in | Accepted |
+| [0016](0016-the-scope-line-is-determinism.md) | The scope line is determinism, not Dockerfile parity | Accepted, supersedes 0004 and part of 0003 |
 
 ## Format
 

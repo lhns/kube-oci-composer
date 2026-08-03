@@ -33,7 +33,7 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: ImageComposition assembles an OCI image from content-addressed
+        description: ImageComposition assembles an OCI artifact from content-addressed
           inputs.
         properties:
           apiVersion:
@@ -55,61 +55,129 @@ spec:
             type: object
           spec:
             description: |-
-              ImageCompositionSpec assembles an OCI image from content-addressed inputs.
+              ImageCompositionSpec assembles an OCI artifact from content-addressed inputs.
 
-              It deliberately cannot run a Dockerfile. Composition is a pure function of its inputs, which
-              is what allows the reconcile loop to be idempotent and convergent and what allows provenance
-              to be exact rather than scanned. Anything requiring arbitrary execution belongs to a
-              different kind with a weaker guarantee. See ADR 0001.
+              It cannot execute anything, and that is the entire scope line. Everything expressible here is a
+              pure function of its inputs, which is what makes the output digest predictable, the reconcile
+              loop convergent, and the provenance exact rather than scanned. Anything needing a compiler
+              belongs in ordinary CI. See ADR 0001 and ADR 0016.
             properties:
+              base:
+                description: Base is the image to build on. Omit for a scratch artifact.
+                properties:
+                  digest:
+                    description: |-
+                      Digest pins the exact content. Required, like every other input.
+
+                      It must name a platform-specific manifest, not a multi-architecture index: resolving an
+                      index would mean the controller choosing a platform, so the output would stop being a
+                      function of the spec. Multi-architecture output is not implemented; when it is, an index
+                      here becomes correct because the platform list will come from the spec. See ADR 0015.
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  image:
+                    description: Image is the repository to pull from, e.g. "quay.io/strimzi/kafka".
+                    type: string
+                  secretRef:
+                    description: |-
+                      SecretRef names a kubernetes.io/dockerconfigjson Secret for pulling, when the base is
+                      private. The registry host comes from the Secret's auths map, matched against Image — the
+                      same arrangement as a Pod's imagePullSecrets, so no separate registry object is needed.
+
+                      Deliberately not shared with spec.push.secretRef: different registry, different scope, and
+                      sending a push-scoped token to wherever the base lives is not a reasonable default.
+                    properties:
+                      name:
+                        description: Name of the referent.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - digest
+                - image
+                type: object
               config:
-                description: Config for the produced image.
+                description: Config for the produced artifact.
                 properties:
                   cmd:
-                    description: Cmd to set on the image config.
+                    description: Cmd to set.
                     items:
                       type: string
                     type: array
                   entrypoint:
-                    description: Entrypoint to set on the image config.
+                    description: Entrypoint to set.
                     items:
                       type: string
                     type: array
                   env:
-                    description: Env to set on the image config.
+                    description: |-
+                      Env to set, as "KEY=value" entries. Replaces the inherited list rather than merging into
+                      it: a per-key merge raises questions about ordering and removal with no obvious answers.
                     items:
                       type: string
                     type: array
-                  from:
+                  exposedPorts:
                     description: |-
-                      From names a layer entry to inherit the OCI config from. Without it the config is empty,
-                      which is correct for artifacts that are only ever mounted rather than executed.
-                    type: string
+                      ExposedPorts, e.g. "9092/tcp". Documentation for whoever reads the image; Kubernetes does
+                      not consult it.
+                    items:
+                      type: string
+                    type: array
+                  inherit:
+                    default: false
+                    description: |-
+                      Inherit takes the base image's config as the starting point: its entrypoint, env, user,
+                      working directory, exposed ports and stop signal. Without it the config starts empty.
+
+                      Opt-in rather than automatic. An artifact that is only ever mounted should have an empty
+                      config, and silently acquiring a base's entrypoint would be surprising. Fields set below
+                      override what is inherited.
+                    type: boolean
                   labels:
                     additionalProperties:
                       type: string
                     description: Labels to set on the image config.
                     type: object
+                  stopSignal:
+                    description: StopSignal, e.g. "SIGTERM".
+                    type: string
+                  user:
+                    description: User to run as, e.g. "1001" or "1001:1001".
+                    type: string
+                  volumes:
+                    description: Volumes declares paths as volumes in the image config.
+                    items:
+                      type: string
+                    type: array
+                  workingDir:
+                    description: WorkingDir to start in.
+                    pattern: ^/
+                    type: string
                 type: object
               interval:
                 default: 1h
                 description: |-
                   Interval at which to reconcile. Reconciling is nearly free when nothing has changed: the
-                  controller computes the expected digest and compares, rather than rebuilding.
+                  controller compares a hash of the inputs rather than rebuilding.
                 type: string
               layers:
                 description: |-
-                  Layers is an ordered, non-empty list of content contributions. Later entries overlay
-                  earlier ones. There is no separate base field: a base image is just the first entry.
+                  Layers are ordered filesystem operations applied on top of the base. Later entries overlay
+                  earlier ones, exactly as image layers do.
                 items:
                   description: |-
-                    Layer is one entry in an ordered list of content contributions.
+                    Layer is one entry in an ordered list of filesystem operations applied on top of the base.
 
-                    Exactly one source must be set. Modelled as a discriminated union from day one so that new
-                    source kinds can be added without a breaking schema change. See ADR 0004.
+                    Each entry produces exactly one layer, which is what makes the name accurate — the base is
+                    hoisted out precisely because it did not satisfy that.
+
+                    Exactly one verb must be set. Source-specific options live inside their verb rather than being
+                    smeared across the entry, so there is no field that is meaningful for one source and silently
+                    ignored by the rest.
                   properties:
-                    configMapRef:
-                      description: ConfigMapRef turns a ConfigMap's entries into files.
+                    configMap:
+                      description: ConfigMap turns a ConfigMap's entries into files.
                       properties:
                         name:
                           description: Name of the ConfigMap, in the ImageComposition's
@@ -117,49 +185,88 @@ spec:
                           type: string
                         optional:
                           default: false
-                          description: Optional tolerates the ConfigMap not existing,
-                            contributing nothing instead of stalling.
+                          description: |-
+                            Optional tolerates the ConfigMap not existing, contributing nothing instead of stalling.
+                            Nothing, not an empty layer — an empty layer would still change the output digest.
                           type: boolean
                       required:
                       - name
                       type: object
-                    digest:
-                      description: |-
-                        Digest of the fetched content, required for url and image sources.
-
-                        Every input is content-addressed at build time, with no exceptions — it is what makes the
-                        output digest a pure function of the spec, and it makes tampering detectable rather than
-                        silent. A mismatch is terminal (Stalled), never a retry.
-
-                        It is omitted for sourceRef and configMapRef, whose digests the controller RESOLVES: from
-                        the Flux source's status.artifact, or by hashing the ConfigMap's content. The guarantee is
-                        unchanged; only who writes the digest down differs. See ADR 0002.
-                      pattern: ^sha256:[a-f0-9]{64}$
-                      type: string
-                    image:
-                      description: Image contributes the layers of an existing image.
+                    fetch:
+                      description: Fetch retrieves content over HTTP(S).
                       properties:
-                        repository:
-                          description: Repository of the image, e.g. "gcr.io/distroless/static".
+                        digest:
+                          description: |-
+                            Digest of the fetched bytes. Declared here rather than resolved, because an arbitrary URL
+                            is not content-addressed by anything else. A mismatch is terminal. See ADR 0002.
+                          pattern: ^sha256:[a-f0-9]{64}$
                           type: string
-                        secretRef:
-                          description: SecretRef names a docker-registry Secret for
-                            pulling, when the image is private.
-                          properties:
-                            name:
-                              description: Name of the referent.
-                              type: string
-                          required:
-                          - name
-                          type: object
+                        subpath:
+                          description: |-
+                            Subpath selects one directory from inside the archive and strips the prefix. Useful when a
+                            release tarball wraps everything in a version-named directory you do not want in the image.
+                            A subpath matching nothing is an error rather than a silently empty layer.
+                          type: string
+                        unpack:
+                          default: none
+                          description: Unpack controls how the bytes become layer
+                            content.
+                          enum:
+                          - none
+                          - tar
+                          - tar.gz
+                          type: string
+                        url:
+                          description: URL to fetch.
+                          pattern: ^https?://
+                          type: string
                       required:
-                      - repository
+                      - digest
+                      - url
+                      type: object
+                    mode:
+                      description: Mode sets permissions on the contributed files.
+                      properties:
+                        dir:
+                          description: Dir mode for directories, e.g. "0755".
+                          pattern: ^0[0-7]{3}$
+                          type: string
+                        file:
+                          description: File mode for regular files, e.g. "0644".
+                          pattern: ^0[0-7]{3}$
+                          type: string
                       type: object
                     name:
-                      description: |-
-                        Name identifies this entry. Used in messages, in provenance attestations, and as the
-                        target of config.from.
+                      description: Name identifies this entry, and appears in messages
+                        and provenance.
                       type: string
+                    owner:
+                      description: Owner sets uid and gid on the contributed files.
+                      properties:
+                        gid:
+                          default: 0
+                          description: GID to set on contributed files.
+                          format: int64
+                          minimum: 0
+                          type: integer
+                        uid:
+                          default: 0
+                          description: UID to set on contributed files.
+                          format: int64
+                          minimum: 0
+                          type: integer
+                      type: object
+                    remove:
+                      description: |-
+                        Remove deletes paths inherited from the base or from earlier layers.
+
+                        Implemented as whiteout entries, which is how OCI expresses deletion: the bytes remain in
+                        the layer below, so this hides a file rather than reclaiming its space. Paths are absolute
+                        and refer to the assembled filesystem.
+                      items:
+                        type: string
+                      minItems: 1
+                      type: array
                     sourceRef:
                       description: SourceRef takes content from a Flux source's artifact.
                       properties:
@@ -177,53 +284,37 @@ spec:
                           description: Namespace of the referenced source. Defaults
                             to the ImageComposition's namespace.
                           type: string
-                        path:
-                          description: Path within the artifact to take content from.
-                            Defaults to the whole artifact.
+                        subpath:
+                          description: Subpath selects one directory from the artifact.
+                            Defaults to the whole thing.
                           type: string
                       required:
                       - kind
                       - name
                       type: object
-                    target:
-                      default: /
-                      description: Target is the absolute path inside the image the
+                    to:
+                      description: To is the absolute path inside the image this entry's
                         content is placed at.
                       pattern: ^/
                       type: string
-                    unpack:
-                      default: none
-                      description: Unpack controls how the fetched bytes become layer
-                        content.
-                      enum:
-                      - none
-                      - tar
-                      - tar.gz
-                      type: string
-                    url:
-                      description: URL to fetch.
-                      pattern: ^https?://
-                      type: string
                   required:
                   - name
-                  - url
                   type: object
                   x-kubernetes-validations:
-                  - message: exactly one of url, image, sourceRef or configMapRef
-                      must be set
-                    rule: '[has(self.url), has(self.image), has(self.sourceRef), has(self.configMapRef)].filter(x,
-                      x).size() == 1'
-                  - message: digest is required for url and image sources, and must
-                      be omitted for sourceRef and configMapRef, whose digests are
-                      resolved by the controller
-                    rule: (has(self.url) || has(self.image)) == has(self.digest)
+                  - message: set exactly one of fetch, configMap, sourceRef or remove
+                    rule: '[has(self.fetch), has(self.configMap), has(self.sourceRef),
+                      has(self.remove)].filter(x, x).size() == 1'
+                  - message: '''to'' is required for content entries and must be omitted
+                      for remove, which takes absolute paths; owner and mode do not
+                      apply to remove'
+                    rule: 'has(self.remove) ? (!has(self.to) && !has(self.owner) &&
+                      !has(self.mode)) : has(self.to)'
                 minItems: 1
                 type: array
               publish:
                 description: |-
-                  Publish serves the artifact from the controller's own read-only OCI endpoint. This is the
-                  default mode and needs no registry and no credentials. Defaulted from the object's name
-                  when neither publish nor push is set.
+                  Publish serves the artifact from the controller's own read-only OCI endpoint. The default
+                  mode, needing no registry and no credentials.
                 properties:
                   history:
                     description: |-
@@ -299,6 +390,8 @@ spec:
             x-kubernetes-validations:
             - message: set at most one of push or publish
               rule: '!has(self.push) || !has(self.publish)'
+            - message: config.inherit requires a base to inherit from
+              rule: '!has(self.config) || !self.config.inherit || has(self.base)'
           status:
             description: ImageCompositionStatus reports what was produced.
             properties:
@@ -387,8 +480,7 @@ spec:
               history:
                 description: |-
                   History records past builds, newest first, capped at the retention count. It is the live
-                  set garbage collection marks from: anything in storage that no retained build references
-                  is reclaimable. See ADR 0011.
+                  set garbage collection marks from. See ADR 0011.
                 items:
                   description: |-
                     BuildRecord is one past build, retained so garbage collection knows what is still live.
@@ -420,15 +512,9 @@ spec:
                 type: array
               inputHash:
                 description: |-
-                  InputHash summarises everything that determines the output: the ordered layer digests,
-                  their unpack modes and targets, the config, and the assembly algorithm version. When it is
-                  unchanged and the published artifact still resolves, the controller skips the whole build
-                  — no fetch, no assembly, one HEAD.
-
-                  This is NOT the same idea as ImageBuild's planned inputHash. There the hash IS the
-                  identity, because a Dockerfile's output digest cannot be known without building. Here the
-                  output digest remains the identity and this is only a short-circuit; the guarantee is
-                  unchanged, the work is skipped. See ADR 0002.
+                  InputHash summarises everything that determines the output. When it is unchanged and the
+                  published artifact still resolves, the controller skips the whole build — no fetch, no
+                  assembly, one HEAD. See ADR 0002.
                 type: string
               lastHandledReconcileAt:
                 description: |-
