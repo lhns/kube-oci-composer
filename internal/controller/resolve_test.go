@@ -100,9 +100,9 @@ func reconcilerWith(t *testing.T, objs ...client.Object) *ImageCompositionReconc
 
 func configMapLayer(name, cmName string, optional bool, target string) ociv1alpha1.Layer {
 	return ociv1alpha1.Layer{
-		Name:         name,
-		ConfigMapRef: &ociv1alpha1.ConfigMapRef{Name: cmName, Optional: optional},
-		Target:       target,
+		Name:      name,
+		ConfigMap: &ociv1alpha1.ConfigMapSource{Name: cmName, Optional: optional},
+		To:        target,
 	}
 }
 
@@ -248,10 +248,10 @@ func TestSourceRefDigestComesFromTheSource(t *testing.T) {
 
 	obj := composition("git", ociv1alpha1.Layer{
 		Name: "config",
-		SourceRef: &ociv1alpha1.SourceRef{
-			Kind: "GitRepository", Name: "k0s-flux", Namespace: "flux-system", Path: "config",
+		SourceRef: &ociv1alpha1.SourceRefSource{
+			Kind: "GitRepository", Name: "k0s-flux", Namespace: "flux-system", Subpath: "config",
 		},
-		Target: "/config",
+		To: "/config",
 	})
 	r := reconcilerWith(t, repo)
 
@@ -281,8 +281,8 @@ func TestSourceRefDefaultsToTheObjectNamespace(t *testing.T) {
 
 	obj := composition("git", ociv1alpha1.Layer{
 		Name:      "content",
-		SourceRef: &ociv1alpha1.SourceRef{Kind: "GitRepository", Name: "local"},
-		Target:    "/content",
+		SourceRef: &ociv1alpha1.SourceRefSource{Kind: "GitRepository", Name: "local"},
+		To:        "/content",
 	})
 	r := reconcilerWith(t, repo)
 
@@ -295,8 +295,8 @@ func TestSourceRefDefaultsToTheObjectNamespace(t *testing.T) {
 func TestMissingSourceIsTerminal(t *testing.T) {
 	obj := composition("git", ociv1alpha1.Layer{
 		Name:      "content",
-		SourceRef: &ociv1alpha1.SourceRef{Kind: "GitRepository", Name: "absent"},
-		Target:    "/content",
+		SourceRef: &ociv1alpha1.SourceRefSource{Kind: "GitRepository", Name: "absent"},
+		To:        "/content",
 	})
 	r := reconcilerWith(t)
 
@@ -319,8 +319,8 @@ func TestSourceWithoutAnArtifactIsTransient(t *testing.T) {
 
 	obj := composition("git", ociv1alpha1.Layer{
 		Name:      "content",
-		SourceRef: &ociv1alpha1.SourceRef{Kind: "GitRepository", Name: "fresh"},
-		Target:    "/content",
+		SourceRef: &ociv1alpha1.SourceRefSource{Kind: "GitRepository", Name: "fresh"},
+		To:        "/content",
 	})
 	r := reconcilerWith(t, repo)
 
@@ -349,8 +349,8 @@ func TestLayerOrderIsPreservedAcrossSourceKinds(t *testing.T) {
 		urlLayer("second", url, digest, "/b"),
 		ociv1alpha1.Layer{
 			Name:      "third",
-			SourceRef: &ociv1alpha1.SourceRef{Kind: "GitRepository", Name: "repo"},
-			Target:    "/c",
+			SourceRef: &ociv1alpha1.SourceRefSource{Kind: "GitRepository", Name: "repo"},
+			To:        "/c",
 		},
 	)
 	r := reconcilerWith(t, cm, repo)

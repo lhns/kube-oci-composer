@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "description": "ImageComposition assembles an OCI image from content-addressed inputs.",
+  "description": "ImageComposition assembles an OCI artifact from content-addressed inputs.",
   "properties": {
     "apiVersion": {
       "description": "APIVersion defines the versioned schema of this representation of an object.\nServers should convert recognized schemas to the latest internal value, and\nmay reject unrecognized values.\nMore info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
@@ -14,35 +14,75 @@
       "type": "object"
     },
     "spec": {
-      "description": "ImageCompositionSpec assembles an OCI image from content-addressed inputs.\n\nIt deliberately cannot run a Dockerfile. Composition is a pure function of its inputs, which\nis what allows the reconcile loop to be idempotent and convergent and what allows provenance\nto be exact rather than scanned. Anything requiring arbitrary execution belongs to a\ndifferent kind with a weaker guarantee. See ADR 0001.",
+      "description": "ImageCompositionSpec assembles an OCI artifact from content-addressed inputs.\n\nIt cannot execute anything, and that is the entire scope line. Everything expressible here is a\npure function of its inputs, which is what makes the output digest predictable, the reconcile\nloop convergent, and the provenance exact rather than scanned. Anything needing a compiler\nbelongs in ordinary CI. See ADR 0001 and ADR 0016.",
       "properties": {
+        "base": {
+          "description": "Base is the image to build on. Omit for a scratch artifact.",
+          "properties": {
+            "digest": {
+              "description": "Digest pins the exact content. Required, like every other input.\n\nIt must name a platform-specific manifest, not a multi-architecture index: resolving an\nindex would mean the controller choosing a platform, so the output would stop being a\nfunction of the spec. Multi-architecture output is not implemented; when it is, an index\nhere becomes correct because the platform list will come from the spec. See ADR 0015.",
+              "pattern": "^sha256:[a-f0-9]{64}$",
+              "type": "string"
+            },
+            "image": {
+              "description": "Image is the repository to pull from, e.g. \"quay.io/strimzi/kafka\".",
+              "type": "string"
+            },
+            "secretRef": {
+              "description": "SecretRef names a kubernetes.io/dockerconfigjson Secret for pulling, when the base is\nprivate. The registry host comes from the Secret's auths map, matched against Image — the\nsame arrangement as a Pod's imagePullSecrets, so no separate registry object is needed.\n\nDeliberately not shared with spec.push.secretRef: different registry, different scope, and\nsending a push-scoped token to wherever the base lives is not a reasonable default.",
+              "properties": {
+                "name": {
+                  "description": "Name of the referent.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "digest",
+            "image"
+          ],
+          "type": "object"
+        },
         "config": {
-          "description": "Config for the produced image.",
+          "description": "Config for the produced artifact.",
           "properties": {
             "cmd": {
-              "description": "Cmd to set on the image config.",
+              "description": "Cmd to set.",
               "items": {
                 "type": "string"
               },
               "type": "array"
             },
             "entrypoint": {
-              "description": "Entrypoint to set on the image config.",
+              "description": "Entrypoint to set.",
               "items": {
                 "type": "string"
               },
               "type": "array"
             },
             "env": {
-              "description": "Env to set on the image config.",
+              "description": "Env to set, as \"KEY=value\" entries. Replaces the inherited list rather than merging into\nit: a per-key merge raises questions about ordering and removal with no obvious answers.",
               "items": {
                 "type": "string"
               },
               "type": "array"
             },
-            "from": {
-              "description": "From names a layer entry to inherit the OCI config from. Without it the config is empty,\nwhich is correct for artifacts that are only ever mounted rather than executed.",
-              "type": "string"
+            "exposedPorts": {
+              "description": "ExposedPorts, e.g. \"9092/tcp\". Documentation for whoever reads the image; Kubernetes does\nnot consult it.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "inherit": {
+              "default": false,
+              "description": "Inherit takes the base image's config as the starting point: its entrypoint, env, user,\nworking directory, exposed ports and stop signal. Without it the config starts empty.\n\nOpt-in rather than automatic. An artifact that is only ever mounted should have an empty\nconfig, and silently acquiring a base's entrypoint would be surprising. Fields set below\noverride what is inherited.",
+              "type": "boolean"
             },
             "labels": {
               "additionalProperties": {
@@ -50,22 +90,42 @@
               },
               "description": "Labels to set on the image config.",
               "type": "object"
+            },
+            "stopSignal": {
+              "description": "StopSignal, e.g. \"SIGTERM\".",
+              "type": "string"
+            },
+            "user": {
+              "description": "User to run as, e.g. \"1001\" or \"1001:1001\".",
+              "type": "string"
+            },
+            "volumes": {
+              "description": "Volumes declares paths as volumes in the image config.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "workingDir": {
+              "description": "WorkingDir to start in.",
+              "pattern": "^/",
+              "type": "string"
             }
           },
           "type": "object"
         },
         "interval": {
           "default": "1h",
-          "description": "Interval at which to reconcile. Reconciling is nearly free when nothing has changed: the\ncontroller computes the expected digest and compares, rather than rebuilding.",
+          "description": "Interval at which to reconcile. Reconciling is nearly free when nothing has changed: the\ncontroller compares a hash of the inputs rather than rebuilding.",
           "type": "string"
         },
         "layers": {
-          "description": "Layers is an ordered, non-empty list of content contributions. Later entries overlay\nearlier ones. There is no separate base field: a base image is just the first entry.",
+          "description": "Layers are ordered filesystem operations applied on top of the base. Later entries overlay\nearlier ones, exactly as image layers do.",
           "items": {
-            "description": "Layer is one entry in an ordered list of content contributions.\n\nExactly one source must be set. Modelled as a discriminated union from day one so that new\nsource kinds can be added without a breaking schema change. See ADR 0004.",
+            "description": "Layer is one entry in an ordered list of filesystem operations applied on top of the base.\n\nEach entry produces exactly one layer, which is what makes the name accurate — the base is\nhoisted out precisely because it did not satisfy that.\n\nExactly one verb must be set. Source-specific options live inside their verb rather than being\nsmeared across the entry, so there is no field that is meaningful for one source and silently\nignored by the rest.",
             "properties": {
-              "configMapRef": {
-                "description": "ConfigMapRef turns a ConfigMap's entries into files.",
+              "configMap": {
+                "description": "ConfigMap turns a ConfigMap's entries into files.",
                 "properties": {
                   "name": {
                     "description": "Name of the ConfigMap, in the ImageComposition's namespace.",
@@ -73,7 +133,7 @@
                   },
                   "optional": {
                     "default": false,
-                    "description": "Optional tolerates the ConfigMap not existing, contributing nothing instead of stalling.",
+                    "description": "Optional tolerates the ConfigMap not existing, contributing nothing instead of stalling.\nNothing, not an empty layer — an empty layer would still change the output digest.",
                     "type": "boolean"
                   }
                 },
@@ -82,40 +142,87 @@
                 ],
                 "type": "object"
               },
-              "digest": {
-                "description": "Digest of the fetched content, required for url and image sources.\n\nEvery input is content-addressed at build time, with no exceptions — it is what makes the\noutput digest a pure function of the spec, and it makes tampering detectable rather than\nsilent. A mismatch is terminal (Stalled), never a retry.\n\nIt is omitted for sourceRef and configMapRef, whose digests the controller RESOLVES: from\nthe Flux source's status.artifact, or by hashing the ConfigMap's content. The guarantee is\nunchanged; only who writes the digest down differs. See ADR 0002.",
-                "pattern": "^sha256:[a-f0-9]{64}$",
-                "type": "string"
-              },
-              "image": {
-                "description": "Image contributes the layers of an existing image.",
+              "fetch": {
+                "description": "Fetch retrieves content over HTTP(S).",
                 "properties": {
-                  "repository": {
-                    "description": "Repository of the image, e.g. \"gcr.io/distroless/static\".",
+                  "digest": {
+                    "description": "Digest of the fetched bytes. Declared here rather than resolved, because an arbitrary URL\nis not content-addressed by anything else. A mismatch is terminal. See ADR 0002.",
+                    "pattern": "^sha256:[a-f0-9]{64}$",
                     "type": "string"
                   },
-                  "secretRef": {
-                    "description": "SecretRef names a docker-registry Secret for pulling, when the image is private.",
-                    "properties": {
-                      "name": {
-                        "description": "Name of the referent.",
-                        "type": "string"
-                      }
-                    },
-                    "required": [
-                      "name"
+                  "subpath": {
+                    "description": "Subpath selects one directory from inside the archive and strips the prefix. Useful when a\nrelease tarball wraps everything in a version-named directory you do not want in the image.\nA subpath matching nothing is an error rather than a silently empty layer.",
+                    "type": "string"
+                  },
+                  "unpack": {
+                    "default": "none",
+                    "description": "Unpack controls how the bytes become layer content.",
+                    "enum": [
+                      "none",
+                      "tar",
+                      "tar.gz"
                     ],
-                    "type": "object"
+                    "type": "string"
+                  },
+                  "url": {
+                    "description": "URL to fetch.",
+                    "pattern": "^https?://",
+                    "type": "string"
                   }
                 },
                 "required": [
-                  "repository"
+                  "digest",
+                  "url"
                 ],
                 "type": "object"
               },
+              "mode": {
+                "description": "Mode sets permissions on the contributed files.",
+                "properties": {
+                  "dir": {
+                    "description": "Dir mode for directories, e.g. \"0755\".",
+                    "pattern": "^0[0-7]{3}$",
+                    "type": "string"
+                  },
+                  "file": {
+                    "description": "File mode for regular files, e.g. \"0644\".",
+                    "pattern": "^0[0-7]{3}$",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
               "name": {
-                "description": "Name identifies this entry. Used in messages, in provenance attestations, and as the\ntarget of config.from.",
+                "description": "Name identifies this entry, and appears in messages and provenance.",
                 "type": "string"
+              },
+              "owner": {
+                "description": "Owner sets uid and gid on the contributed files.",
+                "properties": {
+                  "gid": {
+                    "default": 0,
+                    "description": "GID to set on contributed files.",
+                    "format": "int64",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "uid": {
+                    "default": 0,
+                    "description": "UID to set on contributed files.",
+                    "format": "int64",
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "type": "object"
+              },
+              "remove": {
+                "description": "Remove deletes paths inherited from the base or from earlier layers.\n\nImplemented as whiteout entries, which is how OCI expresses deletion: the bytes remain in\nthe layer below, so this hides a file rather than reclaiming its space. Paths are absolute\nand refer to the assembled filesystem.",
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
               },
               "sourceRef": {
                 "description": "SourceRef takes content from a Flux source's artifact.",
@@ -137,8 +244,8 @@
                     "description": "Namespace of the referenced source. Defaults to the ImageComposition's namespace.",
                     "type": "string"
                   },
-                  "path": {
-                    "description": "Path within the artifact to take content from. Defaults to the whole artifact.",
+                  "subpath": {
+                    "description": "Subpath selects one directory from the artifact. Defaults to the whole thing.",
                     "type": "string"
                   }
                 },
@@ -148,41 +255,24 @@
                 ],
                 "type": "object"
               },
-              "target": {
-                "default": "/",
-                "description": "Target is the absolute path inside the image the content is placed at.",
+              "to": {
+                "description": "To is the absolute path inside the image this entry's content is placed at.",
                 "pattern": "^/",
-                "type": "string"
-              },
-              "unpack": {
-                "default": "none",
-                "description": "Unpack controls how the fetched bytes become layer content.",
-                "enum": [
-                  "none",
-                  "tar",
-                  "tar.gz"
-                ],
-                "type": "string"
-              },
-              "url": {
-                "description": "URL to fetch.",
-                "pattern": "^https?://",
                 "type": "string"
               }
             },
             "required": [
-              "name",
-              "url"
+              "name"
             ],
             "type": "object",
             "x-kubernetes-validations": [
               {
-                "message": "exactly one of url, image, sourceRef or configMapRef must be set",
-                "rule": "[has(self.url), has(self.image), has(self.sourceRef), has(self.configMapRef)].filter(x, x).size() == 1"
+                "message": "set exactly one of fetch, configMap, sourceRef or remove",
+                "rule": "[has(self.fetch), has(self.configMap), has(self.sourceRef), has(self.remove)].filter(x, x).size() == 1"
               },
               {
-                "message": "digest is required for url and image sources, and must be omitted for sourceRef and configMapRef, whose digests are resolved by the controller",
-                "rule": "(has(self.url) || has(self.image)) == has(self.digest)"
+                "message": "'to' is required for content entries and must be omitted for remove, which takes absolute paths; owner and mode do not apply to remove",
+                "rule": "has(self.remove) ? (!has(self.to) \u0026\u0026 !has(self.owner) \u0026\u0026 !has(self.mode)) : has(self.to)"
               }
             ]
           },
@@ -190,7 +280,7 @@
           "type": "array"
         },
         "publish": {
-          "description": "Publish serves the artifact from the controller's own read-only OCI endpoint. This is the\ndefault mode and needs no registry and no credentials. Defaulted from the object's name\nwhen neither publish nor push is set.",
+          "description": "Publish serves the artifact from the controller's own read-only OCI endpoint. The default\nmode, needing no registry and no credentials.",
           "properties": {
             "history": {
               "description": "History is how many past builds to keep before garbage collection reclaims their blobs.\nDefaults to the controller's --gc-keep-builds.\n\nOld builds are worth keeping for three independent reasons: reverting a commit must find\nthe old digest still pullable; a pod pinned to a digest that gets rescheduled must be able\nto pull it again; and hand-pinning a content tag is the supported fallback when image\nautomation is not in use. Layers are shared between builds, so a generous value costs far\nless than the count suggests. See ADR 0011.",
@@ -263,6 +353,10 @@
         {
           "message": "set at most one of push or publish",
           "rule": "!has(self.push) || !has(self.publish)"
+        },
+        {
+          "message": "config.inherit requires a base to inherit from",
+          "rule": "!has(self.config) || !self.config.inherit || has(self.base)"
         }
       ]
     },
@@ -352,7 +446,7 @@
           "type": "array"
         },
         "history": {
-          "description": "History records past builds, newest first, capped at the retention count. It is the live\nset garbage collection marks from: anything in storage that no retained build references\nis reclaimable. See ADR 0011.",
+          "description": "History records past builds, newest first, capped at the retention count. It is the live\nset garbage collection marks from. See ADR 0011.",
           "items": {
             "description": "BuildRecord is one past build, retained so garbage collection knows what is still live.\n\nKept in status rather than inferred from what is in storage. Inference would mean deciding an\nobject is garbage because nothing appears to point at it, which is exactly the reasoning that\ndeletes live data when the controller's view is incomplete. An explicit record also makes\nretention visible in `kubectl get -o yaml`.",
             "properties": {
@@ -382,7 +476,7 @@
           "type": "array"
         },
         "inputHash": {
-          "description": "InputHash summarises everything that determines the output: the ordered layer digests,\ntheir unpack modes and targets, the config, and the assembly algorithm version. When it is\nunchanged and the published artifact still resolves, the controller skips the whole build\n— no fetch, no assembly, one HEAD.\n\nThis is NOT the same idea as ImageBuild's planned inputHash. There the hash IS the\nidentity, because a Dockerfile's output digest cannot be known without building. Here the\noutput digest remains the identity and this is only a short-circuit; the guarantee is\nunchanged, the work is skipped. See ADR 0002.",
+          "description": "InputHash summarises everything that determines the output. When it is unchanged and the\npublished artifact still resolves, the controller skips the whole build — no fetch, no\nassembly, one HEAD. See ADR 0002.",
           "type": "string"
         },
         "lastHandledReconcileAt": {

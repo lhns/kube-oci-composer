@@ -136,13 +136,13 @@ func build(t *testing.T, r *ImageCompositionReconciler, obj *ociv1alpha1.ImageCo
 	return res.Artifact
 }
 
-func urlLayer(name, url, digest, target string) ociv1alpha1.Layer {
+func urlLayer(name, url, digest, to string) ociv1alpha1.Layer {
 	return ociv1alpha1.Layer{
-		Name:      name,
-		URLSource: &ociv1alpha1.URLSource{URL: url},
-		Digest:    digest,
-		Unpack:    ociv1alpha1.UnpackTarGz,
-		Target:    target,
+		Name: name,
+		Fetch: &ociv1alpha1.FetchSource{
+			URL: url, Digest: digest, Unpack: ociv1alpha1.UnpackTarGz,
+		},
+		To: to,
 	}
 }
 
