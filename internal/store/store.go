@@ -35,6 +35,10 @@ const (
 	NamespaceInputs = "inputs"
 	// NamespaceBlobs holds assembled layers and configs, served to workloads.
 	NamespaceBlobs = "blobs"
+	// NamespaceManifests holds manifest bytes, so a published build can be replayed into the
+	// registry after a restart. Without this the blobs survive but nothing names them, and an
+	// older build's digest reference stops resolving. See ADR 0013.
+	NamespaceManifests = "manifests"
 )
 
 // Info describes a stored object.

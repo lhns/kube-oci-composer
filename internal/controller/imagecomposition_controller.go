@@ -68,6 +68,10 @@ type ImageCompositionReconciler struct {
 	// HistoryLimit is how many past builds to retain per object when the object does not say.
 	// Zero means DefaultHistoryLimit.
 	HistoryLimit int
+
+	// replay tracks which objects have had their published history restored into the registry
+	// this process. See replay.go.
+	replay replayer
 }
 
 // The controller never creates or deletes ImageCompositions — it only observes them and patches
@@ -90,8 +94,11 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	var obj ociv1alpha1.ImageComposition
 	if err := r.Get(ctx, req.NamespacedName, &obj); err != nil {
-		if apierrors.IsNotFound(err) && r.Readiness != nil {
-			r.Readiness.Forget(req.NamespacedName)
+		if apierrors.IsNotFound(err) {
+			if r.Readiness != nil {
+				r.Readiness.Forget(req.NamespacedName)
+			}
+			r.replay.forget(req.NamespacedName)
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -271,6 +278,11 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 		return buildResult{}, terminal("invalid reference %s:%s: %v", tgt.writeRepo, tgt.tag, err)
 	}
 
+	// Restore previously published builds before checking convergence, so that after a restart
+	// the moving tag resolves from replayed state rather than looking absent and forcing a
+	// rebuild of something already in the store.
+	r.replayHistory(ctx, obj)
+
 	// A HEAD failure is not an error here — the ordinary cause is that the tag does not exist,
 	// or that the serving store was emptied by a restart.
 	existing, headErr := remote.Head(movingRef, opts...)
@@ -346,6 +358,17 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 
 	if err := remote.Write(movingRef, img, opts...); err != nil {
 		return buildResult{}, fmt.Errorf("publishing %s: %w", movingRef, err)
+	}
+
+	// Record the manifest so this build can be replayed after a restart. Not fatal: the artifact
+	// is published and pullable right now, and losing replayability is a smaller failure than
+	// reporting a build that actually succeeded as failed.
+	if r.Server != nil && obj.Spec.Push == nil {
+		if raw, mErr := img.RawManifest(); mErr != nil {
+			log.FromContext(ctx).Error(mErr, "could not read the manifest for persistence")
+		} else if sErr := r.Server.SaveManifest(ctx, digest.String(), raw); sErr != nil {
+			log.FromContext(ctx).Error(sErr, "could not persist the manifest; a restart will lose this build")
+		}
 	}
 
 	r.event(obj, corev1.EventTypeNormal, ociv1alpha1.ReasonSucceeded,

@@ -2,7 +2,8 @@
 
 ## Status
 
-Proposed. Not yet implemented. The defect it describes is measured and present today.
+Accepted and implemented. The defect below was measured before the fix and is asserted closed by
+`TestOlderDigestSurvivesRestart`.
 
 ## Context
 
@@ -16,8 +17,8 @@ Measured with a persisted blob store and a fresh registry:
 | current moving tag `:main` | resolves |
 | current digest `@sha256:…` | resolves |
 | blob re-upload | none — blobs reused |
-| **older build's content tag** | **404** |
-| **older build's digest reference** | **404** |
+| **older build's content tag** | **404** (fixed) |
+| **older build's digest reference** | **404** (fixed) |
 
 The second failure is the serious one, and it was not what the earlier reasoning anticipated. It
 is not only the hand-pinning fallback from 0010 that breaks — **an older build's digest reference

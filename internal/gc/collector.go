@@ -83,13 +83,15 @@ type Collector struct {
 
 // Result summarises one cycle.
 type Result struct {
-	Skipped      bool
-	SkipReason   string
-	BlobsKept    int
-	BlobsDeleted int
-	CacheKept    int
-	CacheDeleted int
-	Errors       int
+	Skipped          bool
+	SkipReason       string
+	BlobsKept        int
+	BlobsDeleted     int
+	ManifestsKept    int
+	ManifestsDeleted int
+	CacheKept        int
+	CacheDeleted     int
+	Errors           int
 }
 
 // NeedLeaderElection keeps collection on the leader. Two collectors marking from the same API
@@ -128,6 +130,7 @@ func (c *Collector) Start(ctx context.Context) error {
 			}
 			logger.Info("garbage collection complete",
 				"blobsDeleted", result.BlobsDeleted, "blobsKept", result.BlobsKept,
+				"manifestsDeleted", result.ManifestsDeleted,
 				"cacheDeleted", result.CacheDeleted, "cacheKept", result.CacheKept,
 				"errors", result.Errors, "dryRun", c.DryRun)
 		}
@@ -160,9 +163,10 @@ func (c *Collector) Collect(ctx context.Context) (Result, error) {
 		return Result{}, fmt.Errorf("listing ImageCompositions: %w", err)
 	}
 
-	liveBlobs, liveInputs := c.mark(list.Items)
+	liveBlobs, liveInputs, liveManifests := c.mark(list.Items)
 
-	logger.V(1).Info("marked", "blobs", len(liveBlobs), "inputs", len(liveInputs))
+	logger.V(1).Info("marked",
+		"blobs", len(liveBlobs), "inputs", len(liveInputs), "manifests", len(liveManifests))
 
 	result := Result{}
 	cutoff := time.Now().Add(-c.grace())
@@ -170,6 +174,11 @@ func (c *Collector) Collect(ctx context.Context) (Result, error) {
 	if c.Blobs != nil {
 		kept, deleted, errs := c.sweep(ctx, c.Blobs, store.NamespaceBlobs, liveBlobs, cutoff)
 		result.BlobsKept, result.BlobsDeleted, result.Errors = kept, deleted, result.Errors+errs
+	}
+	if c.Blobs != nil {
+		kept, deleted, errs := c.sweep(ctx, c.Blobs, store.NamespaceManifests, liveManifests, cutoff)
+		result.ManifestsKept, result.ManifestsDeleted = kept, deleted
+		result.Errors += errs
 	}
 	if c.Cache != nil {
 		kept, deleted, errs := c.sweep(ctx, c.Cache, store.NamespaceInputs, liveInputs, cutoff)
@@ -179,9 +188,10 @@ func (c *Collector) Collect(ctx context.Context) (Result, error) {
 }
 
 // mark collects every digest that must survive.
-func (c *Collector) mark(items []ociv1alpha1.ImageComposition) (blobs, inputs map[string]struct{}) {
+func (c *Collector) mark(items []ociv1alpha1.ImageComposition) (blobs, inputs, manifests map[string]struct{}) {
 	blobs = make(map[string]struct{})
 	inputs = make(map[string]struct{})
+	manifests = make(map[string]struct{})
 
 	for i := range items {
 		obj := &items[i]
@@ -200,15 +210,21 @@ func (c *Collector) mark(items []ociv1alpha1.ImageComposition) (blobs, inputs ma
 			for _, b := range h.Blobs {
 				blobs[b] = struct{}{}
 			}
+			// The manifest that NAMES those blobs. Reclaiming it while keeping them would leave
+			// content nothing can address, which is the same as having deleted it. See ADR 0013.
+			if h.Digest != "" {
+				manifests[h.Digest] = struct{}{}
+			}
 		}
 
 		// The current artifact, even if history is somehow missing or truncated. Belt and
 		// braces: whatever else is true, what is published right now must remain pullable.
 		if obj.Status.Artifact != nil && obj.Status.Artifact.Digest != "" {
 			blobs[obj.Status.Artifact.Digest] = struct{}{}
+			manifests[obj.Status.Artifact.Digest] = struct{}{}
 		}
 	}
-	return blobs, inputs
+	return blobs, inputs, manifests
 }
 
 // sweep deletes everything in a namespace that marking did not reach.

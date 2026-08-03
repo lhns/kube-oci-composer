@@ -21,7 +21,7 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0010](0010-workloads-reference-digests.md) | Workloads reference digests, never tags | Accepted |
 | [0011](0011-content-tags-expire.md) | Content tags expire: mark-and-sweep garbage collection | Accepted, amends 0010 |
 | [0012](0012-keep-pkg-registry.md) | Keep `pkg/registry`; own only the blob handler | Accepted |
-| [0013](0013-persist-manifests.md) | Persist manifests so published builds survive a restart | Proposed |
+| [0013](0013-persist-manifests.md) | Persist manifests so published builds survive a restart | Accepted |
 | [0014](0014-pluggable-storage.md) | Pluggable storage and a two-tier input cache | Accepted |
 
 ## Format
