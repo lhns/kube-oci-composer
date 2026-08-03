@@ -26,6 +26,7 @@
             },
             "image": {
               "description": "Image is the repository to pull from, e.g. \"quay.io/strimzi/kafka\".",
+              "maxLength": 512,
               "type": "string"
             },
             "secretRef": {
@@ -93,10 +94,12 @@
             },
             "stopSignal": {
               "description": "StopSignal, e.g. \"SIGTERM\".",
+              "maxLength": 32,
               "type": "string"
             },
             "user": {
               "description": "User to run as, e.g. \"1001\" or \"1001:1001\".",
+              "maxLength": 256,
               "type": "string"
             },
             "volumes": {
@@ -108,6 +111,7 @@
             },
             "workingDir": {
               "description": "WorkingDir to start in.",
+              "maxLength": 4096,
               "pattern": "^/",
               "type": "string"
             }
@@ -116,7 +120,7 @@
         },
         "interval": {
           "default": "1h",
-          "description": "Interval at which to reconcile. Reconciling is nearly free when nothing has changed: the\ncontroller compares a hash of the inputs rather than rebuilding.",
+          "description": "Interval at which to reconcile. Reconciling is nearly free when nothing has changed: the\ncontroller compares a hash of the inputs rather than rebuilding.\n\nA POINTER, so that omitting it actually omits it. metav1.Duration is a struct, and\n`omitempty` does not apply to structs — as a value it always serialised as \"0s\", which\nmeant the API server saw an explicit zero and the default below never applied.",
           "type": "string"
         },
         "layers": {
@@ -152,6 +156,7 @@
                   },
                   "subpath": {
                     "description": "Subpath selects one directory from inside the archive and strips the prefix. Useful when a\nrelease tarball wraps everything in a version-named directory you do not want in the image.\nA subpath matching nothing is an error rather than a silently empty layer.",
+                    "maxLength": 4096,
                     "type": "string"
                   },
                   "unpack": {
@@ -166,6 +171,7 @@
                   },
                   "url": {
                     "description": "URL to fetch.",
+                    "maxLength": 2048,
                     "pattern": "^https?://",
                     "type": "string"
                   }
@@ -194,6 +200,7 @@
               },
               "name": {
                 "description": "Name identifies this entry, and appears in messages and provenance.",
+                "maxLength": 253,
                 "type": "string"
               },
               "owner": {
@@ -219,8 +226,10 @@
               "remove": {
                 "description": "Remove deletes paths inherited from the base or from earlier layers.\n\nImplemented as whiteout entries, which is how OCI expresses deletion: the bytes remain in\nthe layer below, so this hides a file rather than reclaiming its space. Paths are absolute\nand refer to the assembled filesystem.",
                 "items": {
+                  "maxLength": 4096,
                   "type": "string"
                 },
+                "maxItems": 256,
                 "minItems": 1,
                 "type": "array"
               },
@@ -246,6 +255,7 @@
                   },
                   "subpath": {
                     "description": "Subpath selects one directory from the artifact. Defaults to the whole thing.",
+                    "maxLength": 4096,
                     "type": "string"
                   }
                 },
@@ -257,6 +267,7 @@
               },
               "to": {
                 "description": "To is the absolute path inside the image this entry's content is placed at.",
+                "maxLength": 4096,
                 "pattern": "^/",
                 "type": "string"
               }
@@ -268,7 +279,7 @@
             "x-kubernetes-validations": [
               {
                 "message": "set exactly one of fetch, configMap, sourceRef or remove",
-                "rule": "[has(self.fetch), has(self.configMap), has(self.sourceRef), has(self.remove)].filter(x, x).size() == 1"
+                "rule": "(has(self.fetch)?1:0) + (has(self.configMap)?1:0) + (has(self.sourceRef)?1:0) + (has(self.remove)?1:0) == 1"
               },
               {
                 "message": "'to' is required for content entries and must be omitted for remove, which takes absolute paths; owner and mode do not apply to remove",
@@ -276,6 +287,7 @@
               }
             ]
           },
+          "maxItems": 64,
           "minItems": 1,
           "type": "array"
         },

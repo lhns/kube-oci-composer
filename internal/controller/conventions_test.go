@@ -41,7 +41,7 @@ func TestReadyAndObservedGeneration(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("ready", urlLayer("core", url, digest, "/core"))
 	obj.Generation = 4
-	obj.Spec.Interval = metav1.Duration{Duration: 30 * time.Minute}
+	obj.Spec.Interval = &metav1.Duration{Duration: 30 * time.Minute}
 	r, _ := servingReconciler(t, obj)
 
 	res, err := reconcileOnce(t, r, obj)

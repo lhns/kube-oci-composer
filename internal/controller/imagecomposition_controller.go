@@ -146,9 +146,11 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		})
 	}
 
-	interval := obj.Spec.Interval.Duration
-	if interval <= 0 {
-		interval = time.Hour
+	// The CRD defaults this, so it is normally set. The fallback covers an object created before
+	// the default existed, and a deliberate zero.
+	interval := time.Hour
+	if obj.Spec.Interval != nil && obj.Spec.Interval.Duration > 0 {
+		interval = obj.Spec.Interval.Duration
 	}
 
 	result, err := r.reconcileArtifact(ctx, &obj)

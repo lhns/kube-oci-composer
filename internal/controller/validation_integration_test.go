@@ -295,7 +295,7 @@ func TestIntegrationDefaultsAreApplied(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = k8s.Delete(integrationCtx(t), obj) })
 
-	if obj.Spec.Interval.Duration.Hours() != 1 {
+	if obj.Spec.Interval == nil || obj.Spec.Interval.Duration.Hours() != 1 {
 		t.Errorf("interval defaulted to %v, want 1h", obj.Spec.Interval.Duration)
 	}
 	if obj.Spec.Layers[0].Fetch.Unpack != ociv1alpha1.UnpackNone {

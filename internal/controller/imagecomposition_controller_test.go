@@ -114,9 +114,8 @@ func composition(name string, layers ...ociv1alpha1.Layer) *ociv1alpha1.ImageCom
 	return &ociv1alpha1.ImageComposition{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 		Spec: ociv1alpha1.ImageCompositionSpec{
-			Interval: metav1.Duration{Duration: 0},
-			Layers:   layers,
-			Publish:  &ociv1alpha1.Publish{Name: name, Tag: "main"},
+			Layers:  layers,
+			Publish: &ociv1alpha1.Publish{Name: name, Tag: "main"},
 		},
 	}
 }

@@ -27,6 +27,7 @@ const (
 // something that is only ever mounted.
 type BaseImage struct {
 	// Image is the repository to pull from, e.g. "quay.io/strimzi/kafka".
+	// +kubebuilder:validation:MaxLength=512
 	// +required
 	Image string `json:"image"`
 
@@ -54,6 +55,7 @@ type BaseImage struct {
 type FetchSource struct {
 	// URL to fetch.
 	// +kubebuilder:validation:Pattern=`^https?://`
+	// +kubebuilder:validation:MaxLength=2048
 	// +required
 	URL string `json:"url"`
 
@@ -71,6 +73,7 @@ type FetchSource struct {
 	// Subpath selects one directory from inside the archive and strips the prefix. Useful when a
 	// release tarball wraps everything in a version-named directory you do not want in the image.
 	// A subpath matching nothing is an error rather than a silently empty layer.
+	// +kubebuilder:validation:MaxLength=4096
 	// +optional
 	Subpath string `json:"subpath,omitempty"`
 }
@@ -114,6 +117,7 @@ type SourceRefSource struct {
 	Namespace string `json:"namespace,omitempty"`
 
 	// Subpath selects one directory from the artifact. Defaults to the whole thing.
+	// +kubebuilder:validation:MaxLength=4096
 	// +optional
 	Subpath string `json:"subpath,omitempty"`
 }
@@ -162,10 +166,11 @@ type FileMode struct {
 // smeared across the entry, so there is no field that is meaningful for one source and silently
 // ignored by the rest.
 //
-// +kubebuilder:validation:XValidation:rule="[has(self.fetch), has(self.configMap), has(self.sourceRef), has(self.remove)].filter(x, x).size() == 1",message="set exactly one of fetch, configMap, sourceRef or remove"
+// +kubebuilder:validation:XValidation:rule="(has(self.fetch)?1:0) + (has(self.configMap)?1:0) + (has(self.sourceRef)?1:0) + (has(self.remove)?1:0) == 1",message="set exactly one of fetch, configMap, sourceRef or remove"
 // +kubebuilder:validation:XValidation:rule="has(self.remove) ? (!has(self.to) && !has(self.owner) && !has(self.mode)) : has(self.to)",message="'to' is required for content entries and must be omitted for remove, which takes absolute paths; owner and mode do not apply to remove"
 type Layer struct {
 	// Name identifies this entry, and appears in messages and provenance.
+	// +kubebuilder:validation:MaxLength=253
 	// +required
 	Name string `json:"name"`
 
@@ -187,11 +192,14 @@ type Layer struct {
 	// the layer below, so this hides a file rather than reclaiming its space. Paths are absolute
 	// and refer to the assembled filesystem.
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=256
+	// +kubebuilder:validation:items:MaxLength=4096
 	// +optional
 	Remove []string `json:"remove,omitempty"`
 
 	// To is the absolute path inside the image this entry's content is placed at.
 	// +kubebuilder:validation:Pattern=`^/`
+	// +kubebuilder:validation:MaxLength=4096
 	// +optional
 	To string `json:"to,omitempty"`
 
@@ -237,11 +245,13 @@ type ImageConfig struct {
 	Cmd []string `json:"cmd,omitempty"`
 
 	// User to run as, e.g. "1001" or "1001:1001".
+	// +kubebuilder:validation:MaxLength=256
 	// +optional
 	User string `json:"user,omitempty"`
 
 	// WorkingDir to start in.
 	// +kubebuilder:validation:Pattern=`^/`
+	// +kubebuilder:validation:MaxLength=4096
 	// +optional
 	WorkingDir string `json:"workingDir,omitempty"`
 
@@ -255,6 +265,7 @@ type ImageConfig struct {
 	Volumes []string `json:"volumes,omitempty"`
 
 	// StopSignal, e.g. "SIGTERM".
+	// +kubebuilder:validation:MaxLength=32
 	// +optional
 	StopSignal string `json:"stopSignal,omitempty"`
 }
@@ -271,9 +282,13 @@ type ImageConfig struct {
 type ImageCompositionSpec struct {
 	// Interval at which to reconcile. Reconciling is nearly free when nothing has changed: the
 	// controller compares a hash of the inputs rather than rebuilding.
+	//
+	// A POINTER, so that omitting it actually omits it. metav1.Duration is a struct, and
+	// `omitempty` does not apply to structs — as a value it always serialised as "0s", which
+	// meant the API server saw an explicit zero and the default below never applied.
 	// +kubebuilder:default="1h"
 	// +optional
-	Interval metav1.Duration `json:"interval,omitempty"`
+	Interval *metav1.Duration `json:"interval,omitempty"`
 
 	// Suspend halts reconciliation without deleting anything already published.
 	// +kubebuilder:default=false
@@ -287,6 +302,7 @@ type ImageCompositionSpec struct {
 	// Layers are ordered filesystem operations applied on top of the base. Later entries overlay
 	// earlier ones, exactly as image layers do.
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=64
 	// +required
 	Layers []Layer `json:"layers"`
 
