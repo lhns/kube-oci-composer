@@ -1,0 +1,169 @@
+{{- if and (not .Values.operator.servingHost) (eq .Values.operator.storage.backend "s3") }}
+{{- fail "operator.storage.backend=s3 only affects the serving endpoint, which needs operator.servingHost" }}
+{{- end }}
+{{- if and (eq .Values.operator.storage.backend "s3") (not .Values.operator.s3.endpoint) }}
+{{- fail "operator.storage.backend=s3 requires operator.s3.endpoint" }}
+{{- end }}
+{{- if and .Values.operator.s3.presignBlobs (not .Values.operator.s3.endpoint) }}
+{{- fail "operator.s3.presignBlobs requires operator.s3.endpoint" }}
+{{- end }}
+{{- if and .Values.operator.s3.endpoint (not .Values.operator.s3.bucket) }}
+{{- fail "operator.s3.endpoint requires operator.s3.bucket" }}
+{{- end }}
+{{- if gt (int .Values.replicaCount) 1 }}
+{{- /*
+Not an error: a warm standby is a legitimate choice. But it must be a deliberate one, because the
+endpoint is leader-election scoped and a standby serves nothing. See ADR 0006.
+*/}}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kube-oci-composer.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kube-oci-composer.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  # Recreate, not RollingUpdate. With a node-local blob store on a ReadWriteOnce volume, two pods
+  # cannot mount it at once; and a rolling update would briefly have a new pod that is not the
+  # leader, serving nothing, while the old one is being torn down.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "kube-oci-composer.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kube-oci-composer.labels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "kube-oci-composer.serviceAccountName" . }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: manager
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            {{- if .Values.operator.leaderElect }}
+            - --leader-elect
+            {{- end }}
+            - --metrics-bind-address={{ .Values.operator.metricsBindAddress }}
+            - --health-probe-bind-address={{ .Values.operator.healthProbeBindAddress }}
+            - --serving-bind-address={{ .Values.operator.servingBindAddress }}
+            {{- with .Values.operator.servingHost }}
+            - --serving-host={{ . }}
+            {{- end }}
+            - --storage-backend={{ .Values.operator.storage.backend }}
+            - --storage-dir={{ .Values.operator.storage.dir }}
+            - --cache-dir={{ .Values.operator.storage.cacheDir }}
+            {{- with .Values.operator.s3.endpoint }}
+            - --s3-endpoint={{ . }}
+            - --s3-bucket={{ $.Values.operator.s3.bucket }}
+            {{- with $.Values.operator.s3.prefix }}
+            - --s3-prefix={{ . }}
+            {{- end }}
+            - --s3-region={{ $.Values.operator.s3.region }}
+            - --s3-path-style={{ $.Values.operator.s3.pathStyle }}
+            {{- if $.Values.operator.s3.presignBlobs }}
+            - --s3-presign-blobs
+            {{- end }}
+            {{- end }}
+            - --gc-interval={{ .Values.operator.gc.interval }}
+            - --gc-grace={{ .Values.operator.gc.grace }}
+            - --gc-keep-builds={{ .Values.operator.gc.keepBuilds }}
+            {{- if .Values.operator.gc.dryRun }}
+            - --gc-dry-run
+            {{- end }}
+          {{- if .Values.operator.s3.existingSecret }}
+          env:
+            # Credentials as environment variables, never as flags: flags are visible in ps, in the
+            # pod spec, and in every kubectl describe.
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.operator.s3.existingSecret }}
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.operator.s3.existingSecret }}
+                  key: AWS_SECRET_ACCESS_KEY
+          {{- end }}
+          ports:
+            - name: oci
+              containerPort: {{ include "kube-oci-composer.port" .Values.operator.servingBindAddress }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ include "kube-oci-composer.port" .Values.operator.metricsBindAddress }}
+              protocol: TCP
+            - name: probes
+              containerPort: {{ include "kube-oci-composer.port" .Values.operator.healthProbeBindAddress }}
+              protocol: TCP
+          livenessProbe:
+            # A bare ping. A standby replica is alive and must not be restarted merely for not
+            # being the leader.
+            httpGet:
+              path: /healthz
+              port: probes
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            # Reports whether the served store is warm, so the pod joins the Service only once it
+            # has something to serve.
+            httpGet:
+              path: /readyz
+              port: probes
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: storage
+              mountPath: {{ .Values.operator.storage.dir }}
+            - name: cache
+              mountPath: {{ .Values.operator.storage.cacheDir }}
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # emptyDir is the correct default. Neither directory is a system of record: composition is
+        # deterministic, so anything lost is rebuilt from the spec. A PVC only buys a faster
+        # restart, and object storage does it better without the single-writer constraint.
+        - name: storage
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "kube-oci-composer.fullname" . }}-storage
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: cache
+          emptyDir: {}
+        # Assembly writes layer tarballs to a temp directory, so /tmp must be writable even though
+        # the root filesystem is not.
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -1,0 +1,76 @@
+{{/*
+Generated from the kubebuilder markers in internal/controller. chart_rbac_test.go asserts these
+rules match what controller-gen produces, so the chart cannot silently grant more or less than the
+controller actually uses.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kube-oci-composer.fullname" . }}
+  labels:
+    {{- include "kube-oci-composer.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["oci.lhns.de"]
+    resources: ["imagecompositions"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["oci.lhns.de"]
+    resources: ["imagecompositions/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["oci.lhns.de"]
+    resources: ["imagecompositions/finalizers"]
+    verbs: ["update"]
+  # get only. Secrets are read by name and deliberately not cached; list and watch would mean
+  # watching every Secret in the cluster to read one push credential.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "kube-oci-composer.fullname" . }}
+  labels:
+    {{- include "kube-oci-composer.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "kube-oci-composer.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kube-oci-composer.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+{{/* Leader election is namespaced, so it is a Role rather than a ClusterRole. */}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "kube-oci-composer.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kube-oci-composer.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "kube-oci-composer.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kube-oci-composer.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "kube-oci-composer.fullname" . }}-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kube-oci-composer.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}

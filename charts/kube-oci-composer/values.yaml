@@ -1,0 +1,178 @@
+# Default values for kube-oci-composer.
+
+# replicaCount is deliberately 1, and raising it does NOT scale throughput.
+#
+# The serving endpoint runs under leader election and its blob store is node-local unless S3 backs
+# it, so a standby replica neither reconciles nor listens. It stays out of the Service because it
+# never reports ready, which makes failover work without a second mechanism. Two replicas buy a
+# warm standby, not more capacity. See ADR 0006 and ADR 0007.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/lhns/kube-oci-composer
+  # Empty means use the chart's appVersion, so an upgrade of the chart moves the image with it.
+  tag: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+operator:
+  # servingHost is the externally reachable name workloads pull artifacts from.
+  #
+  # REQUIRED unless every ImageComposition sets spec.push. It is what status.artifact.ref is built
+  # from, so it must match how the Service below is actually exposed — get it wrong and the
+  # controller publishes references nothing can resolve.
+  servingHost: ""
+
+  metricsBindAddress: ":8080"
+  healthProbeBindAddress: ":8081"
+  servingBindAddress: ":5000"
+
+  # Leader election. On by default because the serving endpoint and the garbage collector are both
+  # leader-scoped, and running two of either would mean two processes issuing deletes.
+  leaderElect: true
+
+  storage:
+    # Where served blobs live: "disk" or "s3".
+    #
+    # This only moves the BLOBS. Manifests are held in memory by the embedded registry and are
+    # replayed from the store at startup either way, so "s3" saves re-uploading layers after a
+    # restart rather than removing the rebuild. See ADR 0012 and ADR 0013.
+    backend: disk
+
+    # Directory backing served blobs when backend is "disk".
+    dir: /var/lib/oci-composer
+
+    # Directory holding fetched layer sources, keyed by digest. Always used, even when S3 is
+    # configured behind it, because assembly reads local files.
+    cacheDir: /var/cache/oci-composer
+
+  # Object storage for the layer cache, and optionally for served blobs.
+  #
+  # Leave endpoint empty to keep everything local to the pod. With it set, a restart or a
+  # reschedule onto another node reuses cached layers instead of re-fetching every one from
+  # upstream — which is the difference between the pod being unready for seconds and for minutes.
+  s3:
+    # Must include a scheme. A bare host is rejected at startup rather than guessed, because
+    # guessing wrong would ship credentials in plaintext.
+    endpoint: ""
+    bucket: ""
+    prefix: ""
+    # Most self-hosted gateways ignore the region but require a value. Ceph RGW expects "default"
+    # rather than an AWS region name.
+    region: default
+    # Path-style addressing (host/bucket/key). Required by most self-hosted gateways, whose
+    # certificate does not cover per-bucket subdomains.
+    pathStyle: true
+    # Redirect blob pulls to a presigned URL so bytes bypass the controller. Off by default: it
+    # exposes the object-store endpoint to every pulling client, which on a private gateway may
+    # not be reachable from every node.
+    presignBlobs: false
+    # Secret holding AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY. Credentials are injected as
+    # environment variables, never as flags — flags appear in ps, in the pod spec, and in every
+    # kubectl describe.
+    existingSecret: ""
+
+  gc:
+    # How often to reclaim blobs, manifests and cache entries nothing references. Zero disables it,
+    # and storage then grows without bound.
+    interval: 1h
+    # Never reclaim anything written more recently than this. A build writes its blobs before
+    # recording them in status, so a sweep landing in that window would delete content moments from
+    # being referenced.
+    grace: 1h
+    # How many past builds stay pullable per ImageComposition, unless the object overrides it via
+    # spec.publish.history.
+    #
+    # Retention is the ONLY thing keeping an older digest resolvable. Reverting a commit, and a pod
+    # pinned to a previous digest being rescheduled, both depend on it. Layers are shared between
+    # builds, so a generous value costs far less than the count suggests. See ADR 0011.
+    keepBuilds: 10
+    # Log what would be reclaimed without deleting anything. Worth running once after changing
+    # keepBuilds.
+    dryRun: false
+
+# Service exposing the OCI endpoint that workloads pull from.
+service:
+  type: ClusterIP
+  port: 5000
+  annotations: {}
+
+# Ingress for the serving endpoint.
+#
+# containerd needs a valid certificate and HTTPS. With those, no node configuration is required at
+# all — no hosts.toml, no DaemonSet, no containerd socket.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  # Should match operator.servingHost.
+  host: ""
+  tls:
+    enabled: true
+    secretName: ""
+
+# Persistence for the blob store and layer cache.
+#
+# Neither is a system of record: composition is deterministic, so anything lost is rebuilt. An
+# emptyDir is therefore correct and supported. A PVC only buys a faster restart.
+persistence:
+  enabled: false
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 10Gi
+
+metrics:
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    labels: {}
+
+resources:
+  limits:
+    memory: 512Mi
+  requests:
+    cpu: 50m
+    memory: 128Mi
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
+livenessProbe:
+  initialDelaySeconds: 15
+  periodSeconds: 20
+
+# Readiness means the served store is warm, not merely that the process is up. After a restart the
+# pod stays out of the Service until its artifacts have been rebuilt, rather than answering 404 and
+# putting workloads into ImagePullBackOff. Rebuilding re-fetches every layer without a warm cache,
+# so allow generous time here.
+readinessProbe:
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  failureThreshold: 30
+
+terminationGracePeriodSeconds: 30
+
+podAnnotations: {}
+commonLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""

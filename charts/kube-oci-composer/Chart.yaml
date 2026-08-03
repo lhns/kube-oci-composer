@@ -1,0 +1,13 @@
+apiVersion: v2
+name: kube-oci-composer
+description: A Kubernetes controller that assembles OCI artifacts from content-addressed inputs
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/lhns/kube-oci-composer
+sources:
+  - https://github.com/lhns/kube-oci-composer
+keywords: [oci, gitops, flux, artifacts, image-volume]
+maintainers:
+  - name: lhns
+    url: https://github.com/lhns

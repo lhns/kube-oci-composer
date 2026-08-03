@@ -1,0 +1,74 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Tests gate the release. A tag is not a reason to skip them.
+      - run: make test
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive version
+        id: version
+        run: |
+          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/lhns/kube-oci-composer:${{ steps.version.outputs.version }}
+            ghcr.io/lhns/kube-oci-composer:latest
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ steps.version.outputs.date }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - uses: azure/setup-helm@v4
+
+      - name: Publish the chart as an OCI artifact
+        run: |
+          helm registry login ghcr.io -u ${{ github.actor }} --password ${{ secrets.GITHUB_TOKEN }}
+          helm package charts/kube-oci-composer \
+            --version "${{ steps.version.outputs.version }}" \
+            --app-version "${{ steps.version.outputs.version }}" \
+            --destination bin/
+          helm push bin/kube-oci-composer-*.tgz oci://ghcr.io/lhns/charts
+
+      - name: Publish the release manifests
+        run: |
+          mkdir -p release
+          helm template kube-oci-composer charts/kube-oci-composer \
+            --namespace oci-composer --include-crds > release/install.yaml
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/install.yaml
+          generate_release_notes: true

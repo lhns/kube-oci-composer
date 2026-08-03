@@ -1,0 +1,399 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: imagecompositions.oci.lhns.de
+spec:
+  group: oci.lhns.de
+  names:
+    kind: ImageComposition
+    listKind: ImageCompositionList
+    plural: imagecompositions
+    shortNames:
+    - imgcomp
+    singular: imagecomposition
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.artifact.ref
+      name: Ref
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].message
+      name: Status
+      priority: 1
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: ImageComposition assembles an OCI image from content-addressed
+          inputs.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ImageCompositionSpec assembles an OCI image from content-addressed inputs.
+
+              It deliberately cannot run a Dockerfile. Composition is a pure function of its inputs, which
+              is what allows the reconcile loop to be idempotent and convergent and what allows provenance
+              to be exact rather than scanned. Anything requiring arbitrary execution belongs to a
+              different kind with a weaker guarantee. See ADR 0001.
+            properties:
+              config:
+                description: Config for the produced image.
+                properties:
+                  cmd:
+                    description: Cmd to set on the image config.
+                    items:
+                      type: string
+                    type: array
+                  entrypoint:
+                    description: Entrypoint to set on the image config.
+                    items:
+                      type: string
+                    type: array
+                  env:
+                    description: Env to set on the image config.
+                    items:
+                      type: string
+                    type: array
+                  from:
+                    description: |-
+                      From names a layer entry to inherit the OCI config from. Without it the config is empty,
+                      which is correct for artifacts that are only ever mounted rather than executed.
+                    type: string
+                  labels:
+                    additionalProperties:
+                      type: string
+                    description: Labels to set on the image config.
+                    type: object
+                type: object
+              interval:
+                default: 1h
+                description: |-
+                  Interval at which to reconcile. Reconciling is nearly free when nothing has changed: the
+                  controller computes the expected digest and compares, rather than rebuilding.
+                type: string
+              layers:
+                description: |-
+                  Layers is an ordered, non-empty list of content contributions. Later entries overlay
+                  earlier ones. There is no separate base field: a base image is just the first entry.
+                items:
+                  description: |-
+                    Layer is one entry in an ordered list of content contributions.
+
+                    Exactly one source must be set. This is modelled as a discriminated union from day one so
+                    that later source kinds (sourceRef to a Flux source, imageRef to another object in this API
+                    group) can be added without a breaking schema change. See ADR 0004.
+                  properties:
+                    digest:
+                      description: |-
+                        Digest of the fetched content. REQUIRED, with no exceptions anywhere in this API — it is
+                        what makes the output digest a pure function of the spec, and it makes tampering
+                        detectable rather than silent. A mismatch is terminal (Stalled), never a retry.
+                        See ADR 0002.
+                      pattern: ^sha256:[a-f0-9]{64}$
+                      type: string
+                    image:
+                      description: Image contributes the layers of an existing image.
+                      properties:
+                        repository:
+                          description: Repository of the image, e.g. "gcr.io/distroless/static".
+                          type: string
+                        secretRef:
+                          description: SecretRef names a docker-registry Secret for
+                            pulling, when the image is private.
+                          properties:
+                            name:
+                              description: Name of the referent.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                      required:
+                      - repository
+                      type: object
+                    name:
+                      description: |-
+                        Name identifies this entry. Used in messages, in provenance attestations, and as the
+                        target of config.from.
+                      type: string
+                    target:
+                      default: /
+                      description: Target is the absolute path inside the image the
+                        content is placed at.
+                      pattern: ^/
+                      type: string
+                    unpack:
+                      default: none
+                      description: Unpack controls how the fetched bytes become layer
+                        content.
+                      enum:
+                      - none
+                      - tar
+                      - tar.gz
+                      type: string
+                    url:
+                      description: URL to fetch.
+                      pattern: ^https?://
+                      type: string
+                  required:
+                  - digest
+                  - name
+                  - url
+                  type: object
+                  x-kubernetes-validations:
+                  - message: exactly one of url or image must be set
+                    rule: '[has(self.url), has(self.image)].filter(x, x).size() ==
+                      1'
+                minItems: 1
+                type: array
+              publish:
+                description: |-
+                  Publish serves the artifact from the controller's own read-only OCI endpoint. This is the
+                  default mode and needs no registry and no credentials. Defaulted from the object's name
+                  when neither publish nor push is set.
+                properties:
+                  history:
+                    description: |-
+                      History is how many past builds to keep before garbage collection reclaims their blobs.
+                      Defaults to the controller's --gc-keep-builds.
+
+                      Old builds are worth keeping for three independent reasons: reverting a commit must find
+                      the old digest still pullable; a pod pinned to a digest that gets rescheduled must be able
+                      to pull it again; and hand-pinning a content tag is the supported fallback when image
+                      automation is not in use. Layers are shared between builds, so a generous value costs far
+                      less than the count suggests. See ADR 0011.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  name:
+                    description: |-
+                      Name is the repository path the artifact is served under, e.g. "kafka-tiered-storage"
+                      results in <serving-host>/kafka-tiered-storage.
+                    type: string
+                  tag:
+                    default: latest
+                    description: |-
+                      Tag is a MOVING POINTER, repointed at the newest build. It exists for image automation
+                      to watch and is NOT intended to be referenced by a workload.
+
+                      Every build also publishes an immutable content tag, "<tag>-<digest[:12]>", which is
+                      never reused for different content. Workloads should reference a digest — either written
+                      by Flux image-automation, or the immutable content tag pinned by hand. See ADR 0010.
+                    type: string
+                required:
+                - name
+                type: object
+              push:
+                description: |-
+                  Push publishes to an external registry instead. Use it when the artifact must outlive the
+                  cluster, be consumed from outside it, or carry registry-native attestations.
+                properties:
+                  immutable:
+                    default: false
+                    description: |-
+                      Immutable refuses to overwrite the moving pointer when it already resolves to different
+                      content. Defaults to false because the pointer is *meant* to move; set it true when the
+                      tag is a version that must never change meaning.
+                    type: boolean
+                  repository:
+                    description: Repository is the fully qualified target, e.g. "ghcr.io/example/artifact".
+                    type: string
+                  secretRef:
+                    description: SecretRef names a docker-registry Secret holding
+                      push credentials.
+                    properties:
+                      name:
+                        description: Name of the referent.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  tag:
+                    default: latest
+                    description: Tag is the moving pointer, as described on Publish.Tag.
+                    type: string
+                required:
+                - repository
+                type: object
+              suspend:
+                default: false
+                description: Suspend halts reconciliation without deleting anything
+                  already published.
+                type: boolean
+            required:
+            - layers
+            type: object
+            x-kubernetes-validations:
+            - message: set at most one of push or publish
+              rule: '!has(self.push) || !has(self.publish)'
+          status:
+            description: ImageCompositionStatus reports what was produced.
+            properties:
+              artifact:
+                description: Artifact describes the published result.
+                properties:
+                  contentTag:
+                    description: |-
+                      ContentTag is the immutable "<tag>-<digest[:12]>" reference for this exact content. It is
+                      never reused, so pinning it by hand is safe when image automation is not in use.
+                    type: string
+                  digest:
+                    description: Digest of the published manifest, e.g. "sha256:...".
+                      This is the value to pin.
+                    type: string
+                  lastUpdateTime:
+                    description: LastUpdateTime is when this artifact was last published.
+                    format: date-time
+                    type: string
+                  ref:
+                    description: |-
+                      Ref is the complete pullable reference, including the serving host in serving mode.
+                      Surfaced as a printer column so `kubectl get` shows the exact string to use.
+                    type: string
+                  revision:
+                    description: Revision is the human-facing "<tag>@<digest>".
+                    type: string
+                type: object
+              conditions:
+                description: 'Conditions follow kstatus: Ready, Reconciling, Stalled.'
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              history:
+                description: |-
+                  History records past builds, newest first, capped at the retention count. It is the live
+                  set garbage collection marks from: anything in storage that no retained build references
+                  is reclaimable. See ADR 0011.
+                items:
+                  description: |-
+                    BuildRecord is one past build, retained so garbage collection knows what is still live.
+
+                    Kept in status rather than inferred from what is in storage. Inference would mean deciding an
+                    object is garbage because nothing appears to point at it, which is exactly the reasoning that
+                    deletes live data when the controller's view is incomplete. An explicit record also makes
+                    retention visible in `kubectl get -o yaml`.
+                  properties:
+                    blobs:
+                      description: |-
+                        Blobs are the config and layer digests this build is composed of. These are the objects
+                        garbage collection must not reclaim while this build is retained.
+                      items:
+                        type: string
+                      type: array
+                    contentTag:
+                      description: ContentTag is the immutable tag this build was
+                        published under.
+                      type: string
+                    digest:
+                      description: Digest of the manifest.
+                      type: string
+                    time:
+                      description: Time the build was published.
+                      format: date-time
+                      type: string
+                  type: object
+                type: array
+              inputHash:
+                description: |-
+                  InputHash summarises everything that determines the output: the ordered layer digests,
+                  their unpack modes and targets, the config, and the assembly algorithm version. When it is
+                  unchanged and the published artifact still resolves, the controller skips the whole build
+                  — no fetch, no assembly, one HEAD.
+
+                  This is NOT the same idea as ImageBuild's planned inputHash. There the hash IS the
+                  identity, because a Dockerfile's output digest cannot be known without building. Here the
+                  output digest remains the identity and this is only a short-circuit; the guarantee is
+                  unchanged, the work is skipped. See ADR 0002.
+                type: string
+              lastHandledReconcileAt:
+                description: |-
+                  LastHandledReconcileAt echoes the reconcile.fluxcd.io/requestedAt annotation, so
+                  `flux reconcile` works out of the box.
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the last spec generation reconciled.
+                format: int64
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
