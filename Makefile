@@ -41,7 +41,7 @@ envtest: ## Install setup-envtest if missing.
 .PHONY: integration-test
 integration-test: envtest ## Run envtest integration tests against a real API server.
 	KUBEBUILDER_ASSETS="$$($(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" \
-		go test ./... -tags=integration -run Integration -count=1
+		go test ./... -tags=integration -count=1
 
 .PHONY: lint
 lint: ## Run golangci-lint if available.

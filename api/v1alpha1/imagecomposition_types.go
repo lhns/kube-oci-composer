@@ -23,8 +23,17 @@ type URLSource struct {
 	URL string `json:"url"`
 }
 
-// ImageSource contributes the layers of an existing image. A base image is not a special
-// field — it is simply the first entry that happens to be an image. See ADR 0003.
+// ImageSource contributes the layers of an existing image.
+//
+// NOT IMPLEMENTED YET, and rejected by validation rather than accepted and stalled — an object
+// that applies cleanly and then reports a terminal error is a worse experience than one that is
+// refused with a reason at apply time.
+//
+// An image entry is not special and is not implicitly first. Layers are contributed in
+// declaration order, so where an image entry sits in the list is where its layers go. See
+// ADR 0003.
+//
+// +kubebuilder:validation:XValidation:rule="false",message="image layer sources are not implemented in this version; use url, sourceRef or configMapRef"
 type ImageSource struct {
 	// Repository of the image, e.g. "gcr.io/distroless/static".
 	// +required
