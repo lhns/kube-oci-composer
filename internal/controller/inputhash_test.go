@@ -225,10 +225,11 @@ func TestInputHashCoversConfig(t *testing.T) {
 // on the next reconcile. That is sometimes exactly right, and it must never happen by accident.
 // If this test fails, the change was either deliberate (update the constant below) or a bug.
 func TestInputHashIsPinned(t *testing.T) {
-	// Changed once, deliberately, when Subpath joined the hash for sourceRef layers. Existing
-	// specs rebuild once and then settle; that was judged acceptable because nothing was deployed
-	// on the old hash yet.
-	const want = "sha256:26c6a0dde46da7c9a77facfec855f23b1c46c7bc4dad0694e2af22e00da61058"
+	// Changed twice, both deliberately and both pre-deployment: once when Subpath joined the hash
+	// for sourceRef layers, and once when config.from joined it — From selects which base image's
+	// config is inherited, so it changes the output and was wrong to omit while it was
+	// unimplemented. Existing specs rebuild once and then settle.
+	const want = "sha256:3086b8792b7a53679f223e761b49899af96c341d26e30cf7aada14dec214b024"
 
 	got := oci.InputHash([]oci.LayerInput{
 		{Name: "core", URL: "https://example/x.tgz", Digest: "sha256:1111", Unpack: oci.UnpackTarGz, Target: "/core"},

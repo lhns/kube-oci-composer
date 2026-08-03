@@ -21,6 +21,9 @@ may change between minor versions.
   optional subpath.
 - `configMapRef` layer sources, with a watch so an edit rebuilds promptly rather than at the next
   interval.
+- `image` layer sources: compose over a base image to produce a runnable image rather than a
+  bundle. Base layers are reused verbatim, and `config.from` inherits the base's entrypoint, env,
+  user, working directory and platform.
 - Architecture decision records in `docs/adr/`.
 
 ### Fixed

@@ -23,6 +23,7 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0012](0012-keep-pkg-registry.md) | Keep `pkg/registry`; own only the blob handler | Accepted |
 | [0013](0013-persist-manifests.md) | Persist manifests so published builds survive a restart | Accepted |
 | [0014](0014-pluggable-storage.md) | Pluggable storage and a two-tier input cache | Accepted |
+| [0015](0015-base-images-are-platform-pinned.md) | Base images are platform-pinned; config inheritance is opt-in | Accepted |
 
 ## Format
 

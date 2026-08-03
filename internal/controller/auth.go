@@ -1,13 +1,19 @@
 package controller
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/google/go-containerregistry/pkg/authn"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
+
+	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 )
 
 // dockerConfig is the subset of ~/.docker/config.json this controller understands.
@@ -102,4 +108,30 @@ func normaliseHost(host string) string {
 		h = h[:i]
 	}
 	return h
+}
+
+// pullOptions builds remote options for pulling a base image.
+//
+// Separate from the push path deliberately: pulling a base image is a different credential with a
+// different scope, and reusing spec.push.secretRef would silently send a push-scoped token to
+// whatever registry the base happens to live in.
+func (r *ImageCompositionReconciler) pullOptions(ctx context.Context, namespace string, ref *ociv1alpha1.LocalObjectReference) ([]remote.Option, error) {
+	if ref == nil {
+		return []remote.Option{remote.WithAuth(authn.Anonymous)}, nil
+	}
+
+	var secret corev1.Secret
+	key := types.NamespacedName{Namespace: namespace, Name: ref.Name}
+	if err := r.Get(ctx, key, &secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, terminal("pull secret %s not found", key)
+		}
+		return nil, fmt.Errorf("reading pull secret %s: %w", key, err)
+	}
+
+	kc, err := keychainFromSecret(&secret)
+	if err != nil {
+		return nil, terminal("pull secret %s: %v", key, err)
+	}
+	return []remote.Option{remote.WithAuthFromKeychain(kc)}, nil
 }

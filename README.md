@@ -113,13 +113,14 @@ helm install kube-oci-composer oci://ghcr.io/lhns/charts/kube-oci-composer \
 
 **v0.1, and honest about its limits.**
 
-Implemented: `url`, `sourceRef` and `configMapRef` layer sources; the built-in serving endpoint;
-external push with `secretRef`; the input-hash short-circuit; a two-tier layer cache with optional
-S3; manifest persistence across restarts; and garbage collection.
+Implemented: `url`, `image`, `sourceRef` and `configMapRef` layer sources; config inheritance from
+a base image; the built-in serving endpoint; external push with `secretRef`; the input-hash
+short-circuit; a two-tier layer cache with optional S3; manifest persistence across restarts; and
+garbage collection.
 
-Not implemented: `image` layer sources (the field exists and a spec using it will stall);
-multi-architecture; SBOM, provenance and signing ([ADR 0008](docs/adr/0008-supply-chain.md) is
-Proposed, not built — and signing is theatre until something verifies it at admission).
+Not implemented: multi-architecture output (a base image must be a platform-specific digest, not
+an index); SBOM, provenance and signing ([ADR 0008](docs/adr/0008-supply-chain.md) is Proposed,
+not built — and signing is theatre until something verifies it at admission).
 
 ### Layer sources
 
@@ -151,6 +152,45 @@ layers:
 ```
 
 **Layers are contributed in declaration order.** No entry type is special or implicitly first.
+
+### Two ways to use the result
+
+A composition can produce a **bundle** to mount, or a **runnable image**.
+
+```yaml
+# Bundle: no base image. Mount it with spec.volumes[].image into a container that already exists.
+# The workload's own image stays whatever upstream ships, so a Kafka upgrade needs nothing here.
+spec:
+  layers:
+    - name: plugins
+      url: https://.../core-1.1.1.tgz
+      digest: sha256:…
+      unpack: tar.gz
+      target: /plugins
+```
+
+```yaml
+# Runnable image: a base plus your content, used as the container's `image:`.
+# config.from inherits the base's entrypoint, env, user and working directory — without it the
+# result starts and immediately fails.
+spec:
+  layers:
+    - name: base
+      image:
+        repository: quay.io/strimzi/kafka
+      digest: sha256:…            # a platform-specific digest, not a multi-arch index
+    - name: plugins
+      url: https://.../core-1.1.1.tgz
+      digest: sha256:…
+      unpack: tar.gz
+      target: /plugins
+  config:
+    from: base
+```
+
+The trade-off is coupling. A bundle is independent of the base image's release cadence; a runnable
+image means every upstream bump is a base digest to update here. Base layers are reused verbatim
+rather than repacked, so the rebuild only uploads your own layers.
 
 Note for `configMapGenerator` users: kustomize appends a content hash to the generated name and
 rewrites references, but only in fields it knows about — **not** `layers[].configMapRef.name`.

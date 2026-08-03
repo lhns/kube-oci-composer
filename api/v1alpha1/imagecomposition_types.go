@@ -25,15 +25,17 @@ type URLSource struct {
 
 // ImageSource contributes the layers of an existing image.
 //
-// NOT IMPLEMENTED YET, and rejected by validation rather than accepted and stalled — an object
-// that applies cleanly and then reports a terminal error is a worse experience than one that is
-// refused with a reason at apply time.
+// This is what turns a composition into a RUNNABLE image rather than a bundle of files: name a
+// base image here, add your content in later entries, and set config.from to inherit the base's
+// entrypoint, env and user.
 //
 // An image entry is not special and is not implicitly first. Layers are contributed in
-// declaration order, so where an image entry sits in the list is where its layers go. See
-// ADR 0003.
+// declaration order, so where an image entry sits in the list is where its layers go. A base
+// image is conventionally first because that is what "base" means, not because the API says so.
+// See ADR 0003.
 //
-// +kubebuilder:validation:XValidation:rule="false",message="image layer sources are not implemented in this version; use url, sourceRef or configMapRef"
+// The digest must name a platform-specific manifest, not a multi-architecture index. See
+// ADR 0015.
 type ImageSource struct {
 	// Repository of the image, e.g. "gcr.io/distroless/static".
 	// +required

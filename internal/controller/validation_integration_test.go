@@ -151,22 +151,38 @@ func TestIntegrationDigestRuleMatchesTheSourceKind(t *testing.T) {
 	})
 }
 
-// TestIntegrationUnimplementedImageSourceIsRejected — refusing at apply time beats accepting a
-// spec that then reports a terminal error nobody was watching for.
-func TestIntegrationUnimplementedImageSourceIsRejected(t *testing.T) {
+// TestIntegrationImageSourceIsAccepted — a base image plus content on top, which is the shape
+// that produces a runnable image rather than a bundle to mount.
+func TestIntegrationImageSourceIsAccepted(t *testing.T) {
 	err := apply(t, "image-source", ociv1alpha1.ImageCompositionSpec{
+		Layers: []ociv1alpha1.Layer{
+			{
+				Name:   "base",
+				Image:  &ociv1alpha1.ImageSource{Repository: "gcr.io/distroless/static"},
+				Digest: validDigest,
+				Target: "/",
+			},
+			urlLayerSpec("plugins", "https://example.com/plugins.tgz", validDigest),
+		},
+		Config:  &ociv1alpha1.ImageConfig{From: "base"},
+		Publish: &ociv1alpha1.Publish{Name: "image-source", Tag: "main"},
+	})
+	if err != nil {
+		t.Fatalf("a base-image composition was rejected: %v", err)
+	}
+}
+
+// TestIntegrationImageSourceStillNeedsADigest — an image entry is content-addressed like every
+// other source. A tag here would make the output depend on when it was built.
+func TestIntegrationImageSourceStillNeedsADigest(t *testing.T) {
+	err := apply(t, "image-no-digest", ociv1alpha1.ImageCompositionSpec{
 		Layers: []ociv1alpha1.Layer{{
-			Name:   "base",
-			Image:  &ociv1alpha1.ImageSource{Repository: "gcr.io/distroless/static"},
-			Digest: validDigest,
-			Target: "/",
+			Name:  "base",
+			Image: &ociv1alpha1.ImageSource{Repository: "gcr.io/distroless/static"},
 		}},
 	})
 	if err == nil {
-		t.Fatal("an image layer source was accepted, but it is not implemented")
-	}
-	if !strings.Contains(err.Error(), "not implemented") {
-		t.Fatalf("the error does not explain why: %v", err)
+		t.Fatal("an image layer without a digest was accepted")
 	}
 }
 

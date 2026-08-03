@@ -64,6 +64,10 @@ func InputHash(inputs []LayerInput, cfg Config) string {
 		writeField(in.Target)
 	}
 
+	// config.from selects which base image's config is inherited, so it changes the output and
+	// must move the hash. It was absent from this hash while From was unimplemented.
+	writeField(cfg.From)
+
 	// Labels are a map, so they need a stable order. Everything else is already a slice and
 	// carries its own.
 	keys := make([]string, 0, len(cfg.Labels))
@@ -115,12 +119,22 @@ type LayerInput struct {
 	// Used by sourceRef layers, where the artifact is a whole repository and usually only one
 	// directory of it belongs in the image.
 	Subpath string
+	// ImageRepository is set for image entries, and names where to pull from. The digest still
+	// comes from Digest, so the pull is content-addressed like everything else.
+	ImageRepository string
+	// Image is the pulled image, populated during fetching. Its layers are contributed as they
+	// are, rather than being rebuilt from files — they are already content-addressed, and
+	// repacking them would change their digests for no reason.
+	Image v1.Image
 	// Target is the absolute path inside the image.
 	Target string
 }
 
 // Config is the OCI config to stamp on the produced image.
 type Config struct {
+	// From names the layer entry whose image config is inherited. Empty means an empty config,
+	// which is correct for artifacts that are mounted rather than executed.
+	From       string
 	Labels     map[string]string
 	Env        []string
 	Entrypoint []string
@@ -153,6 +167,22 @@ func Assemble(inputs []LayerInput, cfg Config, workDir string) (v1.Image, error)
 	img = mutate.ConfigMediaType(img, types.OCIConfigJSON)
 
 	for _, in := range inputs {
+		// An image entry contributes its existing layers. Order is preserved: they land exactly
+		// where the entry sits in the list, which for a base image is usually first but is not
+		// required to be. See ADR 0003.
+		if in.Image != nil {
+			layers, err := in.Image.Layers()
+			if err != nil {
+				return nil, fmt.Errorf("layer %q: reading image layers: %w", in.Name, err)
+			}
+			for _, l := range layers {
+				if img, err = mutate.AppendLayers(img, l); err != nil {
+					return nil, fmt.Errorf("layer %q: appending: %w", in.Name, err)
+				}
+			}
+			continue
+		}
+
 		layerPath, err := buildLayerTarGz(in, workDir)
 		if err != nil {
 			return nil, fmt.Errorf("layer %q: %w", in.Name, err)
@@ -174,10 +204,41 @@ func Assemble(inputs []LayerInput, cfg Config, workDir string) (v1.Image, error)
 		return nil, fmt.Errorf("reading config: %w", err)
 	}
 	cf = cf.DeepCopy()
+
+	// config.from inherits the base image's config. This is what makes a composed image
+	// RUNNABLE: without the entrypoint, env, user and working directory the base declared, the
+	// result is a pile of layers that starts and immediately fails. Inheritance is opt-in
+	// because for a bundle that is only ever mounted, an empty config is the correct answer and
+	// silently adopting an entrypoint would be surprising. See ADR 0003.
+	os, arch := "linux", "amd64"
+	if cfg.From != "" {
+		base, err := findImageInput(inputs, cfg.From)
+		if err != nil {
+			return nil, err
+		}
+		baseConfig, err := base.Image.ConfigFile()
+		if err != nil {
+			return nil, fmt.Errorf("reading config of %q: %w", cfg.From, err)
+		}
+		inherited := baseConfig.DeepCopy()
+		// Diff IDs and history belong to the assembled image, not the base, and the layer set
+		// here is the base's plus ours.
+		inherited.RootFS = cf.RootFS
+		cf = inherited
+		// The platform comes from the base too. Claiming linux/amd64 over an arm64 base would
+		// produce an image the kubelet refuses to run for a reason that points nowhere useful.
+		if baseConfig.OS != "" {
+			os = baseConfig.OS
+		}
+		if baseConfig.Architecture != "" {
+			arch = baseConfig.Architecture
+		}
+	}
+
 	cf.Created = v1.Time{Time: epoch}
 	cf.Author = ""
-	cf.OS = "linux"
-	cf.Architecture = "amd64"
+	cf.OS = os
+	cf.Architecture = arch
 	if len(cfg.Labels) > 0 {
 		cf.Config.Labels = cfg.Labels
 	}
@@ -199,6 +260,20 @@ func Assemble(inputs []LayerInput, cfg Config, workDir string) (v1.Image, error)
 		return nil, fmt.Errorf("setting config: %w", err)
 	}
 	return img, nil
+}
+
+// findImageInput resolves a config.from reference to an image entry.
+func findImageInput(inputs []LayerInput, name string) (*LayerInput, error) {
+	for i := range inputs {
+		if inputs[i].Name != name {
+			continue
+		}
+		if inputs[i].Image == nil {
+			return nil, fmt.Errorf("config.from names layer %q, which is not an image source", name)
+		}
+		return &inputs[i], nil
+	}
+	return nil, fmt.Errorf("config.from names layer %q, which does not exist", name)
 }
 
 // buildLayerTarGz converts one input into a deterministic gzipped tar under workDir and returns

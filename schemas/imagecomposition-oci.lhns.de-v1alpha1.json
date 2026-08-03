@@ -111,13 +111,7 @@
                 "required": [
                   "repository"
                 ],
-                "type": "object",
-                "x-kubernetes-validations": [
-                  {
-                    "message": "image layer sources are not implemented in this version; use url, sourceRef or configMapRef",
-                    "rule": "false"
-                  }
-                ]
+                "type": "object"
               },
               "name": {
                 "description": "Name identifies this entry. Used in messages, in provenance attestations, and as the\ntarget of config.from.",

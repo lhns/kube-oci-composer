@@ -39,6 +39,13 @@ func (r *ImageCompositionReconciler) resolveInputs(ctx context.Context, obj *oci
 			in.URL = l.URL
 			in.Digest = l.Digest
 
+		case l.Image != nil:
+			// Only the repository is recorded here. The pull happens later, with the fetches,
+			// so an unchanged spec still costs one HEAD rather than a registry round trip per
+			// base image on every interval.
+			in.ImageRepository = l.Image.Repository
+			in.Digest = l.Digest
+
 		case l.SourceRef != nil:
 			art, err := r.resolveFluxSource(ctx, obj, l.SourceRef)
 			if err != nil {
