@@ -24,6 +24,16 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get"]
+  # ConfigMaps ARE cached, unlike Secrets, because configMapRef layers are watched: an edit must
+  # rebuild promptly rather than at the next interval. That costs an informer over all ConfigMaps,
+  # which is the price of not appearing to ignore edits for an hour.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+  # Flux sources, read for their status.artifact only.
+  - apiGroups: ["source.toolkit.fluxcd.io"]
+    resources: ["gitrepositories", "ocirepositories", "buckets"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]

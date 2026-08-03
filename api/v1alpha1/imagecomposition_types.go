@@ -35,13 +35,56 @@ type ImageSource struct {
 	SecretRef *LocalObjectReference `json:"secretRef,omitempty"`
 }
 
+// SourceRef references a Flux source object whose artifact provides the content.
+//
+// source-controller already clones, tracks revisions and publishes a digest-addressed tarball, so
+// this reuses that rather than reimplementing fetching. The digest is RESOLVED from the source's
+// status.artifact rather than declared in the spec — the same relationship a Kustomization has
+// with a GitRepository. See ADR 0002.
+type SourceRef struct {
+	// Kind of the referenced source.
+	// +kubebuilder:validation:Enum=GitRepository;OCIRepository;Bucket
+	// +required
+	Kind string `json:"kind"`
+
+	// Name of the referenced source.
+	// +required
+	Name string `json:"name"`
+
+	// Namespace of the referenced source. Defaults to the ImageComposition's namespace.
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+
+	// Path within the artifact to take content from. Defaults to the whole artifact.
+	// +optional
+	Path string `json:"path,omitempty"`
+}
+
+// ConfigMapRef references a ConfigMap whose entries become files.
+//
+// Each key becomes one file directly under Target. Note that ConfigMap keys cannot contain "/",
+// so nested directory layouts are not expressible this way — use a sourceRef for those.
+//
+// The digest is RESOLVED by hashing the ConfigMap's content, so a change to the data changes the
+// output. See ADR 0002.
+type ConfigMapRef struct {
+	// Name of the ConfigMap, in the ImageComposition's namespace.
+	// +required
+	Name string `json:"name"`
+
+	// Optional tolerates the ConfigMap not existing, contributing nothing instead of stalling.
+	// +kubebuilder:default=false
+	// +optional
+	Optional bool `json:"optional,omitempty"`
+}
+
 // Layer is one entry in an ordered list of content contributions.
 //
-// Exactly one source must be set. This is modelled as a discriminated union from day one so
-// that later source kinds (sourceRef to a Flux source, imageRef to another object in this API
-// group) can be added without a breaking schema change. See ADR 0004.
+// Exactly one source must be set. Modelled as a discriminated union from day one so that new
+// source kinds can be added without a breaking schema change. See ADR 0004.
 //
-// +kubebuilder:validation:XValidation:rule="[has(self.url), has(self.image)].filter(x, x).size() == 1",message="exactly one of url or image must be set"
+// +kubebuilder:validation:XValidation:rule="[has(self.url), has(self.image), has(self.sourceRef), has(self.configMapRef)].filter(x, x).size() == 1",message="exactly one of url, image, sourceRef or configMapRef must be set"
+// +kubebuilder:validation:XValidation:rule="(has(self.url) || has(self.image)) == has(self.digest)",message="digest is required for url and image sources, and must be omitted for sourceRef and configMapRef, whose digests are resolved by the controller"
 type Layer struct {
 	// Name identifies this entry. Used in messages, in provenance attestations, and as the
 	// target of config.from.
@@ -56,13 +99,26 @@ type Layer struct {
 	// +optional
 	Image *ImageSource `json:"image,omitempty"`
 
-	// Digest of the fetched content. REQUIRED, with no exceptions anywhere in this API — it is
-	// what makes the output digest a pure function of the spec, and it makes tampering
-	// detectable rather than silent. A mismatch is terminal (Stalled), never a retry.
-	// See ADR 0002.
+	// SourceRef takes content from a Flux source's artifact.
+	// +optional
+	SourceRef *SourceRef `json:"sourceRef,omitempty"`
+
+	// ConfigMapRef turns a ConfigMap's entries into files.
+	// +optional
+	ConfigMapRef *ConfigMapRef `json:"configMapRef,omitempty"`
+
+	// Digest of the fetched content, required for url and image sources.
+	//
+	// Every input is content-addressed at build time, with no exceptions — it is what makes the
+	// output digest a pure function of the spec, and it makes tampering detectable rather than
+	// silent. A mismatch is terminal (Stalled), never a retry.
+	//
+	// It is omitted for sourceRef and configMapRef, whose digests the controller RESOLVES: from
+	// the Flux source's status.artifact, or by hashing the ConfigMap's content. The guarantee is
+	// unchanged; only who writes the digest down differs. See ADR 0002.
 	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
-	// +required
-	Digest string `json:"digest"`
+	// +optional
+	Digest string `json:"digest,omitempty"`
 
 	// Unpack controls how the fetched bytes become layer content.
 	// +kubebuilder:default="none"

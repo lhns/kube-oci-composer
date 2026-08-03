@@ -21,7 +21,9 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 	"github.com/lhns/kube-oci-composer/internal/cache"
@@ -86,6 +88,18 @@ type ImageCompositionReconciler struct {
 // an enormous blast radius for a controller that reads one referenced push credential.
 //
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
+//
+// ConfigMaps ARE cached, unlike Secrets, because configMapRef layers are watched — a ConfigMap
+// edit must rebuild promptly rather than at the next interval, which could be an hour away.
+// That costs an informer over all ConfigMaps; the alternative is a controller that appears not
+// to notice edits.
+//
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
+//
+// Flux sources are read for their status.artifact only. Read-only, and only the source kinds a
+// layer can reference.
+//
+// +kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=gitrepositories;ocirepositories;buckets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch
 
@@ -236,20 +250,17 @@ func buildRecord(img v1.Image, contentTag string, digest v1.Hash) (*ociv1alpha1.
 func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj *ociv1alpha1.ImageComposition) (buildResult, error) {
 	// Built from the spec only; Path is filled in later, after we know a build is actually
 	// needed. InputHash deliberately ignores Path for exactly this reason.
-	inputs := make([]oci.LayerInput, 0, len(obj.Spec.Layers))
-	for _, l := range obj.Spec.Layers {
-		if l.URLSource == nil {
-			// v0.1 supports url entries only. The union is already CEL-validated, so this is a
-			// guard against a source kind the CRD allows but this build cannot handle.
-			return buildResult{}, terminal("layer %q: only url sources are supported in this version", l.Name)
-		}
-		inputs = append(inputs, oci.LayerInput{
-			Name:   l.Name,
-			URL:    l.URL,
-			Digest: l.Digest,
-			Unpack: oci.UnpackMode(orDefault(string(l.Unpack), "none")),
-			Target: orDefault(l.Target, "/"),
-		})
+	// The work directory holds both the assembled layer tarballs and anything synthesised while
+	// resolving a source, so it is created before resolution rather than after.
+	workDir, err := os.MkdirTemp("", "oci-composer-work-*")
+	if err != nil {
+		return buildResult{}, fmt.Errorf("creating work dir: %w", err)
+	}
+	defer os.RemoveAll(workDir)
+
+	inputs, err := r.resolveInputs(ctx, obj, workDir)
+	if err != nil {
+		return buildResult{}, err
 	}
 
 	cfg := configFrom(obj.Spec.Config)
@@ -297,13 +308,12 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 		return buildResult{Artifact: prev.DeepCopy(), InputHash: inputHash}, nil
 	}
 
-	workDir, err := os.MkdirTemp("", "oci-composer-work-*")
-	if err != nil {
-		return buildResult{}, fmt.Errorf("creating work dir: %w", err)
-	}
-	defer os.RemoveAll(workDir)
-
 	for i := range inputs {
+		// Content synthesised during resolution (a ConfigMap) is already on disk; only remote
+		// sources need fetching.
+		if inputs[i].Path != "" {
+			continue
+		}
 		path, err := r.resolveLayer(ctx, inputs[i])
 		if err != nil {
 			var dm *oci.ErrDigestMismatch
@@ -629,6 +639,31 @@ func controllerutilContainsFinalizer(o client.Object, f string) bool {
 	return false
 }
 
+// compositionsForConfigMap maps a changed ConfigMap to the compositions that reference it.
+func (r *ImageCompositionReconciler) compositionsForConfigMap(ctx context.Context, obj client.Object) []reconcile.Request {
+	var list ociv1alpha1.ImageCompositionList
+	// Namespace-scoped: a configMapRef resolves in the composition's own namespace, so a
+	// same-named ConfigMap elsewhere is unrelated and must not trigger a rebuild.
+	if err := r.List(ctx, &list, client.InNamespace(obj.GetNamespace())); err != nil {
+		log.FromContext(ctx).Error(err, "could not map a ConfigMap change to compositions")
+		return nil
+	}
+
+	var out []reconcile.Request
+	for i := range list.Items {
+		item := &list.Items[i]
+		for _, l := range item.Spec.Layers {
+			if l.ConfigMapRef != nil && l.ConfigMapRef.Name == obj.GetName() {
+				out = append(out, reconcile.Request{
+					NamespacedName: types.NamespacedName{Namespace: item.Namespace, Name: item.Name},
+				})
+				break
+			}
+		}
+	}
+	return out
+}
+
 // SetupWithManager wires the controller up.
 func (r *ImageCompositionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.Fetcher == nil {
@@ -636,5 +671,9 @@ func (r *ImageCompositionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&ociv1alpha1.ImageComposition{}).
+		// Without this a ConfigMap edit would only be noticed at the next interval, which
+		// defaults to an hour. Users reasonably expect editing the source of a layer to rebuild
+		// it, and a silent hour of staleness reads as the controller being broken.
+		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.compositionsForConfigMap)).
 		Complete(r)
 }

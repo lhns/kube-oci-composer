@@ -113,13 +113,49 @@ helm install kube-oci-composer oci://ghcr.io/lhns/charts/kube-oci-composer \
 
 **v0.1, and honest about its limits.**
 
-Implemented: `url` layer sources, single architecture, the built-in serving endpoint, external
-push with `secretRef`, the input-hash short-circuit, a two-tier layer cache with optional S3,
-manifest persistence across restarts, and garbage collection.
+Implemented: `url`, `sourceRef` and `configMapRef` layer sources; the built-in serving endpoint;
+external push with `secretRef`; the input-hash short-circuit; a two-tier layer cache with optional
+S3; manifest persistence across restarts; and garbage collection.
 
-Not implemented: `image`, `sourceRef` and `configMapRef` layer sources; multi-architecture; SBOM,
-provenance and signing ([ADR 0008](docs/adr/0008-supply-chain.md) is Proposed, not built — and
-signing is theatre until something verifies it at admission).
+Not implemented: `image` layer sources (the field exists and a spec using it will stall);
+multi-architecture; SBOM, provenance and signing ([ADR 0008](docs/adr/0008-supply-chain.md) is
+Proposed, not built — and signing is theatre until something verifies it at admission).
+
+### Layer sources
+
+```yaml
+layers:
+  # A URL, with the digest declared in the spec.
+  - name: core
+    url: https://github.com/.../core-1.1.1.tgz
+    digest: sha256:6f2e…
+    unpack: tar.gz
+    target: /core
+
+  # Files from a Flux source. No digest here: source-controller has already content-addressed
+  # the revision, so the controller RESOLVES it from status.artifact.
+  - name: config
+    sourceRef:
+      kind: GitRepository
+      name: k0s-flux
+      namespace: flux-system
+      path: ./overlays/kafka       # optional; defaults to the whole artifact
+    target: /config
+
+  # A ConfigMap. Each key becomes one file; the digest is resolved by hashing the content, so an
+  # edit rebuilds. ConfigMap keys cannot contain "/", so nested layouts need a sourceRef.
+  - name: settings
+    configMapRef:
+      name: kafka-settings
+    target: /settings
+```
+
+**Layers are contributed in declaration order.** No entry type is special or implicitly first.
+
+Note for `configMapGenerator` users: kustomize appends a content hash to the generated name and
+rewrites references, but only in fields it knows about — **not** `layers[].configMapRef.name`.
+Either add a `nameReference` entry to a kustomize `configurations:` file, or use a fixed-name
+ConfigMap, which the controller watches directly.
 
 ## Relationship to Flux
 

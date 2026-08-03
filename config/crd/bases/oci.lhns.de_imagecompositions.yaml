@@ -105,16 +105,35 @@ spec:
                   description: |-
                     Layer is one entry in an ordered list of content contributions.
 
-                    Exactly one source must be set. This is modelled as a discriminated union from day one so
-                    that later source kinds (sourceRef to a Flux source, imageRef to another object in this API
-                    group) can be added without a breaking schema change. See ADR 0004.
+                    Exactly one source must be set. Modelled as a discriminated union from day one so that new
+                    source kinds can be added without a breaking schema change. See ADR 0004.
                   properties:
+                    configMapRef:
+                      description: ConfigMapRef turns a ConfigMap's entries into files.
+                      properties:
+                        name:
+                          description: Name of the ConfigMap, in the ImageComposition's
+                            namespace.
+                          type: string
+                        optional:
+                          default: false
+                          description: Optional tolerates the ConfigMap not existing,
+                            contributing nothing instead of stalling.
+                          type: boolean
+                      required:
+                      - name
+                      type: object
                     digest:
                       description: |-
-                        Digest of the fetched content. REQUIRED, with no exceptions anywhere in this API — it is
-                        what makes the output digest a pure function of the spec, and it makes tampering
-                        detectable rather than silent. A mismatch is terminal (Stalled), never a retry.
-                        See ADR 0002.
+                        Digest of the fetched content, required for url and image sources.
+
+                        Every input is content-addressed at build time, with no exceptions — it is what makes the
+                        output digest a pure function of the spec, and it makes tampering detectable rather than
+                        silent. A mismatch is terminal (Stalled), never a retry.
+
+                        It is omitted for sourceRef and configMapRef, whose digests the controller RESOLVES: from
+                        the Flux source's status.artifact, or by hashing the ConfigMap's content. The guarantee is
+                        unchanged; only who writes the digest down differs. See ADR 0002.
                       pattern: ^sha256:[a-f0-9]{64}$
                       type: string
                     image:
@@ -141,6 +160,31 @@ spec:
                         Name identifies this entry. Used in messages, in provenance attestations, and as the
                         target of config.from.
                       type: string
+                    sourceRef:
+                      description: SourceRef takes content from a Flux source's artifact.
+                      properties:
+                        kind:
+                          description: Kind of the referenced source.
+                          enum:
+                          - GitRepository
+                          - OCIRepository
+                          - Bucket
+                          type: string
+                        name:
+                          description: Name of the referenced source.
+                          type: string
+                        namespace:
+                          description: Namespace of the referenced source. Defaults
+                            to the ImageComposition's namespace.
+                          type: string
+                        path:
+                          description: Path within the artifact to take content from.
+                            Defaults to the whole artifact.
+                          type: string
+                      required:
+                      - kind
+                      - name
+                      type: object
                     target:
                       default: /
                       description: Target is the absolute path inside the image the
@@ -161,14 +205,18 @@ spec:
                       pattern: ^https?://
                       type: string
                   required:
-                  - digest
                   - name
                   - url
                   type: object
                   x-kubernetes-validations:
-                  - message: exactly one of url or image must be set
-                    rule: '[has(self.url), has(self.image)].filter(x, x).size() ==
-                      1'
+                  - message: exactly one of url, image, sourceRef or configMapRef
+                      must be set
+                    rule: '[has(self.url), has(self.image), has(self.sourceRef), has(self.configMapRef)].filter(x,
+                      x).size() == 1'
+                  - message: digest is required for url and image sources, and must
+                      be omitted for sourceRef and configMapRef, whose digests are
+                      resolved by the controller
+                    rule: (has(self.url) || has(self.image)) == has(self.digest)
                 minItems: 1
                 type: array
               publish:

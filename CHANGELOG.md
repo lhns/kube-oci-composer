@@ -17,6 +17,10 @@ may change between minor versions.
 - Store-backed blob handler, replacing the upstream disk handler.
 - Manifest persistence and replay, so older builds survive a restart.
 - Mark-and-sweep garbage collection with retention, a grace period, and a completeness gate.
+- `sourceRef` layer sources, reading a Flux GitRepository/OCIRepository/Bucket artifact, with an
+  optional subpath.
+- `configMapRef` layer sources, with a watch so an edit rebuilds promptly rather than at the next
+  interval.
 - Architecture decision records in `docs/adr/`.
 
 ### Fixed

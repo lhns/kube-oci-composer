@@ -60,6 +60,7 @@ func InputHash(inputs []LayerInput, cfg Config) string {
 	for _, in := range inputs {
 		writeField(in.Digest)
 		writeField(string(in.Unpack))
+		writeField(in.Subpath)
 		writeField(in.Target)
 	}
 
@@ -110,6 +111,10 @@ type LayerInput struct {
 	Digest string
 	// Unpack controls how the bytes become layer content.
 	Unpack UnpackMode
+	// Subpath selects a directory within an unpacked archive. Empty takes the whole archive.
+	// Used by sourceRef layers, where the artifact is a whole repository and usually only one
+	// directory of it belongs in the image.
+	Subpath string
 	// Target is the absolute path inside the image.
 	Target string
 }
@@ -299,7 +304,7 @@ func collectEntries(in LayerInput) ([]tarEntry, error) {
 			defer zr.Close()
 			r = zr
 		}
-		return extractTar(tar.NewReader(r), target)
+		return extractTar(tar.NewReader(r), target, in.Subpath)
 
 	default:
 		return nil, fmt.Errorf("unknown unpack mode %q", in.Unpack)
@@ -307,9 +312,17 @@ func collectEntries(in LayerInput) ([]tarEntry, error) {
 }
 
 // extractTar reads an archive and rebases its entries under target.
-func extractTar(tr *tar.Reader, target string) ([]tarEntry, error) {
+//
+// When subpath is set, only entries beneath it are taken, and the prefix is stripped so the
+// selected directory's contents land at target rather than the directory itself.
+func extractTar(tr *tar.Reader, target, subpath string) ([]tarEntry, error) {
 	var entries []tarEntry
 	dirs := make(map[string]bool)
+	prefix := strings.Trim(path.Clean("/"+subpath), "/")
+	if prefix == "." {
+		prefix = ""
+	}
+	var matched bool
 
 	for {
 		hdr, err := tr.Next()
@@ -332,6 +345,19 @@ func extractTar(tr *tar.Reader, target string) ([]tarEntry, error) {
 		clean = strings.TrimPrefix(clean, "/")
 		if clean == "." || clean == "" {
 			continue
+		}
+
+		if prefix != "" {
+			switch {
+			case clean == prefix:
+				matched = true
+				continue // the directory itself; its contents are what we want
+			case strings.HasPrefix(clean, prefix+"/"):
+				matched = true
+				clean = strings.TrimPrefix(clean, prefix+"/")
+			default:
+				continue
+			}
 		}
 
 		name := clean
@@ -363,6 +389,12 @@ func extractTar(tr *tar.Reader, target string) ([]tarEntry, error) {
 			// Devices, fifos and hard links have no place in an artifact layer.
 			continue
 		}
+	}
+
+	// A subpath that matched nothing is a silent empty layer, and the workload then starts with
+	// files missing for no visible reason. Far better to stall on a typo.
+	if prefix != "" && !matched {
+		return nil, fmt.Errorf("path %q is not present in the archive", subpath)
 	}
 	return entries, nil
 }
