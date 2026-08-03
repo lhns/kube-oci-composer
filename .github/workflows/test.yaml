@@ -42,6 +42,10 @@ jobs:
           cache: true
       - uses: golangci/golangci-lint-action@v6
         with:
+          # Built from source with the toolchain setup-go just installed. The prebuilt binaries
+          # lag the Go release, and a linter built with an older Go refuses to parse a go.mod
+          # targeting a newer one — which is what broke this job.
+          install-mode: goinstall
           version: latest
 
   chart:
@@ -65,4 +69,18 @@ jobs:
           # e2e honest: if the feature is unavailable the test must fail loudly rather than
           # silently exercise a different code path.
           node_image: kindest/node:v1.33.1
+          cluster_name: kube-oci-composer-e2e
+      - uses: azure/setup-helm@v4
+
+      # Builds the image, loads it into kind, installs the CRDs and the chart, and waits for the
+      # controller to be ready. Without this the test job found no CRD and failed instantly —
+      # which it did, on every push, until someone looked.
+      - run: make e2e-up
+        env:
+          CLUSTER: kube-oci-composer-e2e
+
       - run: make e2e-test
+
+      - name: Controller logs on failure
+        if: failure()
+        run: kubectl -n oci-composer logs deploy/kube-oci-composer --tail=200 || true
