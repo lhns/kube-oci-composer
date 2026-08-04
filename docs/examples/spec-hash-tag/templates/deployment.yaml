@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.repository }}-consumer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.repository }}-consumer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ .Values.repository }}-consumer
+    spec:
+      containers:
+        - name: kafka
+          # The container keeps its own upstream image; the composed artifact is mounted, not run.
+          image: quay.io/strimzi/kafka:0.47.0-kafka-4.0.0
+          volumeMounts:
+            - name: plugins
+              mountPath: /opt/kafka/plugins
+              readOnly: true
+      volumes:
+        - name: plugins
+          image:
+            # The same value as publish.tags above, from the same helper. Change a layer and both
+            # move in one commit; the pod template changes, so a rollout happens on its own.
+            #
+            # IfNotPresent is correct here for the same reason it is correct with a digest: this
+            # tag identifies content, so a cached copy cannot be stale. That only holds because
+            # immutable is on — without it the tag could be remeaned and this would keep old bytes.
+            reference: {{ include "spec-hash-tag.image" . }}
+            pullPolicy: IfNotPresent

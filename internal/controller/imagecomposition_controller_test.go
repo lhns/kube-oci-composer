@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -20,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
@@ -115,7 +117,7 @@ func composition(name string, layers ...ociv1alpha1.Layer) *ociv1alpha1.ImageCom
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 		Spec: ociv1alpha1.ImageCompositionSpec{
 			Layers:  layers,
-			Publish: &ociv1alpha1.Publish{Name: name, Tag: "main"},
+			Publish: &ociv1alpha1.Publish{Name: name, Tags: []string{"main"}, Immutable: ptr.To(false)},
 		},
 	}
 }
@@ -162,15 +164,15 @@ func TestServingModePublishesAndIsIdempotent(t *testing.T) {
 	if !strings.HasPrefix(art.Ref, "oci.test/plugins:main@") {
 		t.Fatalf("ref %q does not use the serving host", art.Ref)
 	}
-	wantContent := "oci.test/plugins:main-" + strings.TrimPrefix(art.Digest, "sha256:")[:12]
-	if art.ContentTag != wantContent {
-		t.Fatalf("content tag %q, want %q", art.ContentTag, wantContent)
+	if want := []string{"oci.test/plugins:main"}; !slices.Equal(art.Tags, want) {
+		t.Fatalf("tags %v, want %v", art.Tags, want)
 	}
 
-	// Both references must actually resolve, and to the same manifest.
+	// Both the tag and the digest must resolve, and to the same manifest. The digest reference
+	// is the one a build with no tags would have to rely on entirely.
 	for _, ref := range []string{
 		fmt.Sprintf("%s/plugins:main", host),
-		fmt.Sprintf("%s/plugins:main-%s", host, strings.TrimPrefix(art.Digest, "sha256:")[:12]),
+		fmt.Sprintf("%s/plugins@%s", host, art.Digest),
 	} {
 		parsed, err := name.ParseReference(ref, name.Insecure)
 		if err != nil {
@@ -246,10 +248,10 @@ func TestConvergenceOnChangedContent(t *testing.T) {
 	}
 }
 
-// TestOldContentTagSurvivesRebuild is the point of dual publication: the moving pointer moves,
-// but a previously published content tag keeps resolving to its original bytes. Anything that
-// pinned it stays pinned.
-func TestOldContentTagSurvivesRebuild(t *testing.T) {
+// TestOldDigestSurvivesRebuild — a workload pinned to a digest must keep resolving after a
+// rebuild has moved the tag on. This is what the dropped content tag used to provide, and the
+// digest reference provides it directly.
+func TestOldDigestSurvivesRebuild(t *testing.T) {
 	urlA, digestA := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	urlB, digestB := contentServer(t, map[string]string{"lib/a.jar": "bbb"})
 
@@ -257,7 +259,6 @@ func TestOldContentTagSurvivesRebuild(t *testing.T) {
 	r, host := servingReconciler(t, obj)
 
 	first := build(t, r, obj, "first")
-	oldContentTag := fmt.Sprintf("%s/dual:main-%s", host, strings.TrimPrefix(first.Digest, "sha256:")[:12])
 
 	obj.Spec.Layers[0] = urlLayer("core", urlB, digestB, "/core")
 	second := build(t, r, obj, "second")
@@ -265,28 +266,122 @@ func TestOldContentTagSurvivesRebuild(t *testing.T) {
 		t.Fatal("rebuild produced the same digest")
 	}
 
-	ref, err := name.ParseReference(oldContentTag, name.Insecure)
-	if err != nil {
-		t.Fatalf("parsing: %v", err)
-	}
-	desc, err := remote.Head(ref)
-	if err != nil {
-		t.Fatalf("old content tag no longer resolves: %v", err)
-	}
-	if desc.Digest.String() != first.Digest {
-		t.Fatalf("old content tag now resolves to %s, want %s", desc.Digest, first.Digest)
+	resolves := func(ref, want string) {
+		t.Helper()
+		parsed, err := name.ParseReference(ref, name.Insecure)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", ref, err)
+		}
+		desc, err := remote.Head(parsed)
+		if err != nil {
+			t.Fatalf("%s no longer resolves: %v", ref, err)
+		}
+		if desc.Digest.String() != want {
+			t.Fatalf("%s resolves to %s, want %s", ref, desc.Digest, want)
+		}
 	}
 
-	moving, err := name.ParseReference(host+"/dual:main", name.Insecure)
+	resolves(fmt.Sprintf("%s/dual@%s", host, first.Digest), first.Digest)
+	resolves(fmt.Sprintf("%s/dual@%s", host, second.Digest), second.Digest)
+	// This object opts out of immutability, so its tag is a pointer and follows the newest build.
+	resolves(host+"/dual:main", second.Digest)
+}
+
+// TestSpecHashTagPattern is the pattern from ADR 0017 end to end: a tag derived from the spec,
+// with immutability left at its default. Changing the spec changes the tag, so both keep
+// resolving to their own content and neither is ever remeaned — which is what makes it safe for
+// a workload to reference the tag rather than a digest.
+func TestSpecHashTagPattern(t *testing.T) {
+	urlA, digestA := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
+	urlB, digestB := contentServer(t, map[string]string{"lib/a.jar": "bbb"})
+
+	obj := composition("hashed", urlLayer("core", urlA, digestA, "/core"))
+	obj.Spec.Publish = &ociv1alpha1.Publish{Name: "hashed", Tags: []string{"sAAAA"}}
+	r, host := servingReconciler(t, obj)
+
+	first := build(t, r, obj, "first")
+
+	// A different spec is a different tag, exactly as the consumer would have computed.
+	obj.Spec.Layers[0] = urlLayer("core", urlB, digestB, "/core")
+	obj.Spec.Publish.Tags = []string{"sBBBB"}
+	second := build(t, r, obj, "second")
+	if second.Digest == first.Digest {
+		t.Fatal("rebuild produced the same digest")
+	}
+
+	for ref, want := range map[string]string{
+		host + "/hashed:sAAAA": first.Digest,
+		host + "/hashed:sBBBB": second.Digest,
+	} {
+		parsed, err := name.ParseReference(ref, name.Insecure)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", ref, err)
+		}
+		desc, err := remote.Head(parsed)
+		if err != nil {
+			t.Fatalf("%s does not resolve: %v", ref, err)
+		}
+		if desc.Digest.String() != want {
+			t.Fatalf("%s resolves to %s, want %s", ref, desc.Digest, want)
+		}
+	}
+}
+
+// TestImmutableTagRefusesToBeRemeaned — the guard that makes referencing a tag safe. Reusing a
+// tag for different content must fail terminally rather than silently leaving nodes on stale
+// bytes under an unchanged name.
+func TestImmutableTagRefusesToBeRemeaned(t *testing.T) {
+	urlA, digestA := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
+	urlB, digestB := contentServer(t, map[string]string{"lib/a.jar": "bbb"})
+
+	obj := composition("pinned", urlLayer("core", urlA, digestA, "/core"))
+	obj.Spec.Publish = &ociv1alpha1.Publish{Name: "pinned", Tags: []string{"v1"}}
+	r, _ := servingReconciler(t, obj)
+
+	build(t, r, obj, "first")
+
+	// Same tag, different content: the case the guard exists for.
+	obj.Spec.Layers[0] = urlLayer("core", urlB, digestB, "/core")
+	if _, err := r.reconcileArtifact(t.Context(), obj); err == nil {
+		t.Fatal("remeaning an immutable tag was allowed")
+	} else if reasonFor(err) != ociv1alpha1.ReasonImmutableConflict {
+		t.Fatalf("reason %q, want %q", reasonFor(err), ociv1alpha1.ReasonImmutableConflict)
+	}
+
+	// Opting out is what a genuinely moving pointer does.
+	obj.Spec.Publish.Immutable = ptr.To(false)
+	if art := build(t, r, obj, "after opting out"); art.Digest == "" {
+		t.Fatal("immutable: false did not allow the tag to move")
+	}
+}
+
+// TestDigestOnlyPublishing — no tags at all is a supported mode, for anyone pinning digests via
+// image automation. The content must still be pullable.
+func TestDigestOnlyPublishing(t *testing.T) {
+	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
+	obj := composition("untagged", urlLayer("core", url, digest, "/core"))
+	obj.Spec.Publish = &ociv1alpha1.Publish{Name: "untagged"}
+	r, host := servingReconciler(t, obj)
+
+	art := build(t, r, obj, "first")
+	if len(art.Tags) != 0 {
+		t.Fatalf("tags %v, want none", art.Tags)
+	}
+	if art.Ref != fmt.Sprintf("%s/untagged@%s", "oci.test", art.Digest) {
+		t.Fatalf("ref %q is not a bare digest reference", art.Ref)
+	}
+
+	ref, err := name.ParseReference(fmt.Sprintf("%s/untagged@%s", host, art.Digest), name.Insecure)
 	if err != nil {
 		t.Fatalf("parsing: %v", err)
 	}
-	movingDesc, err := remote.Head(moving)
-	if err != nil {
-		t.Fatalf("moving pointer: %v", err)
+	if _, err := remote.Head(ref); err != nil {
+		t.Fatalf("digest-only artifact is not pullable: %v", err)
 	}
-	if movingDesc.Digest.String() != second.Digest {
-		t.Fatalf("moving pointer resolves to %s, want the newest %s", movingDesc.Digest, second.Digest)
+
+	// And it must still converge rather than rebuilding forever with nothing to HEAD by tag.
+	if second := build(t, r, obj, "second"); second.Digest != art.Digest {
+		t.Fatalf("second reconcile produced %s, want %s", second.Digest, art.Digest)
 	}
 }
 
@@ -308,19 +403,18 @@ func TestTagListingWorks(t *testing.T) {
 		t.Fatalf("listing tags: %v", err)
 	}
 
-	want := map[string]bool{
-		"main": false,
-		"main-" + strings.TrimPrefix(art.Digest, "sha256:")[:12]: false,
+	// Exactly the tags that were asked for, and nothing invented alongside them. The listing is
+	// what a scanner sees, so a stray derived tag would show up as a candidate release.
+	if !slices.Contains(tags, "main") {
+		t.Fatalf(`tag "main" missing from listing %v`, tags)
 	}
 	for _, tag := range tags {
-		if _, ok := want[tag]; ok {
-			want[tag] = true
+		if tag != "main" {
+			t.Fatalf("unexpected extra tag %q in listing %v", tag, tags)
 		}
 	}
-	for tag, seen := range want {
-		if !seen {
-			t.Fatalf("tag %q missing from listing %v", tag, tags)
-		}
+	if art.Digest == "" {
+		t.Fatal("nothing was published, so the listing proves nothing")
 	}
 }
 

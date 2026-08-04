@@ -5,6 +5,12 @@
 Accepted and implemented. The defect below was measured before the fix and is asserted closed by
 `TestOlderDigestSurvivesRestart`.
 
+Since [0017](0017-updating-the-consumed-digest.md), replay restores a build's **list** of tags
+rather than one content tag, and a build may carry none. The digest reference is still written
+first, which is what makes a tagless build replayable at all. That test now also asserts an older
+build's *tag* resolves after a restart — with spec-hash tags, that is what a rolled-back commit
+names.
+
 ## Context
 
 Manifests live in `pkg/registry`'s in-memory map (0012), and the startup reconcile republishes

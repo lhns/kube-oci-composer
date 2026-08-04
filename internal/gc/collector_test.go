@@ -66,7 +66,7 @@ func composition(name string, history ...ociv1alpha1.BuildRecord) *ociv1alpha1.I
 	return &ociv1alpha1.ImageComposition{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 		Spec: ociv1alpha1.ImageCompositionSpec{
-			Publish: &ociv1alpha1.Publish{Name: name, Tag: "main"},
+			Publish: &ociv1alpha1.Publish{Name: name, Tags: []string{"main"}},
 		},
 		Status: ociv1alpha1.ImageCompositionStatus{History: history},
 	}

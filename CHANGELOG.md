@@ -5,9 +5,30 @@ may change between minor versions.
 
 ## [Unreleased]
 
+### Changed
+- **`publish.tag` and `push.tag` are now `tags`, a list.** Optional, with no default: omit it and
+  the artifact is published by digest alone. One build can carry several — a spec-hash tag
+  alongside a readable pointer, or the same hash under more than one algorithm.
+- **`immutable` now defaults to `true`, on both `publish` and `push`.** It previously existed only
+  on `push` and defaulted to false. The controller refuses to move a tag to different content and
+  fails the build instead. Republishing *identical* content remains a no-op, so a steady reconcile
+  loop never trips it; set `immutable: false` for a deliberately moving pointer such as `main`.
+- **The auto-generated `<tag>-<digest[:12]>` content tag is gone**, along with
+  `status.artifact.contentTag` (now `status.artifact.tags`) and `BuildRecord.contentTag` (now
+  `tags`). It existed only because the tag was a moving pointer and nothing else offered an
+  immutable handle; a spec-hash tag is one, and the digest always was.
+
+  Migration: replace `tag: x` with `tags: [x]`, and add `immutable: false` if that tag is meant to
+  move. Anything pinning a content tag should pin the digest or a spec-hash tag instead.
+
 ### Added
+- **Spec-hash tags**, resolving [ADR 0017](docs/adr/0017-updating-the-consumed-digest.md) — how a
+  workload's reference gets updated. The consumer hashes the build-determining part of the spec
+  and writes the result into both `publish.tags` and its own image reference, so the two stay in
+  step with no image automation, no git write-back and no status reading. Worked example in
+  `docs/examples/spec-hash-tag/`.
 - `ImageComposition` API (`oci.lhns.de/v1alpha1`) with `url` layer sources, deterministic
-  assembly, and dual publication of an immutable content tag plus a moving pointer.
+  assembly, and publication by digest plus any requested tags.
 - Built-in read-only OCI serving endpoint, so no registry is required.
 - Flux conventions: kstatus conditions, `suspend`, `interval`, `observedGeneration`,
   `status.artifact`, and the `reconcile.fluxcd.io/requestedAt` annotation.

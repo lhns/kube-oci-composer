@@ -1,9 +1,10 @@
-# 0017. How does a workload's digest reference get updated?
+# 0017. How does a workload's reference get updated?
 
 ## Status
 
-**Open.** Nothing is decided. This is the most consequential unanswered question in the project,
-because it is the one a user hits on day one.
+**Accepted.** Resolved by option D below: the consumer chooses the tag by hashing the build spec.
+Amends [0010](0010-workloads-reference-digests.md), which said a workload must never reference a
+tag.
 
 ## Context
 
@@ -21,57 +22,83 @@ Two things came to light:
 2. **The inputs are as much of a problem as the output.** Renovate and similar tools discover
    images by recognising known structures — pod specs, Flux kinds. Nothing recognises
    `spec.base.image` inside a CRD it has never heard of. So a naive setup leaves the user
-   hand-tracking upstream base image releases *as well as* hand-updating the output pin: two
-   manual steps per upstream release, which is precisely the coupling the project exists to
-   reduce.
+   hand-tracking upstream base image releases *as well as* hand-updating the output pin.
 
-There is also an inconsistency worth resolving either way: we tell consumers to reference
-`repo:tag@sha256:…`, while the API splits that into `base.image` plus `base.digest`.
+## Decision
 
-## Options
+**The consumer chooses the tag, by hashing the build.**
 
-**A. Renovate, with the inputs made discoverable.** Merge `base.image` and `base.digest` into one
-conventional `ref: repo:tag@sha256:…`, which Renovate's docker datasource updates natively, and
-document a regex `customManager` for `fetch.url` + `fetch.digest`. The consumer's reference is
-then updated by the same mechanism, since it is an ordinary image reference.
+Whatever templates the `ImageComposition` — Helm here, but any templating tool works — hashes the
+build-determining part of the spec, writes the result into `spec.publish.tags`, and uses the same
+value in the consuming workload's image reference. One render, one value, two places.
 
-- Needs no new controllers, and reuses a tool most GitOps repos already run.
-- Renovate typically runs in CI, so it must be able to *reach* the serving endpoint. For the
-  built-in endpoint that means exposing it publicly, which some users will not want.
+```
+{{- $spec := include "kafka.icspec" . }}      {{/* base + layers + config ONLY */}}
+{{- $tag  := printf "s%s" (sha256sum $spec | trunc 16) }}
 
-**B. Flux image-reflector plus image-automation.** The originally assumed path.
+# ImageComposition   publish: {name: kafka-tiered-storage, tags: [{{ $tag }}]}
+# Deployment         image:   registry/kafka-tiered-storage:{{ $tag }}
+```
 
-- Runs in-cluster, so the endpoint never needs public exposure.
-- Two more controllers, three more CRDs, and git write credentials for Flux.
-- Duplicates Renovate where Renovate is already in use.
-- **Unverified.** `ImagePolicy` needs a selection rule, and our tags are a fixed moving pointer
-  plus content tags with an unordered digest suffix. Whether `filterTags` down to a single
-  candidate plus `digestReflectionPolicy: Always` behaves sensibly has not been tested. Neither
-  has the marker syntax for substituting a digest.
+Nothing observes anything at runtime: no extra controllers, no git write-back, no status reading,
+no scan interval, no lag. A worked example is in
+[`docs/examples/spec-hash-tag`](../examples/spec-hash-tag/README.md).
 
-**C. Hand-pinning.** Read `status.artifact.contentTag`, commit it.
+**Why this is sound rather than a trick.** [ADR 0016](0016-the-scope-line-is-determinism.md) draws
+the scope line at determinism: the output digest is a pure function of digest-pinned inputs. A hash
+of those inputs therefore identifies the output as precisely as the output's own digest does. The
+project's central guarantee is what makes this work — it would be unsafe in a tool that could `RUN`
+things, which is exactly why this one cannot.
 
-- Works today with nothing installed.
-- Fine at a few updates a year; poor at a few a week.
-- Does not solve the input problem at all — the base digest still has to come from somewhere.
+**The circularity dissolves.** The obvious objection is that the tag lives in the spec, so hashing
+the spec would include it. But the tag is not an *input to the build*: where an artifact is
+published does not change what it is. Hash a partial that excludes `publish`, and the problem
+disappears without needing a ConfigMap or a `tagFrom` indirection.
 
-These are not exclusive. A is the likely default with C as the floor; B matters for anyone who
-cannot expose the endpoint.
+### What this required
 
-## What would decide it
+- `publish.tags` / `push.tags` became **lists**, optional, with no default. One build can carry a
+  spec-hash tag and a readable pointer, or the same hash under several algorithms. Empty publishes
+  by digest alone.
+- **`immutable` defaults to true** on both, and is what makes referencing a tag safe: the tag will
+  not be moved to different content, the build fails instead. Republishing identical content is
+  always a no-op, so a steady reconcile loop never trips it.
+- **The auto-generated `<tag>-<digest[:12]>` content tag was removed.** It existed only because
+  `publish.tag` was a moving pointer and nothing else gave an immutable handle. A spec-hash tag
+  *is* a content tag, and the digest is always addressable.
 
-- **Does `ImagePolicy` work against our tag layout?** A test against a real image-reflector,
-  scanning a real serving endpoint. This has been flagged three times as the integration point
-  most likely to be subtly wrong and remains untested.
-- **Is the endpoint publicly reachable in practice?** If exposing it is normal, A dominates. If
-  it usually is not, B has to be supported properly rather than assumed.
-- **Whether the single `ref` field survives contact with the other verbs.** `fetch` has no
-  standard combined form, so it keeps `url` + `digest` regardless — meaning the API would be
-  consistent with convention but not internally uniform. That may be the right trade; it has not
-  been argued through.
+## Consequences
 
-## Consequences of leaving it open
+**Renovate still matters, for the inputs.** This decision settles the *output* reference only.
+Point 2 above is unaddressed: `fetch.url` + `fetch.digest` and `base.image` + `base.digest` still
+need a regex `customManager` for Renovate to track upstream releases. Merging `base.image` and
+`base.digest` into one conventional `ref: repo:tag@sha256:…` remains worth doing and is not done.
 
-The README and ADR 0010 currently present Flux image-automation as the expected path. That is
-misleading for anyone without those controllers, and should be corrected before the first release
-whichever way this lands.
+**It only holds for inputs pinned in the spec.** `sourceRef` resolves a Flux revision at reconcile
+time and `configMap` reads live content, so both can change while the spec, and therefore the tag,
+does not. With `immutable: true` that surfaces as a terminal error rather than silent divergence —
+the right failure, but one to expect rather than discover. Fold such inputs into the hash where
+possible, or use `immutable: false` and reference the digest.
+
+**Rollback is bounded by retention.** Rolling back a commit names an earlier spec-hash tag, which
+resolves only while that build is retained (`publish.history`, ADR 0011).
+
+**A pod may briefly fail to pull on first apply**, because the composition and the workload are
+applied together while the build is still running.
+
+## Alternatives, still valid in their situations
+
+**A. Renovate against the output.** Works when the serving endpoint is reachable from CI. Requires
+exposing it, which some users will not want. Still needed for the *inputs* regardless.
+
+**B. Flux image-reflector plus image-automation.** Runs in-cluster, so nothing needs exposing.
+Costs two controllers, three CRDs and git write credentials for Flux, and remains **untested**
+against our tag layout. The right answer for anyone who cannot template the composition and the
+workload together — a hand-written manifest, or a CR owned by a different chart.
+
+**C. Hand-pinning a digest.** Works today with nothing installed. Fine at a few updates a year.
+
+**E. The controller hashes the CR itself.** Considered and rejected: the controller sees the object
+after API-server defaulting and managed-field rewriting, and could not guarantee a consumer
+reproduces the same bytes from a different serialisation. Making the consumer the source of the
+value avoids having to define a canonical CR encoding that both sides must agree on forever.

@@ -60,11 +60,16 @@ func TestOlderDigestSurvivesRestart(t *testing.T) {
 	obj := composition("durable", urlLayer("core", first.url, first.digest, "/core"))
 	blobs := store.NewMemory() // survives the restart, as a PVC or S3 bucket would
 
+	// Each build carries its own tag, as the spec-hash pattern produces: a changed spec is a
+	// changed tag, so the old one has to keep resolving on its own rather than being superseded.
+	obj.Spec.Publish.Tags = []string{"sOLD"}
+
 	r1, _ := restart(t, blobs, obj)
 	older := build(t, r1, obj, "first build")
 
 	// A newer build supersedes it, so the older one is history rather than current.
 	obj.Spec.Layers[0] = urlLayer("core", second.url, second.digest, "/core")
+	obj.Spec.Publish.Tags = []string{"sNEW"}
 	newer := build(t, r1, obj, "second build")
 	if newer.Digest == older.Digest {
 		t.Fatal("the two builds are identical; the test proves nothing")
@@ -81,10 +86,9 @@ func TestOlderDigestSurvivesRestart(t *testing.T) {
 		t.Fatal("an older build's DIGEST reference does not resolve after a restart; " +
 			"a pod pinned to it by image automation could not start")
 	}
-
-	oldTag := "main-" + strings.TrimPrefix(older.Digest, "sha256:")[:12]
-	if !resolves(t, host+"/durable:"+oldTag) {
-		t.Fatal("an older content tag does not resolve after a restart")
+	if !resolves(t, host+"/durable:sOLD") {
+		t.Fatal("an older build's TAG does not resolve after a restart; " +
+			"rolling back a commit to a previous spec-hash tag would not start")
 	}
 }
 
@@ -131,9 +135,9 @@ func TestReplayToleratesAMissingManifest(t *testing.T) {
 
 	// History references a build whose manifest was never stored.
 	obj.Status.History = []ociv1alpha1.BuildRecord{{
-		ContentTag: "main-deadbeefdead",
-		Digest:     "sha256:" + strings.Repeat("d", 64),
-		Blobs:      []string{"sha256:" + strings.Repeat("e", 64)},
+		Tags:   []string{"main"},
+		Digest: "sha256:" + strings.Repeat("d", 64),
+		Blobs:  []string{"sha256:" + strings.Repeat("e", 64)},
 	}}
 
 	r, _ := restart(t, blobs, obj)
@@ -148,7 +152,7 @@ func TestPushModeDoesNotPersistManifests(t *testing.T) {
 	blobs := store.NewMemory()
 	obj := composition("external")
 	obj.Spec.Publish = nil
-	obj.Spec.Push = &ociv1alpha1.Push{Repository: "registry.example.com/external", Tag: "v1"}
+	obj.Spec.Push = &ociv1alpha1.Push{Repository: "registry.example.com/external", Tags: []string{"v1"}}
 
 	r, _ := restart(t, blobs, obj)
 	r.replayHistory(t.Context(), obj)

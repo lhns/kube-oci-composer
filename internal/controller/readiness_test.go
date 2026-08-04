@@ -63,7 +63,7 @@ func TestPushModeDoesNotGateReadiness(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("external", urlLayer("core", url, digest, "/core"))
 	obj.Spec.Publish = nil
-	obj.Spec.Push = &ociv1alpha1.Push{Repository: "registry.example.com/external", Tag: "v1"}
+	obj.Spec.Push = &ociv1alpha1.Push{Repository: "registry.example.com/external", Tags: []string{"v1"}}
 	r, _ := servingReconciler(t, obj)
 	r.Readiness = &Readiness{Client: r.Client}
 

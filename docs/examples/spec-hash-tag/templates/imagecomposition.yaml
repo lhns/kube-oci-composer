@@ -1,0 +1,19 @@
+apiVersion: oci.lhns.de/v1alpha1
+kind: ImageComposition
+metadata:
+  name: {{ .Values.repository }}
+spec:
+  # The build, rendered from the same partial that was hashed to produce the tag below.
+  {{- include "spec-hash-tag.build" . | nindent 2 }}
+  publish:
+    name: {{ .Values.repository }}
+    # The tag the consuming workload names. Not part of the hashed partial, which is what keeps
+    # this from being circular.
+    tags:
+      - {{ include "spec-hash-tag.tag" . }}
+    # Left at its default of true. With a spec-hash tag that is not merely safe, it is the point:
+    # if this tag ever resolved to different content, the spec that produced it would have had to
+    # change, and then the tag would have changed too. So a conflict here means something is
+    # wrong — an unpinned input, or two specs colliding — and failing loudly is correct.
+    # immutable: true
+    history: {{ .Values.history }}

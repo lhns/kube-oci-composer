@@ -2,8 +2,22 @@
 
 ## Status
 
-Accepted. The permanence claim below is amended by [0011](0011-content-tags-expire.md) and
-[0013](0013-persist-manifests.md) — read those before relying on it.
+Accepted, and **narrowed by [0017](0017-updating-the-consumed-digest.md)**, which should be read
+first. The title overstates the rule: what is actually forbidden is referencing a **mutable** tag.
+Every objection below is about a tag whose *meaning changes*, and a spec-hash tag cannot change
+meaning without the spec changing — at which point the tag changes too. So a workload may reference
+such a tag, and `publish.immutable` (default true) enforces the property the argument depends on.
+
+Two mechanisms described below no longer exist:
+
+- **The moving pointer is no longer the default.** `publish.tags` is an optional list with no
+  default; omitting it publishes by digest alone.
+- **The auto-generated `<tag>-<digest[:12]>` content tag is gone** (0017). It existed only because
+  the tag was a moving pointer and nothing else offered an immutable handle. A spec-hash tag is
+  one, and the digest always was.
+
+The permanence claim is also amended by [0011](0011-content-tags-expire.md) and
+[0013](0013-persist-manifests.md).
 
 ## Context
 

@@ -27,7 +27,7 @@ spec:
       to: /s3
   publish:
     name: kafka-tiered-storage
-    tag: main
+    tags: [s1a2b3c4d5e6f7890]
 ```
 
 Mount the result as an image volume:
@@ -36,27 +36,44 @@ Mount the result as an image volume:
 volumes:
   - name: plugins
     image:
-      reference: oci.example.com/kafka-tiered-storage:main@sha256:abcd…
+      reference: oci.example.com/kafka-tiered-storage:s1a2b3c4d5e6f7890
       pullPolicy: IfNotPresent
 ```
 
-## Read this first: reference digests, never tags
+## Read this first: how a workload names the artifact
 
-**A workload must never reference the moving tag.** Every build publishes two references:
+A Pod spec cannot read another object's status, so the reference has to be a literal string in git
+and something has to keep it right. **The answer here is to let whatever templates the
+`ImageComposition` choose the tag, by hashing the build:**
 
-- an **immutable content tag**, `<tag>-<digest[:12]>`, never reused for different content;
-- a **moving pointer**, `spec.publish.tag`, repointed at the newest build — for automation to
-  watch, never for a workload to name.
+```
+{{- $spec := include "kafka.icspec" . }}      {{/* base + layers + config ONLY */}}
+{{- $tag  := printf "s%s" (sha256sum $spec | trunc 16) }}
 
-A mutable tag plus `pullPolicy: IfNotPresent` means nodes keep stale bytes and you cannot tell
-which pod is running which content. That is the one mistake here that fails silently, which is why
-it is the first thing in this README.
+# ImageComposition   publish: {name: kafka-tiered-storage, tags: [{{ $tag }}]}
+# Deployment         image:   oci.example.com/kafka-tiered-storage:{{ $tag }}
+```
 
-With Flux, `image-reflector` resolves the pointer and `image-automation` writes the digest into
-git behind an `$imagepolicy` marker, so the digest is committed and reviewable. Without it, pin
-the content tag by hand — correct, just manual, and bounded by retention (see below).
+Both sides derive the tag from one source in one render, so nothing observes anything at runtime —
+no extra controllers, no git write-back, no status reading, no lag. Change a layer and both move
+together in one commit; the pod template changes, so a rollout happens by itself.
 
-Full reasoning: [ADR 0010](docs/adr/0010-workloads-reference-digests.md).
+This is safe **because assembly is deterministic**: the output digest is a pure function of
+digest-pinned inputs, so a hash of those inputs identifies the output as precisely as the digest
+does. A spec-hash tag cannot change meaning without the spec changing — which is what makes
+referencing a tag acceptable here, and `pullPolicy: IfNotPresent` correct alongside it.
+
+**`publish.immutable` defaults to true** and enforces exactly that: the controller will not move a
+tag to different content, it fails the build instead. Republishing identical content is always a
+no-op, so a steady reconcile loop never trips it. Set it false for a deliberately moving pointer
+such as `main`.
+
+**`publish.tags` is optional.** Omit it and the artifact is published by digest alone, which is all
+a workload pinned by Flux image-automation needs.
+
+Worked example: [`docs/examples/spec-hash-tag`](docs/examples/spec-hash-tag/README.md).
+Full reasoning and the alternatives: [ADR 0017](docs/adr/0017-updating-the-consumed-digest.md),
+[ADR 0010](docs/adr/0010-workloads-reference-digests.md).
 
 ## What it does not do
 

@@ -5,6 +5,14 @@
 Accepted. Amends [0010](0010-workloads-reference-digests.md), which described content tags as
 permanent.
 
+**The auto-generated content tag itself no longer exists** — [0017](0017-updating-the-consumed-digest.md)
+removed it in favour of consumer-chosen spec-hash tags. Everything here about *why* collection is
+risky and how it is gated stands unchanged; only the name of what expires has moved. `status.history`
+now records a list of tags per build rather than one content tag, and a build may have none at all.
+
+The concern in the Context below is if anything sharper now: a spec-hash tag is what a rolled-back
+commit names, so retention is what decides how far back a rollback can go.
+
 ## Context
 
 Every build adds an immutable content tag and its layer blobs; every fetched layer source stays in

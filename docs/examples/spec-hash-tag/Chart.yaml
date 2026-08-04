@@ -1,0 +1,8 @@
+apiVersion: v2
+name: spec-hash-tag
+description: |
+  How a consumer connects a composed artifact to the workload that uses it, without image
+  automation, git write-back or reading status. See README.md in this directory.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

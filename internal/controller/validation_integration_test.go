@@ -9,6 +9,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 )
@@ -54,7 +56,7 @@ func fetchLayer(name string) ociv1alpha1.Layer {
 func TestIntegrationValidSpecIsAccepted(t *testing.T) {
 	if err := apply(t, "valid", ociv1alpha1.ImageCompositionSpec{
 		Layers:  []ociv1alpha1.Layer{fetchLayer("core")},
-		Publish: &ociv1alpha1.Publish{Name: "valid", Tag: "main"},
+		Publish: &ociv1alpha1.Publish{Name: "valid", Tags: []string{"main"}},
 	}); err != nil {
 		t.Fatalf("a valid spec was rejected: %v", err)
 	}
@@ -199,7 +201,7 @@ func TestIntegrationBaseWithInheritIsAccepted(t *testing.T) {
 			ExposedPorts: []string{"9092/tcp"},
 			StopSignal:   "SIGTERM",
 		},
-		Publish: &ociv1alpha1.Publish{Name: "runnable", Tag: "main"},
+		Publish: &ociv1alpha1.Publish{Name: "runnable", Tags: []string{"main"}},
 	}); err != nil {
 		t.Fatalf("the runnable-image shape was rejected: %v", err)
 	}
@@ -210,8 +212,8 @@ func TestIntegrationBaseWithInheritIsAccepted(t *testing.T) {
 func TestIntegrationPushAndPublishAreMutuallyExclusive(t *testing.T) {
 	if err := apply(t, "both-targets", ociv1alpha1.ImageCompositionSpec{
 		Layers:  []ociv1alpha1.Layer{fetchLayer("core")},
-		Publish: &ociv1alpha1.Publish{Name: "x", Tag: "main"},
-		Push:    &ociv1alpha1.Push{Repository: "ghcr.io/example/x", Tag: "main"},
+		Publish: &ociv1alpha1.Publish{Name: "x", Tags: []string{"main"}},
+		Push:    &ociv1alpha1.Push{Repository: "ghcr.io/example/x", Tags: []string{"main"}},
 	}); err == nil {
 		t.Fatal("both push and publish were accepted")
 	}
@@ -221,7 +223,7 @@ func TestIntegrationPushAndPublishAreMutuallyExclusive(t *testing.T) {
 // accident than a deliberate empty artifact.
 func TestIntegrationEmptyLayersIsRejected(t *testing.T) {
 	if err := apply(t, "no-layers", ociv1alpha1.ImageCompositionSpec{
-		Publish: &ociv1alpha1.Publish{Name: "x", Tag: "main"},
+		Publish: &ociv1alpha1.Publish{Name: "x", Tags: []string{"main"}},
 	}); err == nil {
 		t.Fatal("an ImageComposition with no layers was accepted")
 	}
@@ -301,7 +303,50 @@ func TestIntegrationDefaultsAreApplied(t *testing.T) {
 	if obj.Spec.Layers[0].Fetch.Unpack != ociv1alpha1.UnpackNone {
 		t.Errorf("unpack defaulted to %q, want none", obj.Spec.Layers[0].Fetch.Unpack)
 	}
-	if obj.Spec.Publish.Tag != "latest" {
-		t.Errorf("publish tag defaulted to %q, want latest", obj.Spec.Publish.Tag)
+	// No tags by default: publishing by digest alone is the safe floor, and inventing a "latest"
+	// nobody asked for would make an unreferenced mutable tag appear on every object.
+	if len(obj.Spec.Publish.Tags) != 0 {
+		t.Errorf("publish tags defaulted to %v, want none", obj.Spec.Publish.Tags)
+	}
+	// ...but immutability defaults ON, so a tag cannot be silently remeaned by accident.
+	if !obj.Spec.Publish.TagsAreImmutable() {
+		t.Error("publish.immutable defaulted to false, want true")
+	}
+}
+
+// TestIntegrationImmutableFalseSurvivesTheRoundTrip — immutable is a *bool precisely so that an
+// explicit false is not swallowed. A plain bool with omitempty would serialise false as absent,
+// the API server would apply the default of true, and a deliberately moving tag would start
+// failing its own builds. Exactly the bug this project already hit once with interval.
+func TestIntegrationImmutableFalseSurvivesTheRoundTrip(t *testing.T) {
+	obj := &ociv1alpha1.ImageComposition{
+		ObjectMeta: metav1.ObjectMeta{Name: "moving-pointer", Namespace: "default"},
+		Spec: ociv1alpha1.ImageCompositionSpec{
+			Layers: []ociv1alpha1.Layer{{
+				Name:  "core",
+				Fetch: &ociv1alpha1.FetchSource{URL: "https://example.com/a.tgz", Digest: validDigest},
+				To:    "/x",
+			}},
+			Publish: &ociv1alpha1.Publish{
+				Name:      "moving-pointer",
+				Tags:      []string{"main"},
+				Immutable: ptr.To(false),
+			},
+		},
+	}
+	if err := k8s.Create(integrationCtx(t), obj); err != nil {
+		t.Fatalf("creating: %v", err)
+	}
+	t.Cleanup(func() { _ = k8s.Delete(integrationCtx(t), obj) })
+
+	fetched := &ociv1alpha1.ImageComposition{}
+	if err := k8s.Get(integrationCtx(t), client.ObjectKeyFromObject(obj), fetched); err != nil {
+		t.Fatalf("re-reading: %v", err)
+	}
+	if fetched.Spec.Publish.Immutable == nil {
+		t.Fatal("explicit immutable: false was dropped on the wire and defaulted back to true")
+	}
+	if fetched.Spec.Publish.TagsAreImmutable() {
+		t.Error("immutable resolved to true despite being set false")
 	}
 }

@@ -116,7 +116,7 @@ spec:
       to: /plugins
   publish:
     name: e2e-artifact
-    tag: main
+    tags: [main]
 `)
 
 	eventually(t, "the ImageComposition to become Ready", func() error {
@@ -237,7 +237,13 @@ spec:
       to: /config
   publish:
     name: rebuild
-    tag: main
+    tags: [main]
+    # This test changes a ConfigMap and expects the SAME tag to follow the new content, which is
+    # a moving pointer by definition — so immutability has to be off. It is also the case ADR
+    # 0017 warns about: a configMap layer's content can change while the spec does not, so a
+    # spec-hash tag would not move and, left immutable, the build would fail here rather than
+    # silently republish. That is the intended failure, and opting out is the intended escape.
+    immutable: false
 `)
 
 	digestOf := func() string {

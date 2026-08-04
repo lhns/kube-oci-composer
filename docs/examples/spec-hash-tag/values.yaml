@@ -1,0 +1,22 @@
+# The serving endpoint workloads pull from. In serving mode this is the controller's Service,
+# i.e. whatever --serving-host was set to.
+registry: oci.example.com
+
+repository: kafka-tiered-storage
+
+# Everything below determines the OUTPUT, and therefore the tag. Changing any of it changes both
+# the ImageComposition and the workload's image reference, together, in one commit.
+build:
+  # No base: this is a bundle of files, mounted with spec.volumes[].image into a container that
+  # keeps its upstream image. See the composer README for the runnable-image variant.
+  layers:
+    - name: tiered-storage
+      fetch:
+        url: https://github.com/Aiven-Open/tiered-storage-for-apache-kafka/releases/download/v1.0.0/core-1.0.0.tgz
+        # Pinned by digest, which is what makes the output a pure function of this file.
+        digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+        unpack: tar.gz
+      to: /plugins/tiered-storage
+
+# Not part of the hash: changing where it is published does not change what was built.
+history: 10

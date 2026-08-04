@@ -214,7 +214,7 @@ type buildResult struct {
 
 // buildRecord captures the blobs a build is composed of, so garbage collection can tell what is
 // still live without inferring it from what happens to be in storage.
-func buildRecord(img v1.Image, contentTag string, digest v1.Hash) (*ociv1alpha1.BuildRecord, error) {
+func buildRecord(img v1.Image, tags []string, digest v1.Hash) (*ociv1alpha1.BuildRecord, error) {
 	cfg, err := img.ConfigName()
 	if err != nil {
 		return nil, fmt.Errorf("config digest: %w", err)
@@ -236,11 +236,78 @@ func buildRecord(img v1.Image, contentTag string, digest v1.Hash) (*ociv1alpha1.
 
 	now := metav1.Now()
 	return &ociv1alpha1.BuildRecord{
-		ContentTag: contentTag,
-		Digest:     digest.String(),
-		Blobs:      blobs,
-		Time:       &now,
+		Tags:   append([]string(nil), tags...),
+		Digest: digest.String(),
+		Blobs:  blobs,
+		Time:   &now,
 	}, nil
+}
+
+// publishedState is what the registry currently holds for this target: what each tag resolves
+// to, and whether the digest recorded in status is still present.
+//
+// Gathered in one place because two separate decisions depend on it — whether there is anything
+// to do, and whether doing it would remean a tag — and both must agree about what is out there.
+type publishedState struct {
+	// tags maps tag -> the digest it resolves to. Absent means the tag does not exist.
+	tags map[string]string
+	// wanted is how many tags were asked for, so a missing one is distinguishable from a
+	// wrong one.
+	wanted int
+	// digest is the recorded digest, present iff it still resolves.
+	digest string
+}
+
+// matches reports whether the given digest is fully published: present by digest, and every
+// requested tag already pointing at it. With no tags that is just "the content is there".
+func (p publishedState) matches(digest string) bool {
+	if digest == "" || p.digest != digest {
+		return false
+	}
+	for _, cur := range p.tags {
+		if cur != digest {
+			return false
+		}
+	}
+	return len(p.tags) == p.wanted
+}
+
+func (r *ImageCompositionReconciler) resolvePublished(
+	tgt target, prev *ociv1alpha1.ArtifactStatus, refOpts []name.Option, opts []remote.Option,
+) (publishedState, error) {
+	state := publishedState{tags: make(map[string]string, len(tgt.tags)), wanted: len(tgt.tags)}
+
+	for _, tag := range tgt.tags {
+		ref, err := name.ParseReference(fmt.Sprintf("%s:%s", tgt.writeRepo, tag), refOpts...)
+		if err != nil {
+			return publishedState{}, terminal("invalid reference %s:%s: %v", tgt.writeRepo, tag, err)
+		}
+		// A HEAD failure is not an error: the usual cause is that the tag does not exist yet.
+		if desc, err := remote.Head(ref, opts...); err == nil {
+			state.tags[tag] = desc.Digest.String()
+		}
+	}
+
+	// The digest has to be checked separately rather than inferred from the tags, because a
+	// build with no tags has nothing else to go on — and because a tag resolving correctly does
+	// not prove the digest reference itself survived a storage wipe.
+	if prev != nil && prev.Digest != "" {
+		ref, err := name.ParseReference(fmt.Sprintf("%s@%s", tgt.writeRepo, prev.Digest), refOpts...)
+		if err == nil {
+			if _, err := remote.Head(ref, opts...); err == nil {
+				state.digest = prev.Digest
+			}
+		}
+	}
+	return state, nil
+}
+
+// tagSuffix renders tags for an event message, and nothing at all when there are none.
+func tagSuffix(tags []string) string {
+	if len(tags) == 0 {
+		return ""
+	}
+	return " as " + strings.Join(tags, ", ")
 }
 
 // reconcileArtifact does the work and returns what is published.
@@ -286,27 +353,26 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 		refOpts = append(refOpts, name.Insecure)
 	}
 
-	movingRef, err := name.ParseReference(fmt.Sprintf("%s:%s", tgt.writeRepo, tgt.tag), refOpts...)
-	if err != nil {
-		return buildResult{}, terminal("invalid reference %s:%s: %v", tgt.writeRepo, tgt.tag, err)
-	}
-
 	// Restore previously published builds before checking convergence, so that after a restart
-	// the moving tag resolves from replayed state rather than looking absent and forcing a
+	// the references resolve from replayed state rather than looking absent and forcing a
 	// rebuild of something already in the store.
 	r.replayHistory(ctx, obj)
 
-	// A HEAD failure is not an error here — the ordinary cause is that the tag does not exist,
-	// or that the serving store was emptied by a restart.
-	existing, headErr := remote.Head(movingRef, opts...)
+	// What each tag currently resolves to, plus whether the previously recorded digest is still
+	// present at all. A HEAD failure is not an error: the ordinary cause is that the reference
+	// does not exist yet, or that the serving store was emptied by a restart.
+	published, err := r.resolvePublished(tgt, obj.Status.Artifact, refOpts, opts)
+	if err != nil {
+		return buildResult{}, err
+	}
 
-	// The cheap path. Same inputs, and what is published is still exactly what those inputs
-	// produced last time, so there is nothing to do. This is what makes reconciling on an
-	// interval nearly free: without it, the output digest could only be learned by downloading
-	// every layer and assembling them, every hour, forever.
+	// The cheap path. Same inputs, and everything those inputs produced last time is still
+	// published under every name it should be, so there is nothing to do. This is what makes
+	// reconciling on an interval nearly free: without it, the output digest could only be
+	// learned by downloading every layer and assembling them, every hour, forever.
 	if prev := obj.Status.Artifact; prev != nil &&
 		obj.Status.InputHash == inputHash &&
-		headErr == nil && existing.Digest.String() == prev.Digest {
+		published.matches(prev.Digest) {
 		return buildResult{Artifact: prev.DeepCopy(), InputHash: inputHash}, nil
 	}
 
@@ -351,36 +417,49 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 		return buildResult{}, fmt.Errorf("computing digest: %w", err)
 	}
 
-	contentTag := fmt.Sprintf("%s-%s", tgt.tag, strings.TrimPrefix(digest.String(), "sha256:")[:12])
-
 	// Second convergence check, now against the real output digest. The input hash can differ
 	// while the output does not — a cosmetic spec change, or a controller that lost its recorded
 	// hash — and there is no reason to republish identical bytes.
-	if headErr == nil && existing.Digest == digest {
-		return buildResult{Artifact: artifactStatus(tgt, contentTag, digest), InputHash: inputHash}, nil
+	//
+	// This runs BEFORE the immutability guard, and the order is load-bearing: republishing the
+	// same content under the same tag has to stay a no-op, or a steady reconcile loop would fail
+	// every time round with immutable tags.
+	if published.matches(digest.String()) {
+		return buildResult{Artifact: artifactStatus(tgt, digest), InputHash: inputHash}, nil
 	}
 
-	if obj.Spec.Push != nil && obj.Spec.Push.Immutable && headErr == nil {
-		// Opt-in guard for people using the tag as a version rather than a pointer. Terminal,
-		// because silently changing what a tag means is the failure mode that leaves nodes
-		// running different bytes under the same name. Checked before anything is written.
-		return buildResult{}, terminal(
-			"tag %s already resolves to %s but this spec produces %s; bump the tag or unset immutable",
-			tgt.tag, existing.Digest, digest)
+	if tgt.immutable {
+		// Refuse to change what a tag means. Terminal, because that is the failure mode which
+		// leaves nodes running different bytes under one name, and no amount of retrying fixes
+		// it. Checked before anything is written, so a partial rename cannot happen.
+		for _, tag := range tgt.tags {
+			if cur, ok := published.tags[tag]; ok && cur != digest.String() {
+				return buildResult{}, terminal(
+					"tag %s already resolves to %s but this spec produces %s; change the tag, or set immutable: false if it is meant to move",
+					tag, cur, digest)
+			}
+		}
 	}
 
-	// The immutable content tag is written first and never reused, so the exact bytes stay
-	// addressable even after the pointer moves on.
-	contentRef, err := name.ParseReference(fmt.Sprintf("%s:%s", tgt.writeRepo, contentTag), refOpts...)
+	// The digest reference first. It is the one thing that is always correct, it is what image
+	// automation pins, and writing it before any tag means a failure part-way through leaves the
+	// content addressable rather than a tag pointing at nothing.
+	digestRef, err := name.ParseReference(fmt.Sprintf("%s@%s", tgt.writeRepo, digest), refOpts...)
 	if err != nil {
-		return buildResult{}, terminal("invalid reference %s:%s: %v", tgt.writeRepo, contentTag, err)
+		return buildResult{}, terminal("invalid reference %s@%s: %v", tgt.writeRepo, digest, err)
 	}
-	if err := remote.Write(contentRef, img, opts...); err != nil {
-		return buildResult{}, fmt.Errorf("publishing %s: %w", contentRef, err)
+	if err := remote.Write(digestRef, img, opts...); err != nil {
+		return buildResult{}, fmt.Errorf("publishing %s: %w", digestRef, err)
 	}
 
-	if err := remote.Write(movingRef, img, opts...); err != nil {
-		return buildResult{}, fmt.Errorf("publishing %s: %w", movingRef, err)
+	for _, tag := range tgt.tags {
+		ref, err := name.ParseReference(fmt.Sprintf("%s:%s", tgt.writeRepo, tag), refOpts...)
+		if err != nil {
+			return buildResult{}, terminal("invalid reference %s:%s: %v", tgt.writeRepo, tag, err)
+		}
+		if err := remote.Write(ref, img, opts...); err != nil {
+			return buildResult{}, fmt.Errorf("publishing %s: %w", ref, err)
+		}
 	}
 
 	// Record the manifest so this build can be replayed after a restart. Not fatal: the artifact
@@ -395,9 +474,9 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	}
 
 	r.event(obj, corev1.EventTypeNormal, ociv1alpha1.ReasonSucceeded,
-		fmt.Sprintf("Published %s (%s)", contentRef, digest))
+		fmt.Sprintf("Published %s@%s%s", tgt.pullRepo, digest, tagSuffix(tgt.tags)))
 
-	record, err := buildRecord(img, contentTag, digest)
+	record, err := buildRecord(img, tgt.tags, digest)
 	if err != nil {
 		// The artifact is published and usable; only the retention record is missing. Failing
 		// here would leave storage holding blobs that nothing records as live, which is worse
@@ -406,7 +485,7 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	}
 
 	return buildResult{
-		Artifact:  artifactStatus(tgt, contentTag, digest),
+		Artifact:  artifactStatus(tgt, digest),
 		InputHash: inputHash,
 		Record:    record,
 	}, nil
@@ -483,8 +562,10 @@ type target struct {
 	writeRepo string
 	// pullRepo is what a workload references. Equal to writeRepo in push mode.
 	pullRepo string
-	// tag is the moving pointer.
-	tag string
+	// tags are the tags to publish under, in order. Empty means publish by digest alone.
+	tags []string
+	// immutable refuses to remean an existing tag rather than moving it.
+	immutable bool
 	// insecure allows plaintext HTTP, true only for the loopback endpoint.
 	insecure bool
 }
@@ -496,36 +577,46 @@ func (r *ImageCompositionReconciler) target(obj *ociv1alpha1.ImageComposition) (
 		return target{
 			writeRepo: p.Repository,
 			pullRepo:  p.Repository,
-			tag:       orDefault(p.Tag, "latest"),
+			tags:      p.Tags,
+			immutable: p.TagsAreImmutable(),
 		}, nil
 	}
 	if r.Server == nil {
 		return target{}, terminal("spec.push is unset but no serving endpoint is configured")
 	}
 	path := publishName(obj)
-	tag := "latest"
-	if obj.Spec.Publish != nil {
-		tag = orDefault(obj.Spec.Publish.Tag, "latest")
-	}
 	return target{
 		writeRepo: fmt.Sprintf("127.0.0.1%s/%s", r.Server.Addr, path),
 		pullRepo:  fmt.Sprintf("%s/%s", r.Server.Host, path),
-		tag:       tag,
+		tags:      obj.Spec.Publish.GetTags(),
+		immutable: obj.Spec.Publish.TagsAreImmutable(),
 		insecure:  true,
 	}, nil
 }
 
 // artifactStatus reports the PULL reference, never the loopback one the controller wrote to.
 // Getting that backwards would put an address into status that only the controller can reach.
-func artifactStatus(t target, contentTag string, digest v1.Hash) *ociv1alpha1.ArtifactStatus {
+//
+// The digest is the value that is always present and always correct, so it anchors every field
+// here; tags decorate it. A build with no tags reports a digest-only reference rather than
+// something with an empty tag in it.
+func artifactStatus(t target, digest v1.Hash) *ociv1alpha1.ArtifactStatus {
 	now := metav1.Now()
-	return &ociv1alpha1.ArtifactStatus{
+	st := &ociv1alpha1.ArtifactStatus{
 		Digest:         digest.String(),
-		Revision:       fmt.Sprintf("%s@%s", t.tag, digest),
-		Ref:            fmt.Sprintf("%s:%s@%s", t.pullRepo, t.tag, digest),
-		ContentTag:     fmt.Sprintf("%s:%s", t.pullRepo, contentTag),
+		Revision:       digest.String(),
+		Ref:            fmt.Sprintf("%s@%s", t.pullRepo, digest),
 		LastUpdateTime: &now,
 	}
+	if len(t.tags) > 0 {
+		st.Revision = fmt.Sprintf("%s@%s", t.tags[0], digest)
+		st.Ref = fmt.Sprintf("%s:%s@%s", t.pullRepo, t.tags[0], digest)
+		st.Tags = make([]string, 0, len(t.tags))
+		for _, tag := range t.tags {
+			st.Tags = append(st.Tags, fmt.Sprintf("%s:%s", t.pullRepo, tag))
+		}
+	}
+	return st
 }
 
 func publishName(obj *ociv1alpha1.ImageComposition) string {

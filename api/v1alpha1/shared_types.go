@@ -53,27 +53,73 @@ type Publish struct {
 	// +required
 	Name string `json:"name"`
 
-	// Tag is a MOVING POINTER, repointed at the newest build. It exists for image automation
-	// to watch and is NOT intended to be referenced by a workload.
+	// Tags are the tags this build is published under, in order. Optional, and defaulted to
+	// nothing: with no tags the artifact is published by digest alone, which is all a workload
+	// pinned by image automation needs.
 	//
-	// Every build also publishes an immutable content tag, "<tag>-<digest[:12]>", which is
-	// never reused for different content. Workloads should reference a digest — either written
-	// by Flux image-automation, or the immutable content tag pinned by hand. See ADR 0010.
-	// +kubebuilder:default="latest"
+	// The intended use is a SPEC-HASH tag — a hash of the build-determining part of this spec,
+	// computed by whatever templates it, written into both this field and the consuming
+	// workload's image reference. Because assembly is deterministic (ADR 0016), such a tag
+	// identifies the output as precisely as its digest does, and both sides derive it from one
+	// source with nothing observing anything at runtime. See ADR 0017.
+	//
+	// A list, so one build can carry several: a spec-hash tag alongside a readable pointer, or
+	// the same hash under more than one algorithm.
+	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:MaxLength=128
+	// +kubebuilder:validation:items:Pattern=`^[a-zA-Z0-9_][a-zA-Z0-9._-]*$`
 	// +optional
-	Tag string `json:"tag,omitempty"`
+	Tags []string `json:"tags,omitempty"`
+
+	// Immutable refuses to move a tag that already resolves to different content, failing the
+	// build instead of changing what the tag means. Defaults to TRUE, because silently
+	// remeaning a tag is what leaves nodes running different bytes under one name.
+	//
+	// Republishing IDENTICAL content is always a no-op regardless of this field, so a steady
+	// reconcile loop never trips it — only a real change of meaning does.
+	//
+	// Set false for a deliberately moving pointer, e.g. tags: [main] repointed at every build.
+	//
+	// A pointer because the zero value is meaningful: a plain bool with omitempty would drop an
+	// explicit `false` on the wire and let the default quietly win.
+	// +kubebuilder:default=true
+	// +optional
+	Immutable *bool `json:"immutable,omitempty"`
 
 	// History is how many past builds to keep before garbage collection reclaims their blobs.
 	// Defaults to the controller's --gc-keep-builds.
 	//
 	// Old builds are worth keeping for three independent reasons: reverting a commit must find
-	// the old digest still pullable; a pod pinned to a digest that gets rescheduled must be able
-	// to pull it again; and hand-pinning a content tag is the supported fallback when image
-	// automation is not in use. Layers are shared between builds, so a generous value costs far
-	// less than the count suggests. See ADR 0011.
+	// the old reference still pullable; a pod pinned to one that gets rescheduled must be able
+	// to pull it again; and with spec-hash tags a rollback names a tag from an earlier build,
+	// which only resolves while that build is retained. Layers are shared between builds, so a
+	// generous value costs far less than the count suggests. See ADR 0011.
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	History *int32 `json:"history,omitempty"`
+}
+
+// GetTags is nil-safe, because spec.publish may be omitted entirely while the controller still
+// has a serving endpoint to publish to.
+func (p *Publish) GetTags() []string {
+	if p == nil {
+		return nil
+	}
+	return p.Tags
+}
+
+// TagsAreImmutable resolves the optional Immutable field, which defaults to true.
+//
+// The API server applies that default, so nil should only be seen for objects written before
+// the field existed or for structs built directly in tests. Defaulting to the safe answer here
+// too means neither case can quietly end up with unprotected tags.
+func (p *Publish) TagsAreImmutable() bool {
+	return p == nil || p.Immutable == nil || *p.Immutable
+}
+
+// TagsAreImmutable is the Push equivalent, deliberately identical to Publish's.
+func (p *Push) TagsAreImmutable() bool {
+	return p == nil || p.Immutable == nil || *p.Immutable
 }
 
 // BuildRecord is one past build, retained so garbage collection knows what is still live.
@@ -83,9 +129,10 @@ type Publish struct {
 // deletes live data when the controller's view is incomplete. An explicit record also makes
 // retention visible in `kubectl get -o yaml`.
 type BuildRecord struct {
-	// ContentTag is the immutable tag this build was published under.
+	// Tags this build was published under, if any. Replayed after a restart so the references a
+	// workload names keep resolving; a build with no tags is still replayed by digest.
 	// +optional
-	ContentTag string `json:"contentTag,omitempty"`
+	Tags []string `json:"tags,omitempty"`
 
 	// Digest of the manifest.
 	// +optional
@@ -108,21 +155,23 @@ type Push struct {
 	// +required
 	Repository string `json:"repository"`
 
-	// Tag is the moving pointer, as described on Publish.Tag.
-	// +kubebuilder:default="latest"
+	// Tags are the tags to push, as described on Publish.Tags. Empty pushes by digest only.
+	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:MaxLength=128
+	// +kubebuilder:validation:items:Pattern=`^[a-zA-Z0-9_][a-zA-Z0-9._-]*$`
 	// +optional
-	Tag string `json:"tag,omitempty"`
+	Tags []string `json:"tags,omitempty"`
 
 	// SecretRef names a docker-registry Secret holding push credentials.
 	// +optional
 	SecretRef *LocalObjectReference `json:"secretRef,omitempty"`
 
-	// Immutable refuses to overwrite the moving pointer when it already resolves to different
-	// content. Defaults to false because the pointer is *meant* to move; set it true when the
-	// tag is a version that must never change meaning.
-	// +kubebuilder:default=false
+	// Immutable behaves exactly as on Publish, including the default of true. Identical on both
+	// so the field cannot mean different things depending on where it sits — and an external
+	// registry is where a silently remeaned tag does the most damage.
+	// +kubebuilder:default=true
 	// +optional
-	Immutable bool `json:"immutable,omitempty"`
+	Immutable *bool `json:"immutable,omitempty"`
 }
 
 // ArtifactStatus records what was produced. Deliberately identical in shape across every kind
@@ -132,7 +181,8 @@ type ArtifactStatus struct {
 	// +optional
 	Digest string `json:"digest,omitempty"`
 
-	// Revision is the human-facing "<tag>@<digest>".
+	// Revision is the human-facing "<tag>@<digest>", using the first tag. Just the digest when
+	// the build carries no tags.
 	// +optional
 	Revision string `json:"revision,omitempty"`
 
@@ -141,10 +191,11 @@ type ArtifactStatus struct {
 	// +optional
 	Ref string `json:"ref,omitempty"`
 
-	// ContentTag is the immutable "<tag>-<digest[:12]>" reference for this exact content. It is
-	// never reused, so pinning it by hand is safe when image automation is not in use.
+	// Tags this artifact is published under, fully qualified. Empty when published by digest
+	// only. What a workload should name is a tag chosen by whatever templates the spec, not a
+	// value read back from here — see ADR 0017.
 	// +optional
-	ContentTag string `json:"contentTag,omitempty"`
+	Tags []string `json:"tags,omitempty"`
 
 	// LastUpdateTime is when this artifact was last published.
 	// +optional

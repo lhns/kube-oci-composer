@@ -1,0 +1,62 @@
+---
+# Source: spec-hash-tag/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-tiered-storage-consumer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kafka-tiered-storage-consumer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kafka-tiered-storage-consumer
+    spec:
+      containers:
+        - name: kafka
+          # The container keeps its own upstream image; the composed artifact is mounted, not run.
+          image: quay.io/strimzi/kafka:0.47.0-kafka-4.0.0
+          volumeMounts:
+            - name: plugins
+              mountPath: /opt/kafka/plugins
+              readOnly: true
+      volumes:
+        - name: plugins
+          image:
+            # The same value as publish.tags above, from the same helper. Change a layer and both
+            # move in one commit; the pod template changes, so a rollout happens on its own.
+            #
+            # IfNotPresent is correct here for the same reason it is correct with a digest: this
+            # tag identifies content, so a cached copy cannot be stale. That only holds because
+            # immutable is on — without it the tag could be remeaned and this would keep old bytes.
+            reference: oci.example.com/kafka-tiered-storage:sc63f2fb1bc59a097
+            pullPolicy: IfNotPresent
+---
+# Source: spec-hash-tag/templates/imagecomposition.yaml
+apiVersion: oci.lhns.de/v1alpha1
+kind: ImageComposition
+metadata:
+  name: kafka-tiered-storage
+spec:
+  # The build, rendered from the same partial that was hashed to produce the tag below.
+  layers:
+  - fetch:
+      digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+      unpack: tar.gz
+      url: https://github.com/Aiven-Open/tiered-storage-for-apache-kafka/releases/download/v1.0.0/core-1.0.0.tgz
+    name: tiered-storage
+    to: /plugins/tiered-storage
+  publish:
+    name: kafka-tiered-storage
+    # The tag the consuming workload names. Not part of the hashed partial, which is what keeps
+    # this from being circular.
+    tags:
+      - sc63f2fb1bc59a097
+    # Left at its default of true. With a spec-hash tag that is not merely safe, it is the point:
+    # if this tag ever resolved to different content, the spec that produced it would have had to
+    # change, and then the tag would have changed too. So a conflict here means something is
+    # wrong — an unpinned input, or two specs colliding — and failing loudly is correct.
+    # immutable: true
+    history: 10

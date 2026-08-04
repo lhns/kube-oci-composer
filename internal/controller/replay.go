@@ -86,14 +86,15 @@ func (r *ImageCompositionReconciler) replayHistory(ctx context.Context, obj *oci
 		}
 
 		// The digest reference first: that is what a workload pinned by image automation uses,
-		// and it is the one that matters if the content tag write fails.
+		// and it is the one that matters if a tag write fails. It is also the only reference a
+		// build published without tags has.
 		if err := r.Server.PutManifest(ctx, repoPath, h.Digest, raw); err != nil {
 			logger.Error(err, "could not restore a manifest by digest", "digest", h.Digest)
 			continue
 		}
-		if h.ContentTag != "" {
-			if err := r.Server.PutManifest(ctx, repoPath, h.ContentTag, raw); err != nil {
-				logger.Error(err, "could not restore a content tag", "tag", h.ContentTag)
+		for _, tag := range h.Tags {
+			if err := r.Server.PutManifest(ctx, repoPath, tag, raw); err != nil {
+				logger.Error(err, "could not restore a tag", "tag", tag, "digest", h.Digest)
 			}
 		}
 		restored++

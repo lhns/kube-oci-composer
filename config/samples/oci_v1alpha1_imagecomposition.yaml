@@ -1,0 +1,27 @@
+# A minimal ImageComposition: a bundle of files with no base image, published by the controller's
+# own serving endpoint and mounted into a container with spec.volumes[].image.
+#
+# `tags` is written out here as a literal for readability. In practice it is generated — see
+# docs/examples/spec-hash-tag for the pattern that keeps this value and the consuming workload's
+# image reference in step without image automation.
+apiVersion: oci.lhns.de/v1alpha1
+kind: ImageComposition
+metadata:
+  name: kafka-tiered-storage
+spec:
+  layers:
+    - name: tiered-storage
+      fetch:
+        url: https://github.com/Aiven-Open/tiered-storage-for-apache-kafka/releases/download/v1.0.0/core-1.0.0.tgz
+        # Required, and the reason the output digest is a pure function of this file.
+        digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+        unpack: tar.gz
+      to: /plugins/tiered-storage
+  publish:
+    name: kafka-tiered-storage
+    # Optional. Omit it entirely to publish by digest alone, which is all a workload pinned by
+    # image automation needs.
+    tags:
+      - s0123456789abcdef
+    # immutable defaults to true: this tag will not be moved to different content, the build
+    # fails instead. Set it false only for a deliberately moving pointer such as `main`.

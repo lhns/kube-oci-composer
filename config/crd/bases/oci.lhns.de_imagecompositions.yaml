@@ -3,7 +3,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.19.0
+    controller-gen.kubebuilder.io/version: v0.16.5
   name: imagecompositions.oci.lhns.de
 spec:
   group: oci.lhns.de
@@ -338,28 +338,53 @@ spec:
                       Defaults to the controller's --gc-keep-builds.
 
                       Old builds are worth keeping for three independent reasons: reverting a commit must find
-                      the old digest still pullable; a pod pinned to a digest that gets rescheduled must be able
-                      to pull it again; and hand-pinning a content tag is the supported fallback when image
-                      automation is not in use. Layers are shared between builds, so a generous value costs far
-                      less than the count suggests. See ADR 0011.
+                      the old reference still pullable; a pod pinned to one that gets rescheduled must be able
+                      to pull it again; and with spec-hash tags a rollback names a tag from an earlier build,
+                      which only resolves while that build is retained. Layers are shared between builds, so a
+                      generous value costs far less than the count suggests. See ADR 0011.
                     format: int32
                     minimum: 1
                     type: integer
+                  immutable:
+                    default: true
+                    description: |-
+                      Immutable refuses to move a tag that already resolves to different content, failing the
+                      build instead of changing what the tag means. Defaults to TRUE, because silently
+                      remeaning a tag is what leaves nodes running different bytes under one name.
+
+                      Republishing IDENTICAL content is always a no-op regardless of this field, so a steady
+                      reconcile loop never trips it — only a real change of meaning does.
+
+                      Set false for a deliberately moving pointer, e.g. tags: [main] repointed at every build.
+
+                      A pointer because the zero value is meaningful: a plain bool with omitempty would drop an
+                      explicit `false` on the wire and let the default quietly win.
+                    type: boolean
                   name:
                     description: |-
                       Name is the repository path the artifact is served under, e.g. "kafka-tiered-storage"
                       results in <serving-host>/kafka-tiered-storage.
                     type: string
-                  tag:
-                    default: latest
+                  tags:
                     description: |-
-                      Tag is a MOVING POINTER, repointed at the newest build. It exists for image automation
-                      to watch and is NOT intended to be referenced by a workload.
+                      Tags are the tags this build is published under, in order. Optional, and defaulted to
+                      nothing: with no tags the artifact is published by digest alone, which is all a workload
+                      pinned by image automation needs.
 
-                      Every build also publishes an immutable content tag, "<tag>-<digest[:12]>", which is
-                      never reused for different content. Workloads should reference a digest — either written
-                      by Flux image-automation, or the immutable content tag pinned by hand. See ADR 0010.
-                    type: string
+                      The intended use is a SPEC-HASH tag — a hash of the build-determining part of this spec,
+                      computed by whatever templates it, written into both this field and the consuming
+                      workload's image reference. Because assembly is deterministic (ADR 0016), such a tag
+                      identifies the output as precisely as its digest does, and both sides derive it from one
+                      source with nothing observing anything at runtime. See ADR 0017.
+
+                      A list, so one build can carry several: a spec-hash tag alongside a readable pointer, or
+                      the same hash under more than one algorithm.
+                    items:
+                      maxLength: 128
+                      pattern: ^[a-zA-Z0-9_][a-zA-Z0-9._-]*$
+                      type: string
+                    maxItems: 32
+                    type: array
                 required:
                 - name
                 type: object
@@ -369,11 +394,11 @@ spec:
                   cluster, be consumed from outside it, or carry registry-native attestations.
                 properties:
                   immutable:
-                    default: false
+                    default: true
                     description: |-
-                      Immutable refuses to overwrite the moving pointer when it already resolves to different
-                      content. Defaults to false because the pointer is *meant* to move; set it true when the
-                      tag is a version that must never change meaning.
+                      Immutable behaves exactly as on Publish, including the default of true. Identical on both
+                      so the field cannot mean different things depending on where it sits — and an external
+                      registry is where a silently remeaned tag does the most damage.
                     type: boolean
                   repository:
                     description: Repository is the fully qualified target, e.g. "ghcr.io/example/artifact".
@@ -388,10 +413,15 @@ spec:
                     required:
                     - name
                     type: object
-                  tag:
-                    default: latest
-                    description: Tag is the moving pointer, as described on Publish.Tag.
-                    type: string
+                  tags:
+                    description: Tags are the tags to push, as described on Publish.Tags.
+                      Empty pushes by digest only.
+                    items:
+                      maxLength: 128
+                      pattern: ^[a-zA-Z0-9_][a-zA-Z0-9._-]*$
+                      type: string
+                    maxItems: 32
+                    type: array
                 required:
                 - repository
                 type: object
@@ -414,11 +444,6 @@ spec:
               artifact:
                 description: Artifact describes the published result.
                 properties:
-                  contentTag:
-                    description: |-
-                      ContentTag is the immutable "<tag>-<digest[:12]>" reference for this exact content. It is
-                      never reused, so pinning it by hand is safe when image automation is not in use.
-                    type: string
                   digest:
                     description: Digest of the published manifest, e.g. "sha256:...".
                       This is the value to pin.
@@ -433,8 +458,18 @@ spec:
                       Surfaced as a printer column so `kubectl get` shows the exact string to use.
                     type: string
                   revision:
-                    description: Revision is the human-facing "<tag>@<digest>".
+                    description: |-
+                      Revision is the human-facing "<tag>@<digest>", using the first tag. Just the digest when
+                      the build carries no tags.
                     type: string
+                  tags:
+                    description: |-
+                      Tags this artifact is published under, fully qualified. Empty when published by digest
+                      only. What a workload should name is a tag chosen by whatever templates the spec, not a
+                      value read back from here — see ADR 0017.
+                    items:
+                      type: string
+                    type: array
                 type: object
               conditions:
                 description: 'Conditions follow kstatus: Ready, Reconciling, Stalled.'
@@ -513,13 +548,16 @@ spec:
                       items:
                         type: string
                       type: array
-                    contentTag:
-                      description: ContentTag is the immutable tag this build was
-                        published under.
-                      type: string
                     digest:
                       description: Digest of the manifest.
                       type: string
+                    tags:
+                      description: |-
+                        Tags this build was published under, if any. Replayed after a restart so the references a
+                        workload names keep resolving; a build with no tags is still replayed by digest.
+                      items:
+                        type: string
+                      type: array
                     time:
                       description: Time the build was published.
                       format: date-time
