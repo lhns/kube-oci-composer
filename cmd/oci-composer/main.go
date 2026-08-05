@@ -292,8 +292,14 @@ func main() {
 	}
 
 	if err := (&controller.ImageCompositionReconciler{
-		Client:       mgr.GetClient(),
-		Scheme:       mgr.GetScheme(),
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		// Deprecated in favour of GetEventRecorder, which returns the NEW events API. That is a
+		// real migration rather than a rename: events.EventRecorder has no Event method, only
+		// Eventf(regarding, related, eventtype, reason, action, note, ...), so every call site
+		// and the FakeRecorder the tests rely on change with it. Worth doing deliberately rather
+		// than as a drive-by while repairing CI.
+		//nolint:staticcheck // SA1019: deliberate; see above.
 		Recorder:     mgr.GetEventRecorderFor("imagecomposition-controller"),
 		Server:       server,
 		Readiness:    readiness,

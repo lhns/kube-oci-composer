@@ -43,6 +43,10 @@ jobs:
           # exercises the same combination production does.
           node_image: kindest/node:v1.36.1
           cluster_name: kube-oci-composer-e2e
+          # kind-action creates the cluster, so up.sh's own `kind create` never runs here — the
+          # containerd config_path patch has to be applied through this input or the certs.d
+          # drop-in up.sh writes would be read by nothing.
+          config: test/e2e/kind-config.yaml
 
       - name: Record what the runtime actually is
         # Printed on success too. When image volumes silently do not mount, the container runtime

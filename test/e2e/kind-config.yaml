@@ -1,0 +1,22 @@
+# kind cluster for the e2e.
+#
+# The one thing this file exists for: telling containerd where the in-cluster registry actually is.
+#
+# Image volumes are pulled by the KUBELET, not by the pod that mounts them, and the kubelet
+# resolves registry hostnames with the NODE's resolver. A `*.svc.cluster.local` name therefore
+# cannot resolve, no matter that the Service exists — which is why the e2e sat in ErrImagePull the
+# first time image volumes actually worked here. Real deployments hit exactly this and solve it
+# exactly this way; see the certs.d drop-in in the k0s cluster that runs this operator.
+#
+# `config_path` has to be set when containerd STARTS, which is why it is here rather than applied
+# afterwards. The hosts.toml it points at is written by up.sh once the node exists — that part is
+# read per-pull, so it needs no restart.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+containerdConfigPatches:
+  # containerd 2.x. The old `registry.mirrors` form was removed in 2.0, so a mirror stanza here
+  # would be silently ignored rather than rejected — the failure would look like the registry
+  # being unreachable.
+  - |-
+    [plugins."io.containerd.cri.v1.images".registry]
+      config_path = "/etc/containerd/certs.d"
