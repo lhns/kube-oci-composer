@@ -159,22 +159,25 @@ spec:
           # Listed BEFORE asserting: a failing 'test -f' prints nothing, so without this a
           # failure arrives as an empty log saying only that the pod exited non-zero.
           echo "--- what actually mounted ---"
-          ls -laR /plugins || true
+          ls -laR /mnt || true
           echo "-----------------------------"
           set -e
-          test -f /plugins/first.properties
-          test -f /plugins/second.properties
-          grep -q 'level=INFO' /plugins/first.properties
-          grep -q 'retries=3' /plugins/second.properties
+          test -f /mnt/plugins/first.properties
+          test -f /mnt/plugins/second.properties
+          grep -q 'level=INFO' /mnt/plugins/first.properties
+          grep -q 'retries=3' /mnt/plugins/second.properties
           echo IMAGE_VOLUME_OK
       volumeMounts:
         - name: plugins
-          mountPath: /plugins
-          # subPath, because 'to: /plugins' above puts the files at /plugins/*.properties INSIDE
-          # the image. Mounting the image root at /plugins would nest them a second time, at
-          # /plugins/plugins/*.properties. That is the most common mistake with image volumes,
-          # so the e2e exercises the fix rather than side-stepping it with 'to: /'.
-          subPath: plugins
+          # The image ROOT is mounted here, so the assertions above are against
+          # /mnt + the layer's own 'to: /plugins' -- which is precisely what this test exists to
+          # pin down: that 'to:' places content at that path INSIDE the artifact.
+          #
+          # Deliberately not subPath. subPath would let the test assert /plugins directly, but it
+          # is a kubelet feature whose behaviour on image volumes is not uniform across versions
+          # (it works on 1.36; on kind's 1.33 here the mount simply did not appear), and this test
+          # is about the composer's output, not about subPath.
+          mountPath: /mnt
           readOnly: true
   volumes:
     - name: plugins
