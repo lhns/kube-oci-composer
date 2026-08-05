@@ -5,7 +5,10 @@ on:
     tags: ['v*']
 
 permissions:
-  contents: read
+  # write, not read: the last step creates a GitHub Release, which needs it. With `read` every
+  # other step succeeds — the image and chart are pushed — and only the release object fails,
+  # which looks like a broken release when the artifacts are in fact fine.
+  contents: write
   packages: write
   id-token: write
 
