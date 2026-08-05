@@ -378,6 +378,5 @@ type ImageCompositionList struct {
 	Items           []ImageComposition `json:"items"`
 }
 
-func init() {
-	SchemeBuilder.Register(&ImageComposition{}, &ImageCompositionList{})
-}
+// These types are registered by addKnownTypes in groupversion_info.go rather than an init() here,
+// because apimachinery's SchemeBuilder takes functions where controller-runtime's took objects.

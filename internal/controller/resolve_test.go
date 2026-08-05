@@ -149,10 +149,13 @@ func TestConfigMapContentChangesTheInputHash(t *testing.T) {
 		return oci.InputHash(inputs, oci.Config{})
 	}
 
-	if hashFor("level=INFO") == hashFor("level=DEBUG") {
+	// Bound to variables rather than compared inline: two identical calls in one expression read
+	// as a tautology to a linter, when the point is that separate invocations agree.
+	first, again := hashFor("level=INFO"), hashFor("level=INFO")
+	if first == hashFor("level=DEBUG") {
 		t.Fatal("changing ConfigMap content did not change the input hash")
 	}
-	if hashFor("level=INFO") != hashFor("level=INFO") {
+	if first != again {
 		t.Fatal("identical ConfigMap content produced different hashes")
 	}
 }

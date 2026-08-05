@@ -95,7 +95,10 @@ func TestStalledDoesNotRequeue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a terminal error must not be returned to the queue: %v", err)
 	}
-	if res.RequeueAfter != 0 || res.Requeue {
+	// An empty Result is the whole assertion: no requeue of any kind. Comparing the struct rather
+	// than named fields also keeps this honest as ctrl.Result evolves — Requeue is deprecated in
+	// favour of RequeueAfter, and checking either one alone would quietly stop covering the other.
+	if res != (ctrl.Result{}) {
 		t.Fatalf("stalled object requeued: %+v", res)
 	}
 
