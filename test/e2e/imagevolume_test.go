@@ -156,7 +156,7 @@ spec:
         - sh
         - -c
         - |
-          # Listed BEFORE asserting: `test -f` prints nothing when it fails, so without this a
+          # Listed BEFORE asserting: a failing 'test -f' prints nothing, so without this a
           # failure arrives as an empty log saying only that the pod exited non-zero.
           echo "--- what actually mounted ---"
           ls -laR /plugins || true
@@ -170,10 +170,10 @@ spec:
       volumeMounts:
         - name: plugins
           mountPath: /plugins
-          # subPath, because `to: /plugins` above puts the files at /plugins/*.properties INSIDE
+          # subPath, because 'to: /plugins' above puts the files at /plugins/*.properties INSIDE
           # the image. Mounting the image root at /plugins would nest them a second time, at
           # /plugins/plugins/*.properties. That is the most common mistake with image volumes,
-          # so the e2e exercises the fix rather than side-stepping it with `to: /`.
+          # so the e2e exercises the fix rather than side-stepping it with 'to: /'.
           subPath: plugins
           readOnly: true
   volumes:
