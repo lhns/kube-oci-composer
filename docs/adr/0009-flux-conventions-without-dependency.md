@@ -23,6 +23,21 @@ Implemented, and asserted by tests:
   a digest mismatch, an invalid spec — and is **not retried**; transient failures stay
   `Reconciling` and are returned so controller-runtime backs off. Getting this split right is most
   of what makes a controller feel Flux-like, and it is easy to get subtly wrong.
+
+  **The test for `Stalled` is narrow: editing THIS object's spec must be what fixes it.** That is
+  what makes not retrying safe — the resulting generation change is the wake-up. A failure fixed
+  by changing anything *else* (a Flux source, a Secret, a ConfigMap, the operator's own flags)
+  raises no event on this object, so stalling would wait for something that never arrives.
+
+  Those take a third path: `Reconciling` with reason `DependencyNotReady`, and a **short fixed
+  requeue** rather than exponential backoff — waiting on a dependency is a normal step in
+  converging a commit, not a failure to log and back off over. A composition applied in the same
+  commit as its `GitRepository` races with it, and the loser has to converge in seconds.
+
+  This was learned the hard way. A consumer applied four compositions and their `GitRepository`
+  sources in one commit; the composition that lost the race sat `Stalled` reporting *source not
+  found* while the `GitRepository` it named was `Ready` in the same namespace. Only deleting the
+  object cleared it.
 - **`reconcile.fluxcd.io/requestedAt`** plus `status.lastHandledReconcileAt`, so `flux reconcile`
   works out of the box.
 - **`spec.suspend`** halts reconciliation without deleting anything.

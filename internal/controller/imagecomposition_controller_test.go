@@ -420,7 +420,7 @@ func TestTagListingWorks(t *testing.T) {
 
 // TestServingModeWithoutServerIsTerminal — misconfiguration must say so plainly rather than
 // retry forever against an endpoint that does not exist.
-func TestServingModeWithoutServerIsTerminal(t *testing.T) {
+func TestServingModeWithoutServerIsPending(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("noserver", urlLayer("core", url, digest, "/core"))
 
@@ -432,8 +432,18 @@ func TestServingModeWithoutServerIsTerminal(t *testing.T) {
 	}
 
 	_, err := r.reconcileArtifact(context.Background(), obj)
+	if err == nil {
+		t.Fatal("expected an error with no serving endpoint and no spec.push")
+	}
+	// Pending, not terminal: giving the operator an endpoint means restarting it with different
+	// flags, which changes nothing about any ImageComposition. Stalling would leave every
+	// composition in the cluster wedged after the fix landed.
 	var te *terminalError
-	if err == nil || !errors.As(err, &te) {
-		t.Fatalf("expected a terminal error, got %v", err)
+	if errors.As(err, &te) {
+		t.Fatal("operator misconfiguration must not stall the object")
+	}
+	var pe *pendingError
+	if !errors.As(err, &pe) {
+		t.Fatalf("expected a pendingError, got %T: %v", err, err)
 	}
 }

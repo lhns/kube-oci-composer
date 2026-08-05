@@ -70,9 +70,10 @@ func (r *ImageCompositionReconciler) resolveInputs(ctx context.Context, obj *oci
 			if err != nil {
 				var nf *source.ErrNotFound
 				if errors.As(err, &nf) {
-					// Terminal: a missing ConfigMap that was not marked optional is a spec
-					// problem, and retrying will not create it.
-					return nil, terminal("layer %q: %s", l.Name, err)
+					// Creating the ConfigMap fixes this, not editing the layer, so it waits
+					// rather than stalls. ConfigMaps are watched, so the wait is usually over
+					// the moment one appears.
+					return nil, pending("layer %q: %s", l.Name, err)
 				}
 				return nil, fmt.Errorf("layer %q: %w", l.Name, err)
 			}
@@ -157,8 +158,11 @@ func (r *ImageCompositionReconciler) resolveFluxSource(ctx context.Context, obj 
 	if err != nil {
 		var nf *source.ErrNotFound
 		if errors.As(err, &nf) {
-			// Terminal: the reference names something that does not exist.
-			return source.FluxArtifact{}, terminal("source %s %s/%s not found", ref.Kind, ns, ref.Name)
+			// NOT terminal. Creating the source is what fixes this, and that does not bump
+			// this object's generation — so stalling would wait forever for an event that
+			// cannot come. Applying a composition and its GitRepository in one commit
+			// routinely lands here for a second.
+			return source.FluxArtifact{}, pending("source %s %s/%s not found yet", ref.Kind, ns, ref.Name)
 		}
 		// Everything else — including "no artifact yet" — is transient. source-controller may
 		// simply not have finished its first reconcile.

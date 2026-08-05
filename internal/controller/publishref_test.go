@@ -20,10 +20,10 @@ func TestTagFromRef(t *testing.T) {
 		// The reason this is hand-parsed. An untemplated placeholder must contribute NOTHING;
 		// name.ParseReference would turn it into index.docker.io/library/x:latest and we would
 		// publish a moving tag nobody asked for.
-		{name: "bare placeholder has no tag", ref: "freshrss-extensions", want: ""},
-		{name: "repo path but no tag", ref: "oci-composer.internal/freshrss-extensions", want: ""},
+		{name: "bare placeholder has no tag", ref: "plugin-bundle", want: ""},
+		{name: "repo path but no tag", ref: "oci-composer.internal/plugin-bundle", want: ""},
 
-		{name: "full reference", ref: "oci-composer.internal/freshrss-extensions:s1a2b3c4d", want: "s1a2b3c4d"},
+		{name: "full reference", ref: "oci-composer.internal/plugin-bundle:s1a2b3c4d", want: "s1a2b3c4d"},
 		{name: "host and repo are ignored", ref: "some.other.host/a/b/c:v1.2.3", want: "v1.2.3"},
 
 		// A colon that belongs to a port is not a tag.

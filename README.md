@@ -193,7 +193,7 @@ spec:
     - name: overlay
       sourceRef:
         kind: GitRepository
-        name: k0s-flux
+        name: platform-config
         namespace: flux-system
         subpath: overlays/kafka
       to: /etc/kafka

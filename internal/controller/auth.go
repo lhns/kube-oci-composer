@@ -124,14 +124,18 @@ func (r *ImageCompositionReconciler) pullOptions(ctx context.Context, namespace 
 	key := types.NamespacedName{Namespace: namespace, Name: ref.Name}
 	if err := r.Get(ctx, key, &secret); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, terminal("pull secret %s not found", key)
+			// Waits rather than stalls: the Secret may be on its way from SOPS, Reflector or
+			// a Kustomization applied moments later, and its creation raises no event here.
+			return nil, pending("pull secret %s not found yet", key)
 		}
 		return nil, fmt.Errorf("reading pull secret %s: %w", key, err)
 	}
 
 	kc, err := keychainFromSecret(&secret)
 	if err != nil {
-		return nil, terminal("pull secret %s: %v", key, err)
+		// The Secret exists but is malformed. Fixing it means editing the SECRET, which does
+		// not bump this generation — so this waits rather than stalls.
+		return nil, pending("pull secret %s is unusable: %v", key, err)
 	}
 	return []remote.Option{remote.WithAuthFromKeychain(kc)}, nil
 }

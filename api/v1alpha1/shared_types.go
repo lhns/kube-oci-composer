@@ -12,8 +12,13 @@ const (
 	// object is retried with backoff.
 	ReconcilingCondition = "Reconciling"
 	// StalledCondition signals a TERMINAL error that retrying cannot fix — an invalid spec, a
-	// digest mismatch, a refusal to overwrite immutable content. Anything that a human must
-	// change belongs here rather than in a hot retry loop.
+	// digest mismatch, a refusal to overwrite immutable content.
+	//
+	// The test for belonging here is narrow: editing THIS object's spec must be what fixes it.
+	// That is what makes stalling safe, because the resulting generation change is the event
+	// that wakes the controller back up. A failure fixed by changing anything else — a Secret,
+	// a Flux source, the operator's own configuration — must not stall, because no such event
+	// will ever arrive. See ReasonDependencyNotReady.
 	StalledCondition = "Stalled"
 )
 
@@ -28,6 +33,15 @@ const (
 	ReasonFetchFailed       = "FetchFailed"
 	ReasonPublishFailed     = "PublishFailed"
 	ReasonSuspended         = "Suspended"
+
+	// ReasonDependencyNotReady covers something the composition refers to that does not exist
+	// yet, or exists but cannot be used: a Flux source, a Secret, a non-optional ConfigMap, or
+	// a serving endpoint the operator was never given.
+	//
+	// Kept off Stalled deliberately — see StalledCondition. Applying a composition together
+	// with its GitRepository in one commit is enough to hit this: whichever loses the race
+	// would otherwise stay wedged forever while the thing it needs sits there Ready.
+	ReasonDependencyNotReady = "DependencyNotReady"
 )
 
 // Finalizer is set on objects so published artifacts can be cleaned up on delete.

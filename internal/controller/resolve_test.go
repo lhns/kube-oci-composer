@@ -186,15 +186,24 @@ func TestConfigMapKeyOrderDoesNotAffectTheDigest(t *testing.T) {
 	}
 }
 
-// TestMissingConfigMapIsTerminalUnlessOptional — retrying will not create it.
-func TestMissingConfigMapIsTerminal(t *testing.T) {
+// TestMissingConfigMapIsPending — a non-optional ConfigMap that is absent is waited for, not
+// stalled on. Creating the ConfigMap is the fix, and that bumps no generation here; ConfigMaps
+// are watched, so in practice the wait ends the moment one appears.
+func TestMissingConfigMapIsPending(t *testing.T) {
 	obj := composition("cm", configMapLayer("settings", "absent", false, "/config"))
 	r := reconcilerWith(t)
 
 	_, err := r.resolveInputs(context.Background(), obj, t.TempDir())
+	if err == nil {
+		t.Fatal("expected an error for a missing non-optional ConfigMap")
+	}
 	var te *terminalError
-	if err == nil || !asTerminalErr(err, &te) {
-		t.Fatalf("expected a terminal error, got %v", err)
+	if asTerminalErr(err, &te) {
+		t.Fatal("a missing ConfigMap must not be terminal; creating it bumps no generation here")
+	}
+	var pe *pendingError
+	if !errors.As(err, &pe) {
+		t.Fatalf("expected a pendingError, got %T: %v", err, err)
 	}
 }
 
@@ -247,12 +256,12 @@ func TestConfigMapKeyWithSeparatorIsRejected(t *testing.T) {
 // must not need one.
 func TestSourceRefDigestComesFromTheSource(t *testing.T) {
 	url, digest := tarball(t, map[string]string{"config/app.conf": "x"})
-	repo := gitRepository("k0s-flux", "flux-system", url, digest, "main@sha1:abcd")
+	repo := gitRepository("platform-config", "flux-system", url, digest, "main@sha1:abcd")
 
 	obj := composition("git", ociv1alpha1.Layer{
 		Name: "config",
 		SourceRef: &ociv1alpha1.SourceRefSource{
-			Kind: "GitRepository", Name: "k0s-flux", Namespace: "flux-system", Subpath: "config",
+			Kind: "GitRepository", Name: "platform-config", Namespace: "flux-system", Subpath: "config",
 		},
 		To: "/config",
 	})
@@ -294,8 +303,13 @@ func TestSourceRefDefaultsToTheObjectNamespace(t *testing.T) {
 	}
 }
 
-// TestMissingSourceIsTerminal — a reference to something that does not exist is a spec problem.
-func TestMissingSourceIsTerminal(t *testing.T) {
+// TestMissingSourceIsPendingNotTerminal — a composition and its GitRepository applied in ONE
+// commit race, and the loser used to stall permanently while the source it needed sat there
+// Ready. Applying both together is the normal case, so this must converge on its own.
+//
+// Stalling is only safe when editing this object's spec is the fix, because the generation change
+// is the wake-up. Creating the source raises no event here, so a stall here waits forever.
+func TestMissingSourceIsPendingNotTerminal(t *testing.T) {
 	obj := composition("git", ociv1alpha1.Layer{
 		Name:      "content",
 		SourceRef: &ociv1alpha1.SourceRefSource{Kind: "GitRepository", Name: "absent"},
@@ -304,9 +318,16 @@ func TestMissingSourceIsTerminal(t *testing.T) {
 	r := reconcilerWith(t)
 
 	_, err := r.resolveInputs(context.Background(), obj, t.TempDir())
+	if err == nil {
+		t.Fatal("expected an error for a source that does not exist")
+	}
 	var te *terminalError
-	if err == nil || !asTerminalErr(err, &te) {
-		t.Fatalf("expected a terminal error, got %v", err)
+	if asTerminalErr(err, &te) {
+		t.Fatal("a source that does not exist YET must not be terminal; creating it bumps no generation here")
+	}
+	var pe *pendingError
+	if !errors.As(err, &pe) {
+		t.Fatalf("expected a pendingError, got %T: %v", err, err)
 	}
 }
 

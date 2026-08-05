@@ -39,6 +39,10 @@ const ReconcileRequestAnnotation = "reconcile.fluxcd.io/requestedAt"
 // terminalError marks a failure that retrying cannot fix. It maps to Stalled rather than a
 // backoff loop: a wrong digest or an invalid spec needs a human, and hammering the API server
 // about it only hides the problem.
+//
+// The bar is narrow, and deliberately so: editing THIS object's spec must be what fixes it.
+// That is what makes stalling safe, because the generation change is the wake-up. If the fix
+// lives in another object, use pending instead.
 type terminalError struct{ err error }
 
 func (t *terminalError) Error() string { return t.err.Error() }
@@ -47,6 +51,31 @@ func (t *terminalError) Unwrap() error { return t.err }
 func terminal(format string, a ...any) error {
 	return &terminalError{err: fmt.Errorf(format, a...)}
 }
+
+// pendingError marks a dependency that is absent or unusable: a Flux source, a Secret, a
+// non-optional ConfigMap, a serving endpoint the operator was never configured with.
+//
+// Neither terminal nor an ordinary transient failure. Not terminal, because each of these is
+// fixed by changing a DIFFERENT object, which does not bump this object's generation — stalling
+// would wait for an event that never arrives. Not an ordinary failure either, because "the
+// GitRepository applied one second after me does not exist yet" is a normal step in converging
+// a commit, not something to log as an error, raise a Warning about, and back off exponentially
+// over.
+//
+// So it reports Reconciling with ReasonDependencyNotReady and retries on a short fixed interval.
+type pendingError struct{ err error }
+
+func (p *pendingError) Error() string { return p.err.Error() }
+func (p *pendingError) Unwrap() error { return p.err }
+
+func pending(format string, a ...any) error {
+	return &pendingError{err: fmt.Errorf(format, a...)}
+}
+
+// pendingRetryInterval is how often a composition waiting on a dependency re-checks. Short
+// enough that a same-commit apply converges without anyone noticing; long enough that a
+// genuinely missing reference costs a couple of cheap GETs a minute rather than a hot loop.
+const pendingRetryInterval = 30 * time.Second
 
 // ImageCompositionReconciler assembles and publishes OCI artifacts.
 type ImageCompositionReconciler struct {
@@ -156,6 +185,24 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	result, err := r.reconcileArtifact(ctx, &obj)
 	if err != nil {
+		// Checked before terminal: a dependency that is not there yet is a normal step in
+		// converging a commit, so it gets a quiet fixed-interval retry rather than a Warning
+		// event, an error log and exponential backoff. Crucially it never sets Stalled — the
+		// object that would fix it is a different one, and changing it raises no event here.
+		var pe *pendingError
+		if errors.As(err, &pe) {
+			logger.Info("waiting on a dependency; will retry", "reason", err.Error(),
+				"retryIn", pendingRetryInterval)
+			return ctrl.Result{RequeueAfter: pendingRetryInterval},
+				r.patchStatus(ctx, &obj, func(o *ociv1alpha1.ImageComposition) {
+					setCondition(o, ociv1alpha1.ReconcilingCondition, metav1.ConditionTrue,
+						ociv1alpha1.ReasonDependencyNotReady, err.Error())
+					setCondition(o, ociv1alpha1.ReadyCondition, metav1.ConditionFalse,
+						ociv1alpha1.ReasonDependencyNotReady, err.Error())
+					removeCondition(o, ociv1alpha1.StalledCondition)
+				})
+		}
+
 		var te *terminalError
 		if errors.As(err, &te) {
 			logger.Error(err, "terminal error; not retrying until the spec changes")
@@ -635,7 +682,10 @@ func (r *ImageCompositionReconciler) target(obj *ociv1alpha1.ImageComposition) (
 		}, nil
 	}
 	if r.Server == nil {
-		return target{}, terminal("spec.push is unset but no serving endpoint is configured")
+		// Operator-level misconfiguration, not a spec error. Giving the operator a serving
+		// endpoint means restarting it with different flags — which changes nothing about this
+		// object, so stalling would leave every composition wedged after the fix. It waits.
+		return target{}, pending("spec.push is unset and no serving endpoint is configured yet")
 	}
 	tags, err := effectiveTags(obj.Spec.Publish.GetTags(), obj.Spec.Publish.GetRef())
 	if err != nil {
@@ -697,14 +747,15 @@ func (r *ImageCompositionReconciler) remoteOptions(ctx context.Context, obj *oci
 	key := types.NamespacedName{Namespace: obj.Namespace, Name: p.SecretRef.Name}
 	if err := r.Get(ctx, key, &secret); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, terminal("secret %s not found", key)
+			// See pullOptions: waits rather than stalls, for the same reason.
+			return nil, pending("secret %s not found yet", key)
 		}
 		return nil, fmt.Errorf("reading secret %s: %w", key, err)
 	}
 
 	kc, err := keychainFromSecret(&secret)
 	if err != nil {
-		return nil, terminal("secret %s: %v", key, err)
+		return nil, pending("secret %s is unusable: %v", key, err)
 	}
 	return append(opts, remote.WithAuthFromKeychain(kc)), nil
 }
