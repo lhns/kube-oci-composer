@@ -51,8 +51,13 @@ lint: ## Run golangci-lint if available.
 ##@ Codegen
 
 .PHONY: controller-gen
-controller-gen: ## Install controller-gen if missing.
-	@command -v $(CONTROLLER_GEN) >/dev/null 2>&1 || \
+controller-gen: ## Install controller-gen if missing OR at the wrong version.
+# The version check is the point. `command -v` alone only asks whether SOME controller-gen exists,
+# so a bump to CONTROLLER_GEN_VERSION (Renovate opens those) never reaches a machine that already
+# has an older one. Generated output then keeps being produced by the old binary locally while CI
+# installs the pinned one and fails `verify` on the difference — which is exactly what happened
+# between v0.16.5 and v0.19.0, red on every push until someone regenerated.
+	@[ "$$($(CONTROLLER_GEN) --version 2>/dev/null | awk '{print $$2}')" = "$(CONTROLLER_GEN_VERSION)" ] || \
 		go install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)
 
 .PHONY: manifests
