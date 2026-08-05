@@ -11,8 +11,13 @@ on:
 permissions:
   contents: read
 
+# The group name is LITERAL, not ${{ github.workflow }}. Under workflow_call that expression
+# resolves to the CALLER's workflow, so ci and e2e both computed "release-<ref>" when the release
+# workflow invoked them -- one concurrency group, cancel-in-progress, and the two cancelled each
+# other. v0.2.2's first release run died exactly that way: every ci job green, e2e cancelled,
+# release skipped.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: e2e-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
