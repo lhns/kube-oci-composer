@@ -156,6 +156,11 @@ spec:
         - sh
         - -c
         - |
+          # Listed BEFORE asserting: `test -f` prints nothing when it fails, so without this a
+          # failure arrives as an empty log saying only that the pod exited non-zero.
+          echo "--- what actually mounted ---"
+          ls -laR /plugins || true
+          echo "-----------------------------"
           set -e
           test -f /plugins/first.properties
           test -f /plugins/second.properties
@@ -165,6 +170,12 @@ spec:
       volumeMounts:
         - name: plugins
           mountPath: /plugins
+          # subPath, because `to: /plugins` above puts the files at /plugins/*.properties INSIDE
+          # the image. Mounting the image root at /plugins would nest them a second time, at
+          # /plugins/plugins/*.properties. That is the most common mistake with image volumes,
+          # so the e2e exercises the fix rather than side-stepping it with `to: /`.
+          subPath: plugins
+          readOnly: true
   volumes:
     - name: plugins
       image:
@@ -183,7 +194,9 @@ spec:
 			return nil
 		case "Failed":
 			logs, _ := kubectl(t, "-n", namespace, "logs", "consumer")
-			t.Fatalf("consumer pod failed:\n%s", logs)
+			state, _ := kubectl(t, "-n", namespace, "get", "pod", "consumer",
+				"-o", "jsonpath={.status.containerStatuses[0].state}")
+			t.Fatalf("consumer pod failed:\nstate: %s\nlogs:\n%s", strings.TrimSpace(state), logs)
 			return nil
 		default:
 			// Surface the pull error rather than just the phase: if image volumes are not
