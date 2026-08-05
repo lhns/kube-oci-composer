@@ -27,11 +27,22 @@ jobs:
           cache: true
       - uses: helm/kind-action@v1
         with:
-          # Image volumes need a kubelet that supports them. Pinning the node image keeps the
-          # e2e honest: if the feature is unavailable the test must fail loudly rather than
-          # silently exercise a different code path.
-          node_image: kindest/node:v1.33.1
+          # Image volumes need BOTH a kubelet that supports them and a container runtime that
+          # implements the CRI side. The kubelet half went beta in 1.33, which is why this was
+          # pinned there — but the runtime half landed in containerd 2.1, and the 1.33 node image
+          # ships containerd 2.0.x. The result was the worst possible failure: the pod was
+          # admitted and RAN, the volume was simply never mounted, and the test reported a
+          # missing file as though the composer had produced the wrong layout.
+          #
+          # 1.36 matches the cluster this is deployed on (containerd 2.3.3), so the e2e now
+          # exercises the same combination production does.
+          node_image: kindest/node:v1.36.1
           cluster_name: kube-oci-composer-e2e
+
+      - name: Record what the runtime actually is
+        # Printed on success too. When image volumes silently do not mount, the container runtime
+        # version is the first thing worth knowing and the last thing anyone thinks to check.
+        run: kubectl get nodes -o wide
       - uses: azure/setup-helm@v4
 
       # Builds the image, loads it into kind, installs the CRDs and the chart, and waits for the
@@ -55,6 +66,10 @@ jobs:
           kubectl get events --sort-by='.lastTimestamp' -A | tail -100 || true
           echo "===== imagecompositions ====="
           kubectl get imagecomposition -A -o yaml || true
+          echo "===== consumer pod (did the image volume survive admission?) ====="
+          # If the ImageVolume feature is off, the apiserver STRIPS spec.volumes[].image rather
+          # than rejecting the pod, so this is the only place the truth shows up.
+          kubectl -n oci-composer-e2e get pod consumer -o yaml || true
           echo "===== controller logs ====="
           kubectl -n oci-composer logs deploy/kube-oci-composer --tail=300 || true
           echo "===== controller logs (previous container) ====="
