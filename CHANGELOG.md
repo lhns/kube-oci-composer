@@ -22,6 +22,12 @@ may change between minor versions.
   move. Anything pinning a content tag should pin the digest or a spec-hash tag instead.
 
 ### Added
+- **`publish.ref`**, an optional full image reference whose **tag** is added to `publish.tags`; the
+  host and repository are parsed and ignored. It lets the tag be set by whatever already rewrites
+  image references — kustomize's `images` transformer, for instance — so a single entry can retag
+  the artifact *and* the workload consuming it, keeping them in step by construction. A ref with no
+  tag contributes nothing rather than defaulting to `latest`, so an untemplated manifest degrades
+  to digest-only publishing instead of inventing a moving tag.
 - **Spec-hash tags**, resolving [ADR 0017](docs/adr/0017-updating-the-consumed-digest.md) — how a
   workload's reference gets updated. The consumer hashes the build-determining part of the spec
   and writes the result into both `publish.tags` and its own image reference, so the two stay in

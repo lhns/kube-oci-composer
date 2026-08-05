@@ -365,6 +365,28 @@ spec:
                       Name is the repository path the artifact is served under, e.g. "kafka-tiered-storage"
                       results in <serving-host>/kafka-tiered-storage.
                     type: string
+                  ref:
+                    description: |-
+                      Ref is a full image reference whose TAG is added to Tags. The host and repository path are
+                      parsed and then ignored: the controller already knows its own serving address, and the
+                      repository comes from Name.
+
+                      It exists so the tag can be set by whatever already rewrites image references, rather than
+                      needing a second mechanism. kustomize's images transformer, for one, rewrites a scalar
+                      image field wherever a fieldSpec points at it — so one entry can retag this artifact AND
+                      the workload that consumes it, keeping them in step by construction:
+
+                        images:
+                          - name: my-artifact                       # matches this field and the consumer's
+                            newName: registry.example/my-artifact
+                            newTag: s1a2b3c4d5e6f7890
+
+                      A ref with NO tag contributes nothing rather than failing. That is what an untemplated
+                      manifest looks like, and it degrades to publishing by digest alone — which is supported.
+                      The consumer's reference would be equally unrewritten, so the mistake surfaces at the pod
+                      rather than being hidden here.
+                    maxLength: 512
+                    type: string
                   tags:
                     description: |-
                       Tags are the tags this build is published under, in order. Optional, and defaulted to

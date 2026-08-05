@@ -309,6 +309,11 @@
               "description": "Name is the repository path the artifact is served under, e.g. \"kafka-tiered-storage\"\nresults in \u003cserving-host\u003e/kafka-tiered-storage.",
               "type": "string"
             },
+            "ref": {
+              "description": "Ref is a full image reference whose TAG is added to Tags. The host and repository path are\nparsed and then ignored: the controller already knows its own serving address, and the\nrepository comes from Name.\n\nIt exists so the tag can be set by whatever already rewrites image references, rather than\nneeding a second mechanism. kustomize's images transformer, for one, rewrites a scalar\nimage field wherever a fieldSpec points at it — so one entry can retag this artifact AND\nthe workload that consumes it, keeping them in step by construction:\n\n  images:\n    - name: my-artifact                       # matches this field and the consumer's\n      newName: registry.example/my-artifact\n      newTag: s1a2b3c4d5e6f7890\n\nA ref with NO tag contributes nothing rather than failing. That is what an untemplated\nmanifest looks like, and it degrades to publishing by digest alone — which is supported.\nThe consumer's reference would be equally unrewritten, so the mistake surfaces at the pod\nrather than being hidden here.",
+              "maxLength": 512,
+              "type": "string"
+            },
             "tags": {
               "description": "Tags are the tags this build is published under, in order. Optional, and defaulted to\nnothing: with no tags the artifact is published by digest alone, which is all a workload\npinned by image automation needs.\n\nThe intended use is a SPEC-HASH tag — a hash of the build-determining part of this spec,\ncomputed by whatever templates it, written into both this field and the consuming\nworkload's image reference. Because assembly is deterministic (ADR 0016), such a tag\nidentifies the output as precisely as its digest does, and both sides derive it from one\nsource with nothing observing anything at runtime. See ADR 0017.\n\nA list, so one build can carry several: a spec-hash tag alongside a readable pointer, or\nthe same hash under more than one algorithm.",
               "items": {

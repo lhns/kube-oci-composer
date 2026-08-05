@@ -71,6 +71,28 @@ type Publish struct {
 	// +optional
 	Tags []string `json:"tags,omitempty"`
 
+	// Ref is a full image reference whose TAG is added to Tags. The host and repository path are
+	// parsed and then ignored: the controller already knows its own serving address, and the
+	// repository comes from Name.
+	//
+	// It exists so the tag can be set by whatever already rewrites image references, rather than
+	// needing a second mechanism. kustomize's images transformer, for one, rewrites a scalar
+	// image field wherever a fieldSpec points at it — so one entry can retag this artifact AND
+	// the workload that consumes it, keeping them in step by construction:
+	//
+	//   images:
+	//     - name: my-artifact                       # matches this field and the consumer's
+	//       newName: registry.example/my-artifact
+	//       newTag: s1a2b3c4d5e6f7890
+	//
+	// A ref with NO tag contributes nothing rather than failing. That is what an untemplated
+	// manifest looks like, and it degrades to publishing by digest alone — which is supported.
+	// The consumer's reference would be equally unrewritten, so the mistake surfaces at the pod
+	// rather than being hidden here.
+	// +kubebuilder:validation:MaxLength=512
+	// +optional
+	Ref string `json:"ref,omitempty"`
+
 	// Immutable refuses to move a tag that already resolves to different content, failing the
 	// build instead of changing what the tag means. Defaults to TRUE, because silently
 	// remeaning a tag is what leaves nodes running different bytes under one name.
@@ -106,6 +128,15 @@ func (p *Publish) GetTags() []string {
 		return nil
 	}
 	return p.Tags
+}
+
+// GetRef is nil-safe, for the same reason as GetTags. Parsing lives in the controller rather than
+// here so this package keeps its dependency surface small for anyone importing the types.
+func (p *Publish) GetRef() string {
+	if p == nil {
+		return ""
+	}
+	return p.Ref
 }
 
 // TagsAreImmutable resolves the optional Immutable field, which defaults to true.

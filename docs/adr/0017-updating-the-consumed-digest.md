@@ -60,6 +60,22 @@ disappears without needing a ConfigMap or a `tagFrom` indirection.
 - `publish.tags` / `push.tags` became **lists**, optional, with no default. One build can carry a
   spec-hash tag and a readable pointer, or the same hash under several algorithms. Empty publishes
   by digest alone.
+- **`publish.ref`**, an optional full image reference whose *tag* is used and whose host and
+  repository are ignored. Templating tools are not the only things that rewrite image references —
+  kustomize's `images` transformer does it natively, including into
+  `spec.volumes[].image.reference`, and it can be pointed at a CRD field with a `configurations:`
+  fieldSpec. With `ref`, **one** such entry retags the artifact and its consumer together:
+
+  ```yaml
+  images:
+    - name: my-artifact                       # matches publish.ref AND the workload's reference
+      newName: registry.example/my-artifact
+      newTag: s1a2b3c4d5e6f7890
+  ```
+
+  A ref with no tag contributes nothing rather than defaulting to `latest`. That is what an
+  untemplated manifest looks like, and inventing a moving tag from it would be the one outcome
+  worse than publishing by digest alone.
 - **`immutable` defaults to true** on both, and is what makes referencing a tag safe: the tag will
   not be moved to different content, the build fails instead. Republishing identical content is
   always a no-op, so a steady reconcile loop never trips it.

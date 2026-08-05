@@ -71,6 +71,19 @@ such as `main`.
 **`publish.tags` is optional.** Omit it and the artifact is published by digest alone, which is all
 a workload pinned by Flux image-automation needs.
 
+**Not templating with Helm?** `publish.ref` takes a full image reference and uses its *tag*,
+ignoring the host and repository. Anything that already rewrites image references can then set it —
+kustomize's `images` transformer reaches `spec.volumes[].image.reference` natively and a CRD field
+with a `configurations:` fieldSpec, so a single entry retags the artifact and the workload that
+consumes it together:
+
+```yaml
+images:
+  - name: my-artifact                       # matches publish.ref AND the workload's reference
+    newName: registry.example/my-artifact
+    newTag: s1a2b3c4d5e6f7890
+```
+
 Worked example: [`docs/examples/spec-hash-tag`](docs/examples/spec-hash-tag/README.md).
 Full reasoning and the alternatives: [ADR 0017](docs/adr/0017-updating-the-consumed-digest.md),
 [ADR 0010](docs/adr/0010-workloads-reference-digests.md).
