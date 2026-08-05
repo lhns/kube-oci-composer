@@ -1,0 +1,61 @@
+name: e2e
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Callable, so the release workflow gates on the real e2e rather than trusting that main was
+  # green when the tag was cut.
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: helm/kind-action@v1
+        with:
+          # Image volumes need a kubelet that supports them. Pinning the node image keeps the
+          # e2e honest: if the feature is unavailable the test must fail loudly rather than
+          # silently exercise a different code path.
+          node_image: kindest/node:v1.33.1
+          cluster_name: kube-oci-composer-e2e
+      - uses: azure/setup-helm@v4
+
+      # Builds the image, loads it into kind, installs the CRDs and the chart, and waits for the
+      # controller to be ready. Without this the test job found no CRD and failed instantly —
+      # which it did, on every push, until someone looked.
+      - run: make e2e-up
+        env:
+          CLUSTER: kube-oci-composer-e2e
+
+      - run: make e2e-test
+
+      - name: Diagnostics on failure
+        # A bare controller log tail is rarely enough: the common e2e failures here are a pod
+        # that never became ready and a composition that never published, and neither leaves a
+        # useful trace in the manager log alone.
+        if: failure()
+        run: |
+          echo "===== pods ====="
+          kubectl get pods -A -o wide || true
+          echo "===== events ====="
+          kubectl get events --sort-by='.lastTimestamp' -A | tail -100 || true
+          echo "===== imagecompositions ====="
+          kubectl get imagecomposition -A -o yaml || true
+          echo "===== controller logs ====="
+          kubectl -n oci-composer logs deploy/kube-oci-composer --tail=300 || true
+          echo "===== controller logs (previous container) ====="
+          kubectl -n oci-composer logs deploy/kube-oci-composer --previous --tail=100 || true
