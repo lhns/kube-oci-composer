@@ -10,11 +10,9 @@
 {{- if and .Values.operator.s3.endpoint (not .Values.operator.s3.bucket) }}
 {{- fail "operator.s3.endpoint requires operator.s3.bucket" }}
 {{- end }}
-{{- if gt (int .Values.replicaCount) 1 }}
-{{- /*
-Not an error: a warm standby is a legitimate choice. But it must be a deliberate one, because the
-endpoint is leader-election scoped and a standby serves nothing. See ADR 0006.
-*/}}
+{{- $shared := or .Values.operator.storage.shared (eq .Values.operator.storage.backend "s3") }}
+{{- if and (gt (int .Values.replicaCount) 1) (not $shared) }}
+{{- fail "replicaCount > 1 without shared storage gives you a standby that serves nothing: the blob store would be node-local, so only the leader can answer pulls, and the standby stays out of the Service by never reporting ready. Set operator.storage.shared=true (an RWX volume), or use the s3 backend which is shared by construction." }}
 {{- end }}
 apiVersion: apps/v1
 kind: Deployment
@@ -70,6 +68,10 @@ spec:
             - --storage-backend={{ .Values.operator.storage.backend }}
             - --storage-dir={{ .Values.operator.storage.dir }}
             - --cache-dir={{ .Values.operator.storage.cacheDir }}
+            {{- if .Values.operator.storage.shared }}
+            - --shared-storage
+            - --standby-replay-interval={{ .Values.operator.storage.standbyReplayInterval }}
+            {{- end }}
             {{- with .Values.operator.s3.endpoint }}
             - --s3-endpoint={{ . }}
             - --s3-bucket={{ $.Values.operator.s3.bucket }}

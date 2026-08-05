@@ -22,6 +22,19 @@ may change between minor versions.
   move. Anything pinning a content tag should pin the digest or a spec-hash tag instead.
 
 ### Added
+- **A highly available serving endpoint.** With `--shared-storage` (implied by
+  `--storage-backend=s3`) every replica serves pulls, instead of one leader serving while standbys
+  sit idle. Publishing, garbage collection and status writes stay leader-only, so nothing about
+  correctness changes — serving is read-only.
+
+  This needed two halves: shared blobs, and manifests, which live in the registry's in-memory map
+  rather than the store. `StandbyReplay` refills that map on every replica from `status.history`,
+  without leader election. Resolves [ADR 0021](docs/adr/0021-active-standby-or-shared-storage.md),
+  which spec-hash tags made urgent: every spec change is a new tag and therefore a new pull, so a
+  single-point-of-failure registry stopped being acceptable.
+
+  The chart now **fails** on `replicaCount > 1` without shared storage, instead of quietly giving
+  you a standby that serves nothing.
 - **`publish.ref`**, an optional full image reference whose **tag** is added to `publish.tags`; the
   host and repository are parsed and ignored. It lets the tag be set by whatever already rewrites
   image references — kustomize's `images` transformer, for instance — so a single entry can retag

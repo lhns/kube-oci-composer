@@ -54,6 +54,29 @@ operator:
     # configured behind it, because assembly reads local files.
     cacheDir: /var/cache/oci-composer
 
+    # Assert that `dir` is reachable by EVERY replica — an RWX volume. This is what turns
+    # replicaCount > 1 from a warm standby into real availability: with it, non-leader replicas
+    # serve pulls too, so losing the leader does not stop artifacts being pullable.
+    #
+    # It has to be asserted rather than detected: handed a directory, the process cannot tell
+    # whether it is node-local or a shared mount. Setting it wrongly with a node-local directory
+    # and several replicas means standbys answer 404 for artifacts they do not have.
+    #
+    # Implied by backend: s3, which is shared by construction. Serving is read-only, so several
+    # replicas answering is safe; publishing, garbage collection and status writes stay on the
+    # leader regardless.
+    #
+    # Worth turning on whenever pulls are frequent. With spec-hash tags they are: every change to
+    # a composition produces a new tag, and therefore a new pull on every node running the
+    # workload.
+    shared: false
+
+    # How often a replica refreshes its manifest map from the shared store. Manifests live in the
+    # registry's in-memory map rather than in the store, so this is what lets a non-leader learn
+    # about builds the leader published — and it bounds how long a non-leader can 404 something
+    # that was just built.
+    standbyReplayInterval: 1m
+
   # Object storage for the layer cache, and optionally for served blobs.
   #
   # Leave endpoint empty to keep everything local to the pod. With it set, a restart or a

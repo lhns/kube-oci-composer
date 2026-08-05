@@ -2,8 +2,29 @@
 
 ## Status
 
-**Open.** The current behaviour works and was not really chosen — it fell out of two other
-decisions. That is reason enough to examine it before it becomes load-bearing.
+**Accepted**, in favour of shared storage: with `--shared-storage` (implied by the S3 backend)
+**every replica serves**, and only publishing, garbage collection and status writes stay on the
+leader. Active/standby remains the default, because it is the only correct behaviour when the store
+is node-local.
+
+What forced the decision was spec-hash tags ([ADR 0017](0017-updating-the-consumed-digest.md)). The
+reasoning below quietly assumes pulls are rare — an artifact is fetched once and cached by
+containerd — which holds while the reference is stable. It stopped holding once *every* change to a
+composition began producing a new tag: a new tag is a new pull, on every node running the workload,
+every time anything changes. A single-point-of-failure registry is a different proposition under
+that load than under the one assumed here.
+
+Two things had to be true, and the second is easy to miss:
+
+1. **Blobs reachable from every replica** — an RWX volume or S3. Asserted rather than detected,
+   because a process handed a directory cannot tell whether it is node-local or a shared mount.
+2. **Manifests present on every replica.** They live in the upstream registry package's in-memory
+   map, *not* in the store, so shared blobs alone would leave a standby answering 404 for content
+   sitting right there. `controller.StandbyReplay` refills that map from `status.history` — the
+   same source the leader's own post-restart replay uses — and runs without leader election.
+
+The chart now **fails** on `replicaCount > 1` without shared storage, rather than silently building
+the trap described below.
 
 ## Context
 

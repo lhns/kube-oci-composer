@@ -68,25 +68,27 @@ func init() {
 
 func main() {
 	var (
-		metricsAddr          string
-		probeAddr            string
-		enableLeaderElection bool
-		showVersion          bool
-		servingHost          string
-		servingAddr          string
-		storageBackend       string
-		storageDir           string
-		cacheDir             string
-		s3Endpoint           string
-		s3Bucket             string
-		s3Prefix             string
-		s3Region             string
-		s3PathStyle          bool
-		s3Presign            bool
-		gcInterval           time.Duration
-		gcGrace              time.Duration
-		gcKeepBuilds         int
-		gcDryRun             bool
+		metricsAddr           string
+		probeAddr             string
+		enableLeaderElection  bool
+		showVersion           bool
+		servingHost           string
+		servingAddr           string
+		storageBackend        string
+		storageDir            string
+		cacheDir              string
+		s3Endpoint            string
+		s3Bucket              string
+		s3Prefix              string
+		s3Region              string
+		s3PathStyle           bool
+		s3Presign             bool
+		gcInterval            time.Duration
+		gcGrace               time.Duration
+		gcKeepBuilds          int
+		gcDryRun              bool
+		sharedStorage         bool
+		standbyReplayInterval time.Duration
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "Address the metric endpoint binds to.")
@@ -144,6 +146,18 @@ func main() {
 			"between builds, so a generous value costs far less than the count suggests.")
 	flag.BoolVar(&gcDryRun, "gc-dry-run", false,
 		"Log what garbage collection would reclaim without deleting anything.")
+
+	flag.BoolVar(&sharedStorage, "shared-storage", false,
+		"Assert that --storage-dir is reachable by every replica (an RWX volume), which lets "+
+			"NON-LEADER replicas serve pulls instead of standing by. Implied by --storage-backend=s3, "+
+			"which is shared by construction. Serving is read-only, so this is safe; publishing, "+
+			"garbage collection and status writes stay on the leader either way. Set it wrongly, with "+
+			"a node-local directory and more than one replica, and standbys will answer 404 for "+
+			"artifacts they do not have.")
+	flag.DurationVar(&standbyReplayInterval, "standby-replay-interval", time.Minute,
+		"How often a replica refreshes its manifest map from the shared store, picking up builds "+
+			"the leader published since the last pass. Only used with shared storage. Bounds how "+
+			"long a non-leader can 404 an artifact that was just built.")
 
 	flag.BoolVar(&showVersion, "version", false, "Print version information and exit.")
 
@@ -242,6 +256,10 @@ func main() {
 			setupLog.Error(err, "unable to set up the serving endpoint")
 			os.Exit(1)
 		}
+		// S3 is shared by construction, so making the operator assert it again would be noise.
+		// A directory is ambiguous — node-local and an RWX mount look identical from in here —
+		// so that case has to be asserted.
+		server.SharedStorage = sharedStorage || storageBackend == backendS3
 		// Runnable rather than a bare goroutine, so the manager owns its lifecycle and a
 		// listener failure takes the process down instead of leaving a controller that
 		// reports Ready for artifacts nothing can pull.
@@ -249,12 +267,29 @@ func main() {
 			setupLog.Error(err, "unable to register the serving endpoint")
 			os.Exit(1)
 		}
-		setupLog.Info("serving endpoint enabled", "host", servingHost, "addr", servingAddr)
+		setupLog.Info("serving endpoint enabled",
+			"host", servingHost, "addr", servingAddr, "sharedStorage", server.SharedStorage)
 	} else {
 		setupLog.Info("no serving host configured; only ImageCompositions with spec.push will reconcile")
 	}
 
 	readiness := &controller.Readiness{Client: mgr.GetClient()}
+
+	// With shared storage every replica serves, so every replica needs the manifests that the
+	// leader published — they live in an in-memory map, not in the store. Registered without
+	// leader election, which is the entire point.
+	if server != nil && server.SharedStorage {
+		if err := mgr.Add(&controller.StandbyReplay{
+			Client:    mgr.GetClient(),
+			Server:    server,
+			Readiness: readiness,
+			Interval:  standbyReplayInterval,
+		}); err != nil {
+			setupLog.Error(err, "unable to register standby replay")
+			os.Exit(1)
+		}
+		setupLog.Info("standby replay enabled; non-leader replicas will serve pulls")
+	}
 
 	if err := (&controller.ImageCompositionReconciler{
 		Client:       mgr.GetClient(),

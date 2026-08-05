@@ -52,6 +52,14 @@ type Server struct {
 	// through the same store the endpoint serves from.
 	Blobs store.Store
 
+	// SharedStorage asserts that Blobs is reachable by every replica — an RWX volume or S3 —
+	// which is what allows non-leaders to serve. Asserted rather than detected: handed a
+	// directory, a process cannot tell whether it is node-local or a shared mount.
+	//
+	// Serving is read-only, so several replicas answering pulls is safe. Publishing, garbage
+	// collection and status writes stay on the leader regardless.
+	SharedStorage bool
+
 	handler http.Handler
 }
 
@@ -95,15 +103,20 @@ func (s *Server) PublicRef(name, tag string) string {
 	return fmt.Sprintf("%s/%s:%s", s.Host, name, tag)
 }
 
-// NeedLeaderElection reports true so the endpoint runs only on the leader.
+// NeedLeaderElection keeps the endpoint on the leader UNLESS the store is shared.
 //
-// This is the default for an unmarked Runnable, but it is stated explicitly because it is load
-// bearing rather than incidental: the blob store is node-local, so a standby replica would serve
-// an empty store. It stays out of the Service because it never reports ready — see
-// controller.Readiness — so active/standby works without a second mechanism. Sharing the store
-// between replicas would need a shared backend, and manifests are held in memory by the upstream
-// registry package, so a shared backend alone would not be enough.
-func (s *Server) NeedLeaderElection() bool { return true }
+// With a node-local store this must stay true, and is load bearing rather than incidental: a
+// standby would serve an empty store. It stays out of the Service because it never reports ready
+// — see controller.Readiness — so active/standby falls out of a single mechanism.
+//
+// SharedStorage removes that objection for blobs, but NOT for manifests: those live in the
+// upstream registry package's in-memory map, so a shared backend alone is not enough. The other
+// half is controller.StandbyReplay, which refills that map on every replica from the same shared
+// store. Both are required, which is why this is gated on an explicit assertion.
+//
+// Serving is read-only, so several replicas answering pulls is safe. Publishing, garbage
+// collection and status writes remain leader-only either way.
+func (s *Server) NeedLeaderElection() bool { return !s.SharedStorage }
 
 // Start runs the endpoint until ctx is cancelled, satisfying manager.Runnable so the
 // controller-runtime manager owns its lifecycle. A listener failure therefore takes the whole
