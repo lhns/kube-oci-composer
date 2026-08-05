@@ -27,6 +27,11 @@ jobs:
           cache: true
       - uses: helm/kind-action@v1
         with:
+          # The kind CLI is pinned WITH the node image, not independently. kind-action defaults
+          # to v0.31.0, which cannot read the containerd config the 1.36 node image ships
+          # ("unknown containerd config version: 4") and fails at `kind load`. v0.32.0 is the
+          # release that ships kindest/node:v1.36.1 below — keep the two moving together.
+          version: v0.32.0
           # Image volumes need BOTH a kubelet that supports them and a container runtime that
           # implements the CRI side. The kubelet half went beta in 1.33, which is why this was
           # pinned there — but the runtime half landed in containerd 2.1, and the 1.33 node image
