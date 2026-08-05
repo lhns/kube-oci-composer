@@ -18,6 +18,12 @@ spec:
       port: {{ .Values.service.port }}
       targetPort: oci
       protocol: TCP
+      {{- if and (eq .Values.service.type "NodePort") .Values.service.nodePort }}
+      # Fixed, because whatever configures the pulling client has to name a port —
+      # containerd's hosts.toml, for one. An allocated-at-random port could not be
+      # referenced, and would change on recreate.
+      nodePort: {{ .Values.service.nodePort }}
+      {{- end }}
   selector:
     {{- include "kube-oci-composer.selectorLabels" . | nindent 4 }}
 ---

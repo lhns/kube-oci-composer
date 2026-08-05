@@ -100,9 +100,18 @@ operator:
     dryRun: false
 
 # Service exposing the OCI endpoint that workloads pull from.
+#
+# Note who the client is: image pulls are performed by the KUBELET on each node, never by the pod
+# that mounts the result. A ClusterIP *name* is therefore unusable — nodes resolve with the host
+# resolver, which knows nothing of cluster DNS — so this must be exposed somewhere the nodes can
+# actually reach: a LoadBalancer address, a NodePort, or an Ingress.
 service:
   type: ClusterIP
   port: 5000
+  # Pin the NodePort when type is NodePort. Effectively required rather than optional: whatever
+  # configures the pulling client names a port (containerd's hosts.toml, for one), and a port
+  # allocated at random cannot be referenced and would change on recreate.
+  nodePort: ""
   annotations: {}
 
 # Ingress for the serving endpoint.
