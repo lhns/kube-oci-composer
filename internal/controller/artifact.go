@@ -32,8 +32,6 @@ type builtArtifact struct {
 func singleArtifact(img v1.Image) builtArtifact     { return builtArtifact{img: img} }
 func indexArtifact(idx v1.ImageIndex) builtArtifact { return builtArtifact{idx: idx} }
 
-func (a builtArtifact) isIndex() bool { return a.idx != nil }
-
 func (a builtArtifact) Digest() (v1.Hash, error) {
 	if a.idx != nil {
 		return a.idx.Digest()
