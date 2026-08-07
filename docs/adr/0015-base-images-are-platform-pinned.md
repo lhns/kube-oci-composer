@@ -31,9 +31,24 @@ So a base image digest must name a platform-specific manifest. The error says ho
 
 Terminal, not retried: it needs a spec change.
 
-Multi-architecture *output* is a separate feature and remains unimplemented. When it arrives it
-will mean building one composition per platform and publishing an index, with the platforms named
-in the spec — not the controller guessing.
+#### Amended: the refusal is conditional, not absolute
+
+Multi-architecture output arrived in [ADR 0018](0018-multi-architecture-output.md), and it changes
+the scope of this rule rather than overturning it. The objection was never "an index is bad" — it
+was "the CONTROLLER must not be the one choosing". With `spec.platforms` set, the choice comes from
+the spec, so selecting a child per platform is exactly as spec-driven as pinning one by hand.
+
+The rule as it now stands:
+
+- **`spec.platforms` unset** — an index base is refused, as above, and for the same reason. The
+  error additionally points at `spec.platforms` as the other way out.
+- **`spec.platforms` set** — an index base is *required* shape for more than one platform. Each
+  child is selected by matching the descriptor, and a platform the index does not offer is
+  terminal: the spec asked for something that does not exist, and substituting a near match is how
+  an amd64 binary reaches an arm node.
+
+`TestMultiArchIndexIsRejected` and `TestIndexBaseIsAcceptedWithPlatforms` are the pair that hold
+this line: neither alone says the refusal is conditional.
 
 ### Config inheritance is opt-in via `config.inherit`
 

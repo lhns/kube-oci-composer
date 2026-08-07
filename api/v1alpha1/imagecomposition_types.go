@@ -299,6 +299,28 @@ type ImageCompositionSpec struct {
 	// +optional
 	Base *BaseImage `json:"base,omitempty"`
 
+	// Platforms the artifact is built for, as "linux/amd64" or "linux/arm/v7".
+	//
+	// Two or more entries publish an OCI image INDEX with one child manifest per platform, and a
+	// base may then be a multi-architecture index — its child is selected per platform. With one
+	// entry, or none, the output is a single image manifest exactly as before.
+	//
+	// Unset resolves to one platform: the BASE's if there is a base, otherwise the CONTROLLER's
+	// own. That second case is the only input to the output digest that does not come from the
+	// spec (ADR 0002). It is the right default on a single-architecture cluster, where it is
+	// precisely the value that used to be hardcoded. On a MIXED-architecture cluster it means the
+	// same spec can produce different content depending on where the controller runs, which with
+	// immutable tags surfaces as a failed build — name the platforms here, or pin the controller
+	// to one architecture.
+	//
+	// Naming a platform the base index does not contain is an error: the spec asked for something
+	// that does not exist, and a silent substitution would be worse.
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:MaxLength=64
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]+/[a-z0-9]+(/[a-z0-9]+)?$`
+	// +optional
+	Platforms []string `json:"platforms,omitempty"`
+
 	// Layers are ordered filesystem operations applied on top of the base. Later entries overlay
 	// earlier ones, exactly as image layers do.
 	// +kubebuilder:validation:MinItems=1

@@ -262,32 +262,58 @@ type buildResult struct {
 
 // buildRecord captures the blobs a build is composed of, so garbage collection can tell what is
 // still live without inferring it from what happens to be in storage.
-func buildRecord(img v1.Image, tags []string, digest v1.Hash) (*ociv1alpha1.BuildRecord, error) {
-	cfg, err := img.ConfigName()
+//
+// For a multi-platform build it walks every child: Blobs is the union of their configs and layers,
+// and Manifests names the children themselves. Both matter to GC — the layers are shared between
+// children and so appear once, while the configs differ per platform and would otherwise be
+// reclaimed under a live index.
+func buildRecord(art builtArtifact, tags []string, digest v1.Hash) (*ociv1alpha1.BuildRecord, error) {
+	children, err := art.children()
 	if err != nil {
-		return nil, fmt.Errorf("config digest: %w", err)
-	}
-	layers, err := img.Layers()
-	if err != nil {
-		return nil, fmt.Errorf("layers: %w", err)
+		return nil, err
 	}
 
-	blobs := make([]string, 0, len(layers)+1)
-	blobs = append(blobs, cfg.String())
-	for _, l := range layers {
-		d, err := l.Digest()
-		if err != nil {
-			return nil, fmt.Errorf("layer digest: %w", err)
+	blobs := make([]string, 0, len(children)*2)
+	seen := make(map[string]struct{})
+	add := func(d string) {
+		if _, ok := seen[d]; ok {
+			return
 		}
-		blobs = append(blobs, d.String())
+		seen[d] = struct{}{}
+		blobs = append(blobs, d)
+	}
+
+	for _, img := range children {
+		cfg, err := img.ConfigName()
+		if err != nil {
+			return nil, fmt.Errorf("config digest: %w", err)
+		}
+		add(cfg.String())
+		layers, err := img.Layers()
+		if err != nil {
+			return nil, fmt.Errorf("layers: %w", err)
+		}
+		for _, l := range layers {
+			d, err := l.Digest()
+			if err != nil {
+				return nil, fmt.Errorf("layer digest: %w", err)
+			}
+			add(d.String())
+		}
+	}
+
+	manifests, err := art.childDigests()
+	if err != nil {
+		return nil, err
 	}
 
 	now := metav1.Now()
 	return &ociv1alpha1.BuildRecord{
-		Tags:   append([]string(nil), tags...),
-		Digest: digest.String(),
-		Blobs:  blobs,
-		Time:   &now,
+		Tags:      append([]string(nil), tags...),
+		Digest:    digest.String(),
+		Blobs:     blobs,
+		Manifests: manifests,
+		Time:      &now,
 	}, nil
 }
 
@@ -381,7 +407,23 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	}
 
 	cfg := configFrom(obj.Spec.Config)
-	inputHash := oci.InputHash(inputs, cfg)
+
+	// Platforms that can be known WITHOUT fetching anything. A declared list is known; an unset
+	// one is the base's platform, which the base digest already pins, or — with no base — the
+	// controller's own. Fetching the base here to learn its platform would defeat the point of a
+	// hash that exists to avoid fetching.
+	declared, err := declaredPlatforms(obj)
+	if err != nil {
+		return buildResult{}, err
+	}
+	hashPlatforms := declared
+	var baseDigest string
+	if obj.Spec.Base != nil {
+		baseDigest = obj.Spec.Base.Digest
+	} else if len(hashPlatforms) == 0 {
+		hashPlatforms = []oci.Platform{oci.RuntimePlatform()}
+	}
+	inputHash := oci.InputHash(inputs, cfg, baseDigest, hashPlatforms)
 
 	tgt, err := r.target(obj)
 	if err != nil {
@@ -450,17 +492,12 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 		inputs[i].Path = path
 	}
 
-	base, err := r.resolveBase(ctx, obj)
+	art, err := r.assemble(ctx, obj, declared, inputs, cfg, workDir)
 	if err != nil {
 		return buildResult{}, err
 	}
 
-	img, err := oci.Assemble(base, inputs, cfg, workDir)
-	if err != nil {
-		return buildResult{}, terminal("assembling: %v", err)
-	}
-
-	digest, err := img.Digest()
+	digest, err := art.Digest()
 	if err != nil {
 		return buildResult{}, fmt.Errorf("computing digest: %w", err)
 	}
@@ -496,7 +533,7 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	if err != nil {
 		return buildResult{}, terminal("invalid reference %s@%s: %v", tgt.writeRepo, digest, err)
 	}
-	if err := remote.Write(digestRef, img, opts...); err != nil {
+	if err := art.write(digestRef, opts...); err != nil {
 		return buildResult{}, fmt.Errorf("publishing %s: %w", digestRef, err)
 	}
 
@@ -505,7 +542,7 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 		if err != nil {
 			return buildResult{}, terminal("invalid reference %s:%s: %v", tgt.writeRepo, tag, err)
 		}
-		if err := remote.Write(ref, img, opts...); err != nil {
+		if err := art.write(ref, opts...); err != nil {
 			return buildResult{}, fmt.Errorf("publishing %s: %w", ref, err)
 		}
 	}
@@ -513,10 +550,11 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	// Record the manifest so this build can be replayed after a restart. Not fatal: the artifact
 	// is published and pullable right now, and losing replayability is a smaller failure than
 	// reporting a build that actually succeeded as failed.
+	//
+	// For an index this stores the children too — an index alone would replay into a reference
+	// that resolves but cannot be pulled.
 	if r.Server != nil && obj.Spec.Push == nil {
-		if raw, mErr := img.RawManifest(); mErr != nil {
-			log.FromContext(ctx).Error(mErr, "could not read the manifest for persistence")
-		} else if sErr := r.Server.SaveManifest(ctx, digest.String(), raw); sErr != nil {
+		if sErr := art.saveManifests(ctx, r.Server.SaveManifest); sErr != nil {
 			log.FromContext(ctx).Error(sErr, "could not persist the manifest; a restart will lose this build")
 		}
 	}
@@ -524,7 +562,7 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	r.event(obj, corev1.EventTypeNormal, ociv1alpha1.ReasonSucceeded,
 		fmt.Sprintf("Published %s@%s%s", tgt.pullRepo, digest, tagSuffix(tgt.tags)))
 
-	record, err := buildRecord(img, tgt.tags, digest)
+	record, err := buildRecord(art, tgt.tags, digest)
 	if err != nil {
 		// The artifact is published and usable; only the retention record is missing. Failing
 		// here would leave storage holding blobs that nothing records as live, which is worse

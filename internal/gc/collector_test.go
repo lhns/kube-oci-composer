@@ -303,3 +303,44 @@ func TestDigestKeyRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// TestIndexChildManifestsSurvive is the failure ADR 0018 predicted and this guards against.
+//
+// Marking is derived from status and never parses manifest bytes, so nothing tells the collector
+// that an index points at its children. Without BuildRecord.Manifests they are unreferenced, get
+// swept, and leave a retained index resolving to nothing — which does not fail at collection time
+// but at pull time, on a reference status still reports as published.
+func TestIndexChildManifestsSurvive(t *testing.T) {
+	index := blobDigest(200)
+	childA, childB := blobDigest(201), blobDigest(202)
+	orphan := blobDigest(203)
+
+	s := store.NewMemory()
+	ancient := time.Now().Add(-24 * time.Hour)
+	for _, d := range []string{index, childA, childB, orphan} {
+		k := store.MustKey(store.NamespaceManifests, d)
+		if err := s.Write(context.Background(), k, strings.NewReader("manifest")); err != nil {
+			t.Fatalf("seeding %s: %v", d, err)
+		}
+		s.SetModTime(k, ancient)
+	}
+
+	obj := composition("app", ociv1alpha1.BuildRecord{
+		Digest:    index,
+		Manifests: []string{childA, childB},
+	})
+	c := newCollector(t, s, staticPending{}, obj)
+
+	if _, err := c.Collect(context.Background()); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+
+	for name, d := range map[string]string{"index": index, "child A": childA, "child B": childB} {
+		if _, err := s.Stat(context.Background(), store.MustKey(store.NamespaceManifests, d)); err != nil {
+			t.Fatalf("%s was reclaimed under a retained build: %v", name, err)
+		}
+	}
+	if _, err := s.Stat(context.Background(), store.MustKey(store.NamespaceManifests, orphan)); !errors.Is(err, store.ErrNotFound) {
+		t.Fatal("an unreferenced manifest survived, so this test proves nothing")
+	}
+}

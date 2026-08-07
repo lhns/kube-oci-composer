@@ -219,6 +219,15 @@ func (c *Collector) mark(items []ociv1alpha1.ImageComposition) (blobs, inputs, m
 			if h.Digest != "" {
 				manifests[h.Digest] = struct{}{}
 			}
+			// For a multi-platform build, Digest above is the INDEX and these are its children.
+			// They have to be marked explicitly: marking is derived from status and never parses
+			// manifest bytes, so nothing here would otherwise know the index points at them.
+			// Sweeping them leaves a retained index that resolves to nothing — a failure that
+			// surfaces as a 404 at pull time, long after the collection that caused it, and on a
+			// reference status still reports as published. See ADR 0018.
+			for _, m := range h.Manifests {
+				manifests[m] = struct{}{}
+			}
 		}
 
 		// The current artifact, even if history is somehow missing or truncated. Belt and

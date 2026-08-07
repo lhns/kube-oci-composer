@@ -148,11 +148,10 @@ helm install kube-oci-composer oci://ghcr.io/lhns/charts/kube-oci-composer \
 Implemented: base images with layer reuse and config inheritance; `fetch`, `configMap`,
 `sourceRef` and `remove` layer verbs; ownership, modes and archive subpaths; the full OCI config
 surface; the built-in serving endpoint; external push with `secretRef`; the input-hash
-short-circuit; a two-tier layer cache with optional S3; manifest persistence across restarts; and
-garbage collection.
+short-circuit; a two-tier layer cache with optional S3; manifest persistence across restarts;
+multi-architecture output; and garbage collection.
 
-Not implemented: multi-architecture output (a base must be a platform-specific digest, not an
-index); SBOM, provenance and signing ([ADR 0008](docs/adr/0008-supply-chain.md) is Proposed, not
+Not implemented: SBOM, provenance and signing ([ADR 0008](docs/adr/0008-supply-chain.md) is Proposed, not
 built — and signing is theatre until something verifies it at admission).
 
 **It will never run a Dockerfile.** That is the scope line, and everything else follows from it:
@@ -167,8 +166,15 @@ spec:
   # Optional. Absent = scratch, which is right for a bundle that is only ever mounted.
   base:
     image: quay.io/strimzi/kafka
-    digest: sha256:…             # platform-specific, not a multi-arch index
+    digest: sha256:…             # an index only when platforms names more than one
     secretRef: {name: kafka-pull}
+
+  # Optional. Two or more publishes an OCI index with one child per platform; one, or none, is a
+  # single manifest. Unset = the base's platform, or the controller's own when there is no base
+  # — the one input that is not from the spec (ADR 0002). On a MIXED-architecture cluster, name
+  # them here or pin the controller with a nodeSelector, or the same spec can build differently
+  # depending on where the leader runs.
+  platforms: [linux/amd64, linux/arm64]
 
   # Ordered. Each entry produces exactly one layer. Later entries overlay earlier ones.
   layers:

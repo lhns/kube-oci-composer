@@ -67,6 +67,40 @@ This is **not** the same idea as the `inputHash` sketched for `ImageBuild` (0004
 output digest remains the identity and the hash is only a short-circuit — the convergence check
 against the real digest is still performed after assembly.
 
+### The one input that does not come from the spec
+
+Multi-architecture output (ADR 0018) added `spec.platforms`, and with it a default: when the list
+is unset and there is **no base**, the artifact is built for the *controller's own* architecture.
+That is an environment input, and it is the only one in the API. It is recorded here rather than
+left implicit, because "a pure function of the spec" is the sentence everything else leans on, and
+a quiet exception to it is worse than a stated one.
+
+Why it is worth taking:
+
+- On a single-architecture cluster it is exactly the value that was previously **hardcoded**
+  (`linux/amd64`), so nothing changes. `TestUnsetPlatformMatchesTheOldHardcodedDefault` pins that.
+  Without it, upgrading the controller would republish every artifact under spec-hash tags that had
+  not moved, which `immutable: true` turns into a failed build across the estate at once.
+- On an arm64-only cluster it starts being *correct*, where the hardcoded value produced artifacts
+  the kubelet refuses.
+- The alternative — requiring `platforms` on every base-less artifact — is ceremony for the common
+  case, which is a bundle of platform-neutral files.
+
+What it costs, plainly: on a **mixed-architecture** cluster the same spec can produce different
+content depending on which node the leader is on, and immutable tags then fail the build. The fixes
+are to name `platforms` explicitly, or to pin the controller to one architecture with a
+`nodeSelector`.
+
+The OS is **not** taken from the runtime — it is always `linux`. `runtime.GOOS` describes the
+machine the controller binary was built for, so a controller built on Windows or macOS would stamp
+an artifact nothing can mount, from a spec that never mentioned Windows. Only the architecture is
+genuinely in question. (This was caught by a test, not by review.)
+
+Everything derived from a **base** remains a pure function of the spec: the base digest is pinned,
+so the base's platform is too. Adding `platforms` also closed a real hole here — the base digest
+reached the output but **not** the input hash, so repointing `spec.base.digest` left the hash
+unchanged, the short-circuit engaged, and the new base was silently never built.
+
 ## Consequences
 
 Upgrading a dependency means updating a digest, which is more friction than editing a version

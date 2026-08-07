@@ -112,6 +112,13 @@ func (s *StandbyReplay) replayOne(ctx context.Context, obj *ociv1alpha1.ImageCom
 			continue
 		}
 
+		// Children before the index, as in the leader's replay. A standby serving an index whose
+		// children are absent is worse than one serving nothing: it passes readiness, joins the
+		// Service, and 404s every pull it receives.
+		if !restoreChildren(ctx, s.Server, logger, repoPath, h) {
+			continue
+		}
+
 		// Digest first, as in the leader's replay: it is the reference that is always correct,
 		// and the only one a build published without tags has.
 		if err := s.Server.PutManifest(ctx, repoPath, h.Digest, raw); err != nil {

@@ -179,14 +179,25 @@ type BuildRecord struct {
 	// +optional
 	Tags []string `json:"tags,omitempty"`
 
-	// Digest of the manifest.
+	// Digest of the manifest. For a multi-platform build this is the INDEX.
 	// +optional
 	Digest string `json:"digest,omitempty"`
 
 	// Blobs are the config and layer digests this build is composed of. These are the objects
-	// garbage collection must not reclaim while this build is retained.
+	// garbage collection must not reclaim while this build is retained. For a multi-platform
+	// build it is the union across every child.
 	// +optional
 	Blobs []string `json:"blobs,omitempty"`
+
+	// Manifests are the CHILD manifest digests when this build is a multi-platform index. Empty
+	// for a single-platform build, where Digest is the manifest itself.
+	//
+	// Garbage collection reads this, and must: without it the index is retained while its children
+	// are swept, leaving a manifest that resolves to nothing. That is indistinguishable from
+	// having deleted the artifact, except that it fails at pull time rather than at collection
+	// time, long after the change that caused it.
+	// +optional
+	Manifests []string `json:"manifests,omitempty"`
 
 	// Time the build was published.
 	// +optional

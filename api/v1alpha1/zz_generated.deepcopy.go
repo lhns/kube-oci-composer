@@ -66,6 +66,11 @@ func (in *BuildRecord) DeepCopyInto(out *BuildRecord) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.Manifests != nil {
+		in, out := &in.Manifests, &out.Manifests
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.Time != nil {
 		in, out := &in.Time, &out.Time
 		*out = (*in).DeepCopy()
@@ -198,6 +203,11 @@ func (in *ImageCompositionSpec) DeepCopyInto(out *ImageCompositionSpec) {
 		in, out := &in.Base, &out.Base
 		*out = new(BaseImage)
 		(*in).DeepCopyInto(*out)
+	}
+	if in.Platforms != nil {
+		in, out := &in.Platforms, &out.Platforms
+		*out = make([]string, len(*in))
+		copy(*out, *in)
 	}
 	if in.Layers != nil {
 		in, out := &in.Layers, &out.Layers

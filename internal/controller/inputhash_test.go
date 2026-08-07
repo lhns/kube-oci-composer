@@ -166,7 +166,7 @@ func TestInputHashIgnoresIncidentalFields(t *testing.T) {
 		Digest: "sha256:abcd", Unpack: oci.UnpackTarGz, Target: "/core",
 	}}
 
-	if oci.InputHash(base, oci.Config{}) != oci.InputHash(renamed, oci.Config{}) {
+	if oci.InputHash(base, oci.Config{}, "", nil) != oci.InputHash(renamed, oci.Config{}, "", nil) {
 		t.Fatal("a rename, a mirror change or a different temp path changed the input hash")
 	}
 }
@@ -178,11 +178,11 @@ func TestInputHashIsUnambiguous(t *testing.T) {
 	a := oci.InputHash([]oci.LayerInput{
 		{Digest: "sha256:11", Unpack: oci.UnpackNone, Target: "/ab"},
 		{Digest: "sha256:22", Unpack: oci.UnpackNone, Target: "/c"},
-	}, oci.Config{})
+	}, oci.Config{}, "", nil)
 	b := oci.InputHash([]oci.LayerInput{
 		{Digest: "sha256:11", Unpack: oci.UnpackNone, Target: "/a"},
 		{Digest: "sha256:22", Unpack: oci.UnpackNone, Target: "/bc"},
-	}, oci.Config{})
+	}, oci.Config{}, "", nil)
 	if a == b {
 		t.Fatal("input hash is ambiguous across field boundaries")
 	}
@@ -192,7 +192,7 @@ func TestInputHashIsUnambiguous(t *testing.T) {
 // therefore in the output digest, so all of them must move the input hash.
 func TestInputHashCoversConfig(t *testing.T) {
 	layers := []oci.LayerInput{{Digest: "sha256:11", Unpack: oci.UnpackNone, Target: "/x"}}
-	baseline := oci.InputHash(layers, oci.Config{})
+	baseline := oci.InputHash(layers, oci.Config{}, "", nil)
 
 	variants := map[string]oci.Config{
 		"labels":     {Labels: map[string]string{"a": "b"}},
@@ -202,7 +202,7 @@ func TestInputHashCoversConfig(t *testing.T) {
 	}
 	for name, cfg := range variants {
 		t.Run(name, func(t *testing.T) {
-			if oci.InputHash(layers, cfg) == baseline {
+			if oci.InputHash(layers, cfg, "", nil) == baseline {
 				t.Fatalf("changing %s did not change the input hash", name)
 			}
 		})
@@ -210,9 +210,9 @@ func TestInputHashCoversConfig(t *testing.T) {
 
 	// Map iteration order must not leak into the hash, or the controller would rebuild at random.
 	many := oci.Config{Labels: map[string]string{"a": "1", "b": "2", "c": "3", "d": "4", "e": "5"}}
-	first := oci.InputHash(layers, many)
+	first := oci.InputHash(layers, many, "", nil)
 	for i := 0; i < 20; i++ {
-		if oci.InputHash(layers, many) != first {
+		if oci.InputHash(layers, many, "", nil) != first {
 			t.Fatal("label map iteration order leaked into the input hash")
 		}
 	}
@@ -225,11 +225,21 @@ func TestInputHashCoversConfig(t *testing.T) {
 // on the next reconcile. That is sometimes exactly right, and it must never happen by accident.
 // If this test fails, the change was either deliberate (update the constant below) or a bug.
 func TestInputHashIsPinned(t *testing.T) {
-	// Changed by the schema v2 redesign, which added ownership, modes, removals and the full
-	// config surface to the hash. Every one of those changes the output, so omitting them would
-	// have meant skipping rebuilds that were genuinely needed. Pre-deployment, so the one-time
-	// rebuild costs nothing.
-	const want = "sha256:435fff3c706a9934d1763e2b9532166c3a675b1275f4af8b8087cc4271421b00"
+	// Changed twice, both times because something that genuinely affects the output was missing.
+	//
+	// 1. The schema v2 redesign, which added ownership, modes, removals and the full config
+	//    surface. Pre-deployment, so the one-time rebuild cost nothing.
+	// 2. Multi-architecture output, which added the base digest and the platform list. The base
+	//    digest was a real bug: it reached the output but not the hash, so repointing
+	//    spec.base.digest left the hash unchanged, the cheap path short-circuited, and the new
+	//    base was never built.
+	//
+	// (2) rebuilds every artifact once. That is safe here and was checked before merging: the
+	// resolved platform for an unset list on an amd64 controller is linux/amd64, which is exactly
+	// what was previously hardcoded, so the rebuild produces the SAME digest and republishing it
+	// under an unchanged immutable tag is a no-op. On a non-amd64 controller it would not be —
+	// see TestUnsetPlatformMatchesTheOldHardcodedDefault.
+	const want = "sha256:2162dd741a791daa0b86164ff9e06cead5549a3c393eeb145c55998f2eef84b2"
 
 	got := oci.InputHash([]oci.LayerInput{
 		{Name: "core", URL: "https://example/x.tgz", Digest: "sha256:1111", Unpack: oci.UnpackTarGz, Target: "/core"},
@@ -239,7 +249,7 @@ func TestInputHashIsPinned(t *testing.T) {
 		Env:        []string{"A=1"},
 		Entrypoint: []string{"/bin/sh"},
 		Cmd:        []string{"-c", "true"},
-	})
+	}, "", nil)
 
 	if got != want {
 		t.Fatalf("input hash changed.\n  got:  %s\n  want: %s\n"+

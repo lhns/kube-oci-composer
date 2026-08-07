@@ -327,6 +327,30 @@ spec:
                 maxItems: 64
                 minItems: 1
                 type: array
+              platforms:
+                description: |-
+                  Platforms the artifact is built for, as "linux/amd64" or "linux/arm/v7".
+
+                  Two or more entries publish an OCI image INDEX with one child manifest per platform, and a
+                  base may then be a multi-architecture index — its child is selected per platform. With one
+                  entry, or none, the output is a single image manifest exactly as before.
+
+                  Unset resolves to one platform: the BASE's if there is a base, otherwise the CONTROLLER's
+                  own. That second case is the only input to the output digest that does not come from the
+                  spec (ADR 0002). It is the right default on a single-architecture cluster, where it is
+                  precisely the value that used to be hardcoded. On a MIXED-architecture cluster it means the
+                  same spec can produce different content depending on where the controller runs, which with
+                  immutable tags surfaces as a failed build — name the platforms here, or pin the controller
+                  to one architecture.
+
+                  Naming a platform the base index does not contain is an error: the spec asked for something
+                  that does not exist, and a silent substitution would be worse.
+                items:
+                  maxLength: 64
+                  pattern: ^[a-z0-9]+/[a-z0-9]+(/[a-z0-9]+)?$
+                  type: string
+                maxItems: 16
+                type: array
               publish:
                 description: |-
                   Publish serves the artifact from the controller's own read-only OCI endpoint. The default
@@ -566,13 +590,27 @@ spec:
                     blobs:
                       description: |-
                         Blobs are the config and layer digests this build is composed of. These are the objects
-                        garbage collection must not reclaim while this build is retained.
+                        garbage collection must not reclaim while this build is retained. For a multi-platform
+                        build it is the union across every child.
                       items:
                         type: string
                       type: array
                     digest:
-                      description: Digest of the manifest.
+                      description: Digest of the manifest. For a multi-platform build
+                        this is the INDEX.
                       type: string
+                    manifests:
+                      description: |-
+                        Manifests are the CHILD manifest digests when this build is a multi-platform index. Empty
+                        for a single-platform build, where Digest is the manifest itself.
+
+                        Garbage collection reads this, and must: without it the index is retained while its children
+                        are swept, leaving a manifest that resolves to nothing. That is indistinguishable from
+                        having deleted the artifact, except that it fails at pull time rather than at collection
+                        time, long after the change that caused it.
+                      items:
+                        type: string
+                      type: array
                     tags:
                       description: |-
                         Tags this build was published under, if any. Replayed after a restart so the references a

@@ -146,7 +146,7 @@ func TestConfigMapContentChangesTheInputHash(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolving: %v", err)
 		}
-		return oci.InputHash(inputs, oci.Config{})
+		return oci.InputHash(inputs, oci.Config{}, "", nil)
 	}
 
 	// Bound to variables rather than compared inline: two identical calls in one expression read
@@ -232,7 +232,7 @@ func TestOptionalConfigMapContributesNothing(t *testing.T) {
 	if len(a) != len(b) {
 		t.Fatalf("an absent optional ConfigMap contributed %d inputs, want 0", len(a)-len(b))
 	}
-	if oci.InputHash(a, oci.Config{}) != oci.InputHash(b, oci.Config{}) {
+	if oci.InputHash(a, oci.Config{}, "", nil) != oci.InputHash(b, oci.Config{}, "", nil) {
 		t.Fatal("an absent optional ConfigMap changed the input hash")
 	}
 }

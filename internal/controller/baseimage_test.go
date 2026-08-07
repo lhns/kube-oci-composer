@@ -305,7 +305,7 @@ func TestMultiArchIndexIsRejected(t *testing.T) {
 // in the output digest, so all of them must move the hash.
 func TestConfigSurfaceIsInTheInputHash(t *testing.T) {
 	layers := []oci.LayerInput{{Digest: "sha256:11", Unpack: oci.UnpackNone, Target: "/x"}}
-	baseline := oci.InputHash(layers, oci.Config{})
+	baseline := oci.InputHash(layers, oci.Config{}, "", nil)
 
 	variants := map[string]oci.Config{
 		"inherit":      {Inherit: true},
@@ -317,7 +317,7 @@ func TestConfigSurfaceIsInTheInputHash(t *testing.T) {
 	}
 	for name, cfg := range variants {
 		t.Run(name, func(t *testing.T) {
-			if oci.InputHash(layers, cfg) == baseline {
+			if oci.InputHash(layers, cfg, "", nil) == baseline {
 				t.Fatalf("%s does not affect the input hash", name)
 			}
 		})

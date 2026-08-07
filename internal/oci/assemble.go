@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -47,7 +48,18 @@ const AssemblyVersion = 1
 //
 // Fields are length-prefixed rather than delimiter-joined so that no combination of targets or
 // label values can produce the same byte stream as a different combination.
-func InputHash(inputs []LayerInput, cfg Config) string {
+// baseDigest and platforms cover everything outside the layers that reaches the output.
+//
+// baseDigest is the spec's base pin, empty for a scratch artifact. It was previously ABSENT from
+// this hash, which meant repointing spec.base.digest left the hash unchanged, the cheap path
+// short-circuited, and the new base was silently never built. It also stands in for the platform
+// when none is declared, since an unset list resolves to the base's platform.
+//
+// platforms are the platforms that could be determined WITHOUT fetching anything: the declared
+// list if the spec has one, or the controller's own when there is no base and nothing declared.
+// It is deliberately empty when the platform comes from the base — baseDigest already pins that,
+// and fetching the base to compute a hash would defeat the purpose of having one.
+func InputHash(inputs []LayerInput, cfg Config, baseDigest string, platforms []Platform) string {
 	h := sha256.New()
 	writeField := func(s string) {
 		fmt.Fprintf(h, "%d:", len(s))
@@ -55,6 +67,12 @@ func InputHash(inputs []LayerInput, cfg Config) string {
 	}
 
 	writeField(fmt.Sprintf("assembly-v%d", AssemblyVersion))
+
+	writeField(baseDigest)
+	fmt.Fprintf(h, "platforms=%d;", len(platforms))
+	for _, p := range platforms {
+		writeField(p.String())
+	}
 
 	fmt.Fprintf(h, "layers=%d;", len(inputs))
 	for _, in := range inputs {
@@ -96,6 +114,75 @@ func InputHash(inputs []LayerInput, cfg Config) string {
 	}
 
 	return "sha256:" + hex.EncodeToString(h.Sum(nil))
+}
+
+// Platform is one os/architecture[/variant] an artifact is built for.
+type Platform struct {
+	OS           string
+	Architecture string
+	Variant      string
+}
+
+// ParsePlatform reads the "linux/arm64" or "linux/arm/v7" form used in the spec.
+func ParsePlatform(s string) (Platform, error) {
+	parts := strings.Split(s, "/")
+	switch len(parts) {
+	case 2:
+		return Platform{OS: parts[0], Architecture: parts[1]}, nil
+	case 3:
+		return Platform{OS: parts[0], Architecture: parts[1], Variant: parts[2]}, nil
+	default:
+		return Platform{}, fmt.Errorf("%q is not a platform (want os/arch or os/arch/variant)", s)
+	}
+}
+
+func (p Platform) String() string {
+	if p.Variant != "" {
+		return p.OS + "/" + p.Architecture + "/" + p.Variant
+	}
+	return p.OS + "/" + p.Architecture
+}
+
+func (p Platform) toV1() v1.Platform {
+	return v1.Platform{OS: p.OS, Architecture: p.Architecture, Variant: p.Variant}
+}
+
+// RuntimePlatform is the platform a base-less artifact is built for when the spec names none.
+//
+// This is the ONE input to the output digest that does not come from the spec. ADR 0002 records
+// why the exception is taken and what it costs: on a single-architecture cluster it is exactly the
+// value that was previously hardcoded, so nothing changes; on a mixed-architecture cluster the same
+// spec can produce different content depending on which node the leader is on, and the answers are
+// to name `platforms` in the spec or to pin the controller to one architecture.
+//
+// The OS is linux, NOT runtime.GOOS. GOOS is the platform the controller BINARY was built for,
+// which on a developer machine is windows or darwin — and stamping an artifact os=windows would
+// produce something no kubelet will mount, from a spec that says nothing about Windows. Every
+// artifact this controller produces is a linux container image; only the architecture is genuinely
+// in question, and that is what GOARCH answers.
+func RuntimePlatform() Platform {
+	return Platform{OS: "linux", Architecture: runtime.GOARCH}
+}
+
+// platformFor resolves the single platform of a build with no explicit platform list: the base's
+// if there is a base, the controller's own otherwise.
+func platformFor(base v1.Image) (Platform, error) {
+	if base == nil {
+		return RuntimePlatform(), nil
+	}
+	cf, err := base.ConfigFile()
+	if err != nil {
+		return Platform{}, fmt.Errorf("reading the base config: %w", err)
+	}
+	plat := RuntimePlatform()
+	if cf.OS != "" {
+		plat.OS = cf.OS
+	}
+	if cf.Architecture != "" {
+		plat.Architecture = cf.Architecture
+	}
+	plat.Variant = cf.Variant
+	return plat, nil
 }
 
 // UnpackMode mirrors the API's Unpack field.
@@ -175,6 +262,97 @@ type tarEntry struct {
 // it only after the image has been consumed. An empty workDir uses the system temp directory,
 // which leaves the files behind; pass a real directory in any long-running process.
 func Assemble(base v1.Image, inputs []LayerInput, cfg Config, workDir string) (v1.Image, error) {
+	plat, err := platformFor(base)
+	if err != nil {
+		return nil, err
+	}
+	return AssembleAs(base, inputs, cfg, plat, workDir)
+}
+
+// AssembleAs is Assemble with the platform stated rather than derived, for a spec that names
+// exactly one. The output is a single image manifest, not an index — one platform is one image.
+func AssembleAs(base v1.Image, inputs []LayerInput, cfg Config, plat Platform, workDir string) (v1.Image, error) {
+	layers, err := buildLayers(inputs, workDir)
+	if err != nil {
+		return nil, err
+	}
+	return assembleFor(base, layers, cfg, plat)
+}
+
+// AssembleIndex builds one image per platform and returns them as an OCI image index.
+//
+// The layer tarballs are built ONCE and shared by every child. That is not just an optimisation:
+// composed content is the same bytes on every platform, so rebuilding it per platform would spend
+// real time producing identical layers, and any non-determinism in that path would show up as
+// children that disagree about content they are supposed to share.
+//
+// bases maps each platform to the child of the base index selected for it, and is nil for a
+// base-less artifact. A platform with no entry is an error rather than a silent scratch image —
+// see resolveBase, which is where that selection happens.
+//
+// Determinism holds exactly as it does for a single image: the children are assembled from the
+// same layers in the given platform order, so two calls with the same arguments produce the same
+// index digest.
+func AssembleIndex(bases map[Platform]v1.Image, inputs []LayerInput, cfg Config,
+	platforms []Platform, workDir string) (v1.ImageIndex, error) {
+	if len(platforms) == 0 {
+		return nil, fmt.Errorf("no platforms given")
+	}
+	layers, err := buildLayers(inputs, workDir)
+	if err != nil {
+		return nil, err
+	}
+
+	idx := mutate.IndexMediaType(empty.Index, types.OCIImageIndex)
+	for _, plat := range platforms {
+		var base v1.Image
+		if bases != nil {
+			b, ok := bases[plat]
+			if !ok {
+				return nil, fmt.Errorf("no base image for platform %s", plat)
+			}
+			base = b
+		}
+		img, err := assembleFor(base, layers, cfg, plat)
+		if err != nil {
+			return nil, fmt.Errorf("platform %s: %w", plat, err)
+		}
+		p := plat.toV1()
+		idx = mutate.AppendManifests(idx, mutate.IndexAddendum{
+			Add: img,
+			Descriptor: v1.Descriptor{
+				// The descriptor is what a kubelet reads to pick a child. Getting it wrong
+				// produces a pull that fails with "no matching manifest", pointing at the
+				// workload rather than at the composition that caused it.
+				Platform: &p,
+			},
+		})
+	}
+	return idx, nil
+}
+
+// buildLayers converts every input into a deterministic layer, once.
+//
+// The layer files must outlive this call: go-containerregistry reads them lazily when the image is
+// written, so the CALLER owns workDir and removes it only after the image has been consumed.
+func buildLayers(inputs []LayerInput, workDir string) ([]v1.Layer, error) {
+	layers := make([]v1.Layer, 0, len(inputs))
+	for _, in := range inputs {
+		layerPath, err := buildLayerTarGz(in, workDir)
+		if err != nil {
+			return nil, fmt.Errorf("layer %q: %w", in.Name, err)
+		}
+		layer, err := tarball.LayerFromFile(layerPath, tarball.WithMediaType(types.OCILayer))
+		if err != nil {
+			return nil, fmt.Errorf("layer %q: reading assembled tar: %w", in.Name, err)
+		}
+		layers = append(layers, layer)
+	}
+	return layers, nil
+}
+
+// assembleFor stacks the layers on the base and stamps the config for one platform.
+func assembleFor(base v1.Image, layers []v1.Layer, cfg Config, plat Platform) (v1.Image, error) {
 	// The base's layers come first and are reused verbatim: they are already content-addressed,
 	// so repacking them would change their digests, break sharing with anything else on the same
 	// base, and re-upload content the registry already holds.
@@ -185,20 +363,11 @@ func Assemble(base v1.Image, inputs []LayerInput, cfg Config, workDir string) (v
 	img = mutate.MediaType(img, types.OCIManifestSchema1)
 	img = mutate.ConfigMediaType(img, types.OCIConfigJSON)
 
-	for _, in := range inputs {
-		layerPath, err := buildLayerTarGz(in, workDir)
-		if err != nil {
-			return nil, fmt.Errorf("layer %q: %w", in.Name, err)
-		}
-		// The layer file must outlive this function: go-containerregistry reads it lazily when
-		// the image is written. The caller removes workDir once the image has been consumed.
-		layer, err := tarball.LayerFromFile(layerPath, tarball.WithMediaType(types.OCILayer))
-		if err != nil {
-			return nil, fmt.Errorf("layer %q: reading assembled tar: %w", in.Name, err)
-		}
+	for i, layer := range layers {
+		var err error
 		img, err = mutate.AppendLayers(img, layer)
 		if err != nil {
-			return nil, fmt.Errorf("layer %q: appending: %w", in.Name, err)
+			return nil, fmt.Errorf("layer %d: appending: %w", i, err)
 		}
 	}
 
@@ -210,7 +379,6 @@ func Assemble(base v1.Image, inputs []LayerInput, cfg Config, workDir string) (v
 
 	// Inheritance is opt-in. An artifact that is only ever mounted should have an empty config,
 	// and silently acquiring a base's entrypoint would be surprising. See ADR 0015.
-	os, arch := "linux", "amd64"
 	if cfg.Inherit {
 		if base == nil {
 			return nil, fmt.Errorf("config.inherit is set but there is no base to inherit from")
@@ -223,31 +391,19 @@ func Assemble(base v1.Image, inputs []LayerInput, cfg Config, workDir string) (v
 		// RootFS and History describe the assembled image, not the base.
 		inherited.RootFS = cf.RootFS
 		cf = inherited
-		// The platform comes from the base too. Claiming linux/amd64 over an arm64 base produces
-		// an image the kubelet refuses to run, for a reason that points nowhere useful.
-		if baseConfig.OS != "" {
-			os = baseConfig.OS
-		}
-		if baseConfig.Architecture != "" {
-			arch = baseConfig.Architecture
-		}
 	} else if base != nil {
-		// Not inheriting, but the platform must still describe the layers underneath.
-		if baseConfig, err := base.ConfigFile(); err == nil {
-			if baseConfig.OS != "" {
-				os = baseConfig.OS
-			}
-			if baseConfig.Architecture != "" {
-				arch = baseConfig.Architecture
-			}
-		}
 		cf.Config = v1.Config{}
 	}
 
 	cf.Created = v1.Time{Time: epoch}
 	cf.Author = ""
-	cf.OS = os
-	cf.Architecture = arch
+	// The platform is decided by the caller, not derived here — for a multi-platform build the
+	// same layers are stamped once per platform, so this function cannot be the one that knows.
+	// Claiming linux/amd64 over an arm64 base produces an image the kubelet refuses to run, for a
+	// reason that points nowhere useful, which is why platformFor exists rather than a default.
+	cf.OS = plat.OS
+	cf.Architecture = plat.Architecture
+	cf.Variant = plat.Variant
 	if len(cfg.Labels) > 0 {
 		cf.Config.Labels = cfg.Labels
 	}

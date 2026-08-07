@@ -85,6 +85,16 @@ func (r *ImageCompositionReconciler) replayHistory(ctx context.Context, obj *oci
 			continue
 		}
 
+		// CHILDREN FIRST, for a multi-platform build. An index restored on its own resolves —
+		// the reference exists, HEAD succeeds, status looks right — and every pull that follows
+		// its descriptors 404s. Restoring children first means the index is never published over
+		// an incomplete set, and a child that cannot be restored skips this entry rather than
+		// leaving that state behind permanently.
+		if !restoreChildren(ctx, r.Server, logger, repoPath, h) {
+			missing++
+			continue
+		}
+
 		// The digest reference first: that is what a workload pinned by image automation uses,
 		// and it is the one that matters if a tag write fails. It is also the only reference a
 		// build published without tags has.
