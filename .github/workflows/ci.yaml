@@ -55,7 +55,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Cache envtest assets
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.local/share/kubebuilder-envtest
           key: envtest-${{ runner.os }}
