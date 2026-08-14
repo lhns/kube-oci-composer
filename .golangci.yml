@@ -1,0 +1,29 @@
+# golangci-lint v2. Introduced with golangci-lint-action v6 -> v9, which installs v2 rather than
+# v1; before that this repo ran on defaults and had no config file at all.
+#
+# v2 dropped the default exclusion presets v1 applied silently, so the bump surfaced 22 errcheck
+# findings in code nobody had changed. They are all the same shape -- a deferred Close on a handle
+# being read, or the cleanup half of a create-temp/write/rename sequence:
+#
+#   tmp, _ := os.CreateTemp(dir, ".tmp-*")
+#   defer func() { tmp.Close(); os.Remove(tmpName) }()
+#
+# Durability in those paths is carried by an explicit Sync() or by verifying the digest, both of
+# which ARE checked; the deferred Close is the cleanup path and its error says nothing. Restoring
+# the preset keeps this bump a change of tooling rather than a change of policy -- rewriting 22
+# working call sites to satisfy a new default would be the tail wagging the dog.
+#
+# If a genuine unchecked error shows up in a path where it matters, fix the call site rather than
+# widening this.
+version: "2"
+
+run:
+  # Analysis alone was already at the 1m default and the outcome depended on runner load. This
+  # exists to catch a hung linter, not to cap how long linting may legitimately take.
+  timeout: 5m
+
+linters:
+  exclusions:
+    presets:
+      # v1's default errcheck exclusions: Close, os.Remove, fmt.Fprint* and friends.
+      - std-error-handling

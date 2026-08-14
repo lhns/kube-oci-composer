@@ -70,17 +70,16 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - uses: golangci/golangci-lint-action@v6
+      - uses: golangci/golangci-lint-action@v9
         with:
           # Built from source with the toolchain setup-go just installed. The prebuilt binaries
           # lag the Go release, and a linter built with an older Go refuses to parse a go.mod
           # targeting a newer one — which is what broke this job.
           install-mode: goinstall
           version: latest
-          # Analysis alone was already at the 1m default, so the outcome depended on runner load
-          # rather than on the code. This budget is here to catch a hung linter, not to cap how
-          # long linting may legitimately take.
-          args: --timeout=5m
+          # Settings live in .golangci.yml now, including the timeout: v9 installs golangci-lint
+          # v2, which reads its config from there and needs one anyway (see that file for what the
+          # v1 -> v2 default change surfaced).
 
   chart:
     runs-on: ubuntu-latest

@@ -132,7 +132,7 @@ func (p presigningStore) Presign(ctx context.Context, key string, _ time.Duratio
 	if p.err != nil {
 		return "", p.err
 	}
-	if _, err := p.Memory.Stat(ctx, key); err != nil {
+	if _, err := p.Stat(ctx, key); err != nil {
 		return "", err
 	}
 	return p.url, nil
