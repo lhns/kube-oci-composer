@@ -13,15 +13,10 @@ const (
 	UnpackTar Unpack = "tar"
 	// UnpackTarGz extracts a gzipped tar archive under the target.
 	UnpackTarGz Unpack = "tar.gz"
-	// UnpackDeb extracts the payload of a Debian binary package under the target.
+	// UnpackDeb extracts a Debian package's data member under the target.
 	//
-	// Only the data member is taken; the control member and debian-binary are metadata for a
-	// package manager that is not running here. Nothing is installed and no maintainer script is
-	// executed — a .deb is treated purely as an archive that happens to have a wrapper.
-	//
-	// This exists because a distro package is often the only published build of a native library.
-	// Compiling one instead would put a toolchain in the reconcile path and make the output depend
-	// on it, which is the opposite of what this controller is for. See ADR 0022.
+	// Nothing is installed: no dependency is resolved and no maintainer script runs, so a package
+	// whose files only work after postinst will not work. See ADR 0022.
 	UnpackDeb Unpack = "deb"
 )
 

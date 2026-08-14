@@ -72,7 +72,7 @@ Other package formats are deliberately not included. Alpine's `.apk` is already 
 works today through `unpack: tar.gz` with a `subpath`. RPM would need a lead/signature/header
 parser and a cpio reader — several times this parser — and adding an extraction path nobody
 exercises is how a format ends up subtly broken for the first person who tries it. It is a
-reasonable addition when something needs it, and the seam in `unpackLayer` is where it goes.
+reasonable addition when something needs it, and `collectEntries` is the seam it slots into.
 
 ## Alternatives rejected
 

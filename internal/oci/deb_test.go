@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,45 +53,34 @@ func buildDataTar(t *testing.T, files []debFile) []byte {
 	return buf.Bytes()
 }
 
-// compress applies the named data.tar suffix.
-func compress(t *testing.T, raw []byte, suffix string) []byte {
+// compressData applies a data.tar suffix. No .bz2: the standard library decodes bzip2 but cannot
+// write it, which is why debDecompress's .bz2 branch has no test.
+func compressData(t *testing.T, raw []byte, suffix string) []byte {
 	t.Helper()
-	var out bytes.Buffer
-	switch suffix {
-	case "":
+	if suffix == "" {
 		return raw
+	}
+	var out bytes.Buffer
+	var zw io.WriteCloser
+	var err error
+	switch suffix {
 	case ".gz":
-		zw := gzip.NewWriter(&out)
-		if _, err := zw.Write(raw); err != nil {
-			t.Fatalf("gzip: %v", err)
-		}
-		if err := zw.Close(); err != nil {
-			t.Fatalf("gzip close: %v", err)
-		}
+		zw = gzip.NewWriter(&out)
 	case ".xz":
-		zw, err := xz.NewWriter(&out)
-		if err != nil {
-			t.Fatalf("xz writer: %v", err)
-		}
-		if _, err := zw.Write(raw); err != nil {
-			t.Fatalf("xz: %v", err)
-		}
-		if err := zw.Close(); err != nil {
-			t.Fatalf("xz close: %v", err)
-		}
+		zw, err = xz.NewWriter(&out)
 	case ".zst":
-		zw, err := zstd.NewWriter(&out)
-		if err != nil {
-			t.Fatalf("zstd writer: %v", err)
-		}
-		if _, err := zw.Write(raw); err != nil {
-			t.Fatalf("zstd: %v", err)
-		}
-		if err := zw.Close(); err != nil {
-			t.Fatalf("zstd close: %v", err)
-		}
+		zw, err = zstd.NewWriter(&out)
 	default:
 		t.Fatalf("fixture cannot produce %q", suffix)
+	}
+	if err != nil {
+		t.Fatalf("%s writer: %v", suffix, err)
+	}
+	if _, err := zw.Write(raw); err != nil {
+		t.Fatalf("%s write: %v", suffix, err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("%s close: %v", suffix, err)
 	}
 	return out.Bytes()
 }
@@ -112,14 +102,14 @@ func buildDeb(t *testing.T, suffix string, files []debFile) []byte {
 	// Deliberately odd-sized, so every test exercises the padding byte: get that wrong and every
 	// subsequent member header is off by one.
 	arMember(&buf, "debian-binary", []byte("2.0\n"))
-	arMember(&buf, "control.tar"+suffix, compress(t, buildDataTar(t, []debFile{
+	arMember(&buf, "control.tar"+suffix, compressData(t, buildDataTar(t, []debFile{
 		{name: "./control", body: "Package: fixture\n"},
 	}), suffix))
-	arMember(&buf, "data.tar"+suffix, compress(t, buildDataTar(t, files), suffix))
+	arMember(&buf, "data.tar"+suffix, compressData(t, buildDataTar(t, files), suffix))
 	return buf.Bytes()
 }
 
-// writeTemp puts bytes on disk, because unpackLayer takes a path rather than a reader.
+// writeTemp puts bytes on disk, because collectEntries takes a path rather than a reader.
 func writeTemp(t *testing.T, body []byte) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "input.deb")
@@ -138,9 +128,8 @@ func byName(entries []tarEntry) map[string]tarEntry {
 	return out
 }
 
-// TestExtractDebTakesOnlyTheDataMember — the control member is a tar too, and it has a ./control
-// entry that would land in the artifact if the member name were not checked. A package that
-// quietly ships its own packaging metadata into the image is the failure this guards.
+// TestExtractDebTakesOnlyTheDataMember — control.tar is a tar as well, so reading the wrong
+// member yields a plausible-looking layer full of packaging metadata rather than an error.
 func TestExtractDebTakesOnlyTheDataMember(t *testing.T) {
 	deb := buildDeb(t, ".xz", []debFile{{name: "./usr/bin/tool", body: "payload"}})
 
@@ -159,8 +148,8 @@ func TestExtractDebTakesOnlyTheDataMember(t *testing.T) {
 	}
 }
 
-// TestExtractDebEveryCompression — which compressor a package uses is the packager's choice, so
-// all of them must work or `unpack: deb` is a promise the controller only sometimes keeps.
+// TestExtractDebEveryCompression — dpkg picks the compressor, so a caller cannot know which to
+// expect and all of them have to work.
 func TestExtractDebEveryCompression(t *testing.T) {
 	for _, suffix := range []string{"", ".gz", ".xz", ".zst"} {
 		t.Run("data.tar"+suffix, func(t *testing.T) {
@@ -198,13 +187,10 @@ func TestExtractDebPreservesRelativeSymlinks(t *testing.T) {
 	if !ok {
 		t.Fatalf("symlink missing, got %v", entries)
 	}
+	// Unchanged means still relative, which is what makes it resolve inside the artifact once
+	// subpath has stripped the shared prefix off both ends.
 	if e.link != "../../liblua5.4-ldap.so.0.0.0" {
 		t.Errorf("link = %q, want the relative target unchanged", e.link)
-	}
-	// The point of keeping it relative: with subpath stripping the prefix, it still resolves
-	// inside the artifact rather than pointing at an absolute path that does not exist there.
-	if strings.HasPrefix(e.link, "/") {
-		t.Error("link was rewritten to an absolute path")
 	}
 }
 
@@ -271,7 +257,7 @@ func TestExtractDebRejectsMalformed(t *testing.T) {
 }
 
 // TestAssembleUnpackDeb wires the mode through the layer path the reconciler actually uses,
-// rather than testing extractDeb alone — the switch in unpackLayer is where a new mode gets
+// rather than testing extractDeb alone — collectEntries' switch is where a new mode gets
 // forgotten.
 func TestAssembleUnpackDeb(t *testing.T) {
 	deb := buildDeb(t, ".xz", []debFile{{name: "./usr/lib/thing.so", body: "ELF"}})

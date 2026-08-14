@@ -14,40 +14,31 @@ import (
 	"github.com/ulikunitz/xz"
 )
 
-// A Debian binary package is an ar archive holding exactly three members, in order:
-// debian-binary, control.tar.*, data.tar.*. Only the last one carries files, so that is all this
-// reads: the control member describes an installation that is not happening here, and no
-// maintainer script is ever executed. See ADR 0022.
+// Debian binary package extraction.
 //
-// The ar container is parsed inline rather than through a dependency. The format is a magic
-// string and a run of fixed 60-byte headers, and a third-party parser would be more code to audit
-// than the fifty lines below.
-const arMagic = "!<arch>\n"
+// A .deb is an ar archive of three members in order: debian-binary, control.tar.* and
+// data.tar.*. Only data.tar.* holds the package's files, and it is an ordinary tar, so
+// everything after decompression is extractTar's job. ADR 0022 has the reasoning.
+//
+// ar is parsed here rather than through a dependency: it is a magic string followed by fixed
+// 60-byte headers, which is less code than auditing a library for it would be.
 
-// arHeader is the fixed-width member header. Only the fields this needs are named; the rest
-// (mtime, uid, gid, mode) describe a filesystem the artifact will not inherit.
 const (
-	arHeaderSize    = 60
-	arNameOffset    = 0
-	arNameEnd       = 16
-	arSizeOffset    = 48
-	arSizeEnd       = 58
-	arTrailerOffset = 58
+	arMagic = "!<arch>\n"
+
+	// Member header layout. The fields this does not read — mtime, uid, gid, mode — sit between
+	// the name and the size and are skipped over.
+	arHeaderLen = 60
+	arNameEnd   = 16 // name occupies [0, arNameEnd)
+	arSizeStart = 48
+	arSizeEnd   = 58 // the remaining two bytes are the "`\n" trailer
 )
 
-// debDataMember reports whether name is the package payload, and returns the compression suffix.
+// debDecompress wraps r according to a data.tar suffix, and returns a cleanup to call when done.
 //
-// Debian has shipped data as gz, bz2, xz and zst over the years, and which one a package uses is
-// the packager's choice rather than anything the caller can know. All four are handled so that
-// `unpack: deb` means "a .deb" and not "a .deb that happens to be compressed the way we expected".
-func debDataMember(name string) (suffix string, ok bool) {
-	if !strings.HasPrefix(name, "data.tar") {
-		return "", false
-	}
-	return strings.TrimPrefix(name, "data.tar"), true
-}
-
-// debDecompress wraps r according to the data member's suffix.
+// dpkg picks the compressor, so a caller cannot know which to expect. bz2 has no writer in the
+// standard library and is therefore not covered by a test — it is accepted because rejecting a
+// valid package would be worse than accepting an untested path through two lines of stdlib.
 func debDecompress(r io.Reader, suffix string) (io.Reader, func(), error) {
 	noop := func() {}
 	switch suffix {
@@ -78,59 +69,64 @@ func debDecompress(r io.Reader, suffix string) (io.Reader, func(), error) {
 	}
 }
 
-// extractDeb reads a .deb and returns its payload rebased under target, honouring subpath.
-//
-// Entries in a Debian payload are prefixed "./"; that is stripped here so subpath and target can
-// be written the way they read in the package listing ("usr/lib/..."), not with a leading dot.
-func extractDeb(r io.Reader, target, subpath string) ([]tarEntry, error) {
+// openDebData advances r to the package's data member and returns a decompressed reader for it.
+func openDebData(r io.Reader) (io.Reader, func(), error) {
+	noop := func() {}
+
 	magic := make([]byte, len(arMagic))
 	if _, err := io.ReadFull(r, magic); err != nil {
-		return nil, fmt.Errorf("reading ar magic: %w", err)
+		return nil, noop, fmt.Errorf("reading ar magic: %w", err)
 	}
 	if string(magic) != arMagic {
-		return nil, errors.New("not a Debian package: missing ar magic")
+		return nil, noop, errors.New("not a Debian package: missing ar magic")
 	}
 
-	hdr := make([]byte, arHeaderSize)
+	hdr := make([]byte, arHeaderLen)
 	for {
 		if _, err := io.ReadFull(r, hdr); err != nil {
 			if errors.Is(err, io.EOF) {
 				break
 			}
 			if errors.Is(err, io.ErrUnexpectedEOF) {
-				return nil, errors.New("truncated ar header")
+				return nil, noop, errors.New("truncated ar header")
 			}
-			return nil, fmt.Errorf("reading ar header: %w", err)
+			return nil, noop, fmt.Errorf("reading ar header: %w", err)
 		}
-		if string(hdr[arTrailerOffset:arHeaderSize]) != "`\n" {
-			return nil, errors.New("malformed ar header")
+		if string(hdr[arSizeEnd:arHeaderLen]) != "`\n" {
+			return nil, noop, errors.New("malformed ar header")
 		}
 
 		// Names are space-padded and conventionally end in "/". GNU long names (a "//" string
-		// table plus "/N" references) are not handled: dpkg never emits them, and silently
-		// mis-reading a name would be worse than refusing one.
-		name := strings.TrimRight(strings.TrimSpace(string(hdr[arNameOffset:arNameEnd])), "/")
-		size, err := strconv.ParseInt(strings.TrimSpace(string(hdr[arSizeOffset:arSizeEnd])), 10, 64)
+		// table plus "/N" references) are refused rather than guessed at: dpkg does not emit
+		// them, and a mis-read member name would produce a silently wrong layer.
+		name := strings.TrimRight(strings.TrimSpace(string(hdr[:arNameEnd])), "/")
+		size, err := strconv.ParseInt(strings.TrimSpace(string(hdr[arSizeStart:arSizeEnd])), 10, 64)
 		if err != nil || size < 0 {
-			return nil, fmt.Errorf("unreadable size for ar member %q", name)
+			return nil, noop, fmt.Errorf("unreadable size for ar member %q", name)
 		}
 
-		suffix, isData := debDataMember(name)
-		if !isData {
-			// Skip the member and the padding byte that keeps members 2-aligned.
-			if _, err := io.CopyN(io.Discard, r, size+size%2); err != nil {
-				return nil, fmt.Errorf("skipping ar member %q: %w", name, err)
-			}
-			continue
+		if suffix, ok := strings.CutPrefix(name, "data.tar"); ok {
+			return debDecompress(io.LimitReader(r, size), suffix)
 		}
-
-		dr, closeFn, err := debDecompress(io.LimitReader(r, size), suffix)
-		if err != nil {
-			return nil, err
+		// Members are 2-aligned, so an odd-sized one is followed by a padding byte.
+		if _, err := io.CopyN(io.Discard, r, size+size%2); err != nil {
+			return nil, noop, fmt.Errorf("skipping ar member %q: %w", name, err)
 		}
-		defer closeFn()
-		return extractTar(tar.NewReader(dr), target, subpath)
 	}
 
-	return nil, errors.New("Debian package contains no data member")
+	return nil, noop, errors.New("Debian package contains no data member")
+}
+
+// extractDeb returns the package's payload, rebased under target and filtered by subpath exactly
+// as any other tar layer is.
+//
+// Payload entries are named "./usr/lib/…"; extractTar's path.Clean drops the leading "./", so
+// subpath and target are written without one.
+func extractDeb(r io.Reader, target, subpath string) ([]tarEntry, error) {
+	dr, closeFn, err := openDebData(r)
+	if err != nil {
+		return nil, err
+	}
+	defer closeFn()
+	return extractTar(tar.NewReader(dr), target, subpath)
 }
