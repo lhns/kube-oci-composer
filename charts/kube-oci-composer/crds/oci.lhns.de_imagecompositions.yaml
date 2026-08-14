@@ -224,6 +224,7 @@ spec:
                           - none
                           - tar
                           - tar.gz
+                          - deb
                           type: string
                         url:
                           description: URL to fetch.

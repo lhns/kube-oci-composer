@@ -189,6 +189,17 @@ spec:
       owner: {uid: 1001, gid: 0}
       mode: {file: "0644", dir: "0755"}
 
+    # A distribution package, when that is the only published build of a native library.
+    # unpack: deb takes the payload only — nothing is installed and no maintainer script runs.
+    # The .so must match the image it is mounted into; nothing here can check that (ADR 0022).
+    - name: lualdap
+      fetch:
+        url: https://deb.debian.org/debian/pool/main/l/lua-ldap/lua-ldap_1.3.0-2+b1_amd64.deb
+        digest: sha256:…
+        unpack: deb
+        subpath: usr/lib/x86_64-linux-gnu
+      to: /
+
     # A ConfigMap. Each key becomes one file; the digest is RESOLVED by hashing the content, so
     # an edit rebuilds. Keys cannot contain "/", so nested layouts need a sourceRef.
     - name: settings

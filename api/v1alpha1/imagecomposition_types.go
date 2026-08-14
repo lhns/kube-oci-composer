@@ -3,7 +3,7 @@ package v1alpha1
 import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 // Unpack describes how a fetched blob is turned into layer content.
-// +kubebuilder:validation:Enum=none;tar;tar.gz
+// +kubebuilder:validation:Enum=none;tar;tar.gz;deb
 type Unpack string
 
 const (
@@ -13,6 +13,11 @@ const (
 	UnpackTar Unpack = "tar"
 	// UnpackTarGz extracts a gzipped tar archive under the target.
 	UnpackTarGz Unpack = "tar.gz"
+	// UnpackDeb extracts a Debian package's data member under the target.
+	//
+	// Nothing is installed: no dependency is resolved and no maintainer script runs, so a package
+	// whose files only work after postinst will not work. See ADR 0022.
+	UnpackDeb Unpack = "deb"
 )
 
 // BaseImage is the image the artifact is built on top of.

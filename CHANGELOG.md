@@ -5,6 +5,45 @@ may change between minor versions.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-14
+
+### Added
+- **`unpack: deb`** — a Debian package can be a layer source. For a native library the
+  distribution's package is very often the only build that exists, since upstream ships source,
+  and until now that content could not enter an artifact at all. Only `data.tar.*` is read, so
+  `subpath`, rebasing, mode normalisation, symlink handling and deterministic ordering are the
+  same code the tar path uses.
+
+  **Nothing is installed**: no dependency is resolved and no maintainer script runs, so a package
+  whose files only work after `postinst` will not work. `unpack: deb` means "this archive has a
+  wrapper I know how to remove", exactly as `unpack: tar.gz` means "this archive is compressed".
+
+  The obligation this puts on the caller cannot be checked here: a `.so` must match the image it
+  is mounted into, because the artifact is built without reference to its consumer. It fails at
+  load time with a soname error rather than half-working. Note also that a distribution's pool
+  URL is not permanent — superseded revisions are removed — so a pin eventually 404s, which
+  surfaces as a failed fetch and never as wrong content. See
+  [ADR 0022](docs/adr/0022-distro-packages-as-layer-sources.md).
+
+  RPM is deliberately not included ([#9](https://github.com/lhns/kube-oci-composer/issues/9)).
+  Alpine `.apk` needs nothing: it is already a gzipped tar and works through `unpack: tar.gz`
+  with a `subpath`.
+- **Per-commit dev builds.** Any branch push now publishes a `sha-<short>` image and a
+  `0.0.0-dev.<short>` chart, so a branch can be installed in a real cluster before it is merged.
+  Previously the only artifact this project ever produced came from a `v*` tag — the image job in
+  CI builds with `push: false` — so testing an unmerged change meant cutting a throwaway release
+  tag or building by hand. The chart matters as much as the image, since it carries the CRDs.
+
+  Dev builds are amd64 only and create no GitHub Release. Tag releases are unchanged: multi-arch,
+  `latest`, and still gated on the whole ci+e2e pipeline.
+
+### Fixed
+- The lint job failed on a timeout rather than a finding. `golangci-lint` gives analysis 1m by
+  default and this repo had grown to about that, so the result depended on runner load. Raised to
+  5m — the budget is there to catch a hung linter, not to cap how long linting may take.
+
+## [0.3.0] and earlier
+
 ### Changed
 - **`publish.tag` and `push.tag` are now `tags`, a list.** Optional, with no default: omit it and
   the artifact is published by digest alone. One build can carry several — a spec-hash tag

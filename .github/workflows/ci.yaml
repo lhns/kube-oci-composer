@@ -77,6 +77,10 @@ jobs:
           # targeting a newer one — which is what broke this job.
           install-mode: goinstall
           version: latest
+          # Analysis alone was already at the 1m default, so the outcome depended on runner load
+          # rather than on the code. This budget is here to catch a hung linter, not to cap how
+          # long linting may legitimately take.
+          args: --timeout=5m
 
   chart:
     runs-on: ubuntu-latest
