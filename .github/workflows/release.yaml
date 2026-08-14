@@ -15,7 +15,10 @@ name: release
 on:
   push:
     tags:     ['v*']
-    branches: ['**']
+    # Not dependabot's branches. A dependabot-triggered run gets a read-only GITHUB_TOKEN,
+    # so the publish steps fail with a 403 from ghcr and the PR shows a red check that says
+    # nothing about the bump. Nobody wants a dev image of a dependency bump anyway.
+    branches: ['**', '!dependabot/**']
   workflow_dispatch:
 
 # Cancel superseded DEV runs only. A tag release must never be cancelled part-way: the image can
