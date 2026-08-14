@@ -114,7 +114,7 @@ func openDebData(r io.Reader) (io.Reader, func(), error) {
 		}
 	}
 
-	return nil, noop, errors.New("Debian package contains no data member")
+	return nil, noop, errors.New("no data member in the Debian package")
 }
 
 // extractDeb returns the package's payload, rebased under target and filtered by subpath exactly
