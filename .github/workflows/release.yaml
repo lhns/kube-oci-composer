@@ -1,8 +1,28 @@
 name: release
 
+# Two modes, same job:
+#   release  - a `v*` tag. Multi-arch, tagged `latest`, gated on the full ci+e2e pipeline,
+#              and it creates the GitHub Release.
+#   dev      - any other branch push, or run by hand. Single-arch amd64 (arm64 under QEMU is
+#              the slowest step here by far, and nothing consuming a dev build is arm64),
+#              published as `sha-<short>` plus a chart `0.0.0-dev.<short>` so a branch can be
+#              installed in a real cluster before it is merged. No GitHub Release.
+#
+# The dev half exists because without it there was NO way to run a branch anywhere: the image
+# job in ci builds with `push: false`, so the only artifact this repo ever produced came from a
+# tag. Testing an unmerged change meant either cutting a throwaway release tag or building by
+# hand. kube-vnet and kube-pv-reaper already publish per-commit; this repo was the exception.
 on:
   push:
-    tags: ['v*']
+    tags:     ['v*']
+    branches: ['**']
+  workflow_dispatch:
+
+# Cancel superseded DEV runs only. A tag release must never be cancelled part-way: the image can
+# already be pushed when the chart has not, which leaves a version that half exists.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
 
 permissions:
   # write, not read: the last step creates a GitHub Release, which needs it. With `read` every
@@ -21,12 +41,20 @@ jobs:
   # kube-vnet instead keeps release test-free and relies on main being green when you tag. That
   # works, but it is a convention rather than a mechanism: nothing stops `git tag` on a red commit.
   # Calling the workflows costs the e2e wall-clock once per release and makes it impossible.
+  #
+  # Tags only. A dev build deliberately does not re-run them: ci already runs on pull_request and
+  # on main under the concurrency group `ci-<ref>`, so calling it again for the same ref would put
+  # two invocations in one cancel-in-progress group and they would kill each other -- the exact
+  # failure the group name in ci.yaml was renamed to avoid. A dev image is for trying something
+  # out; the PR's own checks are what say whether it is correct.
   ci:
+    if: startsWith(github.ref, 'refs/tags/v')
     uses: ./.github/workflows/ci.yaml
     permissions:
       contents: read
 
   e2e:
+    if: startsWith(github.ref, 'refs/tags/v')
     uses: ./.github/workflows/e2e.yaml
     permissions:
       contents: read
@@ -34,6 +62,10 @@ jobs:
   release:
     runs-on: ubuntu-latest
     needs: [ci, e2e]
+    # `needs` on a skipped job would otherwise skip this one too, so dev mode never runs. always()
+    # re-enables it, and the two contains() checks put back exactly what needs was doing -- a
+    # failed or cancelled gate still blocks. Plain always() alone would publish on red.
+    if: always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -49,20 +81,42 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Derive version
+      - name: Derive version and mode
         id: version
         run: |
-          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
           echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            {
+              echo "mode=release"
+              echo "version=${VERSION}"
+              echo "platforms=linux/amd64,linux/arm64"
+              echo "extra_tags=ghcr.io/lhns/kube-oci-composer:latest"
+            } >> "$GITHUB_OUTPUT"
+          else
+            SHORT="${GITHUB_SHA::7}"
+            # A branch name may contain characters an OCI tag may not, so anything outside
+            # [a-zA-Z0-9-] becomes a dash. The sha tag is the one to depend on; the branch tag
+            # moves under you as the branch does.
+            BRANCH=$(echo "${GITHUB_REF_NAME}" | tr -c 'a-zA-Z0-9-' '-' | sed 's/-\+/-/g; s/^-//; s/-$//')
+            {
+              echo "mode=dev"
+              echo "version=0.0.0-dev.${SHORT}"
+              echo "platforms=linux/amd64"
+              echo "extra_tags=ghcr.io/lhns/kube-oci-composer:sha-${SHORT},ghcr.io/lhns/kube-oci-composer:${BRANCH}"
+            } >> "$GITHUB_OUTPUT"
+          fi
+          cat "$GITHUB_OUTPUT"
 
       - uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ steps.version.outputs.platforms }}
           push: true
           tags: |
             ghcr.io/lhns/kube-oci-composer:${{ steps.version.outputs.version }}
-            ghcr.io/lhns/kube-oci-composer:latest
+            ${{ steps.version.outputs.extra_tags }}
           build-args: |
             VERSION=${{ steps.version.outputs.version }}
             COMMIT=${{ github.sha }}
@@ -87,7 +141,10 @@ jobs:
           helm template kube-oci-composer charts/kube-oci-composer \
             --namespace oci-composer --include-crds > release/install.yaml
 
+      # Release mode only. A dev build has no release notes worth generating and would clutter
+      # the release list with one entry per commit; the image and chart are the deliverable.
       - uses: softprops/action-gh-release@v2
+        if: steps.version.outputs.mode == 'release'
         with:
           files: release/install.yaml
           generate_release_notes: true
