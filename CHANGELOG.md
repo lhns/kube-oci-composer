@@ -42,29 +42,48 @@ may change between minor versions.
   default and this repo had grown to about that, so the result depended on runner load. Raised to
   5m — the budget is there to catch a hung linter, not to cap how long linting may take.
 
-## [0.3.0] and earlier
+## [0.3.0] - 2026-08-07
 
-### Changed
-- **`publish.tag` and `push.tag` are now `tags`, a list.** Optional, with no default: omit it and
-  the artifact is published by digest alone. One build can carry several — a spec-hash tag
-  alongside a readable pointer, or the same hash under more than one algorithm.
-- **`immutable` now defaults to `true`, on both `publish` and `push`.** It previously existed only
-  on `push` and defaulted to false. The controller refuses to move a tag to different content and
-  fails the build instead. Republishing *identical* content remains a no-op, so a steady reconcile
-  loop never trips it; set `immutable: false` for a deliberately moving pointer such as `main`.
-- **The auto-generated `<tag>-<digest[:12]>` content tag is gone**, along with
-  `status.artifact.contentTag` (now `status.artifact.tags`) and `BuildRecord.contentTag` (now
-  `tags`). It existed only because the tag was a moving pointer and nothing else offered an
-  immutable handle; a spec-hash tag is one, and the digest always was.
+### Added
+- **Multi-architecture output** via `spec.platforms`. Two or more entries publish an OCI index
+  with one child per platform; one, or none, stays a single manifest. Unset means the base's
+  platform, or the controller's own when there is no base -- so on a mixed-architecture cluster,
+  name them explicitly or pin the controller, otherwise the same spec can build differently
+  depending on where the leader runs. See
+  [ADR 0018](docs/adr/0018-multi-architecture-output.md).
 
-  Migration: replace `tag: x` with `tags: [x]`, and add `immutable: false` if that tag is meant to
-  move. Anything pinning a content tag should pin the digest or a spec-hash tag instead.
+## [0.2.2] - 2026-08-05
+
+### Fixed
+- **The release pipeline published without being tested.** `release` ran `make test` alone and
+  called that a gate; `make test` passes on drifted codegen, an unrenderable chart and a broken
+  e2e -- so v0.2.0 and v0.2.1 both published green while the test workflow had been red for a
+  week. It now calls the whole `ci` and `e2e` workflows.
+- **`ci` and `e2e` cancelled each other** when the release workflow invoked both. Their
+  concurrency group was `${{ github.workflow }}`, which under `workflow_call` resolves to the
+  *caller* -- so both computed the same group with cancel-in-progress.
+- **The e2e image-volume assertion had never actually run.** Fixed, along with the node image
+  (its runtime could not mount image volumes), the kind CLI pin, telling containerd where the
+  registry is, and the executable bit on the cluster scripts.
+- Generated output is now produced by the pinned `controller-gen`, and the pin is a version check
+  rather than an existence check -- otherwise a bump reaches CI but never a machine that already
+  has an older binary.
+- `golang.org/x/text` v0.38.0 -> v0.39.0 (CVE-2026-56852).
+
+## [0.2.1] - 2026-08-05
+
+### Fixed
+- A `sourceRef` naming an object that does not exist **yet** no longer stalls the composition.
+  Flux objects routinely appear in any order, so "not there" is a normal transient state and has
+  to be retryable rather than terminal.
+
+## [0.2.0] - 2026-08-05
 
 ### Added
 - **A highly available serving endpoint.** With `--shared-storage` (implied by
   `--storage-backend=s3`) every replica serves pulls, instead of one leader serving while standbys
   sit idle. Publishing, garbage collection and status writes stay leader-only, so nothing about
-  correctness changes — serving is read-only.
+  correctness changes -- serving is read-only.
 
   This needed two halves: shared blobs, and manifests, which live in the registry's in-memory map
   rather than the store. `StandbyReplay` refills that map on every replica from `status.history`,
@@ -74,22 +93,35 @@ may change between minor versions.
 
   The chart now **fails** on `replicaCount > 1` without shared storage, instead of quietly giving
   you a standby that serves nothing.
-- **`publish.ref`**, an optional full image reference whose **tag** is added to `publish.tags`; the
-  host and repository are parsed and ignored. It lets the tag be set by whatever already rewrites
-  image references — kustomize's `images` transformer, for instance — so a single entry can retag
-  the artifact *and* the workload consuming it, keeping them in step by construction. A ref with no
-  tag contributes nothing rather than defaulting to `latest`, so an untemplated manifest degrades
-  to digest-only publishing instead of inventing a moving tag.
-- **Spec-hash tags**, resolving [ADR 0017](docs/adr/0017-updating-the-consumed-digest.md) — how a
-  workload's reference gets updated. The consumer hashes the build-determining part of the spec
-  and writes the result into both `publish.tags` and its own image reference, so the two stay in
-  step with no image automation, no git write-back and no status reading. Worked example in
-  `docs/examples/spec-hash-tag/`.
+
+### Fixed
+- The release job could not create a GitHub Release: it had `contents: read`, so the image and
+  chart published and only the release object failed -- which reads like a broken release when the
+  artifacts are in fact fine.
+- Three lint failures that had CI red on every push.
+
+## [0.1.0] - 2026-08-05
+
+First release. Everything below landed before it, grouped by what it does rather than by the
+commit that did it.
+
+### Added
 - `ImageComposition` API (`oci.lhns.de/v1alpha1`) with `url` layer sources, deterministic
   assembly, and publication by digest plus any requested tags.
 - Built-in read-only OCI serving endpoint, so no registry is required.
 - Flux conventions: kstatus conditions, `suspend`, `interval`, `observedGeneration`,
   `status.artifact`, and the `reconcile.fluxcd.io/requestedAt` annotation.
+- **Spec-hash tags**, resolving [ADR 0017](docs/adr/0017-updating-the-consumed-digest.md) -- how a
+  workload's reference gets updated. The consumer hashes the build-determining part of the spec
+  and writes the result into both `publish.tags` and its own image reference, so the two stay in
+  step with no image automation, no git write-back and no status reading. Worked example in
+  `docs/examples/spec-hash-tag/`.
+- **`publish.ref`**, an optional full image reference whose **tag** is added to `publish.tags`; the
+  host and repository are parsed and ignored. It lets the tag be set by whatever already rewrites
+  image references -- kustomize's `images` transformer, for instance -- so a single entry can retag
+  the artifact *and* the workload consuming it, keeping them in step by construction. A ref with no
+  tag contributes nothing rather than defaulting to `latest`, so an untemplated manifest degrades
+  to digest-only publishing instead of inventing a moving tag.
 - `status.inputHash`, so a reconcile that changes nothing costs one `HEAD` instead of
   re-downloading every layer.
 - Content-addressed storage with disk, in-memory and S3 backends, and a two-tier layer cache.
@@ -103,7 +135,29 @@ may change between minor versions.
 - `image` layer sources: compose over a base image to produce a runnable image rather than a
   bundle. Base layers are reused verbatim, and `config.from` inherits the base's entrypoint, env,
   user, working directory and platform.
+- A tested Helm chart, Makefile, Dockerfile and CI; the chart's NodePort can be pinned.
 - Architecture decision records in `docs/adr/`.
+
+### Changed
+The API was reshaped twice during this release. Recorded because examples and ADRs written before
+those changes describe the older shapes:
+
+- **Schema v2**: the base image was hoisted out of the layer list, verbs became source-scoped, and
+  removals and ownership were added. Three things made the base untenable as one entry among many
+  -- the config had to name which entry it was, it contributes many layers where others contribute
+  one, and multi-architecture builds resolve only it per platform. See
+  [ADR 0016](docs/adr/0016-the-scope-line-is-determinism.md).
+- **`publish.tag` and `push.tag` became `tags`, a list.** Optional, with no default: omit it and
+  the artifact is published by digest alone. One build can carry several -- a spec-hash tag
+  alongside a readable pointer, or the same hash under more than one algorithm.
+- **`immutable` defaults to `true`**, on both `publish` and `push`. It previously existed only on
+  `push` and defaulted to false. The controller refuses to move a tag to different content and
+  fails the build instead. Republishing *identical* content remains a no-op, so a steady reconcile
+  loop never trips it; set `immutable: false` for a deliberately moving pointer such as `main`.
+- **The auto-generated `<tag>-<digest[:12]>` content tag is gone**, along with
+  `status.artifact.contentTag` (now `status.artifact.tags`) and `BuildRecord.contentTag` (now
+  `tags`). It existed only because the tag was a moving pointer and nothing else offered an
+  immutable handle; a spec-hash tag is one, and the digest always was.
 
 ### Fixed
 - Cache returned a path to a file it had already deleted when the remote tier was unavailable.
@@ -113,6 +167,8 @@ may change between minor versions.
 - `name.Insecure` was applied to every reference, which would have silently downgraded pushes to
   an external registry to plaintext HTTP.
 - `status.artifact.ref` was built from the loopback address rather than the serving host.
+- Two API bugs the envtest suite found on its first ever run, and unimplemented image sources
+  being accepted rather than rejected.
 
 ### Removed
 - Pod-reference protection in the garbage collector: implemented, measured to protect nothing, and
