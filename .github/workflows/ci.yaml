@@ -77,6 +77,12 @@ jobs:
           # targeting a newer one — which is what broke this job.
           install-mode: goinstall
           version: latest
+          # golangci-lint gives ANALYSIS a 1m budget by default, and this repo had quietly grown
+          # to about that — so the job's outcome depended on how loaded the runner was rather than
+          # on the code, and it tipped over on the first commit to add a package. Raised well past
+          # the current cost: the timeout is there to catch a hung linter, not to police how long
+          # linting takes, and a red X meaning "the runner was busy" teaches people to ignore red.
+          args: --timeout=5m
 
   chart:
     runs-on: ubuntu-latest
