@@ -165,7 +165,8 @@
                     "enum": [
                       "none",
                       "tar",
-                      "tar.gz"
+                      "tar.gz",
+                      "deb"
                     ],
                     "type": "string"
                   },

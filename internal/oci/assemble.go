@@ -192,6 +192,7 @@ const (
 	UnpackNone  UnpackMode = "none"
 	UnpackTar   UnpackMode = "tar"
 	UnpackTarGz UnpackMode = "tar.gz"
+	UnpackDeb   UnpackMode = "deb"
 )
 
 // LayerInput is one content contribution.
@@ -579,6 +580,14 @@ func collectEntries(in LayerInput) ([]tarEntry, error) {
 			r = zr
 		}
 		return extractTar(tar.NewReader(r), target, in.Subpath)
+
+	case UnpackDeb:
+		f, err := os.Open(in.Path)
+		if err != nil {
+			return nil, fmt.Errorf("opening content: %w", err)
+		}
+		defer f.Close()
+		return extractDeb(f, target, in.Subpath)
 
 	default:
 		return nil, fmt.Errorf("unknown unpack mode %q", in.Unpack)
