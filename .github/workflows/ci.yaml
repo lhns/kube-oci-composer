@@ -134,7 +134,7 @@ jobs:
       - name: Build the image (no push)
         # The release workflow is the only other place this Dockerfile is built, and there a
         # failure means a tag is already pushed. Building it here makes that a PR failure.
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: false
