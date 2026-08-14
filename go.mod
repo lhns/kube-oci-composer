@@ -3,9 +3,9 @@ module github.com/lhns/kube-oci-composer
 go 1.26.0
 
 require (
-	github.com/go-logr/logr v1.4.3
-	github.com/google/go-containerregistry v0.21.7
-	github.com/klauspost/compress v1.18.6
+	github.com/go-logr/logr v1.4.4
+	github.com/google/go-containerregistry v0.21.9
+	github.com/klauspost/compress v1.19.1
 	github.com/minio/minio-go/v7 v7.2.1
 	github.com/ulikunitz/xz v0.5.16
 	k8s.io/api v0.36.2
@@ -20,7 +20,7 @@ require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
-	github.com/docker/cli v29.5.3+incompatible // indirect
+	github.com/docker/cli v29.6.2+incompatible // indirect
 	github.com/docker/docker-credential-helpers v0.9.3 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/emicklei/go-restful/v3 v3.13.0 // indirect
@@ -65,8 +65,8 @@ require (
 	golang.org/x/crypto v0.53.0 // indirect
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sync v0.21.0 // indirect
-	golang.org/x/sys v0.46.0 // indirect
+	golang.org/x/sync v0.22.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/term v0.44.0 // indirect
 	golang.org/x/text v0.39.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
