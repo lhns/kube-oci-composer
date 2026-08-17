@@ -129,7 +129,7 @@ jobs:
     needs: unit
     steps:
       - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - name: Build the image (no push)
         # The release workflow is the only other place this Dockerfile is built, and there a
         # failure means a tag is already pushed. Building it here makes that a PR failure.
