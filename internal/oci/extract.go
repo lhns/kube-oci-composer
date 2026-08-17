@@ -122,15 +122,10 @@ func (c *collector) addFile(name string, mode int64, body []byte) {
 
 // addSymlink records a symlink, with the target kept verbatim.
 //
-// Link targets are NOT resolved or validated. Nothing here writes to a filesystem — the entries
-// become a tar and then a layer — so a link is inert data until a runtime resolves it inside the
-// consuming container's own rootfs. Rewriting one would break the case symlinks are carried for:
-// a native library shipped as a real file plus a relative link beside it.
-//
-// Parent directories are deliberately NOT synthesised here, matching what this code has always
-// done. Adding them would change the bytes of every existing layer containing a symlink, which
-// would mean bumping AssemblyVersion and rebuilding every artifact in every cluster for a
-// cosmetic difference.
+// Targets are neither resolved nor validated: nothing here writes to a filesystem, so a link is
+// inert data until a runtime resolves it inside the consuming container's own rootfs. Parent
+// directories are deliberately not synthesised, unlike addFile — adding them would change the bytes
+// of every existing layer containing a symlink, and so require an AssemblyVersion bump.
 func (c *collector) addSymlink(name, link string) {
 	c.entries = append(c.entries, tarEntry{name: name, mode: 0o777, link: link})
 }

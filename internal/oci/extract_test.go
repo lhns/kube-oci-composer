@@ -15,28 +15,18 @@ import (
 // pin is the collector, which the zip path reaches too — so a regression here is a regression in
 // both formats, which is the reason this file exists separately from assemble_test.go.
 
-// tarWithNames builds an uncompressed tar containing exactly the given entry names, bypassing the
-// normalisation writeTarGz's map-of-files shape would impose. A name is written verbatim, which is
-// the whole point: the guard under test runs on what the archive claims, not on what is sensible.
+// tarWithNames builds a tar containing exactly the given entry names, in order.
+//
+// buildTar writes names verbatim, which is what this needs: the guard under test runs on what an
+// archive claims, not on what a well-behaved packer would emit. (writeTarGz cannot serve here — it
+// takes an unordered map and gzips the result.)
 func tarWithNames(t *testing.T, names ...string) *tar.Reader {
 	t.Helper()
-	var buf bytes.Buffer
-	tw := tar.NewWriter(&buf)
+	files := make([]tarFile, 0, len(names))
 	for _, name := range names {
-		body := "x"
-		if err := tw.WriteHeader(&tar.Header{
-			Name: name, Mode: 0o644, Size: int64(len(body)), Typeflag: tar.TypeReg,
-		}); err != nil {
-			t.Fatalf("writing header %q: %v", name, err)
-		}
-		if _, err := tw.Write([]byte(body)); err != nil {
-			t.Fatalf("writing body %q: %v", name, err)
-		}
+		files = append(files, tarFile{name: name, body: "x"})
 	}
-	if err := tw.Close(); err != nil {
-		t.Fatalf("closing tar: %v", err)
-	}
-	return tar.NewReader(&buf)
+	return tar.NewReader(bytes.NewReader(buildTar(t, files)))
 }
 
 // TestExtractRefusesTraversal — this guard is the only thing standing between a malicious archive

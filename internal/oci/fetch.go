@@ -26,26 +26,6 @@ func (e *ErrDigestMismatch) Error() string {
 	return fmt.Sprintf("digest mismatch for %s: declared %s, got %s", e.Ref, e.Want, e.Got)
 }
 
-// ErrUnsupportedUnpack is returned for an unpack mode this build does not implement.
-//
-// Like ErrDigestMismatch it is a distinct type so the caller can map it to a TERMINAL condition.
-// Retrying cannot add a code path: the mode is either implemented or it is not. Before this was
-// typed the reconciler treated it as an ordinary error and requeued with backoff indefinitely,
-// which left the object Ready=False with no Stalled condition and nothing pointing at the cause.
-//
-// The realistic cause is version skew rather than a typo — the CRD's enum rejects anything else at
-// admission — and the chart makes that skew easy: CRDs ship under crds/, which Helm installs on
-// install and never touches on upgrade, so a CRD applied out of band, or a rolled-back Deployment,
-// leaves a controller older than the schema validating its input.
-type ErrUnsupportedUnpack struct {
-	Mode string
-}
-
-func (e *ErrUnsupportedUnpack) Error() string {
-	return fmt.Sprintf("unknown unpack mode %q: this controller does not implement it, "+
-		"so the CRD may be newer than the controller", e.Mode)
-}
-
 // DefaultFetchTimeout bounds a single fetch. Artifacts here are tens of megabytes; a fetch
 // that has not finished well inside this is stuck rather than slow.
 const DefaultFetchTimeout = 10 * time.Minute

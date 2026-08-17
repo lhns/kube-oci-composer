@@ -185,6 +185,24 @@ func platformFor(base v1.Image) (Platform, error) {
 	return plat, nil
 }
 
+// ErrUnsupportedUnpack is returned for an unpack mode this build does not implement.
+//
+// Typed, like ErrDigestMismatch, so the reconciler can map it to a TERMINAL condition: retrying
+// cannot add a code path to a running binary. Untyped it was an ordinary error, so the object sat
+// Ready=False and requeued with backoff indefinitely without ever saying why.
+//
+// The realistic cause is version skew rather than a typo, since the CRD's enum rejects anything
+// else at admission. The chart ships CRDs under crds/, which Helm installs but never upgrades, so
+// a schema newer than its controller is an ordinary situation.
+type ErrUnsupportedUnpack struct {
+	Mode string
+}
+
+func (e *ErrUnsupportedUnpack) Error() string {
+	return fmt.Sprintf("unknown unpack mode %q: this controller does not implement it, "+
+		"so the CRD may be newer than the controller", e.Mode)
+}
+
 // UnpackMode mirrors the API's Unpack field.
 type UnpackMode string
 
@@ -468,13 +486,8 @@ func buildLayerTarGz(in LayerInput, workDir string) (string, error) {
 	// Stable order. Without this the digest would depend on filesystem or archive iteration
 	// order, which is exactly the kind of incidental variation determinism must exclude.
 	//
-	// SliceStable rather than Slice, and the distinction is load-bearing for entries that share a
-	// name. Two entries with the same name compare equal, so an unstable sort is free to order
-	// them however its partitioning happens to fall — and the dedupe below then keeps whichever
-	// one landed first. That made the output of an archive with duplicate names depend on the
-	// sort implementation rather than on the archive, so a Go upgrade could silently move digests
-	// that immutable tags then refuse to republish. Stability makes archive order the tiebreak,
-	// which is a property of the input.
+	// SliceStable, not Slice: equal names must break ties on archive order, which is a property of
+	// the input, rather than on how the sort happened to partition them. See the dedupe below.
 	sort.SliceStable(entries, func(i, j int) bool { return entries[i].name < entries[j].name })
 
 	out, err := os.CreateTemp(workDir, "layer-*.tar.gz")
@@ -567,138 +580,84 @@ func collectEntries(in LayerInput) ([]tarEntry, error) {
 
 	target := strings.TrimPrefix(path.Clean("/"+in.Target), "/")
 
+	// Every mode past this point reads the fetched file, so it is opened once here rather than in
+	// each arm. Every extractor takes it: the content is always streamed to disk before it gets
+	// here, so an *os.File is both the io.Reader the tar and deb readers want and the io.ReaderAt
+	// the zip reader needs.
+	f, err := os.Open(in.Path)
+	if err != nil {
+		return nil, fmt.Errorf("opening content: %w", err)
+	}
+	defer f.Close()
+
+	// A tar under a codec. Looked up rather than listed as case labels, so the set of modes and
+	// their codecs cannot disagree — see tarCompressions.
+	if comp, ok := tarCompressions[in.Unpack]; ok {
+		return extractTarball(f, comp, target, in.Subpath)
+	}
+
 	switch in.Unpack {
 	case UnpackNone, "":
-		body, err := os.ReadFile(in.Path)
-		if err != nil {
-			return nil, fmt.Errorf("reading content: %w", err)
-		}
-		name := target
-		if name == "" || strings.HasSuffix(in.Target, "/") {
-			return nil, fmt.Errorf("target %q must name a file when unpack is none", in.Target)
-		}
-		return append(parentDirs(name), tarEntry{name: name, mode: 0o644, body: body}), nil
+		return singleFile(f, in, target, compNone)
 
 	case UnpackGz:
-		// A single compressed file, not an archive: the same contract as UnpackNone, one
-		// decompression earlier.
-		//
-		// The name in the image comes from the spec, never from the archive. gzip can carry the
-		// original filename in its header and the URL usually ends in one, and using either would
-		// make the output depend on something InputHash deliberately excludes — two mirrors
-		// serving identical bytes under different filenames would then produce different layers
-		// under one input hash, and the reconciler would serve whichever was built first forever.
-		if in.Subpath != "" {
-			return nil, fmt.Errorf("subpath is not valid with unpack %q: there is no archive to select from", in.Unpack)
-		}
-		name := target
-		if name == "" || strings.HasSuffix(in.Target, "/") {
-			return nil, fmt.Errorf("target %q must name a file when unpack is %q", in.Target, in.Unpack)
-		}
-		f, err := os.Open(in.Path)
-		if err != nil {
-			return nil, fmt.Errorf("opening content: %w", err)
-		}
-		defer f.Close()
-
-		r, closeFn, err := decompress(f, compGzip)
-		if err != nil {
-			return nil, err
-		}
-		defer closeFn()
-
-		body, err := io.ReadAll(r)
-		if err != nil {
-			return nil, fmt.Errorf("reading content: %w", err)
-		}
-		return append(parentDirs(name), tarEntry{name: name, mode: 0o644, body: body}), nil
-
-	case UnpackTar, UnpackTarGz, UnpackTarXz, UnpackTarZstd, UnpackTarBz2:
-		comp, err := tarCompression(in.Unpack)
-		if err != nil {
-			return nil, err
-		}
-		f, err := os.Open(in.Path)
-		if err != nil {
-			return nil, fmt.Errorf("opening content: %w", err)
-		}
-		defer f.Close()
-
-		// Deferring the cleanup is correct because extractTar materialises every entry before it
-		// returns, so nothing reads the stream after this function exits. A later change that
-		// returned a lazy reader instead would have to move this.
-		r, closeFn, err := decompress(f, comp)
-		if err != nil {
-			return nil, err
-		}
-		defer closeFn()
-
-		return extractTar(tar.NewReader(r), target, in.Subpath)
+		return singleFile(f, in, target, compGzip)
 
 	case UnpackZip:
-		return extractZip(in.Path, target, in.Subpath)
+		return extractZip(f, target, in.Subpath)
 
 	case UnpackDeb:
-		f, err := os.Open(in.Path)
-		if err != nil {
-			return nil, fmt.Errorf("opening content: %w", err)
-		}
-		defer f.Close()
 		return extractDeb(f, target, in.Subpath)
 
 	default:
-		// Reached when the CRD admits a mode this build does not implement, which happens when the
-		// CRD is newer than the controller — the chart ships CRDs under crds/, and Helm installs
-		// those but never upgrades them, so the two versions can legitimately diverge. Typed so
-		// the reconciler can report it as terminal instead of retrying a mode that will never
-		// appear.
+		// Reached when the CRD admits a mode this build does not implement. Typed so the reconciler
+		// reports it as terminal instead of retrying a mode that will never appear.
 		return nil, &ErrUnsupportedUnpack{Mode: string(in.Unpack)}
 	}
 }
 
-// extractTar reads an archive and rebases its entries under target.
+// singleFile places one file at the target, decompressing it first when comp says to.
 //
-// When subpath is set, only entries beneath it are taken, and the prefix is stripped so the
-// selected directory's contents land at target rather than the directory itself. Everything about
-// WHERE an entry lands is the collector's; this function only translates tar's typeflags.
-func extractTar(tr *tar.Reader, target, subpath string) ([]tarEntry, error) {
-	c := newCollector(target, subpath)
-
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("reading tar: %w", err)
-		}
-
-		// Names are passed through unchanged: a backslash in a tar entry is part of the filename,
-		// not a separator, so the normalisation the zip path applies would corrupt it here.
-		name, ok, err := c.rebase(hdr.Name)
-		if err != nil {
-			return nil, err
-		}
-		if !ok {
-			continue
-		}
-
-		switch hdr.Typeflag {
-		case tar.TypeDir:
-			c.addDir(name)
-		case tar.TypeReg:
-			body, err := io.ReadAll(tr)
-			if err != nil {
-				return nil, fmt.Errorf("reading %q: %w", hdr.Name, err)
-			}
-			c.addFile(name, normaliseMode(hdr.Mode), body)
-		case tar.TypeSymlink:
-			c.addSymlink(name, hdr.Linkname)
-		default:
-			// Devices, fifos and hard links have no place in an artifact layer.
-			continue
-		}
+// This is `unpack: none` and `unpack: gz` — they are one procedure differing only by a codec, so a
+// third single-file mode is one more call rather than another copy of this.
+//
+// The name in the image comes from the spec and nowhere else. gzip can record an original filename
+// in its header and the URL usually ends in one, but both are excluded from InputHash, so deriving
+// the name from either would let two mirrors serving identical bytes produce different layers under
+// one input hash — after which the reconciler serves whichever was built first, forever.
+func singleFile(f *os.File, in LayerInput, target string, comp compression) ([]tarEntry, error) {
+	if target == "" || strings.HasSuffix(in.Target, "/") {
+		return nil, fmt.Errorf("target %q must name a file when unpack is %q", in.Target, in.Unpack)
+	}
+	// Refused rather than ignored, because there is no archive to select from and silence would
+	// leave a spec mistake looking like it worked. `none` predates this and still ignores it.
+	if comp != compNone && in.Subpath != "" {
+		return nil, fmt.Errorf("subpath is not valid with unpack %q: there is no archive to select from", in.Unpack)
 	}
 
-	return c.done()
+	r, closeFn, err := decompress(f, comp)
+	if err != nil {
+		return nil, err
+	}
+	defer closeFn()
+
+	body, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("reading content: %w", err)
+	}
+	return append(parentDirs(target), tarEntry{name: target, mode: 0o644, body: body}), nil
+}
+
+// extractTarball extracts a tar that may be wrapped in a codec.
+//
+// Deferring the codec cleanup here is safe because extractTar materialises every entry before it
+// returns; a change that made it return a lazy reader would have to move this.
+func extractTarball(f *os.File, comp compression, target, subpath string) ([]tarEntry, error) {
+	r, closeFn, err := decompress(f, comp)
+	if err != nil {
+		return nil, err
+	}
+	defer closeFn()
+
+	return extractTar(tar.NewReader(r), target, subpath)
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"os"
 	"strings"
 	"unicode/utf8"
 )
@@ -28,46 +29,50 @@ import (
 //   - Separators are specified as "/" but zips written on Windows do appear with "\".
 //   - Unix permissions are present only if the writer recorded them.
 //
-// Unlike tar and deb, this takes a PATH rather than a reader. The zip format puts its index at the
-// end of the file, so archive/zip needs io.ReaderAt and a size; the parameter type makes that
-// requirement impossible to overlook. It is satisfied because fetched content is always streamed to
-// a real file on disk before it gets here — see Fetcher.FetchURL and cache.Cache.Path.
+// This takes an *os.File rather than a plain io.Reader, because the zip format puts its index at
+// the end of the file and archive/zip therefore needs io.ReaderAt and a size. That is not a
+// constraint in practice — fetched content is always streamed to a real file on disk before it gets
+// here, see Fetcher.FetchURL and cache.Cache.Path — and *os.File is also the io.Reader the tar and
+// deb readers take, so every extractor has the same shape.
 
 // zipEncryptedFlag is general-purpose bit 0, set when an entry's data is encrypted.
 const zipEncryptedFlag = 0x1
 
 // extractZip reads a zip archive and rebases its entries under target, filtered by subpath.
-func extractZip(path, target, subpath string) ([]tarEntry, error) {
-	zr, err := zip.OpenReader(path)
+func extractZip(f *os.File, target, subpath string) ([]tarEntry, error) {
+	size, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("sizing zip: %w", err)
+	}
+	zr, err := zip.NewReader(f, size.Size())
 	if err != nil {
 		return nil, fmt.Errorf("reading zip: %w", err)
 	}
-	defer zr.Close()
 
 	c := newCollector(target, subpath)
 	// Tracks emitted non-directory destinations, so a duplicate is refused rather than resolved.
 	// Directories are excluded because repeats of those are ordinary and the collector absorbs them.
 	seen := make(map[string]bool, len(zr.File))
 
-	for _, f := range zr.File {
-		if f.Flags&zipEncryptedFlag != 0 {
+	for _, e := range zr.File {
+		if e.Flags&zipEncryptedFlag != 0 {
 			// archive/zip supports neither ZipCrypto nor AES and does not check this flag, so
 			// reading on would hand back ciphertext and, at best, fail a CRC check later. A layer
 			// full of encrypted bytes is worse than a refusal.
-			return nil, fmt.Errorf("zip entry %q is encrypted, which is not supported", f.Name)
+			return nil, fmt.Errorf("zip entry %q is encrypted, which is not supported", e.Name)
 		}
-		if !utf8.ValidString(f.Name) {
+		if !utf8.ValidString(e.Name) {
 			// Names are raw bytes when the UTF-8 flag is clear, historically CP437 or a local
 			// codepage. Transcoding would mean carrying a charset table and a second way for two
 			// builds to disagree, so this refuses instead. Deterministic either way; just not
 			// something to guess at.
-			return nil, fmt.Errorf("zip entry name is not valid UTF-8: %q", f.Name)
+			return nil, fmt.Errorf("zip entry name is not valid UTF-8: %q", e.Name)
 		}
 
 		// Normalise separators BEFORE the traversal check, and the order is load-bearing: rebase
 		// tests for "../", and path.Clean treats "a\b" as a single component, so checking first
 		// would let "..\..\etc\passwd" through as one very strange filename instead of refusing it.
-		name := strings.ReplaceAll(f.Name, "\\", "/")
+		name := strings.ReplaceAll(e.Name, "\\", "/")
 
 		dest, ok, err := c.rebase(name)
 		if err != nil {
@@ -77,7 +82,7 @@ func extractZip(path, target, subpath string) ([]tarEntry, error) {
 			continue
 		}
 
-		mode := f.Mode()
+		mode := e.Mode()
 
 		// Directory detection is deliberately two-sided. The trailing slash is what the format
 		// specifies, but some writers set only the directory attribute, and others emit no
@@ -94,18 +99,16 @@ func extractZip(path, target, subpath string) ([]tarEntry, error) {
 
 		switch {
 		case mode&fs.ModeSymlink != 0:
-			// Checked before the regular-file case, because a symlink IS a regular entry as far as
-			// the container is concerned and the wrong branch order is silent: the build stays
-			// green, the digest stays stable, and the failure surfaces much later as a linker
-			// error in whatever mounts the artifact.
-			link, err := readZipEntry(f)
+			// Before the regular-file case, per the file header: a symlink IS a regular entry to
+			// the container, so the wrong branch order fails silently.
+			link, err := readZipEntry(e)
 			if err != nil {
 				return nil, err
 			}
 			c.addSymlink(dest, string(link))
 
 		case mode.IsRegular():
-			body, err := readZipEntry(f)
+			body, err := readZipEntry(e)
 			if err != nil {
 				return nil, err
 			}

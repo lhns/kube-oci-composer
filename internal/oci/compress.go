@@ -69,24 +69,15 @@ func decompress(r io.Reader, c compression) (io.Reader, func(), error) {
 	}
 }
 
-// tarCompression maps a tar-family unpack mode onto the codec wrapping its tar.
+// tarCompressions is the set of unpack modes that are a tar under a codec, and which codec.
 //
-// Total by construction: collectEntries' switch is the only caller and lists exactly these modes,
-// so the default is unreachable rather than a silent fallback to "uncompressed" — which would
-// hand a compressed stream to the tar reader and report it as a corrupt archive.
-func tarCompression(m UnpackMode) (compression, error) {
-	switch m {
-	case UnpackTar:
-		return compNone, nil
-	case UnpackTarGz:
-		return compGzip, nil
-	case UnpackTarXz:
-		return compXz, nil
-	case UnpackTarZstd:
-		return compZstd, nil
-	case UnpackTarBz2:
-		return compBzip2, nil
-	default:
-		return compNone, fmt.Errorf("unpack mode %q is not a compressed tar", string(m))
-	}
+// This is the ONE list of them: collectEntries dispatches by looking a mode up here rather than
+// naming them again in a case label, so adding tar.lz4 is one entry and cannot half-land as a mode
+// the switch accepts and the codec table does not.
+var tarCompressions = map[UnpackMode]compression{
+	UnpackTar:     compNone,
+	UnpackTarGz:   compGzip,
+	UnpackTarXz:   compXz,
+	UnpackTarZstd: compZstd,
+	UnpackTarBz2:  compBzip2,
 }

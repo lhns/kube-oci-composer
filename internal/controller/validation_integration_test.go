@@ -289,19 +289,10 @@ func TestIntegrationMalformedValuesAreRejected(t *testing.T) {
 //
 // Paired with TestUnknownUnpackModeIsTerminal in internal/oci, which covers the other direction.
 func TestIntegrationEveryUnpackModeIsAccepted(t *testing.T) {
-	modes := []ociv1alpha1.Unpack{
-		ociv1alpha1.UnpackNone,
-		ociv1alpha1.UnpackTar,
-		ociv1alpha1.UnpackTarGz,
-		ociv1alpha1.UnpackTarXz,
-		ociv1alpha1.UnpackTarZstd,
-		ociv1alpha1.UnpackTarBz2,
-		ociv1alpha1.UnpackGz,
-		ociv1alpha1.UnpackZip,
-		ociv1alpha1.UnpackDeb,
-	}
-
-	for _, mode := range modes {
+	// allUnpackModes, not a local copy: unpackparity_test.go carries no build tag, so it compiles
+	// into this build too. A second list here would be one that silently falls behind, quietly
+	// dropping coverage of whichever mode was added to only one of them.
+	for _, mode := range allUnpackModes {
 		t.Run(string(mode), func(t *testing.T) {
 			err := apply(t, "unpack-"+strings.ReplaceAll(string(mode), ".", "-"),
 				ociv1alpha1.ImageCompositionSpec{

@@ -21,51 +21,24 @@ func writeBytes(t *testing.T, name string, body []byte) string {
 	return p
 }
 
-// TestUnpackTarEveryCompression — the codec table is shared with the deb path, so the risk is not
-// the codecs themselves but the mapping: a mode wired to the wrong compression hands a compressed
-// stream to the tar reader and reports it as a corrupt archive.
+// TestUnpackTarCompressions — the codecs themselves are shared with the already-shipped deb path,
+// so the risk here is the MAPPING: a mode wired to the wrong codec hands a compressed stream to the
+// tar reader and reports it as a corrupt archive.
 //
-// No tar.bz2 case: the standard library decodes bzip2 but cannot write it, which is the same reason
-// debDecompress's .bz2 branch has no test. The branch is two lines of stdlib shared with the
-// already-shipped deb path, and adding a bzip2 writer dependency to cover it would cost more than
-// it proves.
-func TestUnpackTarEveryCompression(t *testing.T) {
-	cases := map[UnpackMode]string{
-		UnpackTar:     "",
-		UnpackTarGz:   ".gz",
-		UnpackTarXz:   ".xz",
-		UnpackTarZstd: ".zst",
-	}
-
-	for mode, suffix := range cases {
-		t.Run(string(mode), func(t *testing.T) {
-			raw := buildDataTar(t, []debFile{{name: "usr/bin/tool", body: "payload"}})
-			src := writeBytes(t, "input.tar"+suffix, compressData(t, raw, suffix))
-
-			entries := entriesOf(t, []LayerInput{{
-				Name: "vendor", Path: src, Unpack: mode, Target: "/opt",
-			}}, Config{})
-
-			for _, e := range entries {
-				if e.Name == "opt/usr/bin/tool" {
-					return
-				}
-			}
-			t.Errorf("payload did not reach the layer, got %v", entries)
-		})
-	}
-}
-
-// TestUnpackTarCompressionsAgree — every compression of the same tar must produce the same layer.
-// The codec is packaging, not content, so it must not reach the digest.
-func TestUnpackTarCompressionsAgree(t *testing.T) {
-	raw := buildDataTar(t, []debFile{
+// Asserted two ways at once. The payload must arrive, which catches a mode that decodes to nothing;
+// and every codec must produce the SAME digest, which catches one that decodes to something subtly
+// different and pins that packaging never reaches the output.
+//
+// No tar.bz2 case: the standard library decodes bzip2 but cannot write it, the same reason the deb
+// fixtures skip it. That branch is two lines of stdlib shared with the deb path, and adding a bzip2
+// writer dependency to cover it would cost more than it proves.
+func TestUnpackTarCompressions(t *testing.T) {
+	raw := buildTar(t, []tarFile{
 		{name: "usr/bin/tool", body: "payload"},
 		{name: "usr/lib/thing.so", body: "ELF"},
 	})
 
-	var want string
-	for _, tc := range []struct {
+	cases := []struct {
 		mode   UnpackMode
 		suffix string
 	}{
@@ -73,25 +46,37 @@ func TestUnpackTarCompressionsAgree(t *testing.T) {
 		{UnpackTarGz, ".gz"},
 		{UnpackTarXz, ".xz"},
 		{UnpackTarZstd, ".zst"},
-	} {
-		src := writeBytes(t, "input.tar"+tc.suffix, compressData(t, raw, tc.suffix))
-		img, err := Assemble(nil, []LayerInput{{
-			Name: "vendor", Path: src, Unpack: tc.mode, Target: "/opt",
-		}}, Config{}, t.TempDir())
-		if err != nil {
-			t.Fatalf("%s: assemble: %v", tc.mode, err)
-		}
-		d, err := img.Digest()
-		if err != nil {
-			t.Fatalf("%s: digest: %v", tc.mode, err)
-		}
-		if want == "" {
-			want = d.String()
-			continue
-		}
-		if d.String() != want {
-			t.Errorf("%s produced %s, want %s", tc.mode, d, want)
-		}
+	}
+
+	var want string
+	for _, tc := range cases {
+		t.Run(string(tc.mode), func(t *testing.T) {
+			in := []LayerInput{{
+				Name:   "vendor",
+				Path:   writeBytes(t, "input.tar"+tc.suffix, compressData(t, raw, tc.suffix)),
+				Unpack: tc.mode,
+				Target: "/opt",
+			}}
+
+			var found bool
+			for _, e := range entriesOf(t, in, Config{}) {
+				if e.Name == "opt/usr/bin/tool" {
+					found = true
+				}
+			}
+			if !found {
+				t.Error("payload did not reach the layer")
+			}
+
+			got := assembleDigest(t, in, Config{})
+			if want == "" {
+				want = got
+				return
+			}
+			if got != want {
+				t.Errorf("digest %s, want %s: the codec must not reach the output", got, want)
+			}
+		})
 	}
 }
 

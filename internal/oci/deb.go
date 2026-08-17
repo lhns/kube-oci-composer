@@ -29,26 +29,6 @@ const (
 	arSizeEnd   = 58 // the remaining two bytes are the "`\n" trailer
 )
 
-// debDecompress wraps r according to a data.tar suffix, and returns a cleanup to call when done.
-//
-// dpkg picks the compressor, so a caller cannot know which to expect. The codecs themselves are in
-// compress.go, shared with the tar unpack modes; this only maps a member-name suffix onto one and
-// keeps the error phrased in terms of the package, since "unsupported compression" alone would not
-// tell a reader which part of the .deb was unreadable.
-func debDecompress(r io.Reader, suffix string) (io.Reader, func(), error) {
-	c, ok := map[string]compression{
-		"":     compNone,
-		".gz":  compGzip,
-		".xz":  compXz,
-		".zst": compZstd,
-		".bz2": compBzip2,
-	}[suffix]
-	if !ok {
-		return nil, func() {}, fmt.Errorf("unsupported compression %q in data member", suffix)
-	}
-	return decompress(r, c)
-}
-
 // openDebData advances r to the package's data member and returns a decompressed reader for it.
 func openDebData(r io.Reader) (io.Reader, func(), error) {
 	noop := func() {}
@@ -85,8 +65,16 @@ func openDebData(r io.Reader) (io.Reader, func(), error) {
 			return nil, noop, fmt.Errorf("unreadable size for ar member %q", name)
 		}
 
+		// dpkg picks the compressor, so a caller cannot know which to expect. The member name
+		// carries it as a dotted suffix and compression's values are those names without the dot,
+		// so the codec falls out of the name; decompress rejects anything it does not implement.
 		if suffix, ok := strings.CutPrefix(name, "data.tar"); ok {
-			return debDecompress(io.LimitReader(r, size), suffix)
+			dr, closeFn, err := decompress(io.LimitReader(r, size),
+				compression(strings.TrimPrefix(suffix, ".")))
+			if err != nil {
+				return nil, noop, fmt.Errorf("data member: %w", err)
+			}
+			return dr, closeFn, nil
 		}
 		// Members are 2-aligned, so an odd-sized one is followed by a padding byte.
 		if _, err := io.CopyN(io.Discard, r, size+size%2); err != nil {

@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -19,9 +18,8 @@ type zipEntry struct {
 	// dosOnly writes the entry with an MS-DOS creator and no unix mode, the way a zip made on
 	// Windows arrives.
 	dosOnly bool
-	// method overrides the compression method; zero means Deflate.
-	method uint16
-	store  bool
+	// store writes the entry uncompressed instead of deflated.
+	store bool
 }
 
 // buildZip assembles an archive in memory, in the given order.
@@ -39,10 +37,6 @@ func buildZip(t *testing.T, entries []zipEntry) []byte {
 		if e.store {
 			hdr.Method = zip.Store
 		}
-		if e.method != 0 {
-			hdr.Method = e.method
-		}
-
 		switch {
 		case e.dosOnly:
 			// CreatorVersion stays 0 (FAT), so no unix mode is recorded at all.
@@ -77,14 +71,51 @@ func buildZip(t *testing.T, entries []zipEntry) []byte {
 	return buf.Bytes()
 }
 
-// writeZip puts a built archive on disk, since extractZip takes a path.
-func writeZip(t *testing.T, entries []zipEntry) string {
+// openZip puts a built archive on disk and opens it, since extractZip needs a seekable file.
+func openZip(t *testing.T, entries []zipEntry) *os.File {
 	t.Helper()
-	p := filepath.Join(t.TempDir(), "input.zip")
-	if err := os.WriteFile(p, buildZip(t, entries), 0o600); err != nil {
-		t.Fatalf("writing zip: %v", err)
+	return openBytes(t, "input.zip", buildZip(t, entries))
+}
+
+// zipPath is openZip's sibling for the tests that go through Assemble, which takes a path.
+func zipPath(t *testing.T, entries []zipEntry) string {
+	t.Helper()
+	return writeBytes(t, "input.zip", buildZip(t, entries))
+}
+
+// openBytes writes fixture bytes and opens them, for the tests that hand-patch an archive.
+func openBytes(t *testing.T, name string, body []byte) *os.File {
+	t.Helper()
+	f, err := os.Open(writeBytes(t, name, body))
+	if err != nil {
+		t.Fatalf("opening %s: %v", name, err)
 	}
-	return p
+	t.Cleanup(func() { _ = f.Close() })
+	return f
+}
+
+// Zip header signatures. Spelled as byte literals rather than string escapes because two of the
+// four bytes are unprintable, and a control character sitting invisibly in a string literal is
+// worse to read than the numbers it stands for.
+var (
+	zipLocalHeader   = []byte{'P', 'K', 3, 4}
+	zipCentralHeader = []byte{'P', 'K', 1, 2}
+)
+
+// patchZipField overwrites a little-endian uint16 at a fixed offset in every header carrying sig.
+//
+// Used to forge archives archive/zip cannot WRITE — an encrypted entry and an unsupported
+// compression method — since only the header field has to be plausible for the refusal to fire.
+func patchZipField(raw, sig []byte, offset int, val uint16) {
+	for i := 0; ; {
+		j := bytes.Index(raw[i:], sig)
+		if j < 0 {
+			return
+		}
+		at := i + j + offset
+		raw[at], raw[at+1] = byte(val), byte(val>>8)
+		i += j + len(sig)
+	}
 }
 
 // TestExtractZipMapsEntryKinds — zip has no typeflag, so every kind is inferred from a mode word
@@ -92,7 +123,7 @@ func writeZip(t *testing.T, entries []zipEntry) string {
 // entry whose body is the link target, so reading entries as files produces a layer that looks
 // completely plausible and is wrong in a way nothing downstream can detect.
 func TestExtractZipMapsEntryKinds(t *testing.T) {
-	src := writeZip(t, []zipEntry{
+	src := openZip(t, []zipEntry{
 		{name: "lib/"},
 		{name: "lib/data.txt", body: "plain", mode: 0o644},
 		{name: "bin/tool", body: "ELF", mode: 0o755},
@@ -135,7 +166,7 @@ func TestExtractZipMapsEntryKinds(t *testing.T) {
 // TestExtractZipSynthesisesParentDirs — plenty of writers store no directory entries at all, and a
 // tar whose files have no parents is not reliably extractable.
 func TestExtractZipSynthesisesParentDirs(t *testing.T) {
-	entries, err := extractZip(writeZip(t, []zipEntry{
+	entries, err := extractZip(openZip(t, []zipEntry{
 		{name: "a/b/c.txt", body: "x"},
 	}), "", "")
 	if err != nil {
@@ -149,7 +180,7 @@ func TestExtractZipSynthesisesParentDirs(t *testing.T) {
 	}
 
 	// An explicit directory entry alongside the synthesised one must not double up.
-	entries, err = extractZip(writeZip(t, []zipEntry{
+	entries, err = extractZip(openZip(t, []zipEntry{
 		{name: "a/"},
 		{name: "a/b/"},
 		{name: "a/b/c.txt", body: "x"},
@@ -172,7 +203,7 @@ func TestExtractZipSynthesisesParentDirs(t *testing.T) {
 // Windows do arrive with "\", and treating it as a literal filename character produces one junk
 // file instead of a directory tree.
 func TestExtractZipNormalisesBackslashSeparators(t *testing.T) {
-	entries, err := extractZip(writeZip(t, []zipEntry{
+	entries, err := extractZip(openZip(t, []zipEntry{
 		{name: `dir\sub\file.txt`, body: "x"},
 	}), "", "")
 	if err != nil {
@@ -196,7 +227,7 @@ func TestExtractZipRefusesTraversal(t *testing.T) {
 		`..\`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := extractZip(writeZip(t, []zipEntry{{name: name, body: "x"}}), "opt", "")
+			_, err := extractZip(openZip(t, []zipEntry{{name: name, body: "x"}}), "opt", "")
 			if err == nil {
 				t.Fatalf("entry %q was accepted; it escapes the target directory", name)
 			}
@@ -211,7 +242,7 @@ func TestExtractZipRefusesTraversal(t *testing.T) {
 // Picking one silently would mean the layer depended on which, so this refuses; directory repeats
 // stay ordinary.
 func TestExtractZipRefusesDuplicateNames(t *testing.T) {
-	_, err := extractZip(writeZip(t, []zipEntry{
+	_, err := extractZip(openZip(t, []zipEntry{
 		{name: "a.txt", body: "first"},
 		{name: "a.txt", body: "second"},
 	}), "", "")
@@ -222,7 +253,7 @@ func TestExtractZipRefusesDuplicateNames(t *testing.T) {
 		t.Errorf("error %q does not explain the duplicate", err)
 	}
 
-	if _, err := extractZip(writeZip(t, []zipEntry{
+	if _, err := extractZip(openZip(t, []zipEntry{
 		{name: "d/"},
 		{name: "d/"},
 		{name: "d/x", body: "y"},
@@ -235,26 +266,12 @@ func TestExtractZipRefusesDuplicateNames(t *testing.T) {
 // flag, so without this an encrypted entry becomes a layer full of ciphertext.
 func TestExtractZipRefusesEncryptedEntries(t *testing.T) {
 	raw := buildZip(t, []zipEntry{{name: "secret.txt", body: "x"}})
-	// Set general-purpose bit 0 in the local header and in the central directory. Both carry the
-	// flags; archive/zip reads the central directory, so patching every occurrence is simplest.
-	patched := bytes.ReplaceAll(raw, []byte("PK\x03\x04"), []byte("PK\x03\x04"))
-	idx := 0
-	for {
-		i := bytes.Index(patched[idx:], []byte("PK\x01\x02"))
-		if i < 0 {
-			break
-		}
-		// Central directory header: flags live at offset 8.
-		patched[idx+i+8] |= zipEncryptedFlag
-		idx += i + 4
-	}
+	// Flags sit at offset 6 in a local header and offset 8 in a central directory header. Only the
+	// latter is read, but both are set so the fixture is not self-contradictory.
+	patchZipField(raw, zipLocalHeader, 6, zipEncryptedFlag)
+	patchZipField(raw, zipCentralHeader, 8, zipEncryptedFlag)
 
-	p := filepath.Join(t.TempDir(), "enc.zip")
-	if err := os.WriteFile(p, patched, 0o600); err != nil {
-		t.Fatalf("writing zip: %v", err)
-	}
-
-	_, err := extractZip(p, "", "")
+	_, err := extractZip(openBytes(t, "enc.zip", raw), "", "")
 	if err == nil {
 		t.Fatal("an encrypted entry was accepted")
 	}
@@ -266,37 +283,14 @@ func TestExtractZipRefusesEncryptedEntries(t *testing.T) {
 // TestExtractZipRefusesUnsupportedMethods — LZMA and friends exist in the wild (7-Zip and some
 // .NET writers emit them); the message should name the method rather than surfacing a bare library
 // error.
-//
-// The fixture is patched rather than written, because archive/zip cannot WRITE these methods
-// either — the same limitation the bzip2 branch in compress.go has. Only the method field needs to
-// be plausible: the refusal happens on Open, before any payload is decompressed.
 func TestExtractZipRefusesUnsupportedMethods(t *testing.T) {
 	const methodLZMA = 14
 	raw := buildZip(t, []zipEntry{{name: "a.txt", body: "x", store: true}})
+	// Method sits at offset 8 in a local header and offset 10 in a central directory header.
+	patchZipField(raw, zipLocalHeader, 8, methodLZMA)
+	patchZipField(raw, zipCentralHeader, 10, methodLZMA)
 
-	patch := func(sig []byte, methodOffset int) {
-		for i := 0; ; {
-			j := bytes.Index(raw[i:], sig)
-			if j < 0 {
-				return
-			}
-			at := i + j + methodOffset
-			raw[at], raw[at+1] = methodLZMA, 0
-			i += j + 4
-		}
-	}
-	// Local file header: signature, version, flags, then method at offset 8.
-	patch([]byte("PK\x03\x04"), 8)
-	// Central directory header carries an extra "version made by", so method sits at offset 10.
-	// This is the one archive/zip actually reads.
-	patch([]byte("PK\x01\x02"), 10)
-
-	p := filepath.Join(t.TempDir(), "lzma.zip")
-	if err := os.WriteFile(p, raw, 0o600); err != nil {
-		t.Fatalf("writing zip: %v", err)
-	}
-
-	_, err := extractZip(p, "", "")
+	_, err := extractZip(openBytes(t, "lzma.zip", raw), "", "")
 	if err == nil {
 		t.Fatal("an LZMA entry was accepted")
 	}
@@ -313,7 +307,7 @@ func TestExtractZipRefusesUnsupportedMethods(t *testing.T) {
 // than in a heuristic here, since sniffing content would make the output depend on something other
 // than the declared spec.
 func TestExtractZipNormalisesWindowsModes(t *testing.T) {
-	entries, err := extractZip(writeZip(t, []zipEntry{
+	entries, err := extractZip(openZip(t, []zipEntry{
 		{name: "tool.exe", body: "MZ", dosOnly: true},
 	}), "", "")
 	if err != nil {
@@ -331,7 +325,7 @@ func TestExtractZipNormalisesWindowsModes(t *testing.T) {
 // TestExtractZipSubpathAndTarget — the composition users actually write: strip a version-named
 // wrapper directory and land its contents somewhere specific.
 func TestExtractZipSubpathAndTarget(t *testing.T) {
-	src := writeZip(t, []zipEntry{
+	src := openZip(t, []zipEntry{
 		{name: "plugin-1.2.3/"},
 		{name: "plugin-1.2.3/lib/a.jar", body: "aaa"},
 		{name: "plugin-1.2.3/README", body: "docs"},
@@ -364,7 +358,7 @@ func TestExtractZipSubpathAndTarget(t *testing.T) {
 // TestAssembleUnpackZip wires the mode through the layer path the reconciler actually uses, rather
 // than testing extractZip alone — collectEntries' switch is where a new mode gets forgotten.
 func TestAssembleUnpackZip(t *testing.T) {
-	src := writeZip(t, []zipEntry{
+	src := zipPath(t, []zipEntry{
 		{name: "plugin-1.2.3/lib/a.jar", body: "aaa"},
 	})
 
@@ -388,19 +382,11 @@ func TestAssembleUnpackZip(t *testing.T) {
 // looks at. Two archives with the same logical content must produce the same layer, or the whole
 // premise that the output is a function of the content fails for this format.
 func TestAssembleUnpackZipIsDeterministic(t *testing.T) {
-	digestOf := func(src string) string {
+	digestOf := func(entries []zipEntry) string {
 		t.Helper()
-		img, err := Assemble(nil, []LayerInput{{
-			Name: "plugin", Path: src, Unpack: UnpackZip, Target: "/opt",
-		}}, Config{}, t.TempDir())
-		if err != nil {
-			t.Fatalf("assemble: %v", err)
-		}
-		d, err := img.Digest()
-		if err != nil {
-			t.Fatalf("digest: %v", err)
-		}
-		return d.String()
+		return assembleDigest(t, []LayerInput{{
+			Name: "plugin", Path: zipPath(t, entries), Unpack: UnpackZip, Target: "/opt",
+		}}, Config{})
 	}
 
 	plain := []zipEntry{
@@ -408,9 +394,9 @@ func TestAssembleUnpackZipIsDeterministic(t *testing.T) {
 		{name: "bin/tool", body: "ELF", mode: 0o755},
 	}
 
-	first := digestOf(writeZip(t, plain))
+	first := digestOf(plain)
 	for i := range 3 {
-		if got := digestOf(writeZip(t, plain)); got != first {
+		if got := digestOf(plain); got != first {
 			t.Fatalf("repeat %d produced %s, want %s", i, got, first)
 		}
 	}
@@ -422,7 +408,7 @@ func TestAssembleUnpackZipIsDeterministic(t *testing.T) {
 		{name: "bin/tool", body: "ELF", mode: 0o755 | fs.ModeSetuid, store: true},
 		{name: "lib/a.jar", body: "aaa", mode: 0o644 | fs.ModeSticky, store: true},
 	}
-	if got := digestOf(writeZip(t, varied)); got != first {
+	if got := digestOf(varied); got != first {
 		t.Errorf("a differently packed zip with the same content produced %s, want %s", got, first)
 	}
 }

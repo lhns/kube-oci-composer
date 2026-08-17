@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -47,48 +48,46 @@ func crdUnpackEnum(t *testing.T) []string {
 		t.Fatalf("reading the generated CRD: %v", err)
 	}
 
-	var crd struct {
-		Spec struct {
-			Versions []struct {
-				Schema struct {
-					OpenAPIV3Schema struct {
-						Properties struct {
-							Spec struct {
-								Properties struct {
-									Layers struct {
-										Items struct {
-											Properties struct {
-												Fetch struct {
-													Properties struct {
-														Unpack struct {
-															Enum []string `json:"enum"`
-														} `json:"unpack"`
-													} `json:"properties"`
-												} `json:"fetch"`
-											} `json:"properties"`
-										} `json:"items"`
-									} `json:"layers"`
-								} `json:"properties"`
-							} `json:"spec"`
-						} `json:"properties"`
-					} `json:"openAPIV3Schema"`
-				} `json:"schema"`
-			} `json:"versions"`
-		} `json:"spec"`
-	}
-	if err := yaml.Unmarshal(raw, &crd); err != nil {
+	// Walked untyped rather than through a struct: the typed route needs either a 25-level nested
+	// anonymous struct to reach one leaf, or apiextensions-apiserver, which is only an indirect
+	// dependency today. dig keeps the path readable as the path it is.
+	var doc map[string]any
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
 		t.Fatalf("parsing the generated CRD: %v", err)
 	}
-	if len(crd.Spec.Versions) == 0 {
+
+	node := dig(t, doc, "spec", "versions")
+	versions, ok := node.([]any)
+	if !ok || len(versions) == 0 {
 		t.Fatal("the generated CRD has no versions")
 	}
+	unpack := dig(t, versions[0], "schema", "openAPIV3Schema", "properties", "spec",
+		"properties", "layers", "items", "properties", "fetch", "properties", "unpack", "enum")
 
-	enum := crd.Spec.Versions[0].Schema.OpenAPIV3Schema.
-		Properties.Spec.Properties.Layers.Items.Properties.Fetch.Properties.Unpack.Enum
-	if len(enum) == 0 {
+	values, ok := unpack.([]any)
+	if !ok || len(values) == 0 {
 		t.Fatal("no unpack enum in the generated CRD; has the schema shape changed?")
 	}
+	enum := make([]string, 0, len(values))
+	for _, v := range values {
+		enum = append(enum, fmt.Sprint(v))
+	}
 	return enum
+}
+
+// dig walks nested maps, failing with the path it got stuck on rather than a nil panic.
+func dig(t *testing.T, node any, path ...string) any {
+	t.Helper()
+	for i, key := range path {
+		m, ok := node.(map[string]any)
+		if !ok {
+			t.Fatalf("CRD shape changed: %v is not a map", path[:i])
+		}
+		if node, ok = m[key]; !ok {
+			t.Fatalf("CRD shape changed: no %v", path[:i+1])
+		}
+	}
+	return node
 }
 
 // TestUnpackModesAreInTheCRDEnum — a mode the CRD does not list cannot be used at all, however
@@ -140,6 +139,11 @@ func TestUnpackModesMirrorTheInternalConstants(t *testing.T) {
 		ociv1alpha1.UnpackGz:      oci.UnpackGz,
 		ociv1alpha1.UnpackZip:     oci.UnpackZip,
 		ociv1alpha1.UnpackDeb:     oci.UnpackDeb,
+	}
+
+	if len(mirrors) != len(allUnpackModes) {
+		t.Errorf("mirrors has %d entries, allUnpackModes has %d: one of the two lists was not "+
+			"updated", len(mirrors), len(allUnpackModes))
 	}
 
 	for _, mode := range allUnpackModes {

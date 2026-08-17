@@ -6,8 +6,6 @@ import (
 	"compress/gzip"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -15,16 +13,17 @@ import (
 	"github.com/ulikunitz/xz"
 )
 
-// debFile is one entry to place in a fixture package's payload.
-type debFile struct {
-	name string // as dpkg writes it, i.e. with the "./" prefix
+// tarFile is one entry to place in a fixture tar. Shared with the tar and zip tests, not only the
+// deb ones — a deb's payload is an ordinary tar, which is the whole reason this fixture generalises.
+type tarFile struct {
+	name string // verbatim, so a fixture can carry dpkg's "./" prefix or anything else
 	body string
 	link string // non-empty makes it a symlink
 	dir  bool
 }
 
-// buildDataTar writes the payload tar dpkg would produce.
-func buildDataTar(t *testing.T, files []debFile) []byte {
+// buildTar writes a tar of the given entries, in the given order.
+func buildTar(t *testing.T, files []tarFile) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
@@ -95,28 +94,18 @@ func arMember(buf *bytes.Buffer, name string, body []byte) {
 }
 
 // buildDeb assembles a package with the three members dpkg emits, in dpkg's order.
-func buildDeb(t *testing.T, suffix string, files []debFile) []byte {
+func buildDeb(t *testing.T, suffix string, files []tarFile) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	buf.WriteString(arMagic)
 	// Deliberately odd-sized, so every test exercises the padding byte: get that wrong and every
 	// subsequent member header is off by one.
 	arMember(&buf, "debian-binary", []byte("2.0\n"))
-	arMember(&buf, "control.tar"+suffix, compressData(t, buildDataTar(t, []debFile{
+	arMember(&buf, "control.tar"+suffix, compressData(t, buildTar(t, []tarFile{
 		{name: "./control", body: "Package: fixture\n"},
 	}), suffix))
-	arMember(&buf, "data.tar"+suffix, compressData(t, buildDataTar(t, files), suffix))
+	arMember(&buf, "data.tar"+suffix, compressData(t, buildTar(t, files), suffix))
 	return buf.Bytes()
-}
-
-// writeTemp puts bytes on disk, because collectEntries takes a path rather than a reader.
-func writeTemp(t *testing.T, body []byte) string {
-	t.Helper()
-	p := filepath.Join(t.TempDir(), "input.deb")
-	if err := os.WriteFile(p, body, 0o600); err != nil {
-		t.Fatalf("writing file: %v", err)
-	}
-	return p
 }
 
 // byName indexes extracted entries for assertions.
@@ -131,7 +120,7 @@ func byName(entries []tarEntry) map[string]tarEntry {
 // TestExtractDebTakesOnlyTheDataMember — control.tar is a tar as well, so reading the wrong
 // member yields a plausible-looking layer full of packaging metadata rather than an error.
 func TestExtractDebTakesOnlyTheDataMember(t *testing.T) {
-	deb := buildDeb(t, ".xz", []debFile{{name: "./usr/bin/tool", body: "payload"}})
+	deb := buildDeb(t, ".xz", []tarFile{{name: "./usr/bin/tool", body: "payload"}})
 
 	entries, err := extractDeb(bytes.NewReader(deb), "", "")
 	if err != nil {
@@ -153,7 +142,7 @@ func TestExtractDebTakesOnlyTheDataMember(t *testing.T) {
 func TestExtractDebEveryCompression(t *testing.T) {
 	for _, suffix := range []string{"", ".gz", ".xz", ".zst"} {
 		t.Run("data.tar"+suffix, func(t *testing.T) {
-			deb := buildDeb(t, suffix, []debFile{{name: "./usr/bin/tool", body: "payload"}})
+			deb := buildDeb(t, suffix, []tarFile{{name: "./usr/bin/tool", body: "payload"}})
 			entries, err := extractDeb(bytes.NewReader(deb), "", "")
 			if err != nil {
 				t.Fatalf("extractDeb: %v", err)
@@ -169,7 +158,7 @@ func TestExtractDebEveryCompression(t *testing.T) {
 // native library as a real file plus a symlink under a versioned directory, and the symlink is
 // relative. Flattening it to a copy, or dropping it, breaks the consumer's lookup path.
 func TestExtractDebPreservesRelativeSymlinks(t *testing.T) {
-	deb := buildDeb(t, ".xz", []debFile{
+	deb := buildDeb(t, ".xz", []tarFile{
 		{name: "./usr/lib/x86_64-linux-gnu/liblua5.4-ldap.so.0.0.0", body: "ELF"},
 		{name: "./usr/lib/x86_64-linux-gnu/lua/5.4/", dir: true},
 		{name: "./usr/lib/x86_64-linux-gnu/lua/5.4/lualdap.so", link: "../../liblua5.4-ldap.so.0.0.0"},
@@ -197,7 +186,7 @@ func TestExtractDebPreservesRelativeSymlinks(t *testing.T) {
 // TestExtractDebRebasesUnderTarget — subpath and target compose the same way they do for tar, so
 // a package's layout does not dictate the layout in the image.
 func TestExtractDebRebasesUnderTarget(t *testing.T) {
-	deb := buildDeb(t, ".gz", []debFile{
+	deb := buildDeb(t, ".gz", []tarFile{
 		{name: "./usr/share/doc/fixture/copyright", body: "MIT"},
 		{name: "./usr/lib/thing.so", body: "ELF"},
 	})
@@ -220,7 +209,7 @@ func TestExtractDebRebasesUnderTarget(t *testing.T) {
 // TestExtractDebRejectsMalformed — each of these is a case where guessing would produce a
 // plausible-looking but wrong layer, so they must fail rather than degrade.
 func TestExtractDebRejectsMalformed(t *testing.T) {
-	valid := buildDeb(t, ".xz", []debFile{{name: "./usr/bin/tool", body: "payload"}})
+	valid := buildDeb(t, ".xz", []tarFile{{name: "./usr/bin/tool", body: "payload"}})
 
 	cases := []struct {
 		name string
@@ -260,8 +249,8 @@ func TestExtractDebRejectsMalformed(t *testing.T) {
 // rather than testing extractDeb alone — collectEntries' switch is where a new mode gets
 // forgotten.
 func TestAssembleUnpackDeb(t *testing.T) {
-	deb := buildDeb(t, ".xz", []debFile{{name: "./usr/lib/thing.so", body: "ELF"}})
-	src := writeTemp(t, deb)
+	deb := buildDeb(t, ".xz", []tarFile{{name: "./usr/lib/thing.so", body: "ELF"}})
+	src := writeBytes(t, "input.deb", deb)
 
 	entries := entriesOf(t, []LayerInput{{
 		Name: "vendor", Path: src, Unpack: UnpackDeb, Subpath: "usr/lib", Target: "/opt/vendor",
