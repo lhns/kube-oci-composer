@@ -146,7 +146,7 @@ jobs:
 
       # Release mode only. A dev build has no release notes worth generating and would clutter
       # the release list with one entry per commit; the image and chart are the deliverable.
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         if: steps.version.outputs.mode == 'release'
         with:
           files: release/install.yaml
