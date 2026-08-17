@@ -57,7 +57,7 @@ jobs:
         # Printed on success too. When image volumes silently do not mount, the container runtime
         # version is the first thing worth knowing and the last thing anyone thinks to check.
         run: kubectl get nodes -o wide
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
 
       # Builds the image, loads it into kind, installs the CRDs and the chart, and waits for the
       # controller to be ready. Without this the test job found no CRD and failed instantly —
