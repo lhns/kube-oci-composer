@@ -170,6 +170,86 @@ func TestIntegrationBaseNeedsADigest(t *testing.T) {
 	}
 }
 
+// TestIntegrationBaseSpellings — `ref` and `image`+`digest` are the two ways to name a base, and
+// the CEL rules exist to stop a spec being ambiguous or half-written. The pair must go together,
+// and naming the base twice must be refused rather than silently preferring one.
+func TestIntegrationBaseSpellings(t *testing.T) {
+	const pinned = "quay.io/strimzi/kafka:0.43.0@" + validDigest
+
+	accepted := map[string]*ociv1alpha1.BaseImage{
+		"ref alone":        {Ref: pinned},
+		"image and digest": {Image: "quay.io/strimzi/kafka", Digest: validDigest},
+	}
+	for name, base := range accepted {
+		t.Run(name, func(t *testing.T) {
+			if err := apply(t, "base-ok-"+strings.ReplaceAll(name, " ", "-"),
+				ociv1alpha1.ImageCompositionSpec{
+					Base:   base,
+					Layers: []ociv1alpha1.Layer{fetchLayer("x")},
+				}); err != nil {
+				t.Errorf("rejected: %v", err)
+			}
+		})
+	}
+
+	refused := map[string]*ociv1alpha1.BaseImage{
+		"both spellings":  {Ref: pinned, Image: "quay.io/strimzi/kafka", Digest: validDigest},
+		"digest with ref": {Ref: pinned, Digest: validDigest},
+		"image alone":     {Image: "quay.io/strimzi/kafka"},
+		"digest alone":    {Digest: validDigest},
+		"neither":         {},
+		"unpinned ref":    {Ref: "quay.io/strimzi/kafka:0.43.0"},
+	}
+	for name, base := range refused {
+		t.Run(name, func(t *testing.T) {
+			if err := apply(t, "base-bad-"+strings.ReplaceAll(name, " ", "-"),
+				ociv1alpha1.ImageCompositionSpec{
+					Base:   base,
+					Layers: []ociv1alpha1.Layer{fetchLayer("x")},
+				}); err == nil {
+				t.Error("accepted")
+			}
+		})
+	}
+}
+
+// TestIntegrationImageLayer — the image verb joins the layer union, so it must be accepted alone
+// and refused alongside another verb. An unpinned ref must be refused too: an image layer is
+// content-addressed like everything else (ADR 0002).
+func TestIntegrationImageLayer(t *testing.T) {
+	const pinned = "ghcr.io/lhns/app:v1@" + validDigest
+
+	if err := apply(t, "image-layer-ok", ociv1alpha1.ImageCompositionSpec{
+		Layers: []ociv1alpha1.Layer{{
+			Name: "app", To: "/opt", Image: &ociv1alpha1.ImageSource{Ref: pinned},
+		}},
+	}); err != nil {
+		t.Errorf("a valid image layer was rejected: %v", err)
+	}
+
+	refused := map[string]ociv1alpha1.Layer{
+		"unpinned": {Name: "x", To: "/x", Image: &ociv1alpha1.ImageSource{Ref: "ghcr.io/lhns/app:v1"}},
+		"with fetch": {
+			Name: "x", To: "/x",
+			Image: &ociv1alpha1.ImageSource{Ref: pinned},
+			Fetch: &ociv1alpha1.FetchSource{URL: "https://example.com/a.tgz", Digest: validDigest},
+		},
+		"with remove": {
+			Name: "x", Remove: []string{"/x"},
+			Image: &ociv1alpha1.ImageSource{Ref: pinned},
+		},
+		"no target": {Name: "x", Image: &ociv1alpha1.ImageSource{Ref: pinned}},
+	}
+	for name, layer := range refused {
+		t.Run(name, func(t *testing.T) {
+			if err := apply(t, "image-layer-bad-"+strings.ReplaceAll(name, " ", "-"),
+				ociv1alpha1.ImageCompositionSpec{Layers: []ociv1alpha1.Layer{layer}}); err == nil {
+				t.Error("accepted")
+			}
+		})
+	}
+}
+
 // TestIntegrationInheritNeedsABase — there is nothing to inherit from otherwise, and a silently
 // empty config would leave a non-runnable image with no explanation.
 func TestIntegrationInheritNeedsABase(t *testing.T) {

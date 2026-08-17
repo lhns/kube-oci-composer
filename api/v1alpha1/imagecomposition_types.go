@@ -1,6 +1,10 @@
 package v1alpha1
 
-import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+import (
+	"strings"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
 
 // Unpack describes how a fetched blob is turned into layer content.
 // +kubebuilder:validation:Enum=none;tar;tar.gz;tar.xz;tar.zst;tar.bz2;gz;zip;deb
@@ -53,21 +57,40 @@ const (
 //
 // Omit it entirely for a scratch artifact — a bundle of files with no base is the common case for
 // something that is only ever mounted.
+//
+// The image is named either as one conventional `ref` or as the older `image` + `digest` pair.
+// They express the same thing; `ref` exists because the split form is invisible to the tools that
+// keep pins fresh — a Renovate regex or kustomize's `images` transformer both expect one string.
+//
+// +kubebuilder:validation:XValidation:rule="(has(self.ref)?1:0) + (has(self.image)?1:0) == 1",message="set exactly one of ref or image"
+// +kubebuilder:validation:XValidation:rule="has(self.image) == has(self.digest)",message="image and digest go together; ref is the combined form"
 type BaseImage struct {
-	// Image is the repository to pull from, e.g. "quay.io/strimzi/kafka".
-	// +kubebuilder:validation:MaxLength=512
-	// +required
-	Image string `json:"image"`
-
-	// Digest pins the exact content. Required, like every other input.
+	// Ref names the base in one string: "quay.io/strimzi/kafka:0.43.0@sha256:…".
 	//
-	// It must name a platform-specific manifest, not a multi-architecture index: resolving an
-	// index would mean the controller choosing a platform, so the output would stop being a
-	// function of the spec. Multi-architecture output is not implemented; when it is, an index
-	// here becomes correct because the platform list will come from the spec. See ADR 0015.
+	// The digest is mandatory and is what gets pulled. The tag is decorative — it is recorded so a
+	// human can see which release a digest corresponds to, and it is ignored when pulling, because
+	// resolving a tag at reconcile time is exactly what would stop the output being a function of
+	// the spec (ADR 0002).
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*(:[a-zA-Z0-9._-]+)?@sha256:[a-f0-9]{64}$`
+	// +kubebuilder:validation:MaxLength=1024
+	// +optional
+	Ref string `json:"ref,omitempty"`
+
+	// Image is the repository to pull from, e.g. "quay.io/strimzi/kafka". Use with Digest, or use
+	// Ref instead.
+	// +kubebuilder:validation:MaxLength=512
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// Digest pins the exact content. Required alongside Image, like every other input.
+	//
+	// With spec.platforms unset it must name a platform-specific manifest rather than a
+	// multi-architecture index, because resolving an index would mean the controller choosing a
+	// platform and the output would stop being a function of the spec. With spec.platforms set an
+	// index is correct, since the platform list then comes from the spec. See ADR 0015 and 0018.
 	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
-	// +required
-	Digest string `json:"digest"`
+	// +optional
+	Digest string `json:"digest,omitempty"`
 
 	// SecretRef names a kubernetes.io/dockerconfigjson Secret for pulling, when the base is
 	// private. The registry host comes from the Secret's auths map, matched against Image — the
@@ -153,6 +176,81 @@ type SourceRefSource struct {
 	Subpath string `json:"subpath,omitempty"`
 }
 
+// Repository returns the registry reference to pull from, with any tag stripped, and the digest
+// that pins it. It accepts either spelling; CEL has already ensured exactly one is set.
+//
+// The tag is dropped rather than passed through because what is pulled is always the digest. A
+// reference carrying both would resolve to the same bytes, but pulling by digest alone means a
+// moved tag cannot change what a reconcile sees.
+func (b *BaseImage) Repository() (repository, digest string) {
+	if b.Ref != "" {
+		return splitPinnedRef(b.Ref)
+	}
+	return b.Image, b.Digest
+}
+
+// Repository returns the reference and digest for an image layer source.
+func (i *ImageSource) Repository() (repository, digest string) {
+	return splitPinnedRef(i.Ref)
+}
+
+// splitPinnedRef separates "repo:tag@sha256:…" into its repository and digest.
+//
+// Both callers are constrained by a pattern that requires the "@sha256:" suffix, so the split is
+// total and needs no error: everything before "@" is the reference, and a tag on it — the last
+// ":" segment, when it is not a registry port — is decoration to drop.
+func splitPinnedRef(ref string) (repository, digest string) {
+	at := strings.LastIndex(ref, "@")
+	if at < 0 {
+		return ref, ""
+	}
+	repository, digest = ref[:at], ref[at+1:]
+
+	// A tag, if present, follows the last ":" that comes after the last "/". Without the slash
+	// check "registry:5000/repo" would lose its port.
+	if colon := strings.LastIndex(repository, ":"); colon > strings.LastIndex(repository, "/") {
+		repository = repository[:colon]
+	}
+	return repository, digest
+}
+
+// ImageSource takes the flattened filesystem of a digest-pinned image.
+//
+// The image's layers are flattened first — whiteouts applied, later layers overlaying earlier
+// ones — and the result is contributed as EXACTLY ONE layer at the target. That is not an
+// implementation detail to be relaxed later: ADR 0016 hoisted the base out of the layer list
+// because "an image entry contributes many layers where every other entry contributes exactly
+// one", and splicing the layers through here would put that exception straight back. It also
+// means the entry is genuinely a filesystem contribution rather than a second base, so `subpath`,
+// `to`, `owner` and `mode` all mean what they mean everywhere else.
+//
+// Layer sharing with the source image is deliberately given up. spec.base reuses a base's layers
+// verbatim so that two artifacts on one base share blobs (ADR 0015); flattening re-packs the
+// bytes, so this costs a copy. That is the price of placing content at an arbitrary path, and it
+// is why this does not replace spec.base for the "build on top of" case.
+type ImageSource struct {
+	// Ref is the image to read, pinned by digest: "repo:tag@sha256:…" or "repo@sha256:…".
+	//
+	// The tag is decorative — it is recorded for humans and ignored when pulling, exactly as it
+	// is for spec.base.ref. What is pulled is the digest, which is what ADR 0002 requires of
+	// every input.
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*(:[a-zA-Z0-9._-]+)?@sha256:[a-f0-9]{64}$`
+	// +kubebuilder:validation:MaxLength=1024
+	// +required
+	Ref string `json:"ref"`
+
+	// Subpath selects one directory from the flattened filesystem and strips the prefix, so
+	// "/usr/local/bin" from the image can land directly at the target.
+	// +kubebuilder:validation:MaxLength=4096
+	// +optional
+	Subpath string `json:"subpath,omitempty"`
+
+	// SecretRef names a kubernetes.io/dockerconfigjson Secret for pulling, when the image is
+	// private. Same arrangement as spec.base.secretRef.
+	// +optional
+	SecretRef *LocalObjectReference `json:"secretRef,omitempty"`
+}
+
 // Ownership sets uid and gid on the files a layer contributes.
 //
 // Defaults to 0:0. Composed content is normally read by the workload rather than written, so
@@ -197,7 +295,7 @@ type FileMode struct {
 // smeared across the entry, so there is no field that is meaningful for one source and silently
 // ignored by the rest.
 //
-// +kubebuilder:validation:XValidation:rule="(has(self.fetch)?1:0) + (has(self.configMap)?1:0) + (has(self.sourceRef)?1:0) + (has(self.remove)?1:0) == 1",message="set exactly one of fetch, configMap, sourceRef or remove"
+// +kubebuilder:validation:XValidation:rule="(has(self.fetch)?1:0) + (has(self.configMap)?1:0) + (has(self.sourceRef)?1:0) + (has(self.image)?1:0) + (has(self.remove)?1:0) == 1",message="set exactly one of fetch, configMap, sourceRef, image or remove"
 // +kubebuilder:validation:XValidation:rule="has(self.remove) ? (!has(self.to) && !has(self.owner) && !has(self.mode)) : has(self.to)",message="'to' is required for content entries and must be omitted for remove, which takes absolute paths; owner and mode do not apply to remove"
 type Layer struct {
 	// Name identifies this entry, and appears in messages and provenance.
@@ -208,6 +306,14 @@ type Layer struct {
 	// Fetch retrieves content over HTTP(S).
 	// +optional
 	Fetch *FetchSource `json:"fetch,omitempty"`
+
+	// Image takes the filesystem of another image as this entry's content.
+	//
+	// For consuming something your CI already built. A release published as an image could
+	// previously only enter a composition as spec.base, which allows exactly one per artifact and
+	// puts it underneath everything; this places it at a path like any other content.
+	// +optional
+	Image *ImageSource `json:"image,omitempty"`
 
 	// ConfigMap turns a ConfigMap's entries into files.
 	// +optional

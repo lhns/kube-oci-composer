@@ -20,13 +20,19 @@
           "description": "Base is the image to build on. Omit for a scratch artifact.",
           "properties": {
             "digest": {
-              "description": "Digest pins the exact content. Required, like every other input.\n\nIt must name a platform-specific manifest, not a multi-architecture index: resolving an\nindex would mean the controller choosing a platform, so the output would stop being a\nfunction of the spec. Multi-architecture output is not implemented; when it is, an index\nhere becomes correct because the platform list will come from the spec. See ADR 0015.",
+              "description": "Digest pins the exact content. Required alongside Image, like every other input.\n\nWith spec.platforms unset it must name a platform-specific manifest rather than a\nmulti-architecture index, because resolving an index would mean the controller choosing a\nplatform and the output would stop being a function of the spec. With spec.platforms set an\nindex is correct, since the platform list then comes from the spec. See ADR 0015 and 0018.",
               "pattern": "^sha256:[a-f0-9]{64}$",
               "type": "string"
             },
             "image": {
-              "description": "Image is the repository to pull from, e.g. \"quay.io/strimzi/kafka\".",
+              "description": "Image is the repository to pull from, e.g. \"quay.io/strimzi/kafka\". Use with Digest, or use\nRef instead.",
               "maxLength": 512,
+              "type": "string"
+            },
+            "ref": {
+              "description": "Ref names the base in one string: \"quay.io/strimzi/kafka:0.43.0@sha256:…\".\n\nThe digest is mandatory and is what gets pulled. The tag is decorative — it is recorded so a\nhuman can see which release a digest corresponds to, and it is ignored when pulling, because\nresolving a tag at reconcile time is exactly what would stop the output being a function of\nthe spec (ADR 0002).",
+              "maxLength": 1024,
+              "pattern": "^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*(:[a-zA-Z0-9._-]+)?@sha256:[a-f0-9]{64}$",
               "type": "string"
             },
             "secretRef": {
@@ -43,11 +49,17 @@
               "type": "object"
             }
           },
-          "required": [
-            "digest",
-            "image"
-          ],
-          "type": "object"
+          "type": "object",
+          "x-kubernetes-validations": [
+            {
+              "message": "set exactly one of ref or image",
+              "rule": "(has(self.ref)?1:0) + (has(self.image)?1:0) == 1"
+            },
+            {
+              "message": "image and digest go together; ref is the combined form",
+              "rule": "has(self.image) == has(self.digest)"
+            }
+          ]
         },
         "config": {
           "description": "Config for the produced artifact.",
@@ -188,6 +200,39 @@
                 ],
                 "type": "object"
               },
+              "image": {
+                "description": "Image takes the filesystem of another image as this entry's content.\n\nFor consuming something your CI already built. A release published as an image could\npreviously only enter a composition as spec.base, which allows exactly one per artifact and\nputs it underneath everything; this places it at a path like any other content.",
+                "properties": {
+                  "ref": {
+                    "description": "Ref is the image to read, pinned by digest: \"repo:tag@sha256:…\" or \"repo@sha256:…\".\n\nThe tag is decorative — it is recorded for humans and ignored when pulling, exactly as it\nis for spec.base.ref. What is pulled is the digest, which is what ADR 0002 requires of\nevery input.",
+                    "maxLength": 1024,
+                    "pattern": "^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*(:[a-zA-Z0-9._-]+)?@sha256:[a-f0-9]{64}$",
+                    "type": "string"
+                  },
+                  "secretRef": {
+                    "description": "SecretRef names a kubernetes.io/dockerconfigjson Secret for pulling, when the image is\nprivate. Same arrangement as spec.base.secretRef.",
+                    "properties": {
+                      "name": {
+                        "description": "Name of the referent.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name"
+                    ],
+                    "type": "object"
+                  },
+                  "subpath": {
+                    "description": "Subpath selects one directory from the flattened filesystem and strips the prefix, so\n\"/usr/local/bin\" from the image can land directly at the target.",
+                    "maxLength": 4096,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "ref"
+                ],
+                "type": "object"
+              },
               "mode": {
                 "description": "Mode sets permissions on the contributed files.",
                 "properties": {
@@ -284,8 +329,8 @@
             "type": "object",
             "x-kubernetes-validations": [
               {
-                "message": "set exactly one of fetch, configMap, sourceRef or remove",
-                "rule": "(has(self.fetch)?1:0) + (has(self.configMap)?1:0) + (has(self.sourceRef)?1:0) + (has(self.remove)?1:0) == 1"
+                "message": "set exactly one of fetch, configMap, sourceRef, image or remove",
+                "rule": "(has(self.fetch)?1:0) + (has(self.configMap)?1:0) + (has(self.sourceRef)?1:0) + (has(self.image)?1:0) + (has(self.remove)?1:0) == 1"
               },
               {
                 "message": "'to' is required for content entries and must be omitted for remove, which takes absolute paths; owner and mode do not apply to remove",
