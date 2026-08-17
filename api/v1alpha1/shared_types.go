@@ -34,6 +34,14 @@ const (
 	ReasonPublishFailed     = "PublishFailed"
 	ReasonSuspended         = "Suspended"
 
+	// ReasonBuildFailed covers a DockerBuild whose Job did not succeed.
+	//
+	// Never sets Stalled, and that is the point of having a distinct reason: a failing RUN is
+	// nearly always fixed by editing a Dockerfile, which lives inside a Flux source rather than in
+	// this object's spec, so no generation change would ever arrive to wake a stalled object back
+	// up. It takes a capped backoff instead. See ADR 0025.
+	ReasonBuildFailed = "BuildFailed"
+
 	// ReasonDependencyNotReady covers something the composition refers to that does not exist
 	// yet, or exists but cannot be used: a Flux source, a Secret, a non-optional ConfigMap, or
 	// a serving endpoint the operator was never given.
@@ -188,6 +196,16 @@ type BuildRecord struct {
 	// build it is the union across every child.
 	// +optional
 	Blobs []string `json:"blobs,omitempty"`
+
+	// InputHash the build was produced from. Written by DockerBuild and ignored by
+	// ImageComposition, whose identity is the output digest rather than the hash.
+	//
+	// It exists because a build's output digest is an observation rather than something derivable:
+	// a controller that lost status.artifact but kept history can find what it previously produced
+	// for a set of inputs and re-verify it, instead of rebuilding blind and risking a different
+	// digest under a tag that immutability will then refuse to move. See ADR 0025.
+	// +optional
+	InputHash string `json:"inputHash,omitempty"`
 
 	// Manifests are the CHILD manifest digests when this build is a multi-platform index. Empty
 	// for a single-platform build, where Digest is the manifest itself.

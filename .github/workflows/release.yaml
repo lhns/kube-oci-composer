@@ -96,6 +96,7 @@ jobs:
               echo "version=${VERSION}"
               echo "platforms=linux/amd64,linux/arm64"
               echo "extra_tags=ghcr.io/lhns/kube-oci-composer:latest"
+              echo "builder_extra_tags=ghcr.io/lhns/kube-oci-builder:latest"
             } >> "$GITHUB_OUTPUT"
           else
             SHORT="${GITHUB_SHA::7}"
@@ -108,6 +109,7 @@ jobs:
               echo "version=0.0.0-dev.${SHORT}"
               echo "platforms=linux/amd64"
               echo "extra_tags=ghcr.io/lhns/kube-oci-composer:sha-${SHORT},ghcr.io/lhns/kube-oci-composer:${BRANCH}"
+              echo "builder_extra_tags=ghcr.io/lhns/kube-oci-builder:sha-${SHORT},ghcr.io/lhns/kube-oci-builder:${BRANCH}"
             } >> "$GITHUB_OUTPUT"
           fi
           cat "$GITHUB_OUTPUT"
@@ -121,6 +123,25 @@ jobs:
             ghcr.io/lhns/kube-oci-composer:${{ steps.version.outputs.version }}
             ${{ steps.version.outputs.extra_tags }}
           build-args: |
+            CMD=oci-composer
+            VERSION=${{ steps.version.outputs.version }}
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ steps.version.outputs.date }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The builder, from the same Dockerfile with a different CMD. Published alongside rather
+      # than instead of: installing one must never imply the other (ADR 0004).
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ steps.version.outputs.platforms }}
+          push: true
+          tags: |
+            ghcr.io/lhns/kube-oci-builder:${{ steps.version.outputs.version }}
+            ${{ steps.version.outputs.builder_extra_tags }}
+          build-args: |
+            CMD=oci-builder
             VERSION=${{ steps.version.outputs.version }}
             COMMIT=${{ github.sha }}
             BUILD_DATE=${{ steps.version.outputs.date }}
@@ -137,6 +158,11 @@ jobs:
             --app-version "${{ steps.version.outputs.version }}" \
             --destination bin/
           helm push bin/kube-oci-composer-*.tgz oci://ghcr.io/lhns/charts
+          helm package charts/kube-oci-builder \
+            --version "${{ steps.version.outputs.version }}" \
+            --app-version "${{ steps.version.outputs.version }}" \
+            --destination bin/
+          helm push bin/kube-oci-builder-*.tgz oci://ghcr.io/lhns/charts
 
       - name: Publish the release manifests
         run: |

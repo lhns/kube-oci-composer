@@ -202,6 +202,28 @@ component you install on purpose, never a layer verb, so `kind: ImageComposition
 exactly which guarantee you have. [ADR 0025](docs/adr/0025-dockerfile-builds-as-a-second-kind.md)
 records what that costs, and is candid that the case for it is not yet proven.
 
+```console
+# Installing the composer does NOT install this. Its role can create Jobs — that is, run
+# arbitrary containers — which is exactly why it is a separate thing you opt into.
+helm install kube-oci-builder oci://ghcr.io/lhns/charts/kube-oci-builder \
+  --namespace oci-builder --create-namespace
+```
+
+```yaml
+apiVersion: oci.lhns.de/v1alpha1
+kind: DockerBuild
+metadata: {name: app}
+spec:
+  context: {kind: GitRepository, name: app-src}   # digest resolved by source-controller
+  dockerfile: Dockerfile
+  platforms: [linux/amd64]
+  push: {repository: ghcr.io/me/app, tags: [v1]}
+```
+
+Every `FROM` must be pinned by digest, and the build runs rootless in its own Job under a service
+account bound to nothing. Anyone who can push to the referenced repository can run code in that
+namespace — that is the trade this component makes.
+
 ### The shape
 
 ```yaml

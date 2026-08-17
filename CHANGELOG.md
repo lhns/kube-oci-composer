@@ -6,6 +6,45 @@ may change between minor versions.
 ## [Unreleased]
 
 ### Added
+- **`DockerBuild` (alpha).** The kind ADR 0025 describes, now implemented: a second controller,
+  a second binary (`cmd/oci-builder`), a second chart (`charts/kube-oci-builder`) carrying its own
+  CRD, and its own RBAC.
+
+  **Installing the composer does not install this.** That is the whole shape of the thing. The
+  composer's role cannot create a single object; this one creates Jobs, which is the ability to run
+  arbitrary containers, and ADR 0004 rejected a feature flag because "a flag set to `false` is a
+  weaker guarantee than a component that does not exist".
+
+  How it works: the context comes from a Flux source, so its digest is resolved rather than
+  declared; that digest, the spec, and **the pinned digests of BuildKit and the Dockerfile
+  frontend** form an input hash. An unchanged hash skips the build entirely — which is what answers
+  ADR 0001's objection that "the reconcile loop would have to rebuild to discover whether a rebuild
+  was needed". The builder digests are in the hash because for this kind the algorithm is not in
+  this binary; the controller **refuses to start** if either is not pinned by digest, and the chart
+  refuses to render.
+
+  Each build is one Kubernetes Job, rootless, in the object's own namespace, under a service
+  account that is deliberately bound to nothing — a pod running code from a git repository must not
+  carry the token of the thing that created it. Privileged is not offered at any setting. The Job
+  name is derived from the input hash, so a controller restart adopts the running build instead of
+  starting a second one. Secrets are passed via BuildKit's secret mount, never as build args, and
+  only their `name`/`resourceVersion` reach the input hash — a hash of a low-entropy secret in a
+  world-readable status field would be an oracle. The build cache is always per-object; a shared
+  one is a channel between whoever can write their Dockerfiles.
+
+  A floating `FROM` is refused before a Job is created. It is the single largest source of "same
+  commit, different image", and it is the one rule about a Dockerfile's *content* this controller
+  enforces.
+
+  **Read ADR 0025 before using it.** The promise is deliberately weaker than `ImageComposition`'s:
+  the output digest is an observation recorded in status, not a function of the spec; identical
+  inputs may produce different bytes; storage stops being disposable; spec-hash tags degrade to
+  first-writer-wins; and provenance becomes scanned rather than exact. The record is also candid
+  that ADR 0016's load-bearing objection is unmet by the motivating use cases, and lists what would
+  make it right to abandon this.
+
+  Alpha limits: `push` only (a Job in another pod cannot write to the loopback-only serving
+  endpoint), no GC integration, no attestations.
 - **ADR 0025: Dockerfile builds, as a second kind.** A decision record, no code yet. `DockerBuild`
   will be a separate kind with its own binary, chart and RBAC, and a deliberately weaker promise —
   idempotence is a hash of its inputs recorded in status rather than `output = f(spec)`, and it is
