@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/go-logr/logr v1.4.4
 	github.com/google/go-containerregistry v0.21.9
-	github.com/klauspost/compress v1.19.1
+	github.com/klauspost/compress v1.19.2
 	github.com/minio/minio-go/v7 v7.2.1
 	github.com/ulikunitz/xz v0.5.16
 	k8s.io/api v0.36.3
