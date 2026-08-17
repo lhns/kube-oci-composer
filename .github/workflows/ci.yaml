@@ -86,7 +86,7 @@ jobs:
     needs: unit
     steps:
       - uses: actions/checkout@v7
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
       - run: make chart-lint
 
       - name: Render the option combinations that have their own code paths
