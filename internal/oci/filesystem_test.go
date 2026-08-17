@@ -43,6 +43,21 @@ func entriesOf(t *testing.T, inputs []LayerInput, cfg Config) []*tar.Header {
 	return out
 }
 
+// assembleDigest is entriesOf's sibling for the tests that care about the digest rather than the
+// contents — determinism assertions, mostly, where the whole point is that two inputs agree.
+func assembleDigest(t *testing.T, inputs []LayerInput, cfg Config) string {
+	t.Helper()
+	img, err := Assemble(nil, inputs, cfg, t.TempDir())
+	if err != nil {
+		t.Fatalf("assemble: %v", err)
+	}
+	d, err := img.Digest()
+	if err != nil {
+		t.Fatalf("digest: %v", err)
+	}
+	return d.String()
+}
+
 // TestRemoveEmitsWhiteouts — OCI expresses deletion as a ".wh." sibling. Getting the name or the
 // directory wrong produces a layer that silently deletes nothing.
 func TestRemoveEmitsWhiteouts(t *testing.T) {

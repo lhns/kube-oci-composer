@@ -43,6 +43,7 @@ question waiting for evidence.
 | [0020](0020-is-the-supply-chain-work-worth-building.md) | Is the supply-chain work worth building? | Open |
 | [0021](0021-active-standby-or-shared-storage.md) | Is active/standby enough for the serving endpoint? | Open |
 | [0022](0022-distro-packages-as-layer-sources.md) | Distro packages are a layer source: `unpack: deb` | Accepted |
+| [0023](0023-more-archive-formats.md) | More archive formats: `unpack: zip` and the compressed-tar family | Accepted |
 
 ## Format
 

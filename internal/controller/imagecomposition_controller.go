@@ -494,6 +494,12 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 
 	art, err := r.assemble(ctx, obj, declared, inputs, cfg, workDir)
 	if err != nil {
+		var unsupported *oci.ErrUnsupportedUnpack
+		if errors.As(err, &unsupported) {
+			// Terminal on purpose: retrying cannot add a code path to this binary. See
+			// oci.ErrUnsupportedUnpack for how a spec gets past the CRD's enum in the first place.
+			return buildResult{}, terminal("%s", unsupported.Error())
+		}
 		return buildResult{}, err
 	}
 

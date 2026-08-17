@@ -3,7 +3,7 @@ package v1alpha1
 import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 // Unpack describes how a fetched blob is turned into layer content.
-// +kubebuilder:validation:Enum=none;tar;tar.gz;deb
+// +kubebuilder:validation:Enum=none;tar;tar.gz;tar.xz;tar.zst;tar.bz2;gz;zip;deb
 type Unpack string
 
 const (
@@ -13,6 +13,29 @@ const (
 	UnpackTar Unpack = "tar"
 	// UnpackTarGz extracts a gzipped tar archive under the target.
 	UnpackTarGz Unpack = "tar.gz"
+	// UnpackTarXz extracts an xz-compressed tar archive under the target.
+	UnpackTarXz Unpack = "tar.xz"
+	// UnpackTarZstd extracts a zstd-compressed tar archive under the target.
+	UnpackTarZstd Unpack = "tar.zst"
+	// UnpackTarBz2 extracts a bzip2-compressed tar archive under the target.
+	UnpackTarBz2 Unpack = "tar.bz2"
+	// UnpackGz decompresses a single gzipped file to the target.
+	//
+	// Not an archive: "to" must name a file, and subpath is invalid because there is nothing to
+	// select from. The name in the image comes from "to" alone — neither the URL nor the filename
+	// gzip records in its header is used, since the output must be a function of the spec.
+	//
+	// Pointing this at a .tar.gz is accepted and gives one file that happens to be a tar; use
+	// tar.gz for that.
+	UnpackGz Unpack = "gz"
+	// UnpackZip extracts a zip archive under the target.
+	//
+	// Two properties of the format are worth knowing before using it. A zip records unix
+	// permissions only if whoever wrote it did: an archive produced on Windows carries none, so
+	// every file lands non-executable and a binary needs mode: {file: "0755"} to be runnable.
+	// And an entry name that is not valid UTF-8, a duplicated name, or an encrypted entry is
+	// refused rather than guessed at, because each has more than one plausible reading.
+	UnpackZip Unpack = "zip"
 	// UnpackDeb extracts a Debian package's data member under the target.
 	//
 	// Nothing is installed: no dependency is resolved and no maintainer script runs, so a package
@@ -78,6 +101,9 @@ type FetchSource struct {
 	// Subpath selects one directory from inside the archive and strips the prefix. Useful when a
 	// release tarball wraps everything in a version-named directory you do not want in the image.
 	// A subpath matching nothing is an error rather than a silently empty layer.
+	//
+	// Applies to the archive unpack modes only. It is invalid with "gz", which unpacks a single
+	// file, and ignored with "none".
 	// +kubebuilder:validation:MaxLength=4096
 	// +optional
 	Subpath string `json:"subpath,omitempty"`

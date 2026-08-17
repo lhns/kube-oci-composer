@@ -155,7 +155,7 @@
                     "type": "string"
                   },
                   "subpath": {
-                    "description": "Subpath selects one directory from inside the archive and strips the prefix. Useful when a\nrelease tarball wraps everything in a version-named directory you do not want in the image.\nA subpath matching nothing is an error rather than a silently empty layer.",
+                    "description": "Subpath selects one directory from inside the archive and strips the prefix. Useful when a\nrelease tarball wraps everything in a version-named directory you do not want in the image.\nA subpath matching nothing is an error rather than a silently empty layer.\n\nApplies to the archive unpack modes only. It is invalid with \"gz\", which unpacks a single\nfile, and ignored with \"none\".",
                     "maxLength": 4096,
                     "type": "string"
                   },
@@ -166,6 +166,11 @@
                       "none",
                       "tar",
                       "tar.gz",
+                      "tar.xz",
+                      "tar.zst",
+                      "tar.bz2",
+                      "gz",
+                      "zip",
                       "deb"
                     ],
                     "type": "string"
