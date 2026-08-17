@@ -2,16 +2,11 @@ package oci
 
 import (
 	"archive/tar"
-	"compress/bzip2"
-	"compress/gzip"
 	"errors"
 	"fmt"
 	"io"
 	"strconv"
 	"strings"
-
-	"github.com/klauspost/compress/zstd"
-	"github.com/ulikunitz/xz"
 )
 
 // Debian binary package extraction.
@@ -36,37 +31,22 @@ const (
 
 // debDecompress wraps r according to a data.tar suffix, and returns a cleanup to call when done.
 //
-// dpkg picks the compressor, so a caller cannot know which to expect. bz2 has no writer in the
-// standard library and is therefore not covered by a test — it is accepted because rejecting a
-// valid package would be worse than accepting an untested path through two lines of stdlib.
+// dpkg picks the compressor, so a caller cannot know which to expect. The codecs themselves are in
+// compress.go, shared with the tar unpack modes; this only maps a member-name suffix onto one and
+// keeps the error phrased in terms of the package, since "unsupported compression" alone would not
+// tell a reader which part of the .deb was unreadable.
 func debDecompress(r io.Reader, suffix string) (io.Reader, func(), error) {
-	noop := func() {}
-	switch suffix {
-	case "":
-		return r, noop, nil
-	case ".gz":
-		zr, err := gzip.NewReader(r)
-		if err != nil {
-			return nil, noop, fmt.Errorf("reading gzip: %w", err)
-		}
-		return zr, func() { _ = zr.Close() }, nil
-	case ".xz":
-		zr, err := xz.NewReader(r)
-		if err != nil {
-			return nil, noop, fmt.Errorf("reading xz: %w", err)
-		}
-		return zr, noop, nil
-	case ".zst":
-		zr, err := zstd.NewReader(r)
-		if err != nil {
-			return nil, noop, fmt.Errorf("reading zstd: %w", err)
-		}
-		return zr, zr.Close, nil
-	case ".bz2":
-		return bzip2.NewReader(r), noop, nil
-	default:
-		return nil, noop, fmt.Errorf("unsupported compression %q in data member", suffix)
+	c, ok := map[string]compression{
+		"":     compNone,
+		".gz":  compGzip,
+		".xz":  compXz,
+		".zst": compZstd,
+		".bz2": compBzip2,
+	}[suffix]
+	if !ok {
+		return nil, func() {}, fmt.Errorf("unsupported compression %q in data member", suffix)
 	}
+	return decompress(r, c)
 }
 
 // openDebData advances r to the package's data member and returns a decompressed reader for it.

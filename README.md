@@ -146,7 +146,8 @@ helm install kube-oci-composer oci://ghcr.io/lhns/charts/kube-oci-composer \
 **v0.1, and honest about its limits.**
 
 Implemented: base images with layer reuse and config inheritance; `fetch`, `configMap`,
-`sourceRef` and `remove` layer verbs; ownership, modes and archive subpaths; the full OCI config
+`sourceRef` and `remove` layer verbs; unpacking `tar`, `tar.gz`, `tar.xz`, `tar.zst`, `tar.bz2`,
+`zip`, `deb` and single-file `gz`; ownership, modes and archive subpaths; the full OCI config
 surface; the built-in serving endpoint; external push with `secretRef`; the input-hash
 short-circuit; a two-tier layer cache with optional S3; manifest persistence across restarts;
 multi-architecture output; and garbage collection.
@@ -188,6 +189,18 @@ spec:
       to: /plugins
       owner: {uid: 1001, gid: 0}
       mode: {file: "0644", dir: "0755"}
+
+    # A zip release, which for a great deal of software is the only one published.
+    # A zip records unix permissions only if whoever wrote it did: an archive made on Windows
+    # carries none, so every file arrives non-executable and a binary needs the mode below.
+    - name: plugin
+      fetch:
+        url: https://.../plugin-1.2.3.zip
+        digest: sha256:…
+        unpack: zip
+        subpath: plugin-1.2.3
+      to: /plugins
+      mode: {file: "0755"}
 
     # A distribution package, when that is the only published build of a native library.
     # unpack: deb takes the payload only — nothing is installed and no maintainer script runs.

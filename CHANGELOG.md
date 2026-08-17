@@ -5,6 +5,76 @@ may change between minor versions.
 
 ## [Unreleased]
 
+### Added
+- **`unpack: zip`**, plus `tar.xz`, `tar.zst`, `tar.bz2` and single-file `gz`. A great deal of
+  software is published only as a `.zip` — Kafka Connect plugin bundles, JVM distributions,
+  Terraform providers — and none of it could enter an artifact. The workaround was to repack the
+  zip as a tarball and host that, which discards the upstream URL and digest and replaces them with
+  "we repacked this once".
+
+  `subpath`, rebasing, mode normalisation, symlink handling, deterministic ordering and traversal
+  refusal are the same code the tar path uses, now extracted so there is exactly one implementation
+  of where an entry is allowed to land. A zip and a tarball of the same content produce the same
+  layer.
+
+  **A zip records unix permissions only if whoever wrote it did.** An archive produced on Windows
+  carries FAT attributes instead, so every file arrives non-executable and a binary needs
+  `mode: {file: "0755"}` to be runnable. The output is still reproducible — the input is
+  digest-pinned — but the same release zipped on Linux and on Windows gives two different
+  artifacts, and nothing here can tell which you have. Guessing from content was rejected: it would
+  make the output depend on something other than the spec.
+
+  Symlinks are recovered properly, which is the part worth stating: a zip has no typeflag, so a
+  symlink is an ordinary entry whose body is the link target. Reading entries as files would turn
+  each one into a small text file containing a path, with a stable digest and a green build,
+  failing later as a linker error in whatever mounts the artifact. Encrypted entries, compression
+  methods beyond store and deflate, duplicated names and names that are not valid UTF-8 are refused
+  rather than guessed at.
+
+  `gz` unpacks a single compressed file, so `to` must name a file and `subpath` is invalid. The name
+  comes from `to` alone — not from the URL, and not from the filename gzip stores in its header —
+  because both are excluded from the input hash, and using either would let two mirrors of
+  identical bytes produce different layers under one hash.
+
+  The compressed-tar variants were nearly free: `unpack: deb` already needed xz, zstd and bzip2
+  readers, since dpkg picks the compressor for `data.tar.*`. That table is now shared, so a spec can
+  use xz on its own and not only inside a `.deb`. No new dependency. `tar.bz2` has no round-trip
+  test because the standard library decodes bzip2 but cannot write it — the same two lines of stdlib
+  the deb path has shipped since 0.4.0.
+
+  **`AssemblyVersion` is unchanged, deliberately.** It covers output changing for *identical*
+  inputs, and no existing spec can name any of these modes — the CRD's enum rejected them at
+  admission. Bumping it would invalidate every recorded input hash in every cluster and force a
+  full rebuild of byte-for-byte identical content.
+
+  **Upgrading the chart is not enough.** Helm installs the CRDs under `crds/` on install and never
+  touches them on upgrade, so a chart upgrade alone leaves the old enum in place and the API server
+  rejects `unpack: zip` at apply time. Apply the CRD (`make install`, or
+  `kubectl apply -f config/crd/bases`). Anyone validating manifests with kubeconform against a
+  pinned `schemas/` URL needs to move that pin too, or valid manifests will fail their CI.
+
+  See [ADR 0023](docs/adr/0023-more-archive-formats.md). RPM is still not included
+  ([#9](https://github.com/lhns/kube-oci-composer/issues/9)); Alpine `.apk` still needs nothing.
+
+### Fixed
+- **An archive entry named exactly `..` escaped its target directory.** The traversal guard tested
+  for it in one condition and then only raised an error on a `../` prefix, which `..` does not have,
+  so the entry survived and landed one level above where the layer was confined. The impact was a
+  stray directory entry rather than overwritten content, and no legitimate archive contains such an
+  entry — but it was a hole in the check whose entire job is to be the escape guard, and there was
+  no test covering traversal at all. There is now, for every format.
+- **Entries sharing a name were resolved by an unstable sort.** Two entries with the same name
+  compare equal, so which one survived deduplication was decided by the sort's internal
+  partitioning rather than by the archive. The result was deterministic for a given Go toolchain and
+  undefined in principle, meaning a Go upgrade could silently move digests that immutable tags then
+  refuse to republish. The sort is now stable, so archive order is the tiebreak. This is not an
+  `AssemblyVersion` change: it only affects archives whose output was never well defined, and a
+  version bump cannot repair a hash that had no single correct value.
+- **An unpack mode the controller does not implement now stalls instead of retrying forever.** It
+  was an ordinary error, so the object sat `Ready=False` and requeued with exponential backoff
+  indefinitely, never setting `Stalled` and never saying why. It is reachable in practice precisely
+  because Helm does not upgrade CRDs: a schema newer than its controller is an ordinary situation.
+
 ## [0.4.0] - 2026-08-14
 
 ### Added

@@ -494,6 +494,15 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 
 	art, err := r.assemble(ctx, obj, declared, inputs, cfg, workDir)
 	if err != nil {
+		var unsupported *oci.ErrUnsupportedUnpack
+		if errors.As(err, &unsupported) {
+			// Terminal on purpose: retrying cannot add a code path to this binary. The spec asks
+			// for an unpack mode this build does not implement, which the CRD's enum normally
+			// prevents — so reaching here means the CRD is newer than the controller, and the fix
+			// is to upgrade the controller or change the spec. Left untyped this requeued with
+			// backoff indefinitely and never set Stalled, so nothing said why.
+			return buildResult{}, terminal("%s", unsupported.Error())
+		}
 		return buildResult{}, err
 	}
 

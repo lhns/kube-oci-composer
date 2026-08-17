@@ -248,10 +248,14 @@ func TestIntegrationMalformedValuesAreRejected(t *testing.T) {
 			Name: "x", To: "relative/path",
 			Fetch: &ociv1alpha1.FetchSource{URL: "https://example.com/a.tgz", Digest: validDigest},
 		},
+		// "rpm" rather than something arbitrary: it looks exactly like a mode that ought to work,
+		// which is what makes it a good canary, and it stays invalid for as long as RPM support is
+		// declined (issue #9, ADR 0022). This slot previously held "zip", which stopped being a
+		// useful canary the moment zip was implemented.
 		"unknown unpack mode": {
 			Name: "x", To: "/x",
 			Fetch: &ociv1alpha1.FetchSource{
-				URL: "https://example.com/a.tgz", Digest: validDigest, Unpack: "zip",
+				URL: "https://example.com/a.tgz", Digest: validDigest, Unpack: "rpm",
 			},
 		},
 		"unknown source kind": {
@@ -273,6 +277,43 @@ func TestIntegrationMalformedValuesAreRejected(t *testing.T) {
 			if err := apply(t, "malformed-"+strings.ReplaceAll(name, " ", "-"),
 				ociv1alpha1.ImageCompositionSpec{Layers: []ociv1alpha1.Layer{layer}}); err == nil {
 				t.Fatal("accepted")
+			}
+		})
+	}
+}
+
+// TestIntegrationEveryUnpackModeIsAccepted — the CRD's enum and the controller's switch are
+// separate hand-maintained lists, and this is the half only a real API server can check. Forget the
+// kubebuilder marker and the mode is unusable no matter how complete the implementation is; the
+// symptom is a rejection at apply time that every unit test passes straight through.
+//
+// Paired with TestUnknownUnpackModeIsTerminal in internal/oci, which covers the other direction.
+func TestIntegrationEveryUnpackModeIsAccepted(t *testing.T) {
+	modes := []ociv1alpha1.Unpack{
+		ociv1alpha1.UnpackNone,
+		ociv1alpha1.UnpackTar,
+		ociv1alpha1.UnpackTarGz,
+		ociv1alpha1.UnpackTarXz,
+		ociv1alpha1.UnpackTarZstd,
+		ociv1alpha1.UnpackTarBz2,
+		ociv1alpha1.UnpackGz,
+		ociv1alpha1.UnpackZip,
+		ociv1alpha1.UnpackDeb,
+	}
+
+	for _, mode := range modes {
+		t.Run(string(mode), func(t *testing.T) {
+			err := apply(t, "unpack-"+strings.ReplaceAll(string(mode), ".", "-"),
+				ociv1alpha1.ImageCompositionSpec{
+					Layers: []ociv1alpha1.Layer{{
+						Name: "x", To: "/x/file",
+						Fetch: &ociv1alpha1.FetchSource{
+							URL: "https://example.com/a", Digest: validDigest, Unpack: mode,
+						},
+					}},
+				})
+			if err != nil {
+				t.Errorf("unpack %q was rejected: %v", mode, err)
 			}
 		})
 	}
