@@ -87,7 +87,9 @@ func conditionIs(st dockerBuildStatus, condType, status string) bool {
 	return false
 }
 
-func applyBuild(t *testing.T, name, dockerfile string) {
+// applyBuild creates a DockerBuild. extraSpec is appended verbatim under spec, already indented
+// two spaces, for the fields only one test needs.
+func applyBuild(t *testing.T, name, dockerfile string, extraSpec ...string) {
 	t.Helper()
 	applyStdin(t, fmt.Sprintf(`
 apiVersion: oci.lhns.de/v1alpha1
@@ -106,7 +108,8 @@ spec:
   push:
     repository: %s/e2e/%s
     tags: [v1]
-`, name, buildNamespace, dockerfile, buildRegistry, name))
+%s
+`, name, buildNamespace, dockerfile, buildRegistry, name, strings.Join(extraSpec, "\n")))
 	t.Cleanup(func() {
 		_, _ = kubectl(t, "-n", buildNamespace, "delete", "dockerbuild", name, "--ignore-not-found")
 	})
@@ -256,5 +259,55 @@ func TestDockerBuildRefusesAnUnpinnedFrom(t *testing.T) {
 		"-o", "jsonpath={.items[*].metadata.name}")
 	if strings.Contains(jobs, "e2e-unpinned") {
 		t.Errorf("a Job was created for an unpinned FROM: %s", jobs)
+	}
+}
+
+// TestRebuildingTheSameContextReproducesTheDigest answers ADR 0025's first spike question, which
+// the alpha shipped without answering: does SOURCE_DATE_EPOCH=0 plus rewrite-timestamp=true give
+// byte-identical output across two independent runs of the same context on the same builder?
+//
+// It matters because it is the difference between two readings of status.inputHash. If rebuilds
+// reproduce, the hash identifies the OUTPUT and the immutable-tag guard can never fire on an
+// unchanged spec. If they do not, the hash only identifies the INPUTS, and 0025's concession
+// stands: losing status or the store means a rebuild can produce a digest that conflicts with the
+// tag already published, permanently, under the default immutable: true.
+//
+// Two objects rather than deleting and recreating one: a deterministic Job name means a recreated
+// object can ADOPT the finished Job of the first build and read its digest back without building
+// anything, which would make this pass while proving nothing. Separate names guarantee separate
+// Jobs.
+//
+// The cache is disabled on both for the same reason, and the API says so in as many words: a cache
+// hit would make the second digest match by reuse rather than by reproducibility. So this really
+// does re-execute the fixture's RUN, which is the side of ADR 0016's line where determinism was
+// never promised.
+func TestRebuildingTheSameContextReproducesTheDigest(t *testing.T) {
+	const noCache = "  cache:\n    mode: Disabled"
+
+	digests := make(map[string]string, 2)
+	for _, name := range []string{"e2e-repro-a", "e2e-repro-b"} {
+		applyBuild(t, name, "Dockerfile", noCache)
+
+		buildEventually(t, "build "+name+" to finish", func() error {
+			st := buildStatus(t, name)
+			if st.Artifact == nil || st.Artifact.Digest == "" {
+				return fmt.Errorf("no artifact yet: %+v", st.Conditions)
+			}
+			return nil
+		})
+		digests[name] = buildStatus(t, name).Artifact.Digest
+	}
+
+	a, b := digests["e2e-repro-a"], digests["e2e-repro-b"]
+	if a == "" || b == "" {
+		t.Fatalf("a build produced no digest: %q and %q", a, b)
+	}
+	if a != b {
+		// Not a flake to retry. This is 0025's concession reproducing, and the ADR asks that it be
+		// recorded rather than smoothed over: an unchanged spec can produce two different images.
+		t.Fatalf("two builds of an identical context produced different digests:\n  %s\n  %s\n"+
+			"status.inputHash therefore identifies the inputs and not the output, so a rebuild "+
+			"after losing status or the store can permanently conflict with an already-published "+
+			"immutable tag (ADR 0025)", a, b)
 	}
 }

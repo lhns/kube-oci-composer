@@ -169,6 +169,23 @@ may change between minor versions.
   re-verify rather than rebuild. The field is recorded but the read path is not implemented, and
   the record now says so.
 
+### Added
+- **An e2e test that answers ADR 0025's first spike question.** The alpha shipped without measuring
+  whether `SOURCE_DATE_EPOCH=0` plus `rewrite-timestamp=true` actually gives byte-identical output
+  across two runs of the same context, and that measurement is the difference between two readings
+  of `status.inputHash`: whether it identifies the OUTPUT, or only the INPUTS.
+
+  If rebuilds reproduce, the immutable-tag guard can never fire on an unchanged spec. If they do
+  not, ADR 0025's concession stands -- losing status or the store means a rebuild can produce a
+  digest that permanently conflicts with an already-published tag under the default
+  `immutable: true`.
+
+  The test builds the same context under two names rather than deleting and recreating one object,
+  because a deterministic Job name means a recreated object can *adopt* the first build's finished
+  Job and read its digest back without building anything -- passing while proving nothing. The
+  cache is disabled on both for the same reason: a cache hit would make the digests match by reuse
+  rather than by reproducibility.
+
 ### Changed
 - **Build pods permit privilege escalation and add two capabilities.** Measured, not chosen: the
   first end-to-end run against a real cluster showed rootless BuildKit could not start under the
