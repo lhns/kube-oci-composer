@@ -121,3 +121,6 @@ echo "===== node support ====="
 # "the feature is on and something else is wrong", which are opposite next steps.
 kubectl get nodes -o wide
 kubectl get --raw '/api/v1/nodes' 2>/dev/null | grep -o '"kubeletVersion":"[^"]*"' | head -1
+
+# The probe reports findings; a candidate failing is a result, not a broken step.
+exit 0

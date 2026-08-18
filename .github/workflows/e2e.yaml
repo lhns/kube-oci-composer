@@ -72,7 +72,7 @@ jobs:
       # showed rootless cannot map UIDs under the build pod's hardened context. Remove with the
       # script once ADR 0025 records the answer.
       - name: Probe BuildKit security contexts
-        run: ./test/e2e/probe-buildkit.sh
+        run: bash ./test/e2e/probe-buildkit.sh
 
       # A [probe-only] commit skips the suite: when the probe is the question being asked, the
       # tests below it are 12 minutes spent re-confirming a failure that is already understood.
