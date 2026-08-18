@@ -206,6 +206,18 @@ func (r *ImageCompositionReconciler) resolveFluxSource(ctx context.Context, obj 
 			// routinely lands here for a second.
 			return source.FluxArtifact{}, pending("source %s %s/%s not found yet", ref.Kind, ns, ref.Name)
 		}
+		var nr *source.ErrNotReady
+		if errors.As(err, &nr) {
+			// Pending for the same reason and one degree more sharply: the source exists, but its
+			// status describes a spec that is no longer the one in the cluster. Waiting is the only
+			// safe answer — building from that artifact publishes the PREVIOUS revision's content
+			// under the tag the current revision was supposed to get, and a tag's first publish has
+			// nothing for the immutability guard to refuse. See ADR 0026.
+			//
+			// Not terminal: source-controller catching up bumps no generation here, and the source
+			// is watched, so the wait normally ends within seconds.
+			return source.FluxArtifact{}, pending("%s", err)
+		}
 		// Everything else — including "no artifact yet" — is transient. source-controller may
 		// simply not have finished its first reconcile.
 		return source.FluxArtifact{}, err
