@@ -46,14 +46,15 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	return s
 }
 
-// contextTarball is a build context holding one Dockerfile, as source-controller publishes one.
-func contextTarball(t *testing.T, dockerfile string) []byte {
+// contextTarball is a build context holding one Dockerfile. prefix is the wrapper directory
+// source-controller adds; empty puts the file at the archive root.
+func contextTarball(t *testing.T, prefix, dockerfile string) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(zw)
 	if err := tw.WriteHeader(&tar.Header{
-		Name: "src-abc123/Dockerfile", Mode: 0o644,
+		Name: prefix + "Dockerfile", Mode: 0o644,
 		Size: int64(len(dockerfile)), Typeflag: tar.TypeReg,
 	}); err != nil {
 		t.Fatalf("writing header: %v", err)
@@ -70,9 +71,8 @@ func contextTarball(t *testing.T, dockerfile string) []byte {
 	return buf.Bytes()
 }
 
-func contextServer(t *testing.T, dockerfile string) *httptest.Server {
+func contextServer(t *testing.T, body []byte) *httptest.Server {
 	t.Helper()
-	body := contextTarball(t, dockerfile)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write(body)
 	}))
@@ -98,7 +98,7 @@ func gitRepository(namespace, name, url, digest string) *unstructured.Unstructur
 // harness wires a reconciler over a fake client, with a server standing in for the context.
 func harness(t *testing.T, dockerfile string, objs ...client.Object) *DockerBuildReconciler {
 	t.Helper()
-	srv := contextServer(t, dockerfile)
+	srv := contextServer(t, contextTarball(t, "src-abc123/", dockerfile))
 	all := append([]client.Object{gitRepository("team-a", "src", srv.URL, "sha256:ctx")}, objs...)
 
 	c := fake.NewClientBuilder().

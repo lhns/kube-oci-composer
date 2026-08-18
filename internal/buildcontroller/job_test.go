@@ -1,14 +1,10 @@
 package buildcontroller
 
 import (
-	"archive/tar"
-	"compress/gzip"
-	"net/http"
-	"net/http/httptest"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -103,10 +99,18 @@ func TestBuildJobRunsRootless(t *testing.T) {
 			t.Errorf("%s does not pin a non-zero uid", c.Name)
 		}
 
-		// Capabilities are the part that has to be exact rather than merely absent. Escalation is
-		// permitted (ADR 0027: setuid newuidmap is how rootless maps a UID range, and refusing it
-		// stops buildkitd starting at all), so the bounding set is the only thing left holding the
-		// line — and an unnoticed addition here would be a real widening.
+		// Asserted in the direction that looks wrong: escalation must be PERMITTED. Setuid
+		// newuidmap is how rootless maps a UID range, and NO_NEW_PRIVS makes the kernel ignore
+		// the setuid bit, so tightening this stops buildkitd starting at all (ADR 0027). The
+		// previous version of this test demanded false, passed every run, and was wrong about the
+		// only environment that mattered.
+		if sc.AllowPrivilegeEscalation == nil || !*sc.AllowPrivilegeEscalation {
+			t.Errorf("%s forbids privilege escalation; rootless BuildKit cannot map UIDs and will "+
+				"not start", c.Name)
+		}
+
+		// With escalation permitted the bounding set is the only thing left holding the line, so
+		// it has to be exact rather than merely present.
 		caps := sc.Capabilities
 		if caps == nil || len(caps.Drop) != 1 || caps.Drop[0] != "ALL" {
 			t.Errorf("%s does not drop ALL capabilities: %+v", c.Name, caps)
@@ -303,15 +307,19 @@ func TestInsecureRegistryIsNotInTheInputHash(t *testing.T) {
 //
 // Skipped where there is no POSIX shell, which is most Windows machines; CI runs it.
 func TestFetchContextUnwrapsTheSourceControllerDirectory(t *testing.T) {
+	// Skipping encodes a platform fact, not a hope about CI: "CI covers this" is an assertion the
+	// test cannot make, and if wget ever left the runner image this would skip green forever while
+	// the bug it guards went untested again.
+	if runtime.GOOS == "windows" {
+		t.Skip("no POSIX shell; the script is exercised on Linux")
+	}
 	sh, err := exec.LookPath("sh")
 	if err != nil {
-		t.Skip("no POSIX shell available; CI covers this")
+		t.Fatal("no sh; the script that ships in the pod cannot be exercised")
 	}
-	// wget and tar are what the script actually calls, and substituting them would test a
-	// paraphrase rather than the string that ships in the pod.
 	for _, bin := range []string{"tar", "wget"} {
 		if _, err := exec.LookPath(bin); err != nil {
-			t.Skipf("%s not available; CI covers this", bin)
+			t.Fatalf("no %s; the script calls it, and substituting it would test a paraphrase", bin)
 		}
 	}
 
@@ -323,17 +331,10 @@ func TestFetchContextUnwrapsTheSourceControllerDirectory(t *testing.T) {
 		{"already at the root", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			archive := filepath.Join(dir, "context.tar.gz")
-			writeContextArchive(t, archive, tc.prefix)
+			// Over HTTP, because that is what wget does in the pod.
+			srv := contextServer(t, contextTarball(t, tc.prefix, pinnedFrom))
 
-			// The script fetches over HTTP, which is what wget does in the pod too.
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				http.ServeFile(w, &http.Request{URL: &url.URL{Path: "/"}}, archive)
-			}))
-			defer srv.Close()
-
-			workspace := filepath.Join(dir, "workspace")
+			workspace := filepath.Join(t.TempDir(), "workspace")
 			if err := os.MkdirAll(workspace, 0o755); err != nil {
 				t.Fatalf("creating workspace: %v", err)
 			}
@@ -358,34 +359,5 @@ func TestFetchContextUnwrapsTheSourceControllerDirectory(t *testing.T) {
 				t.Error("the staging directory was left behind, so it becomes part of the build context")
 			}
 		})
-	}
-}
-
-// writeContextArchive writes a gzipped tar holding one Dockerfile, optionally under a wrapper
-// directory, which is the shape source-controller publishes.
-func writeContextArchive(t *testing.T, path, prefix string) {
-	t.Helper()
-	f, err := os.Create(path)
-	if err != nil {
-		t.Fatalf("creating archive: %v", err)
-	}
-	defer f.Close()
-
-	zw := gzip.NewWriter(f)
-	tw := tar.NewWriter(zw)
-	body := []byte("FROM busybox@sha256:" + strings.Repeat("a", 64) + "\n")
-	if err := tw.WriteHeader(&tar.Header{
-		Name: prefix + "Dockerfile", Mode: 0o644, Size: int64(len(body)), Typeflag: tar.TypeReg,
-	}); err != nil {
-		t.Fatalf("writing header: %v", err)
-	}
-	if _, err := tw.Write(body); err != nil {
-		t.Fatalf("writing body: %v", err)
-	}
-	if err := tw.Close(); err != nil {
-		t.Fatalf("closing tar: %v", err)
-	}
-	if err := zw.Close(); err != nil {
-		t.Fatalf("closing gzip: %v", err)
 	}
 }

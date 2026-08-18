@@ -20,8 +20,9 @@ spec:
           image: registry:2
           ports: [{containerPort: 5000}]
           env:
-            # In-memory: the registry is thrown away with the cluster, and a filesystem driver
-            # would need a volume for no benefit.
+            # Ephemeral: storage is the container's own writable layer, thrown away with the
+            # cluster, so no volume is needed. Deletion is enabled so a test can clean up after
+            # itself without restarting the registry.
             - {name: REGISTRY_STORAGE_DELETE_ENABLED, value: "true"}
           readinessProbe:
             httpGet: {path: /v2/, port: 5000}

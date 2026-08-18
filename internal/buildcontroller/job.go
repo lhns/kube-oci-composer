@@ -92,13 +92,11 @@ func shortHash(inputHash string) string {
 // refusing to build at all, and a flag reinstating it would make every other guarantee here
 // conditional. Nothing below grants host access, device access or host mounts.
 //
-// The escalation and capability settings are measured rather than chosen — see ADR 0027. Rootless
-// BuildKit maps a RANGE of UIDs so a build can create files owned by root and by package users,
-// and the kernel only permits an unprivileged process to map ONE uid by itself. The range needs
-// CAP_SETUID, which is why the image ships setuid-root `newuidmap` to do that single write. The
-// first end-to-end run refused it twice over: AllowPrivilegeEscalation:false sets NO_NEW_PRIVS so
-// the kernel ignores the setuid bit, and dropping ALL empties the bounding set so the capability
-// could not be acquired anyway. buildkitd never started.
+// Rootless BuildKit maps a RANGE of UIDs so a build can create files owned by root and by package
+// users, and the kernel lets an unprivileged process map only ONE by itself; the range needs
+// CAP_SETUID, which is why the image ships setuid-root `newuidmap`. Both `allowPrivilegeEscalation:
+// false` and `drop: ALL` independently stop that working, and buildkitd then never starts. Measured
+// rather than chosen — ADR 0027.
 func rootlessSecurityContext() *corev1.SecurityContext {
 	return &corev1.SecurityContext{
 		RunAsUser:    ptr.To[int64](1000),
@@ -116,8 +114,7 @@ func rootlessSecurityContext() *corev1.SecurityContext {
 		AppArmorProfile: &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeUnconfined},
 		// Everything dropped, then exactly the two the UID/GID mapping needs. Upstream's own
 		// Kubernetes example ships no capabilities stanza at all, which leaves the runtime's
-		// default set — around fourteen, including CHOWN, DAC_OVERRIDE and FOWNER. Both were
-		// measured working; this is the narrower of the two, so it is the one taken.
+		// default set — around fourteen, including CHOWN, DAC_OVERRIDE and FOWNER.
 		Capabilities: &corev1.Capabilities{
 			Drop: []corev1.Capability{"ALL"},
 			Add:  []corev1.Capability{"SETUID", "SETGID"},
@@ -129,16 +126,13 @@ func rootlessSecurityContext() *corev1.SecurityContext {
 //
 // The unwrapping is the whole reason this is a script rather than one pipe. A source-controller
 // artifact wraps the tree in a single top-level directory whose name nobody can predict, so a plain
-// extraction leaves the Dockerfile at <wrapper>/Dockerfile while buildctl looks for it at the root.
-// The controller-side check already strips that wrapper (build.matchesContextPath), so before this
-// existed the two halves disagreed: an unpinned FROM was correctly refused by reading the wrapped
-// path, and then every build that passed the check failed inside BuildKit with
+// extraction leaves the Dockerfile one level below where buildctl looks for it.
 //
-//	failed to read dockerfile: open Dockerfile: no such file or directory
-//
-// Deliberately the SAME rule as matchesContextPath rather than an unconditional --strip-components=1:
-// strip one level only when the archive really is a single wrapper directory, so a tarball whose
-// files sit at the root still builds instead of being silently emptied.
+// Deliberately the SAME rule as build.matchesContextPath, which strips that wrapper controller-side:
+// when the two disagreed, an unpinned FROM was correctly refused and every build that passed the
+// check then failed inside BuildKit. Strip one level only when the archive really is a single
+// wrapper directory, so a tarball whose files sit at the root still builds rather than being
+// silently emptied.
 func fetchContextScript(contextURL string) string {
 	return fmt.Sprintf(`set -e
 staging=%[2]s/.staging

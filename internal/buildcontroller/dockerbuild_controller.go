@@ -55,7 +55,6 @@ type DockerBuildReconciler struct {
 // +kubebuilder:rbac:groups=oci.lhns.de,resources=dockerbuilds/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
 // Secrets are read for their resourceVersion only, so a rotation moves the input hash and
 // rebuilds. The VALUE is never read here — it is projected straight into the build pod — which is
 // why this is get and not list or watch, matching the composer's reasoning about blast radius.
@@ -278,10 +277,13 @@ func (r *DockerBuildReconciler) observeJob(ctx context.Context, obj *ociv1alpha1
 		// another — so the RequeueAfter backoff never applies and a failing build retries in a hot
 		// loop. Keeping it also keeps the pod, which is the only place the reason a build failed is
 		// written down; deleting on sight destroys the evidence before anyone can read it.
-		msg := r.jobFailureDetail(ctx, obj, job)
+		msg := storedFailureMessage(obj, job)
 		switch {
 		case obj.Status.BuildRef != nil:
-			// First observation of this failure: count it once.
+			// First observation of this failure: count it once, and read the pod while it is still
+			// there. Later passes reuse this rather than listing pods again on every backoff poll,
+			// which would also let the message degrade once the pod is collected.
+			msg = r.jobFailureDetail(ctx, obj, job)
 			obj.Status.BuildRef = nil
 			obj.Status.Failures++
 			if obj.Status.LastAttempt != nil {
@@ -314,11 +316,9 @@ type buildMetadata struct {
 //
 // The digest is the one thing that has to come back out of the build, and it cannot be derived.
 func (r *DockerBuildReconciler) readResultDigest(ctx context.Context, obj *ociv1alpha1.DockerBuild, job *batchv1.Job) (string, error) {
-	var pods corev1.PodList
-	if err := r.List(ctx, &pods,
-		client.InNamespace(obj.Namespace),
-		client.MatchingLabels{"job-name": job.Name}); err != nil {
-		return "", fmt.Errorf("listing build pods: %w", err)
+	pods, err := r.buildPods(ctx, obj, job)
+	if err != nil {
+		return "", err
 	}
 	if len(pods.Items) == 0 {
 		return "", pending("the build pod for %s has not been observed yet", job.Name)
@@ -483,6 +483,27 @@ func (r *DockerBuildReconciler) httpClient() *http.Client {
 func jobSucceeded(job *batchv1.Job) bool { return job.Status.Succeeded > 0 }
 func jobFailed(job *batchv1.Job) bool    { return job.Status.Failed > 0 }
 
+// buildPods lists the pods of one build's Job.
+func (r *DockerBuildReconciler) buildPods(ctx context.Context, obj *ociv1alpha1.DockerBuild,
+	job *batchv1.Job) (corev1.PodList, error) {
+
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods,
+		client.InNamespace(obj.Namespace),
+		client.MatchingLabels{"job-name": job.Name}); err != nil {
+		return pods, fmt.Errorf("listing build pods: %w", err)
+	}
+	return pods, nil
+}
+
+// storedFailureMessage is what a previous pass already worked out about this failure.
+func storedFailureMessage(obj *ociv1alpha1.DockerBuild, job *batchv1.Job) string {
+	if la := obj.Status.LastAttempt; la != nil && la.Message != "" {
+		return la.Message
+	}
+	return jobFailureMessage(job)
+}
+
 // retryDue reports whether enough time has passed since the last failure to try again. It mirrors
 // the interval Reconcile requeues at, so the wait is the backoff rather than a second policy.
 func retryDue(obj *ociv1alpha1.DockerBuild) bool {
@@ -501,10 +522,8 @@ func retryDue(obj *ociv1alpha1.DockerBuild) bool {
 func (r *DockerBuildReconciler) jobFailureDetail(ctx context.Context, obj *ociv1alpha1.DockerBuild, job *batchv1.Job) string {
 	msg := jobFailureMessage(job)
 
-	var pods corev1.PodList
-	if err := r.List(ctx, &pods,
-		client.InNamespace(obj.Namespace),
-		client.MatchingLabels{"job-name": job.Name}); err != nil {
+	pods, err := r.buildPods(ctx, obj, job)
+	if err != nil {
 		return msg
 	}
 	for _, p := range pods.Items {

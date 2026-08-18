@@ -13,9 +13,9 @@ import (
 // render-and-parse, ruleSet, knownFlags — already exist in this package, and standing up a second
 // copy next to the builder would be the drift this file exists to prevent.
 //
-// Both guards mirror an existing composer test. Without the RBAC one, config/rbac-builder/role.yaml
-// is output nothing reads, and the chart's hand-written rules can diverge from the kubebuilder
-// markers with nothing noticing.
+// The first four mirror a composer test; TestBuilderChartShipsRealDigests does not. Without the
+// RBAC one, config/rbac-builder/role.yaml is output nothing reads, and the chart's hand-written
+// rules can diverge from the kubebuilder markers with nothing noticing.
 
 const builderChartDir = "../../charts/kube-oci-builder"
 
@@ -92,7 +92,10 @@ func TestBuilderChartNeverGrantsSecretListOrWatch(t *testing.T) {
 // TestBuilderChartFlagsMatchTheBinary — every flag the chart renders must exist, or the container
 // crash-loops on an unknown flag with nothing else to say why.
 func TestBuilderChartFlagsMatchTheBinary(t *testing.T) {
-	out := renderBuilder(t)
+	// Rendered WITH the optional flags set, or the guard silently skips them: insecureRegistry is
+	// wrapped in a `with` block, so the newest flag on the chart would be the one flag a typo could
+	// hide in.
+	out := renderBuilder(t, "--set", "builder.insecureRegistry=registry.internal:5000")
 	known := knownFlags(t, "../../cmd/oci-builder")
 
 	var seen int

@@ -28,11 +28,16 @@ const (
 	buildRegistry  = "e2e-registry." + buildNamespace + ".svc.cluster.local:5000"
 )
 
-// buildEventually is eventually() with the BUILDER's logs on timeout, plus the build pod's, since a
-// failure is usually inside the build rather than in the controller.
+// buildTimeout is longer than the composer's `timeout` because a cold build pulls a base image and
+// pushes a result. It must stay well under `go test -timeout` (see the Makefile) or the binary
+// panics first and the dump below never runs.
+const buildTimeout = 5 * time.Minute
+
+// buildEventually polls like eventually(), but dumps the BUILDER's logs and the build pod's on
+// timeout, since a failure is usually inside the build rather than in the controller.
 func buildEventually(t *testing.T, what string, fn func() error) {
 	t.Helper()
-	deadline := time.Now().Add(12 * time.Minute)
+	deadline := time.Now().Add(buildTimeout)
 	var last error
 	for time.Now().Before(deadline) {
 		if last = fn(); last == nil {
@@ -51,8 +56,9 @@ func buildEventually(t *testing.T, what string, fn func() error) {
 
 // dockerBuildStatus is the part of status this test reads.
 type dockerBuildStatus struct {
-	InputHash string `json:"inputHash"`
-	Artifact  *struct {
+	InputHash              string `json:"inputHash"`
+	LastHandledReconcileAt string `json:"lastHandledReconcileAt"`
+	Artifact               *struct {
 		Digest string `json:"digest"`
 		Ref    string `json:"ref"`
 	} `json:"artifact"`
@@ -209,13 +215,20 @@ func TestDockerBuildIsIdempotent(t *testing.T) {
 	})
 
 	first := buildStatus(t, "e2e-idempotent")
-	jobsBefore := mustKubectl(t, "-n", buildNamespace, "get", "jobs",
-		"-o", "jsonpath={.items[*].metadata.name}")
+	jobsBefore := jobsFor(t, "e2e-idempotent")
 
-	// Force a reconcile without changing an input.
+	// Force a reconcile without changing an input, then wait for the controller to say it handled
+	// THAT request rather than sleeping and hoping. A fixed sleep would pass even if the
+	// short-circuit had regressed and a rebuild simply had not started yet.
+	requested := fmt.Sprintf("%d", time.Now().Unix())
 	mustKubectl(t, "-n", buildNamespace, "annotate", "dockerbuild", "e2e-idempotent",
-		fmt.Sprintf("reconcile.fluxcd.io/requestedAt=%d", time.Now().Unix()), "--overwrite")
-	time.Sleep(20 * time.Second)
+		"reconcile.fluxcd.io/requestedAt="+requested, "--overwrite")
+	buildEventually(t, "the reconcile request to be handled", func() error {
+		if got := buildStatus(t, "e2e-idempotent").LastHandledReconcileAt; got != requested {
+			return fmt.Errorf("lastHandledReconcileAt = %q, want %q", got, requested)
+		}
+		return nil
+	})
 
 	second := buildStatus(t, "e2e-idempotent")
 	if second.InputHash != first.InputHash {
@@ -226,12 +239,24 @@ func TestDockerBuildIsIdempotent(t *testing.T) {
 		t.Errorf("digest changed on an unchanged spec: %+v then %+v", first.Artifact, second.Artifact)
 	}
 
-	jobsAfter := mustKubectl(t, "-n", buildNamespace, "get", "jobs",
-		"-o", "jsonpath={.items[*].metadata.name}")
-	if len(strings.Fields(jobsAfter)) > len(strings.Fields(jobsBefore)) {
-		t.Errorf("an unchanged reconcile started another build:\nbefore: %s\nafter:  %s",
+	if jobsAfter := jobsFor(t, "e2e-idempotent"); len(jobsAfter) > len(jobsBefore) {
+		t.Errorf("an unchanged reconcile started another build:\nbefore: %v\nafter:  %v",
 			jobsBefore, jobsAfter)
 	}
+}
+
+// jobsFor returns the Jobs belonging to one build. Scoped by name because the Job name is derived
+// from the object's, so a namespace-wide count would be coupled to what neighbouring tests leave.
+func jobsFor(t *testing.T, name string) []string {
+	t.Helper()
+	all := mustKubectl(t, "-n", buildNamespace, "get", "jobs", "-o", "jsonpath={.items[*].metadata.name}")
+	var mine []string
+	for _, j := range strings.Fields(all) {
+		if strings.HasPrefix(j, name+"-") {
+			mine = append(mine, j)
+		}
+	}
+	return mine
 }
 
 // TestDockerBuildRefusesAnUnpinnedFrom — the one rule the controller enforces on a Dockerfile's
