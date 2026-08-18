@@ -91,8 +91,28 @@ func TestBuildJobRunsRootless(t *testing.T) {
 		if sc.RunAsNonRoot == nil || !*sc.RunAsNonRoot {
 			t.Errorf("%s may run as root", c.Name)
 		}
-		if sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation {
-			t.Errorf("%s allows privilege escalation", c.Name)
+		if sc.RunAsUser == nil || *sc.RunAsUser == 0 {
+			t.Errorf("%s does not pin a non-zero uid", c.Name)
+		}
+
+		// Capabilities are the part that has to be exact rather than merely absent. Escalation is
+		// permitted (ADR 0027: setuid newuidmap is how rootless maps a UID range, and refusing it
+		// stops buildkitd starting at all), so the bounding set is the only thing left holding the
+		// line — and an unnoticed addition here would be a real widening.
+		caps := sc.Capabilities
+		if caps == nil || len(caps.Drop) != 1 || caps.Drop[0] != "ALL" {
+			t.Errorf("%s does not drop ALL capabilities: %+v", c.Name, caps)
+			continue
+		}
+		want := map[corev1.Capability]bool{"SETUID": true, "SETGID": true}
+		for _, add := range caps.Add {
+			if !want[add] {
+				t.Errorf("%s adds capability %q, which the UID mapping does not need", c.Name, add)
+			}
+			delete(want, add)
+		}
+		for missing := range want {
+			t.Errorf("%s is missing %q; rootless BuildKit cannot map UIDs without it", c.Name, missing)
 		}
 	}
 	// Seccomp and AppArmor must be unconfined, and that is not a loosening to tidy away later:

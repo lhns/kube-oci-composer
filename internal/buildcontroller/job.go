@@ -90,22 +90,38 @@ func shortHash(inputHash string) string {
 //
 // Privileged is not offered at any setting: ADR 0001 named that blast radius as the reason for
 // refusing to build at all, and a flag reinstating it would make every other guarantee here
-// conditional.
+// conditional. Nothing below grants host access, device access or host mounts.
+//
+// The escalation and capability settings are measured rather than chosen — see ADR 0027. Rootless
+// BuildKit maps a RANGE of UIDs so a build can create files owned by root and by package users,
+// and the kernel only permits an unprivileged process to map ONE uid by itself. The range needs
+// CAP_SETUID, which is why the image ships setuid-root `newuidmap` to do that single write. The
+// first end-to-end run refused it twice over: AllowPrivilegeEscalation:false sets NO_NEW_PRIVS so
+// the kernel ignores the setuid bit, and dropping ALL empties the bounding set so the capability
+// could not be acquired anyway. buildkitd never started.
 func rootlessSecurityContext() *corev1.SecurityContext {
 	return &corev1.SecurityContext{
-		RunAsUser:                ptr.To[int64](1000),
-		RunAsGroup:               ptr.To[int64](1000),
-		RunAsNonRoot:             ptr.To(true),
-		AllowPrivilegeEscalation: ptr.To(false),
-		Privileged:               ptr.To(false),
+		RunAsUser:    ptr.To[int64](1000),
+		RunAsGroup:   ptr.To[int64](1000),
+		RunAsNonRoot: ptr.To(true),
+		Privileged:   ptr.To(false),
+		// Required for setuid newuidmap, and it buys only what the two capabilities below allow —
+		// this is not privileged, and the container is still uid 1000.
+		AllowPrivilegeEscalation: ptr.To(true),
 		// Seccomp and AppArmor unconfined are what rootless BuildKit documents as required: it
 		// creates user namespaces and mounts inside them, and both defaults block that. This is
-		// the one place the posture is loosened, and it is loosened for the BUILD pod only — the
-		// controller keeps distroless, non-root and a read-only root filesystem.
+		// loosened for the BUILD pod only — the controller keeps distroless, non-root and a
+		// read-only root filesystem.
 		SeccompProfile:  &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined},
 		AppArmorProfile: &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeUnconfined},
-		// No capabilities: rootless needs none, which is the point of running it this way.
-		Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+		// Everything dropped, then exactly the two the UID/GID mapping needs. Upstream's own
+		// Kubernetes example ships no capabilities stanza at all, which leaves the runtime's
+		// default set — around fourteen, including CHOWN, DAC_OVERRIDE and FOWNER. Both were
+		// measured working; this is the narrower of the two, so it is the one taken.
+		Capabilities: &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+			Add:  []corev1.Capability{"SETUID", "SETGID"},
+		},
 	}
 }
 

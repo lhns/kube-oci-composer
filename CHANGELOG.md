@@ -169,6 +169,31 @@ may change between minor versions.
   re-verify rather than rebuild. The field is recorded but the read path is not implemented, and
   the record now says so.
 
+### Changed
+- **Build pods permit privilege escalation and add two capabilities.** Measured, not chosen: the
+  first end-to-end run against a real cluster showed rootless BuildKit could not start under the
+  previous posture, and [ADR 0027](docs/adr/0027-what-rootless-buildkit-actually-needs.md) records
+  the six configurations tried.
+
+  "Rootless" means no root on the *host*, not that no privilege is needed to start. Building an
+  image means creating files owned by many UIDs, which needs a user namespace mapping a *range* of
+  them -- and the kernel lets an unprivileged process map only one by itself, so the image ships
+  setuid-root `newuidmap` to do that single write. `allowPrivilegeEscalation: false` made the kernel
+  ignore the setuid bit, and `drop: ALL` emptied the bounding set so `CAP_SETUID` was unobtainable
+  regardless. buildkitd never started and every build failed in seconds.
+
+  Build containers now run with escalation permitted, all capabilities dropped, and exactly `SETUID`
+  and `SETGID` added. Unchanged: uid 1000, `runAsNonRoot`, `privileged: false` (still not offered at
+  any setting), no host namespaces, no devices, no host mounts. The controller's own posture is
+  untouched.
+
+  The cost, stated plainly: a setuid binary inside a build image can acquire those two capabilities
+  within the container. That is not host root, and the blast radius ADR 0001 refused is not
+  reinstated -- but it is a real loosening, and it is another reason the builder is a separate
+  component with its own chart rather than a flag on the composer. Kubernetes user namespaces would
+  have cost nothing and kept the old posture; all four variants failed to start on kind, so that
+  remains the destination rather than the current state.
+
 ### Fixed
 - **`DockerBuild`: a failing build retried in a hot loop and destroyed its own evidence.** Found by
   the first end-to-end run against a real cluster, which is the only place it could have been found:

@@ -68,29 +68,7 @@ jobs:
         env:
           CLUSTER: kube-oci-composer-e2e
 
-      # TEMPORARY. Answers which security context lets BuildKit start, after the first real run
-      # showed rootless cannot map UIDs under the build pod's hardened context. Remove with the
-      # script once ADR 0025 records the answer.
-      - name: Probe BuildKit security contexts
-        run: bash ./test/e2e/probe-buildkit.sh
-
-      # A [probe-only] commit skips the suite: when the probe is the question being asked, the
-      # tests below it are wall-clock spent re-confirming a failure that is already understood.
-      #
-      # Read from git rather than from github.event.head_commit, which exists only on push events.
-      # On a pull_request the expression evaluated against nothing, the condition came out true,
-      # and the gate silently did the opposite of what it said -- a skip-gate that fails OPEN.
-      - name: Detect a probe-only commit
-        id: probe_only
-        run: |
-          if git log -1 --pretty=%B | grep -qF '[probe-only]'; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - run: make e2e-test
-        if: steps.probe_only.outputs.skip != 'true'
 
       - name: Diagnostics on failure
         # A bare controller log tail is rarely enough: the common e2e failures here are a pod

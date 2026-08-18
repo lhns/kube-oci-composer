@@ -46,6 +46,7 @@ question waiting for evidence.
 | [0023](0023-more-archive-formats.md) | More archive formats: `unpack: zip` and the compressed-tar family | Accepted |
 | [0024](0024-images-as-layer-sources.md) | An image can be a layer source, flattened | Accepted |
 | [0025](0025-dockerfile-builds-as-a-second-kind.md) | Dockerfile builds, as a second kind with a weaker promise | Accepted, for an alpha |
+| [0027](0027-what-rootless-buildkit-actually-needs.md) | What rootless BuildKit actually needs | Accepted |
 
 ## Format
 
