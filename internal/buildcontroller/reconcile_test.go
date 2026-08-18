@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -17,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -279,8 +281,49 @@ func TestFailureDoesNotStall(t *testing.T) {
 	if got.Status.Failures != 1 {
 		t.Errorf("failures = %d, want 1", got.Status.Failures)
 	}
-	if len(jobsIn(t, r, obj.Namespace)) != 0 {
-		t.Error("the failed Job was not deleted, so the next attempt would adopt it")
+}
+
+// TestFailedBuildDoesNotRetryInAHotLoop is a regression test for a real hot loop.
+//
+// Deleting the failed Job as soon as the failure was seen woke this controller through its own Job
+// watch, which reconciled immediately, found no Job and started another — retrying every few
+// seconds forever while destroying each failed pod before its logs could be read. The failed Job
+// must survive until the backoff is actually up, and the failure must be counted once no matter how
+// many times it is observed.
+func TestFailedBuildDoesNotRetryInAHotLoop(t *testing.T) {
+	obj := buildOf(t, nil)
+	r := harness(t, pinnedFrom, obj)
+
+	if _, err := reconcileOnce(t, r, obj); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	failJob(t, r, obj, "the RUN exited 1")
+
+	// Several reconciles inside the backoff window, as the Job watch would produce.
+	for i := range 3 {
+		if _, err := reconcileOnce(t, r, obj); err != nil {
+			t.Fatalf("reconcile %d: %v", i, err)
+		}
+		if n := len(jobsIn(t, r, obj.Namespace)); n != 1 {
+			t.Fatalf("after %d re-observations there are %d Jobs; the failed one must be kept "+
+				"during the backoff so its pod's logs survive", i+1, n)
+		}
+	}
+	if f := reload(t, r, obj).Status.Failures; f != 1 {
+		t.Errorf("failures = %d after re-observing one failure, want 1", f)
+	}
+
+	// Once the backoff has elapsed, the Job is cleared so the next pass builds afresh.
+	got := reload(t, r, obj)
+	got.Status.LastAttempt.FinishedAt = ptr.To(metav1.NewTime(time.Now().Add(-time.Hour)))
+	if err := r.Status().Update(context.Background(), got); err != nil {
+		t.Fatalf("backdating the attempt: %v", err)
+	}
+	if _, err := reconcileOnce(t, r, got); err != nil {
+		t.Fatalf("reconcile after the backoff: %v", err)
+	}
+	if n := len(jobsIn(t, r, obj.Namespace)); n != 0 {
+		t.Errorf("the failed Job survived its backoff (%d Jobs); the retry would adopt it forever", n)
 	}
 }
 

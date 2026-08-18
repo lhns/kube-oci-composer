@@ -170,6 +170,27 @@ may change between minor versions.
   the record now says so.
 
 ### Fixed
+- **`DockerBuild`: a failing build retried in a hot loop and destroyed its own evidence.** Found by
+  the first end-to-end run against a real cluster, which is the only place it could have been found:
+  the reconcile loop was correct against a fake client, because a fake client has no watches.
+
+  The failure path deleted the failed Job immediately, so that the next attempt would not adopt it.
+  But deleting an owned Job wakes this controller through its own Job watch, and that reconcile
+  finds no Job and starts another — so the `RequeueAfter` backoff never applied and the build
+  retried every few seconds indefinitely. Each retry also deleted the previous pod, and the pod is
+  the only place the reason a build failed is written down, so no one could ever read why.
+
+  The failed Job is now kept until its backoff has actually elapsed and deleted only when the next
+  attempt is due, which makes the delete the trigger for the retry rather than a race against it.
+  A failure is counted once however many times it is observed.
+
+  Relatedly, a failed build reported only `BackoffLimitExceeded` — the mechanism, not the cause.
+  Status now carries the build container's exit code, termination reason and message, plus the
+  `kubectl logs` line that shows the rest.
+- **The e2e harness could not report its own failures.** `make e2e-test` ran `go test -timeout 15m`
+  while the in-test deadline was also 15 minutes, so the test binary panicked on the global timeout
+  at the same instant and the diagnostic dump never ran. The in-test deadline is now 12 minutes
+  against a 40-minute binary timeout, so the harness always outlives the assertion it is reporting on.
 - **`DockerBuild`: three things that were shipped wrong.** Found by analysing the merged alpha
   rather than the branch it came from.
 

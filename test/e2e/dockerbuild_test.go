@@ -20,16 +20,19 @@ import (
 	"time"
 )
 
+// buildNamespace must match up.sh's BUILD_NS, which defaults to the same value. The registry host
+// is derived from it rather than written out twice, so overriding one cannot leave the other
+// pointing somewhere the fixtures are not.
 const (
 	buildNamespace = "oci-builder-e2e"
-	buildRegistry  = "e2e-registry.oci-builder-e2e.svc.cluster.local:5000"
+	buildRegistry  = "e2e-registry." + buildNamespace + ".svc.cluster.local:5000"
 )
 
 // buildEventually is eventually() with the BUILDER's logs on timeout, plus the build pod's, since a
 // failure is usually inside the build rather than in the controller.
 func buildEventually(t *testing.T, what string, fn func() error) {
 	t.Helper()
-	deadline := time.Now().Add(15 * time.Minute)
+	deadline := time.Now().Add(12 * time.Minute)
 	var last error
 	for time.Now().Before(deadline) {
 		if last = fn(); last == nil {
