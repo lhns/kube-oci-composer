@@ -98,8 +98,14 @@ func rootlessSecurityContext() *corev1.SecurityContext {
 		RunAsNonRoot:             ptr.To(true),
 		AllowPrivilegeEscalation: ptr.To(false),
 		Privileged:               ptr.To(false),
-		SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined},
-		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+		// Seccomp and AppArmor unconfined are what rootless BuildKit documents as required: it
+		// creates user namespaces and mounts inside them, and both defaults block that. This is
+		// the one place the posture is loosened, and it is loosened for the BUILD pod only — the
+		// controller keeps distroless, non-root and a read-only root filesystem.
+		SeccompProfile:  &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined},
+		AppArmorProfile: &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeUnconfined},
+		// No capabilities: rootless needs none, which is the point of running it this way.
+		Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 	}
 }
 

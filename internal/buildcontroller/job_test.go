@@ -95,6 +95,19 @@ func TestBuildJobRunsRootless(t *testing.T) {
 			t.Errorf("%s allows privilege escalation", c.Name)
 		}
 	}
+	// Seccomp and AppArmor must be unconfined, and that is not a loosening to tidy away later:
+	// rootless BuildKit creates user namespaces and mounts inside them, and both defaults block
+	// it. Tightening these makes every build fail, so the assertion is here to say so.
+	build := pod.Containers[0].SecurityContext
+	if build.SeccompProfile == nil || build.SeccompProfile.Type != corev1.SeccompProfileTypeUnconfined {
+		t.Errorf("seccomp = %+v, want Unconfined; rootless BuildKit cannot run otherwise",
+			build.SeccompProfile)
+	}
+	if build.AppArmorProfile == nil || build.AppArmorProfile.Type != corev1.AppArmorProfileTypeUnconfined {
+		t.Errorf("apparmor = %+v, want Unconfined; rootless BuildKit cannot run otherwise",
+			build.AppArmorProfile)
+	}
+
 	if pod.RestartPolicy != corev1.RestartPolicyNever {
 		t.Errorf("restart policy is %q; a retried RUN just delays the failure", pod.RestartPolicy)
 	}
