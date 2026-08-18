@@ -180,6 +180,11 @@ may change between minor versions.
   digest that permanently conflicts with an already-published tag under the default
   `immutable: true`.
 
+  **The measurement passed:** two independent builds of the same context, caches disabled, produce
+  the same digest. Narrowly, though -- it shows the machinery does not inject nondeterminism, not
+  that an arbitrary Dockerfile reproduces. A `RUN` that installs packages, resolves DNS or reads the
+  clock can still differ, so the immutable-tag guard stays load-bearing.
+
   The test builds the same context under two names rather than deleting and recreating one object,
   because a deterministic Job name means a recreated object can *adopt* the first build's finished
   Job and read its digest back without building anything -- passing while proving nothing. The

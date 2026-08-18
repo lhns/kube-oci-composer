@@ -103,5 +103,18 @@ others — so widening it is a test failure rather than a review oversight. The 
 encoded a configuration that provably cannot run, which is the more useful lesson: it passed on
 every unit run while being wrong about the only environment that mattered.
 
-**0025's first criterion is still open.** Whether two runs of the same context produce the same
-output digest has not been measured; the builds had not yet run when this was written.
+**0025's first criterion is answered, and it passed.** Two independent builds of the same context,
+with the cache disabled on both, produce the *same* output digest. That criterion said to abandon if
+they did not, so the alpha survives on both counts.
+
+Read it narrowly. It shows the machinery does not itself inject nondeterminism: `SOURCE_DATE_EPOCH=0`
+and `rewrite-timestamp=true` do their job, and BuildKit plus this controller's argv are stable across
+runs. It does **not** show that an arbitrary Dockerfile reproduces, and 0025's second concession is
+untouched — a `RUN` that installs packages, resolves DNS, reads the clock or embeds a compiler build
+ID can still differ between runs, and nothing here can prevent that. The fixture's `RUN` is
+deterministic by construction, which is what makes it a test of the pipeline rather than of the
+build.
+
+So `status.inputHash` identifies the output for builds whose steps are themselves deterministic, and
+only the inputs otherwise. The immutable-tag guard therefore remains load-bearing rather than
+decorative: it is what catches the second case, and the e2e now covers the first.
