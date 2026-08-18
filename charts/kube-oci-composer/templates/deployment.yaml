@@ -11,6 +11,9 @@
 {{- fail "operator.s3.endpoint requires operator.s3.bucket" }}
 {{- end }}
 {{- $shared := or .Values.operator.storage.shared (eq .Values.operator.storage.backend "s3") }}
+{{- if and (gt (int .Values.replicaCount) 1) .Values.operator.storage.shared (ne .Values.operator.storage.backend "s3") (not .Values.persistence.enabled) }}
+{{- fail "operator.storage.shared=true asserts every replica reaches the SAME blobs, but persistence.enabled=false gives each pod its own emptyDir. Each replica would then restore nothing, report ready anyway, join the Service and 404 every pull that reaches it. Set persistence.enabled=true with an RWX storageClass, or use the s3 backend, or drop to replicaCount=1." }}
+{{- end }}
 {{- if and (gt (int .Values.replicaCount) 1) (not $shared) }}
 {{- fail "replicaCount > 1 without shared storage gives you a standby that serves nothing: the blob store would be node-local, so only the leader can answer pulls, and the standby stays out of the Service by never reporting ready. Set operator.storage.shared=true (an RWX volume), or use the s3 backend which is shared by construction." }}
 {{- end }}

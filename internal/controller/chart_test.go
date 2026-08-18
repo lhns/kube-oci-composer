@@ -326,3 +326,41 @@ func knownFlags(t *testing.T, cmdPath string) map[string]struct{} {
 	}
 	return flags
 }
+
+// TestChartRefusesSharedStorageOnEmptyDir — "shared" is an assertion the chart cannot verify, so
+// the one combination that provably contradicts it has to be refused at template time.
+//
+// replicaCount>1 with storage.shared=true and persistence.enabled=false gives every pod its own
+// emptyDir while telling the operator they are shared. Each replica then restores nothing, reports
+// ready anyway (readiness is observed on attempt, deliberately), joins the Service, and 404s every
+// pull routed to it. That is worse than not serving: it is intermittent, and it looks like the
+// registry losing images.
+func TestChartRefusesSharedStorageOnEmptyDir(t *testing.T) {
+	out := renderExpectingFailure(t,
+		"--set", "replicaCount=2",
+		"--set", "operator.storage.shared=true",
+		"--set", "persistence.enabled=false",
+		"--set", "operator.servingHost=oci.test")
+
+	if !strings.Contains(out, "its own emptyDir") {
+		t.Errorf("the failure does not explain that the replicas would not share anything:\n%s", out)
+	}
+}
+
+// The same shape must still render once storage is genuinely shared, or the guard is just a ban on
+// running more than one replica.
+func TestChartAllowsSharedStorageWithAVolume(t *testing.T) {
+	render(t,
+		"--set", "replicaCount=2",
+		"--set", "operator.storage.shared=true",
+		"--set", "persistence.enabled=true",
+		"--set", "operator.servingHost=oci.test")
+
+	// s3 is shared by construction, so it needs no volume.
+	render(t,
+		"--set", "replicaCount=2",
+		"--set", "operator.storage.backend=s3",
+		"--set", "operator.s3.endpoint=https://s3.test",
+		"--set", "operator.s3.bucket=blobs",
+		"--set", "operator.servingHost=oci.test")
+}

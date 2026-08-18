@@ -75,14 +75,17 @@ func New(host, addr string, blobs store.Store, presign bool) (*Server, error) {
 		return nil, fmt.Errorf("a blob store is required")
 	}
 
+	bh := NewBlobHandler(blobs, presign)
 	h := registry.New(
-		registry.WithBlobHandler(NewBlobHandler(blobs, presign)),
+		registry.WithBlobHandler(bh),
 		// Referrers support is on so SBOM, provenance and signature artifacts can attach to a
 		// manifest by subject, the same way they would on a real registry.
 		registry.WithReferrersSupport(true),
 	)
 
-	return &Server{Host: host, Addr: addr, Blobs: blobs, handler: h}, nil
+	// Wrapped, not replaced: the registry handler is upstream and correct apart from the one
+	// header shape it cannot parse. See rangefix.go.
+	return &Server{Host: host, Addr: addr, Blobs: blobs, handler: closeOpenEndedRanges(h, bh)}, nil
 }
 
 // Handler exposes the distribution endpoint.

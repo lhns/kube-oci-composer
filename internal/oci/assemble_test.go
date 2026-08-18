@@ -174,3 +174,56 @@ func TestAssemblePlacesContentAtTarget(t *testing.T) {
 		t.Fatalf("content mismatch: %q", got)
 	}
 }
+
+// TestAssembleMatchesItsGoldenDigest is the mechanism behind AssemblyVersion.
+//
+// AssemblyVersion exists so that a controller which assembles differently cannot serve artifacts
+// built by the old algorithm under an unchanged input hash. It is a constant a human must remember
+// to bump, and TestAssembleIsDeterministic cannot help: it runs the algorithm twice in one process,
+// so any change agrees with itself.
+//
+// This pins the actual bytes. Change the tar writer, the gzip level, the config, the ordering, or
+// the toolchain's flate output, and this fails — which is the prompt to decide whether the change
+// is intended and whether AssemblyVersion must move. Updating the constant below is part of making
+// that change, not a nuisance to route around.
+//
+// Fixed to linux/amd64 on purpose: the platform of a base-less artifact is the controller's own
+// architecture (ADR 0002), so leaving it unset would make this assert the host rather than the
+// algorithm.
+func TestAssembleMatchesItsGoldenDigest(t *testing.T) {
+	const (
+		goldenDigest      = "sha256:cfec4f023ecba3944f204412c0e6f80ae325c4c049ab1d3697c9ab900a038ca5"
+		goldenAssemblyVer = 1
+	)
+	if AssemblyVersion != goldenAssemblyVer {
+		t.Fatalf("AssemblyVersion is %d but this golden digest was recorded at %d; re-record the "+
+			"digest below deliberately, having checked the output really is meant to change",
+			AssemblyVersion, goldenAssemblyVer)
+	}
+
+	inputs := []LayerInput{{
+		Name:   "bundle",
+		Digest: "sha256:1111",
+		Unpack: UnpackTarGz,
+		Target: "/plugins",
+		Path: writeTarGz(t, map[string]string{
+			"lib/a.jar": "aaa",
+			"lib/b.jar": "bbb",
+			"README":    "hello",
+		}),
+	}}
+
+	img, err := AssembleAs(nil, inputs, Config{}, Platform{OS: "linux", Architecture: "amd64"}, t.TempDir())
+	if err != nil {
+		t.Fatalf("assemble: %v", err)
+	}
+	digest, err := img.Digest()
+	if err != nil {
+		t.Fatalf("digest: %v", err)
+	}
+	if digest.String() != goldenDigest {
+		t.Errorf("assembled digest is %s, want %s.\n"+
+			"The output format changed. If that is intended, bump AssemblyVersion so unchanged "+
+			"specs rebuild, and re-record this digest in the same commit.", digest, goldenDigest)
+	}
+}

@@ -225,6 +225,32 @@ may change between minor versions.
   remains the destination rather than the current state.
 
 ### Fixed
+- **An interrupted layer pull could never resume.** containerd asks for `Range: bytes=<offset>-`
+  when continuing a download, which is valid per RFC 9110; the upstream registry handler parses the
+  header with `fmt.Sscanf(h, "bytes=%d-%d")` and answered **416 BLOB_UNKNOWN**, so an interrupted
+  pull failed permanently instead of continuing. The open-ended form is now closed to
+  `bytes=<offset>-<size-1>` before the handler sees it -- wrapped rather than forked, since the size
+  is only knowable from our blob store. Suffix ranges are deliberately left alone: upstream rejects
+  those too, but containerd does not send them.
+- **A standby replica could serve 404 for one tag forever.** Replay skipped a build when its
+  *digest* was already present, but tag restores happen afterwards and only log on failure. One
+  failed tag PUT therefore became permanent: the digest stayed present, the build was skipped on
+  every later pass, and that tag 404'd on that replica for the life of the process while another
+  replica served it -- which from a client is indistinguishable from a registry intermittently
+  losing images. The skip now requires the digest **and** every tag.
+- **The chart could template a replica that reports ready and serves nothing.** `replicaCount > 1`
+  with `storage.shared=true` and `persistence.enabled=false` gave every pod its own `emptyDir` while
+  asserting they were shared. Each replica then restored nothing, reported ready anyway (readiness
+  is observed on attempt, deliberately), joined the Service and 404'd every pull routed to it.
+  Refused at template time.
+
+### Added
+- **A golden-digest test for assembly.** `AssemblyVersion` exists so a controller that assembles
+  differently cannot serve old-algorithm artifacts under an unchanged input hash -- but it is a
+  constant a human must remember to bump, and the determinism test cannot help because it runs the
+  algorithm twice in one process, where any change agrees with itself. The golden test pins the
+  actual bytes, so a change to the tar writer, the config, the ordering or the toolchain's flate
+  output fails loudly and prompts the decision.
 - **`DockerBuild` history duplicated entries a rebuild reproduced.** It rotated `status.history`
   with its own copy of the logic, missing the composer's rule that a rebuild reproducing an earlier
   digest MOVES that entry to the front rather than adding a second one. Now that rebuilds are known

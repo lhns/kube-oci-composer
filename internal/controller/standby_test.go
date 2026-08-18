@@ -195,3 +195,57 @@ func TestLeaderElectionFollowsSharedStorage(t *testing.T) {
 		t.Fatal("standby replay must run WITHOUT leader election; that is its entire purpose")
 	}
 }
+
+// TestStandbyReplayRepairsAMissingTag — the skip must consider every reference a build published,
+// not just its digest.
+//
+// A tag PUT during replay only logs on failure. Skipping on the digest alone therefore made one
+// failure permanent: the digest stayed present, so the build was skipped on every later pass, and
+// that tag 404'd on this replica for the life of the process while another replica served it. From
+// a client that is indistinguishable from a registry that intermittently lacks the image.
+func TestStandbyReplayRepairsAMissingTag(t *testing.T) {
+	shared, err := store.NewDisk(t.TempDir())
+	if err != nil {
+		t.Fatalf("creating shared store: %v", err)
+	}
+
+	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
+	obj := composition("partial", urlLayer("core", url, digest, "/core"))
+	obj.Spec.Publish = &ociv1alpha1.Publish{Name: "partial", Tags: []string{"sPARTIAL"}}
+
+	leader := leaderOn(t, shared, obj)
+	art := build(t, leader, obj, "leader build")
+
+	standby, standbyHost := servingOn(t, shared)
+
+	// The state a failed tag PUT leaves behind: the digest is served, the tag is not.
+	raw, err := standby.LoadManifest(t.Context(), art.Digest)
+	if err != nil {
+		t.Fatalf("loading the stored manifest: %v", err)
+	}
+	if err := standby.PutManifest(t.Context(), "partial", art.Digest, raw); err != nil {
+		t.Fatalf("restoring by digest: %v", err)
+	}
+	if !standby.HasManifest(t.Context(), "partial", art.Digest) {
+		t.Fatal("the digest is not present, so this test does not reproduce the skip")
+	}
+
+	k8s := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(obj).WithStatusSubresource(obj).Build()
+	sr := &StandbyReplay{Client: k8s, Server: standby, Readiness: &Readiness{Client: k8s}}
+	if err := sr.replayAll(t.Context()); err != nil {
+		t.Fatalf("replayAll: %v", err)
+	}
+
+	ref, err := name.ParseReference(standbyHost+"/partial:sPARTIAL", name.Insecure)
+	if err != nil {
+		t.Fatalf("parsing: %v", err)
+	}
+	desc, err := remote.Head(ref)
+	if err != nil {
+		t.Fatalf("the tag was not repaired, so this replica serves 404 for it forever: %v", err)
+	}
+	if desc.Digest.String() != art.Digest {
+		t.Fatalf("repaired tag serves %s, want %s", desc.Digest, art.Digest)
+	}
+}
