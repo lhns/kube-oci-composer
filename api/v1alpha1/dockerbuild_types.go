@@ -101,11 +101,12 @@ type DockerBuildSpec struct {
 	// +optional
 	Timeout *metav1.Duration `json:"timeout,omitempty"`
 
-	// ServiceAccountName the build pod runs as. Defaults to a dedicated, near-empty account
-	// created by the chart.
+	// ServiceAccountName the build pod runs as. Empty uses the namespace's default account with
+	// NO API token mounted, which is what a pod running code from a git repository should have.
 	//
-	// Deliberately NOT the controller's own: a pod running code from a git repository must not
-	// carry the token of the thing that created it.
+	// Set this only when a build genuinely needs an identity — pulling from a registry that
+	// authenticates by workload identity, say. Naming an account mounts its token, so whatever it
+	// can do, a Dockerfile in the referenced repository can do.
 	// +kubebuilder:validation:MaxLength=253
 	// +optional
 	ServiceAccountName string `json:"serviceAccountName,omitempty"`

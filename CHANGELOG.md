@@ -5,6 +5,48 @@ may change between minor versions.
 
 ## [Unreleased]
 
+### Fixed
+- **`DockerBuild`: three things that were shipped wrong.** Found by analysing the merged alpha
+  rather than the branch it came from.
+
+  The chart's `buildkitImage` and `dockerfileFrontend` were pinned to **all-zero placeholder
+  digests**. The guard checks for `@sha256:` — form, not substance — so the chart installed
+  happily and every build then failed to pull. Both now carry real digests.
+
+  **`spec.timeout` was never read.** A documented field with a 30m default that did nothing, so a
+  hung build ran until something else killed it. It becomes the Job's `activeDeadlineSeconds`, so
+  Kubernetes enforces it and marks the Job `DeadlineExceeded` — a controller-side timer would have
+  had to survive a leader change to mean anything.
+
+  **Build pods carried an API token.** `spec.serviceAccountName` defaulted to empty, so pods ran as
+  the namespace's `default` account with its token mounted, while the chart created a purpose-built
+  empty account that nothing could reference and `NOTES.txt` printed a line claiming builds used it.
+  The account could never have worked: a ServiceAccount is namespaced and builds run in their own
+  object's namespace. The guarantee was never "a special account", it was "no credentials in the
+  build pod" — so the controller now sets `automountServiceAccountToken: false` on every build pod
+  that does not name an account, which works in every namespace and needs no chart coordination.
+  Naming an account is opting the token back in, for a build that genuinely needs an identity.
+
+- **A suspended `DockerBuild` said nothing**, so it looked stalled. It now reports `Ready=False`
+  with reason `Suspended`, matching `ImageComposition`.
+- **No Events were emitted** despite the RBAC granting them. Build failures and invalid specs now
+  raise Warnings — a build's detail lives in pod logs that vanish with the pod, so the Event is
+  often the only durable trace.
+- **`spec.resources` reached only the build container**, leaving the context fetch as the one
+  unbounded container in the pod — the wrong one to leave unbounded, since it downloads somebody
+  else's tarball.
+
+### Changed
+- The `DockerBuild` reconcile loop has tests: coverage of `internal/buildcontroller` goes from
+  **23.6% to 82.9%**. The whole state machine was previously unexercised — only the pure Job
+  rendering was covered — which is how the three defects above shipped. The new suite drives the
+  loop over a fake client: job creation, adoption on repeat reconciles, the input-hash
+  short-circuit, success recording the artifact, failure not stalling, suspend, a missing source
+  being pending rather than terminal, and an unpinned `FROM` being refused before any Job exists.
+- ADR 0025 corrected: it said `BuildRecord.inputHash` lets a controller that lost `status.artifact`
+  re-verify rather than rebuild. The field is recorded but the read path is not implemented, and
+  the record now says so.
+
 ### Added
 - **`DockerBuild` (alpha).** The kind ADR 0025 describes, now implemented: a second controller,
   a second binary (`cmd/oci-builder`), a second chart (`charts/kube-oci-builder`) carrying its own

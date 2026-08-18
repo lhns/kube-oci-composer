@@ -119,6 +119,8 @@ func main() {
 
 	if err := (&buildcontroller.DockerBuildReconciler{
 		Client: mgr.GetClient(),
+		//nolint:staticcheck // SA1019: the new events API has no Event method; see the composer.
+		Recorder: mgr.GetEventRecorderFor("dockerbuild-controller"),
 		JobConfig: buildcontroller.JobConfig{
 			BuilderImage:    builderImage,
 			FrontendImage:   frontendImage,

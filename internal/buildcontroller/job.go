@@ -231,6 +231,20 @@ cat %s > /dev/termination-log
 		VolumeMounts:    []corev1.VolumeMount{{Name: contextVolume, MountPath: contextPath}},
 		SecurityContext: rootlessSecurityContext(),
 	}
+	if spec.Resources != nil {
+		// The same limits as the build container. Without this the fetch is the one unbounded
+		// container in the pod, which is the wrong thing to leave unbounded when it is the part
+		// downloading somebody else's tarball.
+		initContainer.Resources = *spec.Resources
+	}
+
+	// Enforced by Kubernetes rather than by the controller noticing: ActiveDeadlineSeconds kills
+	// the pod and marks the Job Failed with DeadlineExceeded, which observeJob already surfaces.
+	// A controller-side timer would have to survive a leader change to mean anything.
+	var deadline *int64
+	if spec.Timeout != nil && spec.Timeout.Duration > 0 {
+		deadline = ptr.To(int64(spec.Timeout.Seconds()))
+	}
 
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -244,7 +258,8 @@ cat %s > /dev/termination-log
 		Spec: batchv1.JobSpec{
 			// One attempt. BuildKit retries nothing usefully on its own, and a Job retrying a
 			// failing RUN four times just delays the failure the user needs to see.
-			BackoffLimit: ptr.To[int32](0),
+			BackoffLimit:          ptr.To[int32](0),
+			ActiveDeadlineSeconds: deadline,
 			// Failed Jobs linger a little so `kubectl logs` still works; the controller records
 			// the pod name in status for exactly that.
 			TTLSecondsAfterFinished: ptr.To[int32](3600),
@@ -252,13 +267,31 @@ cat %s > /dev/termination-log
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
 					ServiceAccountName: spec.ServiceAccountName,
-					InitContainers:     []corev1.Container{initContainer},
-					Containers:         []corev1.Container{container},
-					Volumes:            volumes,
+					// No API token in the build pod unless the spec asked for an identity.
+					//
+					// This, not a dedicated ServiceAccount, is what "a pod running code from a git
+					// repository carries no credentials" actually requires. A ServiceAccount is
+					// namespaced and builds run in the object's namespace, so a chart-created one
+					// could never have been reachable; suppressing the mount works everywhere and
+					// needs no coordination. Naming an account is opting back in, for the case
+					// where a build genuinely needs an identity.
+					AutomountServiceAccountToken: automount(spec.ServiceAccountName),
+					InitContainers:               []corev1.Container{initContainer},
+					Containers:                   []corev1.Container{container},
+					Volumes:                      volumes,
 				},
 			},
 		},
 	}
+}
+
+// automount reports whether the build pod should receive an API token: only when the spec named an
+// account on purpose.
+func automount(serviceAccount string) *bool {
+	if serviceAccount == "" {
+		return ptr.To(false)
+	}
+	return nil
 }
 
 // pushNames renders the comma-separated image names the exporter pushes to.
