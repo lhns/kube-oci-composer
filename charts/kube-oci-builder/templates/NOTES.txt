@@ -15,8 +15,8 @@ If what you need is "take a released artifact and put it in an image" — includ
 already published as an image — use ImageComposition. Since ADR 0024 it can take files out of an
 image directly.
 
-A build runs as: {{ include "kube-oci-builder.buildServiceAccountName" . }}
-Builder image:   {{ .Values.builder.buildkitImage }}
+Build pods carry no API token unless a DockerBuild names spec.serviceAccountName.
+Builder image: {{ .Values.builder.buildkitImage }}
 
 Anyone who can push to a git repository referenced by a DockerBuild can run code in the namespace
 that DockerBuild lives in. That is the trade this component makes.

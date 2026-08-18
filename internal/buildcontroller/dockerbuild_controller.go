@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -37,6 +38,10 @@ import (
 type DockerBuildReconciler struct {
 	client.Client
 	JobConfig JobConfig
+
+	// Recorder surfaces failures as Events. A build failure's detail lives in the pod's logs,
+	// which vanish with the pod, so the Event is often the only durable trace of why.
+	Recorder record.EventRecorder
 
 	// HTTPClient fetches the build context for the Dockerfile check. Nil uses a default with a
 	// timeout; the build itself never streams through this process.
@@ -65,8 +70,13 @@ func (r *DockerBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if err := r.Get(ctx, req.NamespacedName, &obj); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	// Suspended objects say so, rather than going quiet and looking stalled.
 	if obj.Spec.Suspend {
-		return ctrl.Result{}, nil
+		patch := client.MergeFrom(obj.DeepCopy())
+		setCondition(&obj, ociv1alpha1.ReadyCondition, metav1.ConditionFalse,
+			ociv1alpha1.ReasonSuspended, "Reconciliation is suspended")
+		removeCondition(&obj, ociv1alpha1.ReconcilingCondition)
+		return ctrl.Result{}, r.Status().Patch(ctx, &obj, patch)
 	}
 
 	patch := client.MergeFrom(obj.DeepCopy())
@@ -84,6 +94,7 @@ func (r *DockerBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	case isTerminal(err):
 		// Stalled. No requeue: the generation change from editing the spec is the wake-up.
 		logger.Error(err, "stalled")
+		r.event(&obj, corev1.EventTypeWarning, ociv1alpha1.ReasonInvalidSpec, err.Error())
 		return ctrl.Result{}, nil
 	case isPending(err):
 		return ctrl.Result{RequeueAfter: pendingRetryInterval}, nil
@@ -92,6 +103,7 @@ func (r *DockerBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		// forever, because the fix is usually a push to the Dockerfile's repository and the retry
 		// is what notices it.
 		logger.Error(err, "build failed", "failures", obj.Status.Failures)
+		r.event(&obj, corev1.EventTypeWarning, ociv1alpha1.ReasonBuildFailed, err.Error())
 		return ctrl.Result{RequeueAfter: failureBackoff(obj.Status.Failures)}, nil
 	}
 }
@@ -308,6 +320,13 @@ func (r *DockerBuildReconciler) readResultDigest(ctx context.Context, obj *ociv1
 		}
 	}
 	return "", fmt.Errorf("the build reported no image digest; check `kubectl logs job/%s`", job.Name)
+}
+
+// event records one, if a recorder was wired. Nil in tests that do not care.
+func (r *DockerBuildReconciler) event(obj *ociv1alpha1.DockerBuild, kind, reason, msg string) {
+	if r.Recorder != nil {
+		r.Recorder.Event(obj, kind, reason, truncate(msg, 1024))
+	}
 }
 
 // podBuildDigest returns the digest the build container reported, or "" if it reported none.

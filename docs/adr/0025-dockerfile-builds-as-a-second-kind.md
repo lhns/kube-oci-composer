@@ -72,7 +72,8 @@ and upgrading BuildKit rebuilds every object in the cluster. Secret *identities*
 (`name` + `resourceVersion`), never values: `status.inputHash` is readable by anyone with `get`, and
 a hash of a low-entropy secret is an oracle.
 
-**Execution is one Kubernetes Job per build**, rootless, in the object's own namespace. Rejected
+**Execution is one Kubernetes Job per build**, rootless, in the object's own namespace, with no API
+token mounted unless the spec names a service account. Rejected
 alternatives: a long-lived BuildKit Deployment makes the controller a confused deputy holding
 credentials for every namespace and hands work to one shared daemon whose cache is a channel
 between tenants; in-process BuildKit destroys `readOnlyRootFilesystem`, `drop: [ALL]`, non-root and
@@ -105,9 +106,10 @@ releases. `SOURCE_DATE_EPOCH=0` with `rewrite-timestamp` narrows this and does n
 can be rebuilt from its spec*. For a build that is false: a rebuild after storage loss may produce
 a different digest than a tag already names, and with `immutable: true` that is a **permanent
 terminal conflict** until a human intervenes. Retention stops meaning "how far back can I roll" and
-starts meaning "how much of my only copy am I keeping". `BuildRecord` gains an `inputHash` so a
-controller that lost `status.artifact` can find what it previously produced and re-verify rather
-than rebuild blind.
+starts meaning "how much of my only copy am I keeping". `BuildRecord` gains an `inputHash` so that a
+controller which lost `status.artifact` *could* find what it previously produced and re-verify
+rather than rebuild blind. The field is recorded; the read path is **not implemented**, so today a
+lost status does mean a rebuild.
 
 **Provenance degrades from exact to scanned.** [0008](0008-supply-chain.md):24-30 uses this exact
 kind as its counterexample — an SBOM becomes a scan of the result and provenance stops at "we ran
