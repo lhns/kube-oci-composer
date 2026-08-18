@@ -96,10 +96,10 @@ func rootlessSecurityContext() *corev1.SecurityContext {
 	}
 }
 
-// buildJob renders the Job for one build.
-func buildJob(obj *ociv1alpha1.DockerBuild, inputHash, contextURL string, cfg JobConfig) *batchv1.Job {
+// buildctlArgs assembles the buildctl invocation. Split out because it is the part that decides
+// what gets built, and the only part the argv tests read.
+func buildctlArgs(obj *ociv1alpha1.DockerBuild, cfg JobConfig) []string {
 	spec := obj.Spec
-
 	args := []string{
 		"build",
 		"--frontend", "dockerfile.v0",
@@ -143,46 +143,52 @@ func buildJob(obj *ociv1alpha1.DockerBuild, inputHash, contextURL string, cfg Jo
 			"--export-cache", "type=registry,ref="+cacheRef+",mode=max")
 	}
 
-	volumes := []corev1.Volume{
-		{Name: contextVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-		{Name: resultVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+	return args
+}
+
+// buildVolumes returns the pod's volumes and the build container's mounts.
+//
+// Paired through one closure rather than two appends per source: a volume and the mount that names
+// it have to agree, and building them in separate lists is how they stop agreeing.
+func buildVolumes(spec ociv1alpha1.DockerBuildSpec) ([]corev1.Volume, []corev1.VolumeMount) {
+	var volumes []corev1.Volume
+	var mounts []corev1.VolumeMount
+
+	add := func(name string, src corev1.VolumeSource, at string, readOnly bool) {
+		volumes = append(volumes, corev1.Volume{Name: name, VolumeSource: src})
+		mounts = append(mounts, corev1.VolumeMount{Name: name, MountPath: at, ReadOnly: readOnly})
 	}
-	mounts := []corev1.VolumeMount{
-		{Name: contextVolume, MountPath: contextPath},
-		{Name: resultVolume, MountPath: resultPath},
+	empty := corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}
+
+	add(contextVolume, empty, contextPath, false)
+	add(resultVolume, empty, resultPath, false)
+
+	// Push credentials are projected into the build pod rather than read by the controller, which
+	// keeps registry tokens out of the controller's memory entirely for the push path.
+	if spec.Push != nil && spec.Push.SecretRef != nil {
+		add(dockerVolume, corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{
+				SecretName: spec.Push.SecretRef.Name,
+				Items:      []corev1.KeyToPath{{Key: corev1.DockerConfigJsonKey, Path: "config.json"}},
+			},
+		}, dockerPath, true)
 	}
 
-	// Projected into the build pod rather than read by the controller, which keeps registry tokens
-	// out of the controller's memory entirely for the push path.
+	for _, sec := range spec.Secrets {
+		add(secretVolume+"-"+sec.SecretRef.Name, corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{SecretName: sec.SecretRef.Name},
+		}, path.Join(secretPath, sec.SecretRef.Name), true)
+	}
+
+	return volumes, mounts
+}
+
+// buildJob renders the Job for one build.
+func buildJob(obj *ociv1alpha1.DockerBuild, inputHash, contextURL string, cfg JobConfig) *batchv1.Job {
+	spec := obj.Spec
+	args := buildctlArgs(obj, cfg)
+	volumes, mounts := buildVolumes(spec)
 	hasPushSecret := spec.Push != nil && spec.Push.SecretRef != nil
-	if hasPushSecret {
-		volumes = append(volumes, corev1.Volume{
-			Name: dockerVolume,
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName: spec.Push.SecretRef.Name,
-					Items: []corev1.KeyToPath{
-						{Key: corev1.DockerConfigJsonKey, Path: "config.json"},
-					},
-				},
-			},
-		})
-		mounts = append(mounts, corev1.VolumeMount{Name: dockerVolume, MountPath: dockerPath, ReadOnly: true})
-	}
-
-	for _, s := range spec.Secrets {
-		volumes = append(volumes, corev1.Volume{
-			Name: secretVolume + "-" + s.SecretRef.Name,
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{SecretName: s.SecretRef.Name},
-			},
-		})
-		mounts = append(mounts, corev1.VolumeMount{
-			Name:      secretVolume + "-" + s.SecretRef.Name,
-			MountPath: path.Join(secretPath, s.SecretRef.Name),
-			ReadOnly:  true,
-		})
-	}
 
 	env := []corev1.EnvVar{
 		{Name: "BUILDKITD_FLAGS", Value: "--oci-worker-no-process-sandbox"},
