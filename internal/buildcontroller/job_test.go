@@ -216,3 +216,40 @@ func TestFailureBackoffIsCapped(t *testing.T) {
 		t.Errorf("backoff after many failures is %v, want the %v cap", got, maxFailureBackoff)
 	}
 }
+
+// TestInsecureRegistryIsOptInPerHost — naming one internal registry must not downgrade every other
+// push the same controller makes, so the attribute appears only when the push host matches.
+func TestInsecureRegistryIsOptInPerHost(t *testing.T) {
+	cfg := sampleConfig()
+	cfg.InsecureRegistries = []string{"registry.internal:5000"}
+
+	secure := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", cfg)
+	if argv := strings.Join(secure.Spec.Template.Spec.Containers[0].Args, " "); strings.Contains(argv, "registry.insecure") {
+		t.Errorf("a non-listed host was pushed insecurely\ngot: %s", argv)
+	}
+
+	obj := sampleBuild()
+	obj.Spec.Push.Repository = "registry.internal:5000/team/app"
+	listed := buildJob(obj, testHash, "https://example/ctx.tgz", cfg)
+	if argv := strings.Join(listed.Spec.Template.Spec.Containers[0].Args, " "); !strings.Contains(argv, "registry.insecure=true") {
+		t.Errorf("a listed host was not allowed plain HTTP\ngot: %s", argv)
+	}
+}
+
+// TestInsecureRegistryIsNotInTheInputHash — how the bytes are transported does not change what
+// they are, so flipping this must not rebuild every object in the cluster.
+func TestInsecureRegistryIsNotInTheInputHash(t *testing.T) {
+	obj := sampleBuild()
+	obj.Spec.Push.Repository = "registry.internal:5000/team/app"
+
+	plain := sampleConfig()
+	insecure := sampleConfig()
+	insecure.InsecureRegistries = []string{"registry.internal:5000"}
+
+	// The Job name is derived from the input hash, so identical names prove the hash did not move.
+	a := buildJob(obj, testHash, "https://example/ctx.tgz", plain)
+	b := buildJob(obj, testHash, "https://example/ctx.tgz", insecure)
+	if a.Name != b.Name {
+		t.Errorf("the insecure list moved the input hash: %q vs %q", a.Name, b.Name)
+	}
+}

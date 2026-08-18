@@ -51,6 +51,13 @@ type JobConfig struct {
 	// FrontendImage is the Dockerfile frontend, pinned by digest. BuildKit resolves `# syntax=`
 	// over the network unless told otherwise.
 	FrontendImage string
+	// InsecureRegistries are registry hosts to talk to over plain HTTP.
+	//
+	// Operator-level and opt-in per host, not a global "trust anything": an internal or air-gapped
+	// registry without TLS is a real deployment, and the alternative is telling those clusters to
+	// use a different tool. It is deliberately NOT part of the input hash — how the bytes are
+	// transported does not change what they are, so flipping it must not rebuild anything.
+	InsecureRegistries []string
 	// SourceDateEpoch is the timestamp stamped into the result. Zero by default, matching the
 	// composer's fixed epoch.
 	SourceDateEpoch string
@@ -134,16 +141,36 @@ func buildctlArgs(obj *ociv1alpha1.DockerBuild, cfg JobConfig) []string {
 	// rewrite-timestamp needs SOURCE_DATE_EPOCH to mean anything. Together they narrow the "same
 	// inputs, different bytes" gap; ADR 0025 says why they do not close it.
 	args = append(args, "--output",
-		"type=image,name="+pushNames(obj)+",push=true,rewrite-timestamp=true")
+		"type=image,name="+pushNames(obj)+",push=true,rewrite-timestamp=true"+
+			insecureAttr(obj.Spec.Push, cfg.InsecureRegistries))
 	args = append(args, "--opt", "build-arg:SOURCE_DATE_EPOCH="+cfg.SourceDateEpoch)
 
 	if cacheRef := cacheRefFor(obj); cacheRef != "" {
+		insecure := insecureAttr(obj.Spec.Push, cfg.InsecureRegistries)
 		args = append(args,
-			"--import-cache", "type=registry,ref="+cacheRef,
-			"--export-cache", "type=registry,ref="+cacheRef+",mode=max")
+			"--import-cache", "type=registry,ref="+cacheRef+insecure,
+			"--export-cache", "type=registry,ref="+cacheRef+",mode=max"+insecure)
 	}
 
 	return args
+}
+
+// insecureAttr returns the exporter attribute that allows plain HTTP, when the push target's host
+// is one the operator listed.
+//
+// Matched on host rather than applied globally, so naming one internal registry does not quietly
+// downgrade every other push the same controller makes.
+func insecureAttr(push *ociv1alpha1.Push, insecure []string) string {
+	if push == nil {
+		return ""
+	}
+	host, _, _ := strings.Cut(push.Repository, "/")
+	for _, h := range insecure {
+		if h == host {
+			return ",registry.insecure=true"
+		}
+	}
+	return ""
 }
 
 // buildVolumes returns the pod's volumes and the build container's mounts.

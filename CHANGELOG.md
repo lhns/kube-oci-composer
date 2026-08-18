@@ -6,6 +6,11 @@ may change between minor versions.
 ## [Unreleased]
 
 ### Added
+- **`--insecure-registry`** on the builder: registry hosts to push to over plain HTTP,
+  comma-separated. Opt-in **per host** rather than a global switch -- an internal or air-gapped
+  registry without TLS is a real deployment, but naming one must not quietly downgrade every other
+  push the same controller makes. Deliberately not part of the build input hash: how bytes are
+  transported does not change what they are, so flipping it rebuilds nothing.
 - **`DockerBuild` (alpha).** The kind ADR 0025 describes, now implemented: a second controller,
   a second binary (`cmd/oci-builder`), a second chart (`charts/kube-oci-builder`) carrying its own
   CRD, and its own RBAC.
@@ -128,6 +133,25 @@ may change between minor versions.
   ([#9](https://github.com/lhns/kube-oci-composer/issues/9)); Alpine `.apk` still needs nothing.
 
 ### Changed
+- **`DockerBuild` has an e2e.** The first thing that runs the builder end to end, and it exists
+  because two pieces could not be verified any other way: the built digest comes back through the
+  pod's termination message, which needs a real kubelet to populate, and the `FROM` check reads a
+  real context over HTTP. Both were previously tested only against fakes -- which is how a digest
+  readback from a message nothing wrote got as far as it did.
+
+  It also answers ADR 0025's second spike question, whether rootless BuildKit runs on the target
+  nodes at all. The ADR lists "it does not" as grounds to abandon, so the failure is loud rather
+  than skipped.
+
+  Three cases: a build produces an image and the recorded digest resolves **in the registry** (not
+  merely in status); an unchanged reconcile does not rebuild, with the input hash, the digest and
+  the Job count all holding still; and an unpinned `FROM` is refused with **no Job created**.
+
+  The fixtures are the interesting part. A build needs a registry, so one runs in the cluster over
+  plain HTTP. The context must come from a Flux source, and the e2e cluster does not run Flux -- so
+  a minimal `GitRepository` CRD stands in, deliberately without a status subresource so the harness
+  can publish `status.artifact` itself, pointing at a tarball served from a ConfigMap. That tests
+  this controller's reading of the contract rather than testing Flux.
 - **The builder chart is now drift-guarded like the composer's.** `config/rbac-builder/role.yaml`
   was generated and read by nothing, so the chart's hand-written rules — the ones granting
   `jobs: create`, which is the ability to run arbitrary containers — could diverge from the

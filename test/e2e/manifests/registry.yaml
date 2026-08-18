@@ -1,0 +1,36 @@
+# A registry for the build to push to.
+#
+# spec.push is required in the alpha (a Job in another pod cannot reach the controller's
+# loopback-only serving endpoint), so an e2e needs a real registry. Plain HTTP, which is why the
+# builder is started with --insecure-registry naming this host.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: e2e-registry
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: e2e-registry}
+  template:
+    metadata:
+      labels: {app: e2e-registry}
+    spec:
+      containers:
+        - name: registry
+          image: registry:2
+          ports: [{containerPort: 5000}]
+          env:
+            # In-memory: the registry is thrown away with the cluster, and a filesystem driver
+            # would need a volume for no benefit.
+            - {name: REGISTRY_STORAGE_DELETE_ENABLED, value: "true"}
+          readinessProbe:
+            httpGet: {path: /v2/, port: 5000}
+            initialDelaySeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: e2e-registry
+spec:
+  selector: {app: e2e-registry}
+  ports: [{port: 5000, targetPort: 5000}]

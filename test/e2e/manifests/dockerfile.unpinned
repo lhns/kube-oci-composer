@@ -1,0 +1,5 @@
+# Deliberately unpinned. The controller must refuse this before it creates a Job, so a build never
+# starts and no RUN executes.
+FROM busybox:1.37
+
+RUN echo this should never run

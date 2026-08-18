@@ -40,6 +40,13 @@ builder:
   # for no reason anybody cares about.
   sourceDateEpoch: "0"
 
+  # Registry hosts to push to over plain HTTP, comma-separated. Empty means every push uses TLS.
+  #
+  # Opt-in per host rather than a global switch: an internal or air-gapped registry without TLS is a
+  # real deployment, but naming one must not quietly downgrade every other push this controller
+  # makes. Not part of the build input hash — transport does not change what was built.
+  insecureRegistry: ""
+
   # How many past builds to retain in status.
   keepBuilds: 10
 

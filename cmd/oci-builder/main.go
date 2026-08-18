@@ -46,6 +46,17 @@ func init() {
 	utilruntime.Must(ociv1alpha1.AddToScheme(scheme))
 }
 
+// splitList turns a comma-separated flag into a slice, dropping blanks.
+func splitList(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
 func main() {
 	var (
 		metricsAddr     string
@@ -54,6 +65,7 @@ func main() {
 		builderImage    string
 		frontendImage   string
 		sourceDateEpoch string
+		insecureRegs    string
 		historyLimit    int
 		showVersion     bool
 	)
@@ -67,6 +79,9 @@ func main() {
 		"Dockerfile frontend image, PINNED BY DIGEST. Required.")
 	flag.StringVar(&sourceDateEpoch, "source-date-epoch", "0",
 		"SOURCE_DATE_EPOCH stamped into builds. Fixed rather than the wall clock, matching the composer's epoch.")
+	flag.StringVar(&insecureRegs, "insecure-registry", "",
+		"Comma-separated registry hosts to push to over plain HTTP. Opt-in per host, for an "+
+			"internal or air-gapped registry without TLS.")
 	flag.IntVar(&historyLimit, "keep-builds", ociv1alpha1.DefaultHistoryLimit, "How many past builds to retain in status.")
 	flag.BoolVar(&showVersion, "version", false, "Print the version and exit.")
 
@@ -122,9 +137,10 @@ func main() {
 		//nolint:staticcheck // SA1019: the new events API has no Event method; see the composer.
 		Recorder: mgr.GetEventRecorderFor("dockerbuild-controller"),
 		JobConfig: buildcontroller.JobConfig{
-			BuilderImage:    builderImage,
-			FrontendImage:   frontendImage,
-			SourceDateEpoch: sourceDateEpoch,
+			BuilderImage:       builderImage,
+			FrontendImage:      frontendImage,
+			SourceDateEpoch:    sourceDateEpoch,
+			InsecureRegistries: splitList(insecureRegs),
 		},
 		HistoryLimit: historyLimit,
 	}).SetupWithManager(mgr); err != nil {

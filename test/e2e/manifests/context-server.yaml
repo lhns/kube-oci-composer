@@ -1,0 +1,39 @@
+# Serves the build context the GitRepository points at.
+#
+# source-controller would publish a gzipped tar at a digest-addressed URL; this serves one built by
+# up.sh and carried in a ConfigMap. busybox httpd rather than nginx because it needs no config file
+# and the image is already small.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: e2e-context
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: e2e-context}
+  template:
+    metadata:
+      labels: {app: e2e-context}
+    spec:
+      containers:
+        - name: httpd
+          image: busybox:1.37
+          command: [httpd, -f, -p, "8080", -h, /www]
+          ports: [{containerPort: 8080}]
+          volumeMounts:
+            - {name: context, mountPath: /www}
+          readinessProbe:
+            httpGet: {path: /context.tar.gz, port: 8080}
+            initialDelaySeconds: 2
+      volumes:
+        - name: context
+          configMap:
+            name: e2e-context
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: e2e-context
+spec:
+  selector: {app: e2e-context}
+  ports: [{port: 8080, targetPort: 8080}]
