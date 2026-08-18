@@ -26,7 +26,10 @@ var (
 )
 
 func addKnownTypes(s *runtime.Scheme) error {
-	s.AddKnownTypes(GroupVersion, &ImageComposition{}, &ImageCompositionList{})
+	s.AddKnownTypes(GroupVersion,
+		&ImageComposition{}, &ImageCompositionList{},
+		&DockerBuild{}, &DockerBuildList{},
+	)
 	metav1.AddToGroupVersion(s, GroupVersion)
 	return nil
 }

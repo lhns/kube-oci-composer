@@ -139,7 +139,7 @@ func main() {
 		"Never reclaim anything written more recently than this. A build writes its blobs before "+
 			"recording them in status, so a sweep landing in that window would delete content that "+
 			"is moments from being referenced.")
-	flag.IntVar(&gcKeepBuilds, "gc-keep-builds", controller.DefaultHistoryLimit,
+	flag.IntVar(&gcKeepBuilds, "gc-keep-builds", ociv1alpha1.DefaultHistoryLimit,
 		"How many past builds to retain per ImageComposition, unless the object overrides it. "+
 			"Retention is the ONLY thing keeping an old digest pullable, so reverting a commit or "+
 			"rescheduling a pod pinned to an older build both depend on it. Layers are shared "+

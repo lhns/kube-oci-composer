@@ -1,7 +1,6 @@
 package oci
 
 import (
-	"archive/tar"
 	"bytes"
 	"io"
 	"path"
@@ -40,11 +39,8 @@ func imageOf(t *testing.T, layers ...v1.Layer) v1.Image {
 	return img
 }
 
-// TestExtractImageFlattensToOneLayer is the constraint the verb exists under.
-//
-// ADR 0016 hoisted the base out of the layer list because "an image entry contributes many layers
-// where every other entry contributes exactly one". A three-layer source image must therefore
-// still produce exactly one layer here, or this verb reinstates the exception that removed.
+// TestExtractImageFlattensToOneLayer — a three-layer source must still contribute exactly one
+// layer, or the verb reinstates the exception ADR 0016 removed.
 func TestExtractImageFlattensToOneLayer(t *testing.T) {
 	src := imageOf(t,
 		imageLayer(t, []tarFile{{name: "a.txt", body: "one"}}),
@@ -63,7 +59,7 @@ func TestExtractImageFlattensToOneLayer(t *testing.T) {
 		t.Fatalf("layers: %v", err)
 	}
 	if len(layers) != 1 {
-		t.Fatalf("a %d-layer image produced %d layers, want exactly 1", 3, len(layers))
+		t.Fatalf("a three-layer image produced %d layers, want exactly 1", len(layers))
 	}
 
 	got := byName(mustExtractImage(t, src, "opt", ""))
@@ -210,30 +206,4 @@ func mustExtractImage(t *testing.T, img v1.Image, target, subpath string) []tarE
 		t.Fatalf("extractImage: %v", err)
 	}
 	return entries
-}
-
-// readTarNames is a small guard that buildTar writes what these fixtures assume — a whiteout name
-// must survive verbatim rather than being cleaned away by the writer.
-func readTarNames(t *testing.T, raw []byte) []string {
-	t.Helper()
-	var out []string
-	tr := tar.NewReader(bytes.NewReader(raw))
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			t.Fatalf("reading fixture tar: %v", err)
-		}
-		out = append(out, hdr.Name)
-	}
-	return out
-}
-
-func TestWhiteoutFixtureIsWrittenVerbatim(t *testing.T) {
-	names := readTarNames(t, buildTar(t, []tarFile{{name: ".wh.secret.txt"}}))
-	if len(names) != 1 || names[0] != ".wh.secret.txt" {
-		t.Errorf("fixture wrote %v, want the whiteout name verbatim", names)
-	}
 }

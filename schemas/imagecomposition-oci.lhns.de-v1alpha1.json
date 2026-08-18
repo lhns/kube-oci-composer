@@ -557,6 +557,10 @@
                 "description": "Digest of the manifest. For a multi-platform build this is the INDEX.",
                 "type": "string"
               },
+              "inputHash": {
+                "description": "InputHash the build was produced from. Written by DockerBuild only; ImageComposition's\nidentity is the output digest rather than the hash. See ADR 0025.",
+                "type": "string"
+              },
               "manifests": {
                 "description": "Manifests are the CHILD manifest digests when this build is a multi-platform index. Empty\nfor a single-platform build, where Digest is the manifest itself.\n\nGarbage collection reads this, and must: without it the index is retained while its children\nare swept, leaving a manifest that resolves to nothing. That is indistinguishable from\nhaving deleted the artifact, except that it fails at pull time rather than at collection\ntime, long after the change that caused it.",
                 "items": {

@@ -6,9 +6,6 @@ Accepted, for an alpha. Amends [0016](0016-the-scope-line-is-determinism.md); it
 supersede it. The scope line stays exactly where 0016 put it *for `ImageComposition`*, whose
 guarantees are untouched by this record.
 
-Read the *Context* before treating this as a won argument. It is not one. It is a deliberate bet,
-recorded as such.
-
 ## Context
 
 [0016](0016-the-scope-line-is-determinism.md) dropped an `ImageBuild` kind from the roadmap and
@@ -157,9 +154,7 @@ The alpha is the experiment. Abandon, and say so in a superseding record, if:
 
 ## Alternatives rejected
 
-**A `build:` layer verb.** Covered above and in [0004](0004-two-kinds-two-controllers.md): the
-weaker guarantee silently applies to everything, and the kind stops telling a reader what it
-guarantees.
+**A `build:` layer verb.** See *Decision* and [0004](0004-two-kinds-two-controllers.md).
 
 **One binary with a feature flag.** 0004:70-73: *"A flag set to `false` is a weaker guarantee than a
 component that does not exist."* It also puts `jobs: create` in every composer install.

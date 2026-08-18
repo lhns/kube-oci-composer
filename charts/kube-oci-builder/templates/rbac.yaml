@@ -1,0 +1,84 @@
+{{/*
+Kept deliberately readable. This role is the difference between this component and the composer,
+whose role cannot create a single object — so it is worth being able to read in one screen.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kube-oci-builder.fullname" . }}
+  labels:
+    {{- include "kube-oci-builder.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [oci.lhns.de]
+    resources: [dockerbuilds]
+    verbs: [get, list, watch]
+  - apiGroups: [oci.lhns.de]
+    resources: [dockerbuilds/status]
+    verbs: [get, update, patch]
+  # Creating Jobs is the ability to run arbitrary containers. This is the permission that makes
+  # this a separate component rather than a flag on the composer.
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, watch, create, delete]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+  # get, not list or watch: Secrets are read for their resourceVersion so a rotation rebuilds, and
+  # their values are projected straight into the build pod without passing through this process.
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+  - apiGroups: [source.toolkit.fluxcd.io]
+    resources: [gitrepositories, ocirepositories, buckets]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "kube-oci-builder.fullname" . }}
+  labels:
+    {{- include "kube-oci-builder.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "kube-oci-builder.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kube-oci-builder.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- if .Values.builder.leaderElect }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "kube-oci-builder.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kube-oci-builder.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "kube-oci-builder.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kube-oci-builder.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "kube-oci-builder.fullname" . }}-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kube-oci-builder.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

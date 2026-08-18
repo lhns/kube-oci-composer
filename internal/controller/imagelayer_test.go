@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
@@ -65,11 +64,7 @@ func publishContentImage(t *testing.T, host, repo string, layerFiles ...map[stri
 		t.Fatalf("digest: %v", err)
 	}
 	repository := host + "/" + repo
-	ref, err := name.ParseReference(repository+"@"+digest.String(), name.Insecure)
-	if err != nil {
-		t.Fatalf("parsing: %v", err)
-	}
-	if err := remote.Write(ref, img); err != nil {
+	if err := remote.Write(mustRef(t, repository+"@"+digest.String()), img); err != nil {
 		t.Fatalf("publishing: %v", err)
 	}
 	return repository + ":v1@" + digest.String()
@@ -78,11 +73,7 @@ func publishContentImage(t *testing.T, host, repo string, layerFiles ...map[stri
 // entriesOfArtifact reads back every path in the published artifact's last layer.
 func entriesOfArtifact(t *testing.T, host, repo, digest string) (map[string]string, int) {
 	t.Helper()
-	ref, err := name.ParseReference(host+"/"+repo+"@"+digest, name.Insecure)
-	if err != nil {
-		t.Fatalf("parsing: %v", err)
-	}
-	img, err := remote.Image(ref)
+	img, err := remote.Image(mustRef(t, host+"/"+repo+"@"+digest))
 	if err != nil {
 		t.Fatalf("pulling the result: %v", err)
 	}
@@ -114,9 +105,8 @@ func entriesOfArtifact(t *testing.T, host, repo, digest string) (map[string]stri
 	return out, len(layers)
 }
 
-// TestImageLayerIsContributedAsOneLayer — the headline case. A CI-built image lands at a path,
-// and a three-layer source still contributes exactly one layer (ADR 0016's rule that every entry
-// contributes exactly one).
+// TestImageLayerIsContributedAsOneLayer — the headline case: a CI-built image lands at a path, and
+// a three-layer source still contributes exactly one layer.
 func TestImageLayerIsContributedAsOneLayer(t *testing.T) {
 	obj := composition("from-image")
 	r, host := servingReconciler(t, obj)
