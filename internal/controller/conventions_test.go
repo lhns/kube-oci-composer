@@ -170,7 +170,7 @@ func TestSuspendHaltsReconciliation(t *testing.T) {
 func TestReconcileRequestAnnotationIsEchoed(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("annotated", urlLayer("core", url, digest, "/core"))
-	obj.Annotations = map[string]string{ReconcileRequestAnnotation: "2026-01-01T00:00:00Z"}
+	obj.Annotations = map[string]string{ociv1alpha1.ReconcileRequestAnnotation: "2026-01-01T00:00:00Z"}
 	r, _ := servingReconciler(t, obj)
 
 	if _, err := reconcileOnce(t, r, obj); err != nil {
@@ -179,6 +179,37 @@ func TestReconcileRequestAnnotationIsEchoed(t *testing.T) {
 	got := reload(t, r, obj)
 	if got.Status.LastHandledReconcileAt != "2026-01-01T00:00:00Z" {
 		t.Fatalf("lastHandledReconcileAt %q was not echoed", got.Status.LastHandledReconcileAt)
+	}
+}
+
+// TestFailedReconcileStillEchoesAndObserves — both fields describe the pass, not its outcome.
+//
+// Echoing only on success makes `flux reconcile` wait for a token that never arrives and then
+// report a timeout, hiding the failure the object is already describing. A stale
+// observedGeneration reads to kstatus as "still working" rather than "failed". Both are worst
+// exactly when something is broken, which is when someone is looking.
+func TestFailedReconcileStillEchoesAndObserves(t *testing.T) {
+	url, _ := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
+	obj := composition("failed-echo", urlLayer("core", url, "sha256:"+strings.Repeat("0", 64), "/core"))
+	obj.Annotations = map[string]string{ociv1alpha1.ReconcileRequestAnnotation: "2026-01-01T00:00:00Z"}
+	r, _ := servingReconciler(t, obj)
+
+	if _, err := reconcileOnce(t, r, obj); err != nil {
+		t.Fatalf("a terminal error must not be returned to the queue: %v", err)
+	}
+
+	got := reload(t, r, obj)
+	if !meta.IsStatusConditionTrue(got.Status.Conditions, ociv1alpha1.StalledCondition) {
+		t.Fatalf("expected this object to have failed: %+v", got.Status.Conditions)
+	}
+	if got.Status.LastHandledReconcileAt != "2026-01-01T00:00:00Z" {
+		t.Errorf("a failed reconcile did not echo the request (%q), so `flux reconcile` would time "+
+			"out instead of reporting the failure", got.Status.LastHandledReconcileAt)
+	}
+	if got.Status.ObservedGeneration != got.Generation {
+		t.Errorf("observedGeneration %d is behind generation %d after a failed reconcile, which "+
+			"reads as still-in-progress rather than failed",
+			got.Status.ObservedGeneration, got.Generation)
 	}
 }
 

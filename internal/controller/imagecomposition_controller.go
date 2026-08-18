@@ -34,10 +34,6 @@ import (
 	"github.com/lhns/kube-oci-composer/internal/serve"
 )
 
-// ReconcileRequestAnnotation matches Flux's, so `flux reconcile` and `kubectl annotate` both
-// trigger a reconciliation the way users of the ecosystem expect.
-const ReconcileRequestAnnotation = "reconcile.fluxcd.io/requestedAt"
-
 // terminalError marks a failure that retrying cannot fix. It maps to Stalled rather than a
 // backoff loop: a wrong digest or an invalid spec needs a human, and hammering the API server
 // about it only hides the problem.
@@ -237,8 +233,6 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		o.Status.Artifact = result.Artifact
 		o.Status.InputHash = result.InputHash
 		o.Status.History = recordHistory(o.Status.History, result.Record, r.historyLimit(o))
-		o.Status.ObservedGeneration = o.Generation
-		o.Status.LastHandledReconcileAt = o.Annotations[ReconcileRequestAnnotation]
 		setCondition(o, ociv1alpha1.ReadyCondition, metav1.ConditionTrue,
 			ociv1alpha1.ReasonSucceeded, fmt.Sprintf("Published %s", result.Artifact.Ref))
 		removeCondition(o, ociv1alpha1.ReconcilingCondition)
@@ -875,6 +869,13 @@ func (r *ImageCompositionReconciler) patchStatus(ctx context.Context, obj *ociv1
 	}
 	patch := client.MergeFrom(latest.DeepCopy())
 	mutate(&latest)
+	// Set on EVERY status write, not just the successful one, because both describe the pass rather
+	// than its outcome — which is how Flux writes them. Echoing only on success makes `flux
+	// reconcile` wait for a token that never arrives and report a timeout instead of the failure the
+	// object is already describing; and a stale observedGeneration reads to kstatus as "still
+	// working" rather than "failed".
+	latest.Status.ObservedGeneration = latest.Generation
+	latest.Status.LastHandledReconcileAt = latest.Annotations[ociv1alpha1.ReconcileRequestAnnotation]
 	return r.Status().Patch(ctx, &latest, patch)
 }
 

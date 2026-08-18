@@ -83,6 +83,9 @@ func (r *DockerBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	result, err := r.reconcile(ctx, &obj)
 
 	obj.Status.ObservedGeneration = obj.Generation
+	// Echoed on every completed pass, failures included: a client waiting for the request to land
+	// must not hang because the build it asked for failed (ADR 0009).
+	obj.Status.LastHandledReconcileAt = obj.Annotations[ociv1alpha1.ReconcileRequestAnnotation]
 	r.applyOutcome(&obj, err)
 	if perr := r.Status().Patch(ctx, &obj, patch); perr != nil {
 		return ctrl.Result{}, fmt.Errorf("patching status: %w", perr)

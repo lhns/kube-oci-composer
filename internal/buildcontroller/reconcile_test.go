@@ -454,3 +454,30 @@ func failJob(t *testing.T, r *DockerBuildReconciler, obj *ociv1alpha1.DockerBuil
 		t.Fatalf("updating job status: %v", err)
 	}
 }
+
+// TestReconcileRequestIsEchoed — `flux reconcile` decides whether its request landed by watching
+// for status.lastHandledReconcileAt to match, so a kind that never echoes makes the CLI hang.
+// Echoed on failures too, or the hang is worst exactly when someone is debugging.
+func TestReconcileRequestIsEchoed(t *testing.T) {
+	const requested = "2026-01-01T00:00:00Z"
+	obj := buildOf(t, func(o *ociv1alpha1.DockerBuild) {
+		o.Annotations = map[string]string{ociv1alpha1.ReconcileRequestAnnotation: requested}
+	})
+	r := harness(t, pinnedFrom, obj)
+
+	if _, err := reconcileOnce(t, r, obj); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if got := reload(t, r, obj).Status.LastHandledReconcileAt; got != requested {
+		t.Errorf("lastHandledReconcileAt = %q, want %q", got, requested)
+	}
+
+	// And again once the build has failed, which is when a stuck CLI would hurt most.
+	failJob(t, r, obj, "the RUN exited 1")
+	if _, err := reconcileOnce(t, r, obj); err != nil {
+		t.Fatalf("reconcile after failure: %v", err)
+	}
+	if got := reload(t, r, obj).Status.LastHandledReconcileAt; got != requested {
+		t.Errorf("after a failed build lastHandledReconcileAt = %q, want %q", got, requested)
+	}
+}
