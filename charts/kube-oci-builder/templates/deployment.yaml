@@ -47,6 +47,9 @@ spec:
             - --buildkit-image={{ .Values.builder.buildkitImage }}
             - --dockerfile-frontend={{ .Values.builder.dockerfileFrontend }}
             - --source-date-epoch={{ .Values.builder.sourceDateEpoch }}
+            {{- with .Values.builder.insecureRegistry }}
+            - --insecure-registry={{ . }}
+            {{- end }}
             - --keep-builds={{ .Values.builder.keepBuilds }}
           ports:
             - name: metrics

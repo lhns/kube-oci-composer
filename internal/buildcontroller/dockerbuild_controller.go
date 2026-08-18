@@ -269,19 +269,32 @@ func (r *DockerBuildReconciler) observeJob(ctx context.Context, obj *ociv1alpha1
 		return ctrl.Result{RequeueAfter: interval(obj)}, nil
 
 	case jobFailed(job):
-		// Deleted so the next attempt is a fresh Job rather than a permanently failed one that
-		// would be adopted forever.
-		if err := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil &&
-			!apierrors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("deleting the failed job: %w", err)
+		// The failed Job is KEPT until its backoff has elapsed, and deleted only when the next
+		// attempt is actually due. Deleting it as soon as the failure is seen fires this
+		// controller's own Job watch, which reconciles immediately, finds no Job and starts
+		// another — so the RequeueAfter backoff never applies and a failing build retries in a hot
+		// loop. Keeping it also keeps the pod, which is the only place the reason a build failed is
+		// written down; deleting on sight destroys the evidence before anyone can read it.
+		msg := r.jobFailureDetail(ctx, obj, job)
+		switch {
+		case obj.Status.BuildRef != nil:
+			// First observation of this failure: count it once.
+			obj.Status.BuildRef = nil
+			obj.Status.Failures++
+			if obj.Status.LastAttempt != nil {
+				obj.Status.LastAttempt.FinishedAt = ptr.To(metav1.Now())
+				obj.Status.LastAttempt.Message = msg
+			}
+		case retryDue(obj):
+			// Already counted, and the wait is over. The delete wakes this controller through the
+			// Job watch, and that reconcile is the one that starts the fresh Job.
+			if err := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil &&
+				!apierrors.IsNotFound(err) {
+				return ctrl.Result{}, fmt.Errorf("deleting the failed job: %w", err)
+			}
 		}
-		obj.Status.BuildRef = nil
-		obj.Status.Failures++
-		msg := jobFailureMessage(job)
-		if obj.Status.LastAttempt != nil {
-			obj.Status.LastAttempt.FinishedAt = ptr.To(metav1.Now())
-			obj.Status.LastAttempt.Message = msg
-		}
+		// Returned as an error on every pass, including while waiting: Ready must stay False, and
+		// Reconcile's own backoff already spaces the retries.
 		return ctrl.Result{}, fmt.Errorf("build failed: %s", msg)
 
 	default:
@@ -466,6 +479,49 @@ func (r *DockerBuildReconciler) httpClient() *http.Client {
 
 func jobSucceeded(job *batchv1.Job) bool { return job.Status.Succeeded > 0 }
 func jobFailed(job *batchv1.Job) bool    { return job.Status.Failed > 0 }
+
+// retryDue reports whether enough time has passed since the last failure to try again. It mirrors
+// the interval Reconcile requeues at, so the wait is the backoff rather than a second policy.
+func retryDue(obj *ociv1alpha1.DockerBuild) bool {
+	la := obj.Status.LastAttempt
+	if la == nil || la.FinishedAt == nil {
+		return true
+	}
+	return !time.Now().Before(la.FinishedAt.Add(failureBackoff(obj.Status.Failures)))
+}
+
+// jobFailureDetail explains a failed build as specifically as the cluster allows.
+//
+// The Job's own condition says only "BackoffLimitExceeded", which names the mechanism and not the
+// cause. The cause is the build container's exit code and termination message, so those are read
+// from the pod and appended — otherwise status shows a failure with no way to act on it.
+func (r *DockerBuildReconciler) jobFailureDetail(ctx context.Context, obj *ociv1alpha1.DockerBuild, job *batchv1.Job) string {
+	msg := jobFailureMessage(job)
+
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods,
+		client.InNamespace(obj.Namespace),
+		client.MatchingLabels{"job-name": job.Name}); err != nil {
+		return msg
+	}
+	for _, p := range pods.Items {
+		for _, cs := range p.Status.ContainerStatuses {
+			t := cs.State.Terminated
+			if t == nil || t.ExitCode == 0 {
+				continue
+			}
+			detail := fmt.Sprintf("%s: container %q exited %d", msg, cs.Name, t.ExitCode)
+			if t.Reason != "" {
+				detail += " (" + t.Reason + ")"
+			}
+			if m := strings.TrimSpace(t.Message); m != "" {
+				detail += ": " + m
+			}
+			return detail + fmt.Sprintf("; see `kubectl -n %s logs %s -c %s`", p.Namespace, p.Name, cs.Name)
+		}
+	}
+	return msg
+}
 
 func jobFailureMessage(job *batchv1.Job) string {
 	for _, c := range job.Status.Conditions {

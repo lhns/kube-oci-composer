@@ -1,0 +1,5 @@
+# Pinned by digest, because the controller refuses a floating FROM before it creates a Job.
+# busybox is the smallest thing that can run a RUN and prove the layer landed.
+FROM busybox:1.37@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
+
+RUN mkdir -p /opt/built && echo e2e-was-here > /opt/built/marker

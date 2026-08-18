@@ -6,6 +6,11 @@ may change between minor versions.
 ## [Unreleased]
 
 ### Added
+- **`--insecure-registry`** on the builder: registry hosts to push to over plain HTTP,
+  comma-separated. Opt-in **per host** rather than a global switch -- an internal or air-gapped
+  registry without TLS is a real deployment, but naming one must not quietly downgrade every other
+  push the same controller makes. Deliberately not part of the build input hash: how bytes are
+  transported does not change what they are, so flipping it rebuilds nothing.
 - **`DockerBuild` (alpha).** The kind ADR 0025 describes, now implemented: a second controller,
   a second binary (`cmd/oci-builder`), a second chart (`charts/kube-oci-builder`) carrying its own
   CRD, and its own RBAC.
@@ -128,6 +133,25 @@ may change between minor versions.
   ([#9](https://github.com/lhns/kube-oci-composer/issues/9)); Alpine `.apk` still needs nothing.
 
 ### Changed
+- **`DockerBuild` has an e2e.** The first thing that runs the builder end to end, and it exists
+  because two pieces could not be verified any other way: the built digest comes back through the
+  pod's termination message, which needs a real kubelet to populate, and the `FROM` check reads a
+  real context over HTTP. Both were previously tested only against fakes -- which is how a digest
+  readback from a message nothing wrote got as far as it did.
+
+  It also answers ADR 0025's second spike question, whether rootless BuildKit runs on the target
+  nodes at all. The ADR lists "it does not" as grounds to abandon, so the failure is loud rather
+  than skipped.
+
+  Three cases: a build produces an image and the recorded digest resolves **in the registry** (not
+  merely in status); an unchanged reconcile does not rebuild, with the input hash, the digest and
+  the Job count all holding still; and an unpinned `FROM` is refused with **no Job created**.
+
+  The fixtures are the interesting part. A build needs a registry, so one runs in the cluster over
+  plain HTTP. The context must come from a Flux source, and the e2e cluster does not run Flux -- so
+  a minimal `GitRepository` CRD stands in, deliberately without a status subresource so the harness
+  can publish `status.artifact` itself, pointing at a tarball served from a ConfigMap. That tests
+  this controller's reading of the contract rather than testing Flux.
 - **The builder chart is now drift-guarded like the composer's.** `config/rbac-builder/role.yaml`
   was generated and read by nothing, so the chart's hand-written rules — the ones granting
   `jobs: create`, which is the ability to run arbitrary containers — could diverge from the
@@ -145,7 +169,91 @@ may change between minor versions.
   re-verify rather than rebuild. The field is recorded but the read path is not implemented, and
   the record now says so.
 
+### Added
+- **An e2e test that answers ADR 0025's first spike question.** The alpha shipped without measuring
+  whether `SOURCE_DATE_EPOCH=0` plus `rewrite-timestamp=true` actually gives byte-identical output
+  across two runs of the same context, and that measurement is the difference between two readings
+  of `status.inputHash`: whether it identifies the OUTPUT, or only the INPUTS.
+
+  If rebuilds reproduce, the immutable-tag guard can never fire on an unchanged spec. If they do
+  not, ADR 0025's concession stands -- losing status or the store means a rebuild can produce a
+  digest that permanently conflicts with an already-published tag under the default
+  `immutable: true`.
+
+  **The measurement passed:** two independent builds of the same context, caches disabled, produce
+  the same digest. Narrowly, though -- it shows the machinery does not inject nondeterminism, not
+  that an arbitrary Dockerfile reproduces. A `RUN` that installs packages, resolves DNS or reads the
+  clock can still differ, so the immutable-tag guard stays load-bearing.
+
+  The test builds the same context under two names rather than deleting and recreating one object,
+  because a deterministic Job name means a recreated object can *adopt* the first build's finished
+  Job and read its digest back without building anything -- passing while proving nothing. The
+  cache is disabled on both for the same reason: a cache hit would make the digests match by reuse
+  rather than by reproducibility.
+
+### Changed
+- **Build pods permit privilege escalation and add two capabilities.** Measured, not chosen: the
+  first end-to-end run against a real cluster showed rootless BuildKit could not start under the
+  previous posture, and [ADR 0027](docs/adr/0027-what-rootless-buildkit-actually-needs.md) records
+  the six configurations tried.
+
+  "Rootless" means no root on the *host*, not that no privilege is needed to start. Building an
+  image means creating files owned by many UIDs, which needs a user namespace mapping a *range* of
+  them -- and the kernel lets an unprivileged process map only one by itself, so the image ships
+  setuid-root `newuidmap` to do that single write. `allowPrivilegeEscalation: false` made the kernel
+  ignore the setuid bit, and `drop: ALL` emptied the bounding set so `CAP_SETUID` was unobtainable
+  regardless. buildkitd never started and every build failed in seconds.
+
+  Build containers now run with escalation permitted, all capabilities dropped, and exactly `SETUID`
+  and `SETGID` added. Unchanged: uid 1000, `runAsNonRoot`, `privileged: false` (still not offered at
+  any setting), no host namespaces, no devices, no host mounts. The controller's own posture is
+  untouched.
+
+  The cost, stated plainly: a setuid binary inside a build image can acquire those two capabilities
+  within the container. That is not host root, and the blast radius ADR 0001 refused is not
+  reinstated -- but it is a real loosening, and it is another reason the builder is a separate
+  component with its own chart rather than a flag on the composer. Kubernetes user namespaces would
+  have cost nothing and kept the old posture; all four variants failed to start on kind, so that
+  remains the destination rather than the current state.
+
 ### Fixed
+- **`DockerBuild`: every build failed to find its own Dockerfile.** The two halves of the context
+  contract disagreed, and each half was individually right.
+
+  A source-controller artifact wraps the tree in a single top-level directory whose name is not
+  predictable. The controller's pinned-`FROM` check strips that wrapper, so an unpinned base was
+  correctly refused -- and then every build that PASSED the check died inside BuildKit with
+  `failed to read dockerfile: open Dockerfile: no such file or directory`, because the init
+  container extracted the archive verbatim and left the Dockerfile one directory below where
+  `buildctl` looks.
+
+  The init container now applies the same rule the controller does: strip one level only when the
+  archive really is a single wrapper directory, so a tarball whose files sit at the root still
+  builds rather than being silently emptied. The test runs the actual script against both shapes,
+  because no assertion over the rendered pod spec could have caught this -- both halves looked
+  correct in isolation, and only running them together showed the mismatch.
+
+- **`DockerBuild`: a failing build retried in a hot loop and destroyed its own evidence.** Found by
+  the first end-to-end run against a real cluster, which is the only place it could have been found:
+  the reconcile loop was correct against a fake client, because a fake client has no watches.
+
+  The failure path deleted the failed Job immediately, so that the next attempt would not adopt it.
+  But deleting an owned Job wakes this controller through its own Job watch, and that reconcile
+  finds no Job and starts another — so the `RequeueAfter` backoff never applied and the build
+  retried every few seconds indefinitely. Each retry also deleted the previous pod, and the pod is
+  the only place the reason a build failed is written down, so no one could ever read why.
+
+  The failed Job is now kept until its backoff has actually elapsed and deleted only when the next
+  attempt is due, which makes the delete the trigger for the retry rather than a race against it.
+  A failure is counted once however many times it is observed.
+
+  Relatedly, a failed build reported only `BackoffLimitExceeded` — the mechanism, not the cause.
+  Status now carries the build container's exit code, termination reason and message, plus the
+  `kubectl logs` line that shows the rest.
+- **The e2e harness could not report its own failures.** `make e2e-test` ran `go test -timeout 15m`
+  while the in-test deadline was also 15 minutes, so the test binary panicked on the global timeout
+  at the same instant and the diagnostic dump never ran. The in-test deadline is now 12 minutes
+  against a 40-minute binary timeout, so the harness always outlives the assertion it is reporting on.
 - **`DockerBuild`: three things that were shipped wrong.** Found by analysing the merged alpha
   rather than the branch it came from.
 

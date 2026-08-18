@@ -51,6 +51,13 @@ type JobConfig struct {
 	// FrontendImage is the Dockerfile frontend, pinned by digest. BuildKit resolves `# syntax=`
 	// over the network unless told otherwise.
 	FrontendImage string
+	// InsecureRegistries are registry hosts to talk to over plain HTTP.
+	//
+	// Operator-level and opt-in per host, not a global "trust anything": an internal or air-gapped
+	// registry without TLS is a real deployment, and the alternative is telling those clusters to
+	// use a different tool. It is deliberately NOT part of the input hash — how the bytes are
+	// transported does not change what they are, so flipping it must not rebuild anything.
+	InsecureRegistries []string
 	// SourceDateEpoch is the timestamp stamped into the result. Zero by default, matching the
 	// composer's fixed epoch.
 	SourceDateEpoch string
@@ -83,17 +90,71 @@ func shortHash(inputHash string) string {
 //
 // Privileged is not offered at any setting: ADR 0001 named that blast radius as the reason for
 // refusing to build at all, and a flag reinstating it would make every other guarantee here
-// conditional.
+// conditional. Nothing below grants host access, device access or host mounts.
+//
+// The escalation and capability settings are measured rather than chosen — see ADR 0027. Rootless
+// BuildKit maps a RANGE of UIDs so a build can create files owned by root and by package users,
+// and the kernel only permits an unprivileged process to map ONE uid by itself. The range needs
+// CAP_SETUID, which is why the image ships setuid-root `newuidmap` to do that single write. The
+// first end-to-end run refused it twice over: AllowPrivilegeEscalation:false sets NO_NEW_PRIVS so
+// the kernel ignores the setuid bit, and dropping ALL empties the bounding set so the capability
+// could not be acquired anyway. buildkitd never started.
 func rootlessSecurityContext() *corev1.SecurityContext {
 	return &corev1.SecurityContext{
-		RunAsUser:                ptr.To[int64](1000),
-		RunAsGroup:               ptr.To[int64](1000),
-		RunAsNonRoot:             ptr.To(true),
-		AllowPrivilegeEscalation: ptr.To(false),
-		Privileged:               ptr.To(false),
-		SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined},
-		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+		RunAsUser:    ptr.To[int64](1000),
+		RunAsGroup:   ptr.To[int64](1000),
+		RunAsNonRoot: ptr.To(true),
+		Privileged:   ptr.To(false),
+		// Required for setuid newuidmap, and it buys only what the two capabilities below allow —
+		// this is not privileged, and the container is still uid 1000.
+		AllowPrivilegeEscalation: ptr.To(true),
+		// Seccomp and AppArmor unconfined are what rootless BuildKit documents as required: it
+		// creates user namespaces and mounts inside them, and both defaults block that. This is
+		// loosened for the BUILD pod only — the controller keeps distroless, non-root and a
+		// read-only root filesystem.
+		SeccompProfile:  &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined},
+		AppArmorProfile: &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeUnconfined},
+		// Everything dropped, then exactly the two the UID/GID mapping needs. Upstream's own
+		// Kubernetes example ships no capabilities stanza at all, which leaves the runtime's
+		// default set — around fourteen, including CHOWN, DAC_OVERRIDE and FOWNER. Both were
+		// measured working; this is the narrower of the two, so it is the one taken.
+		Capabilities: &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+			Add:  []corev1.Capability{"SETUID", "SETGID"},
+		},
 	}
+}
+
+// fetchContextScript downloads the build context and unwraps it to the directory buildctl reads.
+//
+// The unwrapping is the whole reason this is a script rather than one pipe. A source-controller
+// artifact wraps the tree in a single top-level directory whose name nobody can predict, so a plain
+// extraction leaves the Dockerfile at <wrapper>/Dockerfile while buildctl looks for it at the root.
+// The controller-side check already strips that wrapper (build.matchesContextPath), so before this
+// existed the two halves disagreed: an unpinned FROM was correctly refused by reading the wrapped
+// path, and then every build that passed the check failed inside BuildKit with
+//
+//	failed to read dockerfile: open Dockerfile: no such file or directory
+//
+// Deliberately the SAME rule as matchesContextPath rather than an unconditional --strip-components=1:
+// strip one level only when the archive really is a single wrapper directory, so a tarball whose
+// files sit at the root still builds instead of being silently emptied.
+func fetchContextScript(contextURL string) string {
+	return fmt.Sprintf(`set -e
+staging=%[2]s/.staging
+mkdir -p "$staging"
+wget -qO- %[1]q | tar -xzf - -C "$staging"
+
+src="$staging"
+if [ "$(ls -A "$staging" | wc -l)" -eq 1 ]; then
+  only="$staging/$(ls -A "$staging")"
+  [ -d "$only" ] && src="$only"
+fi
+
+# tar rather than mv: it copies dotfiles without a shell glob that misses them.
+tar -cf - -C "$src" . | tar -xf - -C %[2]s
+rm -rf "$staging"
+`, contextURL, contextPath)
 }
 
 // buildctlArgs assembles the buildctl invocation. Split out because it is the part that decides
@@ -134,16 +195,36 @@ func buildctlArgs(obj *ociv1alpha1.DockerBuild, cfg JobConfig) []string {
 	// rewrite-timestamp needs SOURCE_DATE_EPOCH to mean anything. Together they narrow the "same
 	// inputs, different bytes" gap; ADR 0025 says why they do not close it.
 	args = append(args, "--output",
-		"type=image,name="+pushNames(obj)+",push=true,rewrite-timestamp=true")
+		"type=image,name="+pushNames(obj)+",push=true,rewrite-timestamp=true"+
+			insecureAttr(obj.Spec.Push, cfg.InsecureRegistries))
 	args = append(args, "--opt", "build-arg:SOURCE_DATE_EPOCH="+cfg.SourceDateEpoch)
 
 	if cacheRef := cacheRefFor(obj); cacheRef != "" {
+		insecure := insecureAttr(obj.Spec.Push, cfg.InsecureRegistries)
 		args = append(args,
-			"--import-cache", "type=registry,ref="+cacheRef,
-			"--export-cache", "type=registry,ref="+cacheRef+",mode=max")
+			"--import-cache", "type=registry,ref="+cacheRef+insecure,
+			"--export-cache", "type=registry,ref="+cacheRef+",mode=max"+insecure)
 	}
 
 	return args
+}
+
+// insecureAttr returns the exporter attribute that allows plain HTTP, when the push target's host
+// is one the operator listed.
+//
+// Matched on host rather than applied globally, so naming one internal registry does not quietly
+// downgrade every other push the same controller makes.
+func insecureAttr(push *ociv1alpha1.Push, insecure []string) string {
+	if push == nil {
+		return ""
+	}
+	host, _, _ := strings.Cut(push.Repository, "/")
+	for _, h := range insecure {
+		if h == host {
+			return ",registry.insecure=true"
+		}
+	}
+	return ""
 }
 
 // buildVolumes returns the pod's volumes and the build container's mounts.
@@ -230,10 +311,9 @@ cat %s > /dev/termination-log
 	// would otherwise have to hold the whole context in memory or on its own read-only filesystem,
 	// and the URL is already a digest-addressed artifact that anything can pull.
 	initContainer := corev1.Container{
-		Name:  "fetch-context",
-		Image: cfg.BuilderImage,
-		Command: []string{"sh", "-c",
-			fmt.Sprintf("wget -qO- %q | tar -xzf - -C %s", contextURL, contextPath)},
+		Name:            "fetch-context",
+		Image:           cfg.BuilderImage,
+		Command:         []string{"sh", "-c", fetchContextScript(contextURL)},
 		VolumeMounts:    []corev1.VolumeMount{{Name: contextVolume, MountPath: contextPath}},
 		SecurityContext: rootlessSecurityContext(),
 	}

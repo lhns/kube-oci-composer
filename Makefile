@@ -156,7 +156,7 @@ e2e-up: ## Create the kind cluster used by the e2e tests.
 
 .PHONY: e2e-test
 e2e-test: ## Run the e2e tests against the current cluster.
-	go test ./test/e2e/... -tags=e2e -timeout 15m -count=1 -v
+	go test ./test/e2e/... -tags=e2e -timeout 40m -count=1 -v
 
 .PHONY: e2e-down
 e2e-down: ## Delete the kind cluster.

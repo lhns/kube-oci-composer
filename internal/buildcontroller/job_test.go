@@ -1,6 +1,14 @@
 package buildcontroller
 
 import (
+	"archive/tar"
+	"compress/gzip"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -91,10 +99,43 @@ func TestBuildJobRunsRootless(t *testing.T) {
 		if sc.RunAsNonRoot == nil || !*sc.RunAsNonRoot {
 			t.Errorf("%s may run as root", c.Name)
 		}
-		if sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation {
-			t.Errorf("%s allows privilege escalation", c.Name)
+		if sc.RunAsUser == nil || *sc.RunAsUser == 0 {
+			t.Errorf("%s does not pin a non-zero uid", c.Name)
+		}
+
+		// Capabilities are the part that has to be exact rather than merely absent. Escalation is
+		// permitted (ADR 0027: setuid newuidmap is how rootless maps a UID range, and refusing it
+		// stops buildkitd starting at all), so the bounding set is the only thing left holding the
+		// line — and an unnoticed addition here would be a real widening.
+		caps := sc.Capabilities
+		if caps == nil || len(caps.Drop) != 1 || caps.Drop[0] != "ALL" {
+			t.Errorf("%s does not drop ALL capabilities: %+v", c.Name, caps)
+			continue
+		}
+		want := map[corev1.Capability]bool{"SETUID": true, "SETGID": true}
+		for _, add := range caps.Add {
+			if !want[add] {
+				t.Errorf("%s adds capability %q, which the UID mapping does not need", c.Name, add)
+			}
+			delete(want, add)
+		}
+		for missing := range want {
+			t.Errorf("%s is missing %q; rootless BuildKit cannot map UIDs without it", c.Name, missing)
 		}
 	}
+	// Seccomp and AppArmor must be unconfined, and that is not a loosening to tidy away later:
+	// rootless BuildKit creates user namespaces and mounts inside them, and both defaults block
+	// it. Tightening these makes every build fail, so the assertion is here to say so.
+	build := pod.Containers[0].SecurityContext
+	if build.SeccompProfile == nil || build.SeccompProfile.Type != corev1.SeccompProfileTypeUnconfined {
+		t.Errorf("seccomp = %+v, want Unconfined; rootless BuildKit cannot run otherwise",
+			build.SeccompProfile)
+	}
+	if build.AppArmorProfile == nil || build.AppArmorProfile.Type != corev1.AppArmorProfileTypeUnconfined {
+		t.Errorf("apparmor = %+v, want Unconfined; rootless BuildKit cannot run otherwise",
+			build.AppArmorProfile)
+	}
+
 	if pod.RestartPolicy != corev1.RestartPolicyNever {
 		t.Errorf("restart policy is %q; a retried RUN just delays the failure", pod.RestartPolicy)
 	}
@@ -214,5 +255,137 @@ func TestFailureBackoffIsCapped(t *testing.T) {
 	}
 	if got := failureBackoff(50); got != maxFailureBackoff {
 		t.Errorf("backoff after many failures is %v, want the %v cap", got, maxFailureBackoff)
+	}
+}
+
+// TestInsecureRegistryIsOptInPerHost — naming one internal registry must not downgrade every other
+// push the same controller makes, so the attribute appears only when the push host matches.
+func TestInsecureRegistryIsOptInPerHost(t *testing.T) {
+	cfg := sampleConfig()
+	cfg.InsecureRegistries = []string{"registry.internal:5000"}
+
+	secure := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", cfg)
+	if argv := strings.Join(secure.Spec.Template.Spec.Containers[0].Args, " "); strings.Contains(argv, "registry.insecure") {
+		t.Errorf("a non-listed host was pushed insecurely\ngot: %s", argv)
+	}
+
+	obj := sampleBuild()
+	obj.Spec.Push.Repository = "registry.internal:5000/team/app"
+	listed := buildJob(obj, testHash, "https://example/ctx.tgz", cfg)
+	if argv := strings.Join(listed.Spec.Template.Spec.Containers[0].Args, " "); !strings.Contains(argv, "registry.insecure=true") {
+		t.Errorf("a listed host was not allowed plain HTTP\ngot: %s", argv)
+	}
+}
+
+// TestInsecureRegistryIsNotInTheInputHash — how the bytes are transported does not change what
+// they are, so flipping this must not rebuild every object in the cluster.
+func TestInsecureRegistryIsNotInTheInputHash(t *testing.T) {
+	obj := sampleBuild()
+	obj.Spec.Push.Repository = "registry.internal:5000/team/app"
+
+	plain := sampleConfig()
+	insecure := sampleConfig()
+	insecure.InsecureRegistries = []string{"registry.internal:5000"}
+
+	// The Job name is derived from the input hash, so identical names prove the hash did not move.
+	a := buildJob(obj, testHash, "https://example/ctx.tgz", plain)
+	b := buildJob(obj, testHash, "https://example/ctx.tgz", insecure)
+	if a.Name != b.Name {
+		t.Errorf("the insecure list moved the input hash: %q vs %q", a.Name, b.Name)
+	}
+}
+
+// TestFetchContextUnwrapsTheSourceControllerDirectory runs the init container's script for real,
+// against both archive shapes, because the bug it guards was invisible to every unit test: the
+// controller-side check strips the wrapper directory and the pod-side extraction did not, so an
+// unpinned FROM was correctly refused while every build that PASSED that check then died inside
+// BuildKit with "failed to read dockerfile". Only an end-to-end run could see the disagreement.
+//
+// Skipped where there is no POSIX shell, which is most Windows machines; CI runs it.
+func TestFetchContextUnwrapsTheSourceControllerDirectory(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no POSIX shell available; CI covers this")
+	}
+	// wget and tar are what the script actually calls, and substituting them would test a
+	// paraphrase rather than the string that ships in the pod.
+	for _, bin := range []string{"tar", "wget"} {
+		if _, err := exec.LookPath(bin); err != nil {
+			t.Skipf("%s not available; CI covers this", bin)
+		}
+	}
+
+	for _, tc := range []struct {
+		name   string
+		prefix string // the wrapper directory, or "" for files at the archive root
+	}{
+		{"wrapped by source-controller", "src-abc123/"},
+		{"already at the root", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			archive := filepath.Join(dir, "context.tar.gz")
+			writeContextArchive(t, archive, tc.prefix)
+
+			// The script fetches over HTTP, which is what wget does in the pod too.
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				http.ServeFile(w, &http.Request{URL: &url.URL{Path: "/"}}, archive)
+			}))
+			defer srv.Close()
+
+			workspace := filepath.Join(dir, "workspace")
+			if err := os.MkdirAll(workspace, 0o755); err != nil {
+				t.Fatalf("creating workspace: %v", err)
+			}
+
+			// contextPath is absolute in the pod; rewrite it to the temp workspace to run here.
+			script := strings.ReplaceAll(fetchContextScript(srv.URL), contextPath, workspace)
+			out, err := exec.Command(sh, "-c", script).CombinedOutput()
+			if err != nil {
+				t.Fatalf("fetch script failed: %v\n%s", err, out)
+			}
+
+			// The Dockerfile must land where buildctl looks for it: the workspace root.
+			if _, err := os.Stat(filepath.Join(workspace, "Dockerfile")); err != nil {
+				got, _ := os.ReadDir(workspace)
+				var names []string
+				for _, e := range got {
+					names = append(names, e.Name())
+				}
+				t.Fatalf("Dockerfile is not at the context root, so buildctl cannot read it; workspace holds %v", names)
+			}
+			if _, err := os.Stat(filepath.Join(workspace, ".staging")); !os.IsNotExist(err) {
+				t.Error("the staging directory was left behind, so it becomes part of the build context")
+			}
+		})
+	}
+}
+
+// writeContextArchive writes a gzipped tar holding one Dockerfile, optionally under a wrapper
+// directory, which is the shape source-controller publishes.
+func writeContextArchive(t *testing.T, path, prefix string) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("creating archive: %v", err)
+	}
+	defer f.Close()
+
+	zw := gzip.NewWriter(f)
+	tw := tar.NewWriter(zw)
+	body := []byte("FROM busybox@sha256:" + strings.Repeat("a", 64) + "\n")
+	if err := tw.WriteHeader(&tar.Header{
+		Name: prefix + "Dockerfile", Mode: 0o644, Size: int64(len(body)), Typeflag: tar.TypeReg,
+	}); err != nil {
+		t.Fatalf("writing header: %v", err)
+	}
+	if _, err := tw.Write(body); err != nil {
+		t.Fatalf("writing body: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("closing tar: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("closing gzip: %v", err)
 	}
 }
