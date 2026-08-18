@@ -49,6 +49,11 @@ const (
 )
 
 // Finalizer is set on objects so published artifacts can be cleaned up on delete.
+// ReconcileRequestAnnotation is Flux's key, not one of ours, because the key IS the contract:
+// `flux reconcile` writes this one and asks nobody. Controllers echo it into
+// status.lastHandledReconcileAt once acted on, which is how a client knows the request landed.
+const ReconcileRequestAnnotation = "reconcile.fluxcd.io/requestedAt"
+
 const Finalizer = "finalizers.oci.lhns.de"
 
 // LocalObjectReference refers to an object in the same namespace. Credentials are always
@@ -274,3 +279,12 @@ type ArtifactStatus struct {
 	// +optional
 	LastUpdateTime *metav1.Time `json:"lastUpdateTime,omitempty"`
 }
+
+// Conditions accessors, so the shared reconcile helpers can write conditions on either kind
+// without knowing which it holds. The shape follows Flux's own ObjectWithConditions.
+
+func (o *ImageComposition) GetConditions() []metav1.Condition  { return o.Status.Conditions }
+func (o *ImageComposition) SetConditions(c []metav1.Condition) { o.Status.Conditions = c }
+
+func (o *DockerBuild) GetConditions() []metav1.Condition  { return o.Status.Conditions }
+func (o *DockerBuild) SetConditions(c []metav1.Condition) { o.Status.Conditions = c }

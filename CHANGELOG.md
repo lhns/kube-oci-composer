@@ -5,65 +5,6 @@ may change between minor versions.
 
 ## [Unreleased]
 
-### Fixed
-- **A composition could publish a new tag holding the PREVIOUS revision's content**, permanently.
-  A generator bumped a `GitRepository`'s `ref.tag` and rotated the composition's spec-hash publish
-  tag in one apply; the composition reconciled instantly, the source had not cloned the new tag
-  yet, and its `status.artifact` still described the old revision while reporting `Ready=True`.
-  The controller believed it, the layer cache served the old tarball from disk without a network
-  call, and the new tag was published pointing at old content. The immutable-tag guard could not
-  catch it — a tag's *first* publish has nothing to conflict with — and could only refuse to
-  correct it afterwards, which is how it was found.
-
-  A Flux source's `status` is now only believed when it describes the source's current spec:
-  `metadata.generation` must equal `status.observedGeneration`, and `Ready` must not be `False`.
-  Otherwise the composition waits with `Reconciling`/`DependencyNotReady` instead of building.
-  Flux source kinds are also watched now, so a source catching up rebuilds within seconds rather
-  than at the next `spec.interval` — tolerating a cluster with no Flux installed, where the kinds
-  simply are not watched. This does **not** cover a source tracking a branch or a semver range,
-  which produces a new revision with no generation bump at all; see ADR 0026 for the
-  `sourceRef.revision` follow-up that would.
-- **`DockerBuild`: three things that were shipped wrong.** Found by analysing the merged alpha
-  rather than the branch it came from.
-
-  The chart's `buildkitImage` and `dockerfileFrontend` were pinned to **all-zero placeholder
-  digests**. The guard checks for `@sha256:` — form, not substance — so the chart installed
-  happily and every build then failed to pull. Both now carry real digests.
-
-  **`spec.timeout` was never read.** A documented field with a 30m default that did nothing, so a
-  hung build ran until something else killed it. It becomes the Job's `activeDeadlineSeconds`, so
-  Kubernetes enforces it and marks the Job `DeadlineExceeded` — a controller-side timer would have
-  had to survive a leader change to mean anything.
-
-  **Build pods carried an API token.** `spec.serviceAccountName` defaulted to empty, so pods ran as
-  the namespace's `default` account with its token mounted, while the chart created a purpose-built
-  empty account that nothing could reference and `NOTES.txt` printed a line claiming builds used it.
-  The account could never have worked: a ServiceAccount is namespaced and builds run in their own
-  object's namespace. The guarantee was never "a special account", it was "no credentials in the
-  build pod" — so the controller now sets `automountServiceAccountToken: false` on every build pod
-  that does not name an account, which works in every namespace and needs no chart coordination.
-  Naming an account is opting the token back in, for a build that genuinely needs an identity.
-
-- **A suspended `DockerBuild` said nothing**, so it looked stalled. It now reports `Ready=False`
-  with reason `Suspended`, matching `ImageComposition`.
-- **No Events were emitted** despite the RBAC granting them. Build failures and invalid specs now
-  raise Warnings — a build's detail lives in pod logs that vanish with the pod, so the Event is
-  often the only durable trace.
-- **`spec.resources` reached only the build container**, leaving the context fetch as the one
-  unbounded container in the pod — the wrong one to leave unbounded, since it downloads somebody
-  else's tarball.
-
-### Changed
-- The `DockerBuild` reconcile loop has tests: coverage of `internal/buildcontroller` goes from
-  **23.6% to 82.9%**. The whole state machine was previously unexercised — only the pure Job
-  rendering was covered — which is how the three defects above shipped. The new suite drives the
-  loop over a fake client: job creation, adoption on repeat reconciles, the input-hash
-  short-circuit, success recording the artifact, failure not stalling, suspend, a missing source
-  being pending rather than terminal, and an unpinned `FROM` being refused before any Job exists.
-- ADR 0025 corrected: it said `BuildRecord.inputHash` lets a controller that lost `status.artifact`
-  re-verify rather than rebuild. The field is recorded but the read path is not implemented, and
-  the record now says so.
-
 ### Added
 - **`--insecure-registry`** on the builder: registry hosts to push to over plain HTTP,
   comma-separated. Opt-in **per host** rather than a global switch -- an internal or air-gapped
@@ -191,7 +132,38 @@ may change between minor versions.
   See [ADR 0023](docs/adr/0023-more-archive-formats.md). RPM is still not included
   ([#9](https://github.com/lhns/kube-oci-composer/issues/9)); Alpine `.apk` still needs nothing.
 
+- **An e2e test that answers ADR 0025's first spike question.** The alpha shipped without measuring
+  whether `SOURCE_DATE_EPOCH=0` plus `rewrite-timestamp=true` actually gives byte-identical output
+  across two runs of the same context, and that measurement is the difference between two readings
+  of `status.inputHash`: whether it identifies the OUTPUT, or only the INPUTS.
+
+  If rebuilds reproduce, the immutable-tag guard can never fire on an unchanged spec. If they do
+  not, ADR 0025's concession stands -- losing status or the store means a rebuild can produce a
+  digest that permanently conflicts with an already-published tag under the default
+  `immutable: true`.
+
+  **The measurement passed:** two independent builds of the same context, caches disabled, produce
+  the same digest. Narrowly, though -- it shows the machinery does not inject nondeterminism, not
+  that an arbitrary Dockerfile reproduces. A `RUN` that installs packages, resolves DNS or reads the
+  clock can still differ, so the immutable-tag guard stays load-bearing.
+
+  The test builds the same context under two names rather than deleting and recreating one object,
+  because a deterministic Job name means a recreated object can *adopt* the first build's finished
+  Job and read its digest back without building anything -- passing while proving nothing. The
+  cache is disabled on both for the same reason: a cache hit would make the digests match by reuse
+  rather than by reproducibility.
+
 ### Changed
+- The `DockerBuild` reconcile loop has tests: coverage of `internal/buildcontroller` goes from
+  **23.6% to 82.9%**. The whole state machine was previously unexercised — only the pure Job
+  rendering was covered — which is how the three defects above shipped. The new suite drives the
+  loop over a fake client: job creation, adoption on repeat reconciles, the input-hash
+  short-circuit, success recording the artifact, failure not stalling, suspend, a missing source
+  being pending rather than terminal, and an unpinned `FROM` being refused before any Job exists.
+- ADR 0025 corrected: it said `BuildRecord.inputHash` lets a controller that lost `status.artifact`
+  re-verify rather than rebuild. The field is recorded but the read path is not implemented, and
+  the record now says so.
+
 - **`DockerBuild` has an e2e.** The first thing that runs the builder end to end, and it exists
   because two pieces could not be verified any other way: the built digest comes back through the
   pod's termination message, which needs a real kubelet to populate, and the `FROM` check reads a
@@ -202,7 +174,7 @@ may change between minor versions.
   nodes at all. The ADR lists "it does not" as grounds to abandon, so the failure is loud rather
   than skipped.
 
-  Three cases: a build produces an image and the recorded digest resolves **in the registry** (not
+  Four cases: a build produces an image and the recorded digest resolves **in the registry** (not
   merely in status); an unchanged reconcile does not rebuild, with the input hash, the digest and
   the Job count all holding still; and an unpinned `FROM` is refused with **no Job created**.
 
@@ -228,29 +200,6 @@ may change between minor versions.
   re-verify rather than rebuild. The field is recorded but the read path is not implemented, and
   the record now says so.
 
-### Added
-- **An e2e test that answers ADR 0025's first spike question.** The alpha shipped without measuring
-  whether `SOURCE_DATE_EPOCH=0` plus `rewrite-timestamp=true` actually gives byte-identical output
-  across two runs of the same context, and that measurement is the difference between two readings
-  of `status.inputHash`: whether it identifies the OUTPUT, or only the INPUTS.
-
-  If rebuilds reproduce, the immutable-tag guard can never fire on an unchanged spec. If they do
-  not, ADR 0025's concession stands -- losing status or the store means a rebuild can produce a
-  digest that permanently conflicts with an already-published tag under the default
-  `immutable: true`.
-
-  **The measurement passed:** two independent builds of the same context, caches disabled, produce
-  the same digest. Narrowly, though -- it shows the machinery does not inject nondeterminism, not
-  that an arbitrary Dockerfile reproduces. A `RUN` that installs packages, resolves DNS or reads the
-  clock can still differ, so the immutable-tag guard stays load-bearing.
-
-  The test builds the same context under two names rather than deleting and recreating one object,
-  because a deterministic Job name means a recreated object can *adopt* the first build's finished
-  Job and read its digest back without building anything -- passing while proving nothing. The
-  cache is disabled on both for the same reason: a cache hit would make the digests match by reuse
-  rather than by reproducibility.
-
-### Changed
 - **Build pods permit privilege escalation and add two capabilities.** Measured, not chosen: the
   first end-to-end run against a real cluster showed rootless BuildKit could not start under the
   previous posture, and [ADR 0027](docs/adr/0027-what-rootless-buildkit-actually-needs.md) records
@@ -276,6 +225,70 @@ may change between minor versions.
   remains the destination rather than the current state.
 
 ### Fixed
+- **`DockerBuild` history duplicated entries a rebuild reproduced.** It rotated `status.history`
+  with its own copy of the logic, missing the composer's rule that a rebuild reproducing an earlier
+  digest MOVES that entry to the front rather than adding a second one. Now that rebuilds are known
+  to reproduce ([ADR 0027](docs/adr/0027-what-rootless-buildkit-actually-needs.md)) that was no
+  longer theoretical: a reverted change, or any input-hash move that leaves the output identical,
+  burned two retention slots on one artifact and evicted a genuinely distinct older build. Both
+  kinds now share one rotation.
+- **`flux reconcile` timed out instead of reporting a failure.** `status.lastHandledReconcileAt` and
+  `status.observedGeneration` describe a reconcile pass, not its outcome, and Flux writes them that
+  way -- the composer set both only on success. So a failing object never echoed the request the CLI
+  was waiting for, and a stale `observedGeneration` reads to kstatus as "still working" rather than
+  "failed". Both are worst exactly when someone is debugging. They are now set on every status
+  write. `DockerBuild` never implemented the annotation at all despite declaring the field and
+  [ADR 0009](docs/adr/0009-flux-conventions-without-dependency.md) committing to it; it does now.
+- **The builder no longer requests `pods/log`.** Nothing read pod logs -- the digest comes back
+  through the termination message and a failure's detail from container status -- so the grant was
+  permission held for nothing.
+- **A composition could publish a new tag holding the PREVIOUS revision's content**, permanently.
+  A generator bumped a `GitRepository`'s `ref.tag` and rotated the composition's spec-hash publish
+  tag in one apply; the composition reconciled instantly, the source had not cloned the new tag
+  yet, and its `status.artifact` still described the old revision while reporting `Ready=True`.
+  The controller believed it, the layer cache served the old tarball from disk without a network
+  call, and the new tag was published pointing at old content. The immutable-tag guard could not
+  catch it — a tag's *first* publish has nothing to conflict with — and could only refuse to
+  correct it afterwards, which is how it was found.
+
+  A Flux source's `status` is now only believed when it describes the source's current spec:
+  `metadata.generation` must equal `status.observedGeneration`, and `Ready` must not be `False`.
+  Otherwise the composition waits with `Reconciling`/`DependencyNotReady` instead of building.
+  Flux source kinds are also watched now, so a source catching up rebuilds within seconds rather
+  than at the next `spec.interval` — tolerating a cluster with no Flux installed, where the kinds
+  simply are not watched. This does **not** cover a source tracking a branch or a semver range,
+  which produces a new revision with no generation bump at all; see ADR 0026 for the
+  `sourceRef.revision` follow-up that would.
+- **`DockerBuild`: three things that were shipped wrong.** Found by analysing the merged alpha
+  rather than the branch it came from.
+
+  The chart's `buildkitImage` and `dockerfileFrontend` were pinned to **all-zero placeholder
+  digests**. The guard checks for `@sha256:` — form, not substance — so the chart installed
+  happily and every build then failed to pull. Both now carry real digests.
+
+  **`spec.timeout` was never read.** A documented field with a 30m default that did nothing, so a
+  hung build ran until something else killed it. It becomes the Job's `activeDeadlineSeconds`, so
+  Kubernetes enforces it and marks the Job `DeadlineExceeded` — a controller-side timer would have
+  had to survive a leader change to mean anything.
+
+  **Build pods carried an API token.** `spec.serviceAccountName` defaulted to empty, so pods ran as
+  the namespace's `default` account with its token mounted, while the chart created a purpose-built
+  empty account that nothing could reference and `NOTES.txt` printed a line claiming builds used it.
+  The account could never have worked: a ServiceAccount is namespaced and builds run in their own
+  object's namespace. The guarantee was never "a special account", it was "no credentials in the
+  build pod" — so the controller now sets `automountServiceAccountToken: false` on every build pod
+  that does not name an account, which works in every namespace and needs no chart coordination.
+  Naming an account is opting the token back in, for a build that genuinely needs an identity.
+
+- **A suspended `DockerBuild` said nothing**, so it looked stalled. It now reports `Ready=False`
+  with reason `Suspended`, matching `ImageComposition`.
+- **No Events were emitted** despite the RBAC granting them. Build failures and invalid specs now
+  raise Warnings — a build's detail lives in pod logs that vanish with the pod, so the Event is
+  often the only durable trace.
+- **`spec.resources` reached only the build container**, leaving the context fetch as the one
+  unbounded container in the pod — the wrong one to leave unbounded, since it downloads somebody
+  else's tarball.
+
 - **`DockerBuild`: every build failed to find its own Dockerfile.** The two halves of the context
   contract disagreed, and each half was individually right.
 
@@ -311,8 +324,8 @@ may change between minor versions.
   `kubectl logs` line that shows the rest.
 - **The e2e harness could not report its own failures.** `make e2e-test` ran `go test -timeout 15m`
   while the in-test deadline was also 15 minutes, so the test binary panicked on the global timeout
-  at the same instant and the diagnostic dump never ran. The in-test deadline is now 12 minutes
-  against a 40-minute binary timeout, so the harness always outlives the assertion it is reporting on.
+  at the same instant and the diagnostic dump never ran. The in-test deadline is now strictly
+  shorter than the binary's, so the harness always outlives the assertion it is reporting on.
 - **`DockerBuild`: three things that were shipped wrong.** Found by analysing the merged alpha
   rather than the branch it came from.
 

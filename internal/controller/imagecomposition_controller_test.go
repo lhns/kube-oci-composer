@@ -26,6 +26,7 @@ import (
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 	"github.com/lhns/kube-oci-composer/internal/oci"
+	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 	"github.com/lhns/kube-oci-composer/internal/serve"
 	"github.com/lhns/kube-oci-composer/internal/store"
 )
@@ -133,7 +134,7 @@ func build(t *testing.T, r *ImageCompositionReconciler, obj *ociv1alpha1.ImageCo
 	}
 	obj.Status.Artifact = res.Artifact
 	obj.Status.InputHash = res.InputHash
-	obj.Status.History = recordHistory(obj.Status.History, res.Record, r.historyLimit(obj))
+	obj.Status.History = recon.RecordHistory(obj.Status.History, res.Record, r.historyLimit(obj))
 	return res.Artifact
 }
 
@@ -206,7 +207,7 @@ func TestDigestMismatchIsTerminalAndPublishesNothing(t *testing.T) {
 		t.Fatal("expected an error for a mismatched digest")
 	}
 
-	var te *terminalError
+	var te *recon.TerminalError
 	if !errors.As(err, &te) {
 		t.Fatalf("digest mismatch must be terminal, got %T: %v", err, err)
 	}
@@ -438,12 +439,12 @@ func TestServingModeWithoutServerIsPending(t *testing.T) {
 	// Pending, not terminal: giving the operator an endpoint means restarting it with different
 	// flags, which changes nothing about any ImageComposition. Stalling would leave every
 	// composition in the cluster wedged after the fix landed.
-	var te *terminalError
+	var te *recon.TerminalError
 	if errors.As(err, &te) {
 		t.Fatal("operator misconfiguration must not stall the object")
 	}
-	var pe *pendingError
+	var pe *recon.PendingError
 	if !errors.As(err, &pe) {
-		t.Fatalf("expected a pendingError, got %T: %v", err, err)
+		t.Fatalf("expected a recon.PendingError, got %T: %v", err, err)
 	}
 }

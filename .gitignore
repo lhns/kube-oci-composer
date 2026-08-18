@@ -21,5 +21,5 @@ dist/
 # envtest assets
 testbin/
 
-# Agent worktrees are local scratch checkouts, never part of the tree.
+# Scratch checkouts created by Claude Code worktrees, never part of the tree.
 .claude/worktrees/

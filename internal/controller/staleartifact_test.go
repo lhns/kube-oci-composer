@@ -12,6 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
+	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 )
 
 // The incident these tests exist for, plainly:
@@ -114,13 +115,13 @@ func TestStaleSourceIsPendingNotTerminal(t *testing.T) {
 	if err == nil {
 		t.Fatal("resolved a source whose status.artifact predates its own spec")
 	}
-	var te *terminalError
+	var te *recon.TerminalError
 	if asTerminalErr(err, &te) {
 		t.Fatal("a source that has not caught up must not be terminal")
 	}
-	var pe *pendingError
+	var pe *recon.PendingError
 	if !errors.As(err, &pe) {
-		t.Fatalf("expected a pendingError, got %T: %v", err, err)
+		t.Fatalf("expected a recon.PendingError, got %T: %v", err, err)
 	}
 }
 

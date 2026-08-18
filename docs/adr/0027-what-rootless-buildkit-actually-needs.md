@@ -55,7 +55,7 @@ Build containers run with `allowPrivilegeEscalation: true`, all capabilities dro
 `privileged: false`, seccomp and AppArmor unconfined, no host namespaces, no device access, no host
 mounts. The controller's own posture is untouched — distroless, non-root, read-only root filesystem.
 
-Six configurations were measured on the e2e cluster (Kubernetes 1.36.1, containerd 2.3.1, kernel
+Seven configurations were measured on the e2e cluster (Kubernetes 1.36.1, containerd 2.3.1, kernel
 6.17) rather than argued about. Two worked:
 
 | configuration | result |

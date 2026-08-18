@@ -46,14 +46,15 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	return s
 }
 
-// contextTarball is a build context holding one Dockerfile, as source-controller publishes one.
-func contextTarball(t *testing.T, dockerfile string) []byte {
+// contextTarball is a build context holding one Dockerfile. prefix is the wrapper directory
+// source-controller adds; empty puts the file at the archive root.
+func contextTarball(t *testing.T, prefix, dockerfile string) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(zw)
 	if err := tw.WriteHeader(&tar.Header{
-		Name: "src-abc123/Dockerfile", Mode: 0o644,
+		Name: prefix + "Dockerfile", Mode: 0o644,
 		Size: int64(len(dockerfile)), Typeflag: tar.TypeReg,
 	}); err != nil {
 		t.Fatalf("writing header: %v", err)
@@ -70,9 +71,8 @@ func contextTarball(t *testing.T, dockerfile string) []byte {
 	return buf.Bytes()
 }
 
-func contextServer(t *testing.T, dockerfile string) *httptest.Server {
+func contextServer(t *testing.T, body []byte) *httptest.Server {
 	t.Helper()
-	body := contextTarball(t, dockerfile)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write(body)
 	}))
@@ -98,7 +98,7 @@ func gitRepository(namespace, name, url, digest string) *unstructured.Unstructur
 // harness wires a reconciler over a fake client, with a server standing in for the context.
 func harness(t *testing.T, dockerfile string, objs ...client.Object) *DockerBuildReconciler {
 	t.Helper()
-	srv := contextServer(t, dockerfile)
+	srv := contextServer(t, contextTarball(t, "src-abc123/", dockerfile))
 	all := append([]client.Object{gitRepository("team-a", "src", srv.URL, "sha256:ctx")}, objs...)
 
 	c := fake.NewClientBuilder().
@@ -452,5 +452,32 @@ func failJob(t *testing.T, r *DockerBuildReconciler, obj *ociv1alpha1.DockerBuil
 	}}
 	if err := r.Status().Update(context.Background(), &job); err != nil {
 		t.Fatalf("updating job status: %v", err)
+	}
+}
+
+// TestReconcileRequestIsEchoed — `flux reconcile` decides whether its request landed by watching
+// for status.lastHandledReconcileAt to match, so a kind that never echoes makes the CLI hang.
+// Echoed on failures too, or the hang is worst exactly when someone is debugging.
+func TestReconcileRequestIsEchoed(t *testing.T) {
+	const requested = "2026-01-01T00:00:00Z"
+	obj := buildOf(t, func(o *ociv1alpha1.DockerBuild) {
+		o.Annotations = map[string]string{ociv1alpha1.ReconcileRequestAnnotation: requested}
+	})
+	r := harness(t, pinnedFrom, obj)
+
+	if _, err := reconcileOnce(t, r, obj); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if got := reload(t, r, obj).Status.LastHandledReconcileAt; got != requested {
+		t.Errorf("lastHandledReconcileAt = %q, want %q", got, requested)
+	}
+
+	// And again once the build has failed, which is when a stuck CLI would hurt most.
+	failJob(t, r, obj, "the RUN exited 1")
+	if _, err := reconcileOnce(t, r, obj); err != nil {
+		t.Fatalf("reconcile after failure: %v", err)
+	}
+	if got := reload(t, r, obj).Status.LastHandledReconcileAt; got != requested {
+		t.Errorf("after a failed build lastHandledReconcileAt = %q, want %q", got, requested)
 	}
 }

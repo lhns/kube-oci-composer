@@ -24,6 +24,7 @@ import (
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 	"github.com/lhns/kube-oci-composer/internal/oci"
+	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 )
 
 // tarball builds a gzipped tar and serves it, returning the URL and digest — standing in for what
@@ -208,13 +209,13 @@ func TestMissingConfigMapIsPending(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for a missing non-optional ConfigMap")
 	}
-	var te *terminalError
+	var te *recon.TerminalError
 	if asTerminalErr(err, &te) {
 		t.Fatal("a missing ConfigMap must not be terminal; creating it bumps no generation here")
 	}
-	var pe *pendingError
+	var pe *recon.PendingError
 	if !errors.As(err, &pe) {
-		t.Fatalf("expected a pendingError, got %T: %v", err, err)
+		t.Fatalf("expected a recon.PendingError, got %T: %v", err, err)
 	}
 }
 
@@ -332,13 +333,13 @@ func TestMissingSourceIsPendingNotTerminal(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for a source that does not exist")
 	}
-	var te *terminalError
+	var te *recon.TerminalError
 	if asTerminalErr(err, &te) {
 		t.Fatal("a source that does not exist YET must not be terminal; creating it bumps no generation here")
 	}
-	var pe *pendingError
+	var pe *recon.PendingError
 	if !errors.As(err, &pe) {
-		t.Fatalf("expected a pendingError, got %T: %v", err, err)
+		t.Fatalf("expected a recon.PendingError, got %T: %v", err, err)
 	}
 }
 
@@ -363,7 +364,7 @@ func TestSourceWithoutAnArtifactIsTransient(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for a source with no artifact")
 	}
-	var te *terminalError
+	var te *recon.TerminalError
 	if asTerminalErr(err, &te) {
 		t.Fatal("a source that has not published yet must be transient, not Stalled")
 	}
@@ -407,4 +408,4 @@ func TestLayerOrderIsPreservedAcrossSourceKinds(t *testing.T) {
 }
 
 // asTerminalErr is errors.As, named so the intent reads at each call site.
-func asTerminalErr(err error, target **terminalError) bool { return errors.As(err, target) }
+func asTerminalErr(err error, target **recon.TerminalError) bool { return errors.As(err, target) }

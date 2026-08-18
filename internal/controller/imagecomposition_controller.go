@@ -31,48 +31,9 @@ import (
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 	"github.com/lhns/kube-oci-composer/internal/cache"
 	"github.com/lhns/kube-oci-composer/internal/oci"
+	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 	"github.com/lhns/kube-oci-composer/internal/serve"
 )
-
-// ReconcileRequestAnnotation matches Flux's, so `flux reconcile` and `kubectl annotate` both
-// trigger a reconciliation the way users of the ecosystem expect.
-const ReconcileRequestAnnotation = "reconcile.fluxcd.io/requestedAt"
-
-// terminalError marks a failure that retrying cannot fix. It maps to Stalled rather than a
-// backoff loop: a wrong digest or an invalid spec needs a human, and hammering the API server
-// about it only hides the problem.
-//
-// The bar is narrow, and deliberately so: editing THIS object's spec must be what fixes it.
-// That is what makes stalling safe, because the generation change is the wake-up. If the fix
-// lives in another object, use pending instead.
-type terminalError struct{ err error }
-
-func (t *terminalError) Error() string { return t.err.Error() }
-func (t *terminalError) Unwrap() error { return t.err }
-
-func terminal(format string, a ...any) error {
-	return &terminalError{err: fmt.Errorf(format, a...)}
-}
-
-// pendingError marks a dependency that is absent or unusable: a Flux source, a Secret, a
-// non-optional ConfigMap, a serving endpoint the operator was never configured with.
-//
-// Neither terminal nor an ordinary transient failure. Not terminal, because each of these is
-// fixed by changing a DIFFERENT object, which does not bump this object's generation — stalling
-// would wait for an event that never arrives. Not an ordinary failure either, because "the
-// GitRepository applied one second after me does not exist yet" is a normal step in converging
-// a commit, not something to log as an error, raise a Warning about, and back off exponentially
-// over.
-//
-// So it reports Reconciling with ReasonDependencyNotReady and retries on a short fixed interval.
-type pendingError struct{ err error }
-
-func (p *pendingError) Error() string { return p.err.Error() }
-func (p *pendingError) Unwrap() error { return p.err }
-
-func pending(format string, a ...any) error {
-	return &pendingError{err: fmt.Errorf(format, a...)}
-}
 
 // pendingRetryInterval is how often a composition waiting on a dependency re-checks. Short
 // enough that a same-commit apply converges without anyone noticing; long enough that a
@@ -171,19 +132,16 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// being reconciled, and says so.
 	if obj.Spec.Suspend {
 		return ctrl.Result{}, r.patchStatus(ctx, &obj, func(o *ociv1alpha1.ImageComposition) {
-			setCondition(o, ociv1alpha1.ReadyCondition, metav1.ConditionFalse,
+			recon.SetCondition(o, ociv1alpha1.ReadyCondition, metav1.ConditionFalse,
 				ociv1alpha1.ReasonSuspended, "Reconciliation is suspended")
-			removeCondition(o, ociv1alpha1.ReconcilingCondition)
-			removeCondition(o, ociv1alpha1.StalledCondition)
+			recon.RemoveCondition(o, ociv1alpha1.ReconcilingCondition)
+			recon.RemoveCondition(o, ociv1alpha1.StalledCondition)
 		})
 	}
 
 	// The CRD defaults this, so it is normally set. The fallback covers an object created before
 	// the default existed, and a deliberate zero.
-	interval := time.Hour
-	if obj.Spec.Interval != nil && obj.Spec.Interval.Duration > 0 {
-		interval = obj.Spec.Interval.Duration
-	}
+	interval := recon.Interval(obj.Spec.Interval)
 
 	result, err := r.reconcileArtifact(ctx, &obj)
 	if err != nil {
@@ -191,41 +149,41 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		// converging a commit, so it gets a quiet fixed-interval retry rather than a Warning
 		// event, an error log and exponential backoff. Crucially it never sets Stalled — the
 		// object that would fix it is a different one, and changing it raises no event here.
-		var pe *pendingError
+		var pe *recon.PendingError
 		if errors.As(err, &pe) {
 			logger.Info("waiting on a dependency; will retry", "reason", err.Error(),
 				"retryIn", pendingRetryInterval)
 			return ctrl.Result{RequeueAfter: pendingRetryInterval},
 				r.patchStatus(ctx, &obj, func(o *ociv1alpha1.ImageComposition) {
-					setCondition(o, ociv1alpha1.ReconcilingCondition, metav1.ConditionTrue,
+					recon.SetCondition(o, ociv1alpha1.ReconcilingCondition, metav1.ConditionTrue,
 						ociv1alpha1.ReasonDependencyNotReady, err.Error())
-					setCondition(o, ociv1alpha1.ReadyCondition, metav1.ConditionFalse,
+					recon.SetCondition(o, ociv1alpha1.ReadyCondition, metav1.ConditionFalse,
 						ociv1alpha1.ReasonDependencyNotReady, err.Error())
-					removeCondition(o, ociv1alpha1.StalledCondition)
+					recon.RemoveCondition(o, ociv1alpha1.StalledCondition)
 				})
 		}
 
-		var te *terminalError
+		var te *recon.TerminalError
 		if errors.As(err, &te) {
 			logger.Error(err, "terminal error; not retrying until the spec changes")
 			r.event(&obj, corev1.EventTypeWarning, reasonFor(err), err.Error())
 			// No requeue: Stalled means a human must act. The generation change that fixes it
 			// wakes the controller anyway.
 			return ctrl.Result{}, r.patchStatus(ctx, &obj, func(o *ociv1alpha1.ImageComposition) {
-				setCondition(o, ociv1alpha1.StalledCondition, metav1.ConditionTrue, reasonFor(err), err.Error())
-				setCondition(o, ociv1alpha1.ReadyCondition, metav1.ConditionFalse, reasonFor(err), err.Error())
-				removeCondition(o, ociv1alpha1.ReconcilingCondition)
+				recon.SetCondition(o, ociv1alpha1.StalledCondition, metav1.ConditionTrue, reasonFor(err), err.Error())
+				recon.SetCondition(o, ociv1alpha1.ReadyCondition, metav1.ConditionFalse, reasonFor(err), err.Error())
+				recon.RemoveCondition(o, ociv1alpha1.ReconcilingCondition)
 			})
 		}
 
 		logger.Error(err, "transient failure; will retry")
 		r.event(&obj, corev1.EventTypeWarning, ociv1alpha1.ReasonFetchFailed, err.Error())
 		if perr := r.patchStatus(ctx, &obj, func(o *ociv1alpha1.ImageComposition) {
-			setCondition(o, ociv1alpha1.ReconcilingCondition, metav1.ConditionTrue,
+			recon.SetCondition(o, ociv1alpha1.ReconcilingCondition, metav1.ConditionTrue,
 				ociv1alpha1.ReasonProgressing, err.Error())
-			setCondition(o, ociv1alpha1.ReadyCondition, metav1.ConditionFalse,
+			recon.SetCondition(o, ociv1alpha1.ReadyCondition, metav1.ConditionFalse,
 				ociv1alpha1.ReasonProgressing, err.Error())
-			removeCondition(o, ociv1alpha1.StalledCondition)
+			recon.RemoveCondition(o, ociv1alpha1.StalledCondition)
 		}); perr != nil {
 			return ctrl.Result{}, perr
 		}
@@ -236,13 +194,11 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	if err := r.patchStatus(ctx, &obj, func(o *ociv1alpha1.ImageComposition) {
 		o.Status.Artifact = result.Artifact
 		o.Status.InputHash = result.InputHash
-		o.Status.History = recordHistory(o.Status.History, result.Record, r.historyLimit(o))
-		o.Status.ObservedGeneration = o.Generation
-		o.Status.LastHandledReconcileAt = o.Annotations[ReconcileRequestAnnotation]
-		setCondition(o, ociv1alpha1.ReadyCondition, metav1.ConditionTrue,
+		o.Status.History = recon.RecordHistory(o.Status.History, result.Record, r.historyLimit(o))
+		recon.SetCondition(o, ociv1alpha1.ReadyCondition, metav1.ConditionTrue,
 			ociv1alpha1.ReasonSucceeded, fmt.Sprintf("Published %s", result.Artifact.Ref))
-		removeCondition(o, ociv1alpha1.ReconcilingCondition)
-		removeCondition(o, ociv1alpha1.StalledCondition)
+		recon.RemoveCondition(o, ociv1alpha1.ReconcilingCondition)
+		recon.RemoveCondition(o, ociv1alpha1.StalledCondition)
 	}); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -356,7 +312,7 @@ func (r *ImageCompositionReconciler) resolvePublished(
 	for _, tag := range tgt.tags {
 		ref, err := name.ParseReference(fmt.Sprintf("%s:%s", tgt.writeRepo, tag), refOpts...)
 		if err != nil {
-			return publishedState{}, terminal("invalid reference %s:%s: %v", tgt.writeRepo, tag, err)
+			return publishedState{}, recon.Terminal("invalid reference %s:%s: %v", tgt.writeRepo, tag, err)
 		}
 		// A HEAD failure is not an error: the usual cause is that the tag does not exist yet.
 		if desc, err := remote.Head(ref, opts...); err == nil {
@@ -504,7 +460,7 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 				// Terminal on purpose: the declared digest and the served bytes disagree, and
 				// no amount of retrying reconciles that. Retrying would also mean repeatedly
 				// pulling content we have already decided not to trust.
-				return buildResult{}, terminal("layer %q: %s", inputs[i].Name, dm.Error())
+				return buildResult{}, recon.Terminal("layer %q: %s", inputs[i].Name, dm.Error())
 			}
 			return buildResult{}, fmt.Errorf("layer %q: %w", inputs[i].Name, err)
 		}
@@ -517,7 +473,7 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 		if errors.As(err, &unsupported) {
 			// Terminal on purpose: retrying cannot add a code path to this binary. See
 			// oci.ErrUnsupportedUnpack for how a spec gets past the CRD's enum in the first place.
-			return buildResult{}, terminal("%s", unsupported.Error())
+			return buildResult{}, recon.Terminal("%s", unsupported.Error())
 		}
 		return buildResult{}, err
 	}
@@ -544,7 +500,7 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 		// it. Checked before anything is written, so a partial rename cannot happen.
 		for _, tag := range tgt.tags {
 			if cur, ok := published.tags[tag]; ok && cur != digest.String() {
-				return buildResult{}, terminal(
+				return buildResult{}, recon.Terminal(
 					"tag %s already resolves to %s but this spec produces %s; change the tag, or set immutable: false if it is meant to move",
 					tag, cur, digest)
 			}
@@ -556,7 +512,7 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	// content addressable rather than a tag pointing at nothing.
 	digestRef, err := name.ParseReference(fmt.Sprintf("%s@%s", tgt.writeRepo, digest), refOpts...)
 	if err != nil {
-		return buildResult{}, terminal("invalid reference %s@%s: %v", tgt.writeRepo, digest, err)
+		return buildResult{}, recon.Terminal("invalid reference %s@%s: %v", tgt.writeRepo, digest, err)
 	}
 	if err := art.write(digestRef, opts...); err != nil {
 		return buildResult{}, fmt.Errorf("publishing %s: %w", digestRef, err)
@@ -565,7 +521,7 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	for _, tag := range tgt.tags {
 		ref, err := name.ParseReference(fmt.Sprintf("%s:%s", tgt.writeRepo, tag), refOpts...)
 		if err != nil {
-			return buildResult{}, terminal("invalid reference %s:%s: %v", tgt.writeRepo, tag, err)
+			return buildResult{}, recon.Terminal("invalid reference %s:%s: %v", tgt.writeRepo, tag, err)
 		}
 		if err := art.write(ref, opts...); err != nil {
 			return buildResult{}, fmt.Errorf("publishing %s: %w", ref, err)
@@ -611,37 +567,6 @@ func (r *ImageCompositionReconciler) historyLimit(obj *ociv1alpha1.ImageComposit
 		return r.HistoryLimit
 	}
 	return ociv1alpha1.DefaultHistoryLimit
-}
-
-// recordHistory prepends a new build and trims to the limit.
-//
-// A nil record means the reconcile converged without publishing, and must not touch history.
-// Appending on every interval would fill the retention list with duplicates of the current build
-// and evict genuinely distinct older ones within hours, quietly breaking the guarantee retention
-// exists to provide.
-func recordHistory(history []ociv1alpha1.BuildRecord, record *ociv1alpha1.BuildRecord, limit int) []ociv1alpha1.BuildRecord {
-	if record == nil {
-		return history
-	}
-	if limit < 1 {
-		limit = 1
-	}
-
-	// A rebuild that reproduces an earlier digest moves that entry to the front rather than
-	// duplicating it. Reverting a change and reverting it back is ordinary, and each round trip
-	// would otherwise burn two retention slots on one distinct artifact.
-	out := make([]ociv1alpha1.BuildRecord, 0, limit)
-	out = append(out, *record)
-	for _, h := range history {
-		if h.Digest == record.Digest {
-			continue
-		}
-		if len(out) == limit {
-			break
-		}
-		out = append(out, h)
-	}
-	return out
 }
 
 // resolveLayer returns a local path holding the layer's content.
@@ -690,7 +615,7 @@ func tagFromRef(ref string) (string, error) {
 		return "", nil
 	}
 	if strings.ContainsRune(ref, '@') {
-		return "", terminal("publish.ref %q carries a digest; it must name a tag, since the digest is an output rather than an input", ref)
+		return "", recon.Terminal("publish.ref %q carries a digest; it must name a tag, since the digest is an output rather than an input", ref)
 	}
 	// A colon before the last slash is a port, not a tag: "registry:5000/repo".
 	colon := strings.LastIndexByte(ref, ':')
@@ -699,7 +624,7 @@ func tagFromRef(ref string) (string, error) {
 	}
 	tag := ref[colon+1:]
 	if !tagPattern.MatchString(tag) {
-		return "", terminal("publish.ref %q has an invalid tag %q", ref, tag)
+		return "", recon.Terminal("publish.ref %q has an invalid tag %q", ref, tag)
 	}
 	return tag, nil
 }
@@ -741,7 +666,7 @@ func (r *ImageCompositionReconciler) target(obj *ociv1alpha1.ImageComposition) (
 		// Operator-level misconfiguration, not a spec error. Giving the operator a serving
 		// endpoint means restarting it with different flags — which changes nothing about this
 		// object, so stalling would leave every composition wedged after the fix. It waits.
-		return target{}, pending("spec.push is unset and no serving endpoint is configured yet")
+		return target{}, recon.Pending("spec.push is unset and no serving endpoint is configured yet")
 	}
 	tags, err := effectiveTags(obj.Spec.Publish.GetTags(), obj.Spec.Publish.GetRef())
 	if err != nil {
@@ -804,14 +729,14 @@ func (r *ImageCompositionReconciler) remoteOptions(ctx context.Context, obj *oci
 	if err := r.Get(ctx, key, &secret); err != nil {
 		if apierrors.IsNotFound(err) {
 			// See pullOptions: waits rather than stalls, for the same reason.
-			return nil, pending("secret %s not found yet", key)
+			return nil, recon.Pending("secret %s not found yet", key)
 		}
 		return nil, fmt.Errorf("reading secret %s: %w", key, err)
 	}
 
 	kc, err := keychainFromSecret(&secret)
 	if err != nil {
-		return nil, pending("secret %s is unusable: %v", key, err)
+		return nil, recon.Pending("secret %s is unusable: %v", key, err)
 	}
 	return append(opts, remote.WithAuthFromKeychain(kc)), nil
 }
@@ -875,28 +800,14 @@ func (r *ImageCompositionReconciler) patchStatus(ctx context.Context, obj *ociv1
 	}
 	patch := client.MergeFrom(latest.DeepCopy())
 	mutate(&latest)
+	// Set on EVERY status write, not just the successful one, because both describe the pass rather
+	// than its outcome — which is how Flux writes them. Echoing only on success makes `flux
+	// reconcile` wait for a token that never arrives and report a timeout instead of the failure the
+	// object is already describing; and a stale observedGeneration reads to kstatus as "still
+	// working" rather than "failed".
+	latest.Status.ObservedGeneration = latest.Generation
+	latest.Status.LastHandledReconcileAt = latest.Annotations[ociv1alpha1.ReconcileRequestAnnotation]
 	return r.Status().Patch(ctx, &latest, patch)
-}
-
-func setCondition(o *ociv1alpha1.ImageComposition, condType string, status metav1.ConditionStatus, reason, msg string) {
-	meta.SetStatusCondition(&o.Status.Conditions, metav1.Condition{
-		Type:               condType,
-		Status:             status,
-		Reason:             reason,
-		Message:            truncate(msg, 32768),
-		ObservedGeneration: o.Generation,
-	})
-}
-
-func removeCondition(o *ociv1alpha1.ImageComposition, condType string) {
-	meta.RemoveStatusCondition(&o.Status.Conditions, condType)
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n]
 }
 
 func removeString(in []string, s string) []string {

@@ -9,6 +9,7 @@ import (
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 	"github.com/lhns/kube-oci-composer/internal/oci"
+	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 	"github.com/lhns/kube-oci-composer/internal/source"
 )
 
@@ -25,12 +26,12 @@ func declaredPlatforms(obj *ociv1alpha1.ImageComposition) ([]oci.Platform, error
 		if err != nil {
 			// The CRD pattern already rejects this shape, so reaching here means a spec that
 			// somehow passed validation. Terminal either way: retrying cannot reparse it.
-			return nil, terminal("spec.platforms: %v", err)
+			return nil, recon.Terminal("spec.platforms: %v", err)
 		}
 		if _, dup := seen[p.String()]; dup {
 			// Two identical children would produce an index with an ambiguous descriptor, and a
 			// puller picking between them gets to choose which of two identical things it means.
-			return nil, terminal("spec.platforms: %s is listed twice", p)
+			return nil, recon.Terminal("spec.platforms: %s is listed twice", p)
 		}
 		seen[p.String()] = struct{}{}
 		out = append(out, p)
@@ -54,7 +55,7 @@ func (r *ImageCompositionReconciler) assemble(ctx context.Context, obj *ociv1alp
 		}
 		idx, err := oci.AssembleIndex(bases, inputs, cfg, declared, workDir)
 		if err != nil {
-			return builtArtifact{}, terminal("assembling: %v", err)
+			return builtArtifact{}, recon.Terminal("assembling: %v", err)
 		}
 		return indexArtifact(idx), nil
 	}
@@ -69,14 +70,14 @@ func (r *ImageCompositionReconciler) assemble(ctx context.Context, obj *ociv1alp
 	if len(declared) == 1 {
 		img, err := oci.AssembleAs(base, inputs, cfg, declared[0], workDir)
 		if err != nil {
-			return builtArtifact{}, terminal("assembling: %v", err)
+			return builtArtifact{}, recon.Terminal("assembling: %v", err)
 		}
 		return singleArtifact(img), nil
 	}
 
 	img, err := oci.Assemble(base, inputs, cfg, workDir)
 	if err != nil {
-		return builtArtifact{}, terminal("assembling: %v", err)
+		return builtArtifact{}, recon.Terminal("assembling: %v", err)
 	}
 	return singleArtifact(img), nil
 }
@@ -110,7 +111,7 @@ func (r *ImageCompositionReconciler) resolveBases(ctx context.Context, obj *ociv
 		if errors.As(err, &badRef) {
 			// A platform the base does not offer needs a spec change — either a different base or
 			// a shorter platform list — so retrying would repeat the same failure hourly.
-			return nil, terminal("base image: %v", err)
+			return nil, recon.Terminal("base image: %v", err)
 		}
 		return nil, fmt.Errorf("base image: %w", err)
 	}
@@ -119,7 +120,7 @@ func (r *ImageCompositionReconciler) resolveBases(ctx context.Context, obj *ociv
 	for _, p := range platforms {
 		img, ok := byKey[p.String()]
 		if !ok {
-			return nil, terminal("base image: no %s manifest", p)
+			return nil, recon.Terminal("base image: no %s manifest", p)
 		}
 		out[p] = img
 	}

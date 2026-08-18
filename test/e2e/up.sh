@@ -85,7 +85,7 @@ kubectl create namespace "$BUILD_NS" --dry-run=client -o yaml | kubectl apply -f
 
 # The context tarball, built here so the Dockerfile lives in the repository as a readable file
 # rather than as a base64 blob in a manifest. The wrapper directory mimics what source-controller
-# produces, which is what FetchDockerfile has to strip.
+# produces, which both FetchDockerfile and the build pod's fetch script have to strip.
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/src-e2e"

@@ -28,11 +28,16 @@ const (
 	buildRegistry  = "e2e-registry." + buildNamespace + ".svc.cluster.local:5000"
 )
 
-// buildEventually is eventually() with the BUILDER's logs on timeout, plus the build pod's, since a
-// failure is usually inside the build rather than in the controller.
+// buildTimeout is longer than the composer's `timeout` because a cold build pulls a base image and
+// pushes a result. It must stay well under `go test -timeout` (see the Makefile) or the binary
+// panics first and the dump below never runs.
+const buildTimeout = 5 * time.Minute
+
+// buildEventually polls like eventually(), but dumps the BUILDER's logs and the build pod's on
+// timeout, since a failure is usually inside the build rather than in the controller.
 func buildEventually(t *testing.T, what string, fn func() error) {
 	t.Helper()
-	deadline := time.Now().Add(12 * time.Minute)
+	deadline := time.Now().Add(buildTimeout)
 	var last error
 	for time.Now().Before(deadline) {
 		if last = fn(); last == nil {
@@ -51,17 +56,20 @@ func buildEventually(t *testing.T, what string, fn func() error) {
 
 // dockerBuildStatus is the part of status this test reads.
 type dockerBuildStatus struct {
-	InputHash string `json:"inputHash"`
-	Artifact  *struct {
+	InputHash              string `json:"inputHash"`
+	LastHandledReconcileAt string `json:"lastHandledReconcileAt"`
+	Artifact               *struct {
 		Digest string `json:"digest"`
 		Ref    string `json:"ref"`
 	} `json:"artifact"`
-	Conditions []struct {
-		Type    string `json:"type"`
-		Status  string `json:"status"`
-		Reason  string `json:"reason"`
-		Message string `json:"message"`
-	} `json:"conditions"`
+	Conditions []statusCondition `json:"conditions"`
+}
+
+type statusCondition struct {
+	Type    string `json:"type"`
+	Status  string `json:"status"`
+	Reason  string `json:"reason"`
+	Message string `json:"message"`
 }
 
 func buildStatus(t *testing.T, name string) dockerBuildStatus {
@@ -78,13 +86,16 @@ func buildStatus(t *testing.T, name string) dockerBuildStatus {
 	return st
 }
 
-func conditionIs(st dockerBuildStatus, condType, status string) bool {
-	for _, c := range st.Conditions {
-		if c.Type == condType {
-			return c.Status == status
+// readyCondition returns the Ready condition, or nil. It returns the condition rather than a bool
+// because every caller wants the reason and message when it is not what they expected — which is
+// why a bool-returning version kept being bypassed.
+func readyCondition(st dockerBuildStatus) *statusCondition {
+	for i := range st.Conditions {
+		if st.Conditions[i].Type == "Ready" {
+			return &st.Conditions[i]
 		}
 	}
-	return false
+	return nil
 }
 
 // applyBuild creates a DockerBuild. extraSpec is appended verbatim under spec, already indented
@@ -124,15 +135,13 @@ func TestDockerBuildProducesAnImage(t *testing.T) {
 
 	buildEventually(t, "the build to become Ready", func() error {
 		st := buildStatus(t, "e2e-build")
-		if !conditionIs(st, "Ready", "True") {
-			for _, c := range st.Conditions {
-				if c.Type == "Ready" {
-					return fmt.Errorf("Ready=%s (%s): %s", c.Status, c.Reason, c.Message)
-				}
-			}
+		ready := readyCondition(st)
+		switch {
+		case ready == nil:
 			return fmt.Errorf("no Ready condition yet")
-		}
-		if st.Artifact == nil || st.Artifact.Digest == "" {
+		case ready.Status != "True":
+			return fmt.Errorf("Ready=%s (%s): %s", ready.Status, ready.Reason, ready.Message)
+		case st.Artifact == nil || st.Artifact.Digest == "":
 			return fmt.Errorf("Ready but no artifact digest recorded")
 		}
 		return nil
@@ -209,13 +218,20 @@ func TestDockerBuildIsIdempotent(t *testing.T) {
 	})
 
 	first := buildStatus(t, "e2e-idempotent")
-	jobsBefore := mustKubectl(t, "-n", buildNamespace, "get", "jobs",
-		"-o", "jsonpath={.items[*].metadata.name}")
+	jobsBefore := jobsFor(t, "e2e-idempotent")
 
-	// Force a reconcile without changing an input.
+	// Force a reconcile without changing an input, then wait for the controller to say it handled
+	// THAT request rather than sleeping and hoping. A fixed sleep would pass even if the
+	// short-circuit had regressed and a rebuild simply had not started yet.
+	requested := fmt.Sprintf("%d", time.Now().Unix())
 	mustKubectl(t, "-n", buildNamespace, "annotate", "dockerbuild", "e2e-idempotent",
-		fmt.Sprintf("reconcile.fluxcd.io/requestedAt=%d", time.Now().Unix()), "--overwrite")
-	time.Sleep(20 * time.Second)
+		"reconcile.fluxcd.io/requestedAt="+requested, "--overwrite")
+	buildEventually(t, "the reconcile request to be handled", func() error {
+		if got := buildStatus(t, "e2e-idempotent").LastHandledReconcileAt; got != requested {
+			return fmt.Errorf("lastHandledReconcileAt = %q, want %q", got, requested)
+		}
+		return nil
+	})
 
 	second := buildStatus(t, "e2e-idempotent")
 	if second.InputHash != first.InputHash {
@@ -226,12 +242,24 @@ func TestDockerBuildIsIdempotent(t *testing.T) {
 		t.Errorf("digest changed on an unchanged spec: %+v then %+v", first.Artifact, second.Artifact)
 	}
 
-	jobsAfter := mustKubectl(t, "-n", buildNamespace, "get", "jobs",
-		"-o", "jsonpath={.items[*].metadata.name}")
-	if len(strings.Fields(jobsAfter)) > len(strings.Fields(jobsBefore)) {
-		t.Errorf("an unchanged reconcile started another build:\nbefore: %s\nafter:  %s",
+	if jobsAfter := jobsFor(t, "e2e-idempotent"); len(jobsAfter) > len(jobsBefore) {
+		t.Errorf("an unchanged reconcile started another build:\nbefore: %v\nafter:  %v",
 			jobsBefore, jobsAfter)
 	}
+}
+
+// jobsFor returns the Jobs belonging to one build. Scoped by name because the Job name is derived
+// from the object's, so a namespace-wide count would be coupled to what neighbouring tests leave.
+func jobsFor(t *testing.T, name string) []string {
+	t.Helper()
+	all := mustKubectl(t, "-n", buildNamespace, "get", "jobs", "-o", "jsonpath={.items[*].metadata.name}")
+	var mine []string
+	for _, j := range strings.Fields(all) {
+		if strings.HasPrefix(j, name+"-") {
+			mine = append(mine, j)
+		}
+	}
+	return mine
 }
 
 // TestDockerBuildRefusesAnUnpinnedFrom — the one rule the controller enforces on a Dockerfile's
@@ -242,11 +270,9 @@ func TestDockerBuildRefusesAnUnpinnedFrom(t *testing.T) {
 
 	buildEventually(t, "the unpinned FROM to be refused", func() error {
 		st := buildStatus(t, "e2e-unpinned")
-		for _, c := range st.Conditions {
-			if c.Type == "Ready" && c.Status == "False" &&
-				strings.Contains(c.Message, "pinned by digest") {
-				return nil
-			}
+		if c := readyCondition(st); c != nil && c.Status == "False" &&
+			strings.Contains(c.Message, "pinned by digest") {
+			return nil
 		}
 		if st.Artifact != nil {
 			return fmt.Errorf("an unpinned FROM produced an artifact: %+v", st.Artifact)
@@ -262,25 +288,14 @@ func TestDockerBuildRefusesAnUnpinnedFrom(t *testing.T) {
 	}
 }
 
-// TestRebuildingTheSameContextReproducesTheDigest answers ADR 0025's first spike question, which
-// the alpha shipped without answering: does SOURCE_DATE_EPOCH=0 plus rewrite-timestamp=true give
-// byte-identical output across two independent runs of the same context on the same builder?
+// TestRebuildingTheSameContextReproducesTheDigest answers ADR 0025's first spike question: does
+// SOURCE_DATE_EPOCH=0 plus rewrite-timestamp=true give byte-identical output across two runs of the
+// same context? See 0025 and 0027 for what each answer costs.
 //
-// It matters because it is the difference between two readings of status.inputHash. If rebuilds
-// reproduce, the hash identifies the OUTPUT and the immutable-tag guard can never fire on an
-// unchanged spec. If they do not, the hash only identifies the INPUTS, and 0025's concession
-// stands: losing status or the store means a rebuild can produce a digest that conflicts with the
-// tag already published, permanently, under the default immutable: true.
-//
-// Two objects rather than deleting and recreating one: a deterministic Job name means a recreated
-// object can ADOPT the finished Job of the first build and read its digest back without building
-// anything, which would make this pass while proving nothing. Separate names guarantee separate
-// Jobs.
-//
-// The cache is disabled on both for the same reason, and the API says so in as many words: a cache
-// hit would make the second digest match by reuse rather than by reproducibility. So this really
-// does re-execute the fixture's RUN, which is the side of ADR 0016's line where determinism was
-// never promised.
+// Two things keep it from passing vacuously. Two objects rather than one deleted and recreated,
+// because the Job name is derived from the inputs and a recreated object would ADOPT the first
+// build's finished Job and read its digest back without building. And the cache disabled on both,
+// or the second digest would match by reuse rather than by reproducibility.
 func TestRebuildingTheSameContextReproducesTheDigest(t *testing.T) {
 	const noCache = "  cache:\n    mode: Disabled"
 

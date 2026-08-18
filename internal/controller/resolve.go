@@ -10,6 +10,7 @@ import (
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 	"github.com/lhns/kube-oci-composer/internal/oci"
+	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 	"github.com/lhns/kube-oci-composer/internal/source"
 )
 
@@ -80,7 +81,7 @@ func (r *ImageCompositionReconciler) resolveInputs(ctx context.Context, obj *oci
 					// Creating the ConfigMap fixes this, not editing the layer, so it waits
 					// rather than stalls. ConfigMaps are watched, so the wait is usually over
 					// the moment one appears.
-					return nil, nil, pending("layer %q: %s", l.Name, err)
+					return nil, nil, recon.Pending("layer %q: %s", l.Name, err)
 				}
 				return nil, nil, fmt.Errorf("layer %q: %w", l.Name, err)
 			}
@@ -113,14 +114,14 @@ func (r *ImageCompositionReconciler) resolveInputs(ctx context.Context, obj *oci
 		default:
 			// CEL already enforces the union, so this only fires for a verb the CRD permits and
 			// this build does not implement.
-			return nil, nil, terminal("layer %q: no supported source is set", l.Name)
+			return nil, nil, recon.Terminal("layer %q: no supported source is set", l.Name)
 		}
 
 		inputs = append(inputs, in)
 	}
 
 	if len(inputs) == 0 {
-		return nil, nil, terminal("every layer resolved to nothing; there is no content to compose")
+		return nil, nil, recon.Terminal("every layer resolved to nothing; there is no content to compose")
 	}
 	return inputs, pulls, nil
 }
@@ -139,7 +140,7 @@ func (r *ImageCompositionReconciler) pullImageLayer(ctx context.Context, obj *oc
 		if errors.As(err, &badRef) {
 			// A malformed reference, or an index where a platform-specific manifest is required.
 			// Editing the layer is what fixes it, so retrying would repeat the same failure.
-			return nil, terminal("layer %q: %v", in.Name, err)
+			return nil, recon.Terminal("layer %q: %v", in.Name, err)
 		}
 		return nil, fmt.Errorf("layer %q: %w", in.Name, err)
 	}
@@ -155,7 +156,7 @@ func parseMode(layer, which, value string) (int64, error) {
 	if err != nil {
 		// Terminal: CEL already constrains the pattern, so reaching here means a spec that
 		// somehow passed validation and still cannot be interpreted.
-		return 0, terminal("layer %q: %s mode %q is not octal", layer, which, value)
+		return 0, recon.Terminal("layer %q: %s mode %q is not octal", layer, which, value)
 	}
 	return mode, nil
 }
@@ -182,7 +183,7 @@ func (r *ImageCompositionReconciler) resolveBase(ctx context.Context, obj *ociv1
 		if errors.As(err, &badRef) {
 			// A malformed reference or a multi-architecture index needs a spec change, so
 			// retrying would only repeat the same failure on an interval.
-			return nil, terminal("base image: %v", err)
+			return nil, recon.Terminal("base image: %v", err)
 		}
 		return nil, fmt.Errorf("base image: %w", err)
 	}
@@ -204,7 +205,7 @@ func (r *ImageCompositionReconciler) resolveFluxSource(ctx context.Context, obj 
 			// this object's generation — so stalling would wait forever for an event that
 			// cannot come. Applying a composition and its GitRepository in one commit
 			// routinely lands here for a second.
-			return source.FluxArtifact{}, pending("source %s %s/%s not found yet", ref.Kind, ns, ref.Name)
+			return source.FluxArtifact{}, recon.Pending("source %s %s/%s not found yet", ref.Kind, ns, ref.Name)
 		}
 		var nr *source.ErrNotReady
 		if errors.As(err, &nr) {
@@ -216,7 +217,7 @@ func (r *ImageCompositionReconciler) resolveFluxSource(ctx context.Context, obj 
 			//
 			// Not terminal: source-controller catching up bumps no generation here, and the source
 			// is watched, so the wait normally ends within seconds.
-			return source.FluxArtifact{}, pending("%s", err)
+			return source.FluxArtifact{}, recon.Pending("%s", err)
 		}
 		// Everything else — including "no artifact yet" — is transient. source-controller may
 		// simply not have finished its first reconcile.

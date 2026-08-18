@@ -13,6 +13,7 @@ import (
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 	"github.com/lhns/kube-oci-composer/internal/oci"
+	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 )
 
 // publishBaseImage puts a real image into the test registry and returns its repository and digest,
@@ -295,7 +296,7 @@ func TestMultiArchIndexIsRejected(t *testing.T) {
 	if !strings.Contains(err.Error(), "multi-architecture index") {
 		t.Fatalf("the error does not explain the problem: %v", err)
 	}
-	var te *terminalError
+	var te *recon.TerminalError
 	if !asTerminalErr(err, &te) {
 		t.Fatal("a multi-architecture index needs a spec change, so it must be terminal")
 	}
