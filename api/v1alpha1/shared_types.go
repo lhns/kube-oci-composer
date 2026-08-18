@@ -279,3 +279,12 @@ type ArtifactStatus struct {
 	// +optional
 	LastUpdateTime *metav1.Time `json:"lastUpdateTime,omitempty"`
 }
+
+// Conditions accessors, so the shared reconcile helpers can write conditions on either kind
+// without knowing which it holds. The shape follows Flux's own ObjectWithConditions.
+
+func (o *ImageComposition) GetConditions() []metav1.Condition  { return o.Status.Conditions }
+func (o *ImageComposition) SetConditions(c []metav1.Condition) { o.Status.Conditions = c }
+
+func (o *DockerBuild) GetConditions() []metav1.Condition  { return o.Status.Conditions }
+func (o *DockerBuild) SetConditions(c []metav1.Condition) { o.Status.Conditions = c }

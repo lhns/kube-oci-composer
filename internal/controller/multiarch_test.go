@@ -13,6 +13,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
+	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 )
 
 // platformIndex builds a real multi-architecture index: children whose descriptors AND configs
@@ -193,7 +194,7 @@ func TestUnknownPlatformIsTerminal(t *testing.T) {
 	if !strings.Contains(err.Error(), "s390x") {
 		t.Fatalf("the error does not name the missing platform: %v", err)
 	}
-	var te *terminalError
+	var te *recon.TerminalError
 	if !asTerminalErr(err, &te) {
 		t.Fatalf("a missing platform needs a spec change, so it must be terminal: %v", err)
 	}
@@ -211,7 +212,7 @@ func TestDuplicatePlatformIsTerminal(t *testing.T) {
 	if err == nil {
 		t.Fatal("a duplicated platform was accepted")
 	}
-	var te *terminalError
+	var te *recon.TerminalError
 	if !asTerminalErr(err, &te) {
 		t.Fatalf("a duplicated platform needs a spec change, so it must be terminal: %v", err)
 	}

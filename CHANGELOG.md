@@ -225,6 +225,13 @@ may change between minor versions.
   remains the destination rather than the current state.
 
 ### Fixed
+- **`DockerBuild` history duplicated entries a rebuild reproduced.** It rotated `status.history`
+  with its own copy of the logic, missing the composer's rule that a rebuild reproducing an earlier
+  digest MOVES that entry to the front rather than adding a second one. Now that rebuilds are known
+  to reproduce ([ADR 0027](docs/adr/0027-what-rootless-buildkit-actually-needs.md)) that was no
+  longer theoretical: a reverted change, or any input-hash move that leaves the output identical,
+  burned two retention slots on one artifact and evicted a genuinely distinct older build. Both
+  kinds now share one rotation.
 - **`flux reconcile` timed out instead of reporting a failure.** `status.lastHandledReconcileAt` and
   `status.observedGeneration` describe a reconcile pass, not its outcome, and Flux writes them that
   way -- the composer set both only on success. So a failing object never echoed the request the CLI

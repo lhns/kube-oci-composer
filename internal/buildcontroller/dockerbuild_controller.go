@@ -13,7 +13,6 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -24,6 +23,7 @@ import (
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 	"github.com/lhns/kube-oci-composer/internal/build"
+	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 	"github.com/lhns/kube-oci-composer/internal/source"
 )
 
@@ -72,9 +72,9 @@ func (r *DockerBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// Suspended objects say so, rather than going quiet and looking stalled.
 	if obj.Spec.Suspend {
 		patch := client.MergeFrom(obj.DeepCopy())
-		setCondition(&obj, ociv1alpha1.ReadyCondition, metav1.ConditionFalse,
+		recon.SetCondition(&obj, ociv1alpha1.ReadyCondition, metav1.ConditionFalse,
 			ociv1alpha1.ReasonSuspended, "Reconciliation is suspended")
-		removeCondition(&obj, ociv1alpha1.ReconcilingCondition)
+		recon.RemoveCondition(&obj, ociv1alpha1.ReconcilingCondition)
 		return ctrl.Result{}, r.Status().Patch(ctx, &obj, patch)
 	}
 
@@ -93,12 +93,12 @@ func (r *DockerBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	switch {
 	case err == nil:
 		return result, nil
-	case isTerminal(err):
+	case recon.IsTerminal(err):
 		// Stalled. No requeue: the generation change from editing the spec is the wake-up.
 		logger.Error(err, "stalled")
 		r.event(&obj, corev1.EventTypeWarning, ociv1alpha1.ReasonInvalidSpec, err.Error())
 		return ctrl.Result{}, nil
-	case isPending(err):
+	case recon.IsPending(err):
 		return ctrl.Result{RequeueAfter: pendingRetryInterval}, nil
 	default:
 		// A build failure, or anything else transient. Capped backoff rather than exponential
@@ -124,7 +124,7 @@ func (r *DockerBuildReconciler) reconcile(ctx context.Context, obj *ociv1alpha1.
 	// turning a missing artifact into a permanent immutable-tag conflict. ADR 0025 records that
 	// storage durability stops being optional for this kind.
 	if obj.Status.Artifact != nil && obj.Status.InputHash == inputHash {
-		return ctrl.Result{RequeueAfter: interval(obj)}, nil
+		return ctrl.Result{RequeueAfter: recon.Interval(obj.Spec.Interval)}, nil
 	}
 
 	// Adopt, observe or start.
@@ -146,7 +146,7 @@ func (r *DockerBuildReconciler) resolveInputs(ctx context.Context, obj *ociv1alp
 	spec := obj.Spec
 
 	if spec.Push == nil {
-		return build.Inputs{}, "", terminal("spec.push is required: the built image is produced by a Job in another pod, which cannot write to the controller's loopback-only serving endpoint")
+		return build.Inputs{}, "", recon.Terminal("spec.push is required: the built image is produced by a Job in another pod, which cannot write to the controller's loopback-only serving endpoint")
 	}
 
 	ns := spec.Context.Namespace
@@ -158,7 +158,7 @@ func (r *DockerBuildReconciler) resolveInputs(ctx context.Context, obj *ociv1alp
 		var nf *source.ErrNotFound
 		if errors.As(err, &nf) {
 			// Creating the source fixes this, not editing this object.
-			return build.Inputs{}, "", pending("build context: %s", err)
+			return build.Inputs{}, "", recon.Pending("build context: %s", err)
 		}
 		return build.Inputs{}, "", fmt.Errorf("build context: %w", err)
 	}
@@ -171,7 +171,7 @@ func (r *DockerBuildReconciler) resolveInputs(ctx context.Context, obj *ociv1alp
 		key := types.NamespacedName{Namespace: obj.Namespace, Name: s.SecretRef.Name}
 		if err := r.Get(ctx, key, &secret); err != nil {
 			if apierrors.IsNotFound(err) {
-				return build.Inputs{}, "", pending("build secret %q does not exist yet", s.SecretRef.Name)
+				return build.Inputs{}, "", recon.Pending("build secret %q does not exist yet", s.SecretRef.Name)
 			}
 			return build.Inputs{}, "", fmt.Errorf("reading build secret %q: %w", s.SecretRef.Name, err)
 		}
@@ -268,7 +268,7 @@ func (r *DockerBuildReconciler) observeJob(ctx context.Context, obj *ociv1alpha1
 			return ctrl.Result{}, err
 		}
 		r.recordSuccess(obj, inputHash, digest)
-		return ctrl.Result{RequeueAfter: interval(obj)}, nil
+		return ctrl.Result{RequeueAfter: recon.Interval(obj.Spec.Interval)}, nil
 
 	case jobFailed(job):
 		// The failed Job is KEPT until its backoff has elapsed, and deleted only when the next
@@ -321,7 +321,7 @@ func (r *DockerBuildReconciler) readResultDigest(ctx context.Context, obj *ociv1
 		return "", err
 	}
 	if len(pods.Items) == 0 {
-		return "", pending("the build pod for %s has not been observed yet", job.Name)
+		return "", recon.Pending("the build pod for %s has not been observed yet", job.Name)
 	}
 
 	// The metadata file lives in the pod's emptyDir, which the controller cannot read. The build
@@ -341,7 +341,7 @@ func (r *DockerBuildReconciler) readResultDigest(ctx context.Context, obj *ociv1
 // event records one, if a recorder was wired. Nil in tests that do not care.
 func (r *DockerBuildReconciler) event(obj *ociv1alpha1.DockerBuild, kind, reason, msg string) {
 	if r.Recorder != nil {
-		r.Recorder.Event(obj, kind, reason, truncate(msg, 1024))
+		r.Recorder.Event(obj, kind, reason, recon.Truncate(msg, 1024))
 	}
 }
 
@@ -391,48 +391,43 @@ func (r *DockerBuildReconciler) recordSuccess(obj *ociv1alpha1.DockerBuild, inpu
 
 	// InputHash on the record, unlike the composer's — see BuildRecord.InputHash.
 	record := ociv1alpha1.BuildRecord{Digest: digest, Tags: tags, InputHash: inputHash}
-	history := append([]ociv1alpha1.BuildRecord{record}, obj.Status.History...)
-
 	limit := r.HistoryLimit
 	if limit <= 0 {
 		limit = ociv1alpha1.DefaultHistoryLimit
 	}
-	if len(history) > limit {
-		history = history[:limit]
-	}
-	obj.Status.History = history
+	obj.Status.History = recon.RecordHistory(obj.Status.History, &record, limit)
 }
 
 // applyOutcome sets the conditions for whatever just happened.
 func (r *DockerBuildReconciler) applyOutcome(obj *ociv1alpha1.DockerBuild, err error) {
 	switch {
 	case err == nil:
-		setCondition(obj, ociv1alpha1.ReadyCondition, metav1.ConditionTrue,
+		recon.SetCondition(obj, ociv1alpha1.ReadyCondition, metav1.ConditionTrue,
 			ociv1alpha1.ReasonSucceeded, readyMessage(obj))
-		removeCondition(obj, ociv1alpha1.StalledCondition)
-		removeCondition(obj, ociv1alpha1.ReconcilingCondition)
+		recon.RemoveCondition(obj, ociv1alpha1.StalledCondition)
+		recon.RemoveCondition(obj, ociv1alpha1.ReconcilingCondition)
 
-	case isTerminal(err):
-		setCondition(obj, ociv1alpha1.ReadyCondition, metav1.ConditionFalse,
+	case recon.IsTerminal(err):
+		recon.SetCondition(obj, ociv1alpha1.ReadyCondition, metav1.ConditionFalse,
 			ociv1alpha1.ReasonInvalidSpec, err.Error())
-		setCondition(obj, ociv1alpha1.StalledCondition, metav1.ConditionTrue,
+		recon.SetCondition(obj, ociv1alpha1.StalledCondition, metav1.ConditionTrue,
 			ociv1alpha1.ReasonInvalidSpec, err.Error())
-		removeCondition(obj, ociv1alpha1.ReconcilingCondition)
+		recon.RemoveCondition(obj, ociv1alpha1.ReconcilingCondition)
 
-	case isPending(err):
-		setCondition(obj, ociv1alpha1.ReadyCondition, metav1.ConditionFalse,
+	case recon.IsPending(err):
+		recon.SetCondition(obj, ociv1alpha1.ReadyCondition, metav1.ConditionFalse,
 			ociv1alpha1.ReasonDependencyNotReady, err.Error())
-		setCondition(obj, ociv1alpha1.ReconcilingCondition, metav1.ConditionTrue,
+		recon.SetCondition(obj, ociv1alpha1.ReconcilingCondition, metav1.ConditionTrue,
 			ociv1alpha1.ReasonDependencyNotReady, err.Error())
-		removeCondition(obj, ociv1alpha1.StalledCondition)
+		recon.RemoveCondition(obj, ociv1alpha1.StalledCondition)
 
 	default:
 		// Never Stalled: the fix lives in another object. See errors.go.
-		setCondition(obj, ociv1alpha1.ReadyCondition, metav1.ConditionFalse,
+		recon.SetCondition(obj, ociv1alpha1.ReadyCondition, metav1.ConditionFalse,
 			ociv1alpha1.ReasonBuildFailed, err.Error())
-		setCondition(obj, ociv1alpha1.ReconcilingCondition, metav1.ConditionTrue,
+		recon.SetCondition(obj, ociv1alpha1.ReconcilingCondition, metav1.ConditionTrue,
 			ociv1alpha1.ReasonBuildFailed, err.Error())
-		removeCondition(obj, ociv1alpha1.StalledCondition)
+		recon.RemoveCondition(obj, ociv1alpha1.StalledCondition)
 	}
 }
 
@@ -441,35 +436,6 @@ func readyMessage(obj *ociv1alpha1.DockerBuild) string {
 		return "reconciled"
 	}
 	return "built " + obj.Status.Artifact.Ref
-}
-
-func setCondition(obj *ociv1alpha1.DockerBuild, condType string, status metav1.ConditionStatus, reason, msg string) {
-	meta.SetStatusCondition(&obj.Status.Conditions, metav1.Condition{
-		Type:               condType,
-		Status:             status,
-		Reason:             reason,
-		Message:            truncate(msg, 32768),
-		ObservedGeneration: obj.Generation,
-	})
-}
-
-func removeCondition(obj *ociv1alpha1.DockerBuild, condType string) {
-	meta.RemoveStatusCondition(&obj.Status.Conditions, condType)
-}
-
-// truncate keeps a message inside the API server's per-condition limit.
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n]
-}
-
-func interval(obj *ociv1alpha1.DockerBuild) time.Duration {
-	if obj.Spec.Interval != nil && obj.Spec.Interval.Duration > 0 {
-		return obj.Spec.Interval.Duration
-	}
-	return time.Hour
 }
 
 // httpClient is the client used for the Dockerfile pre-check.
@@ -555,16 +521,6 @@ func jobFailureMessage(job *batchv1.Job) string {
 		}
 	}
 	return "the build job failed"
-}
-
-func isTerminal(err error) bool {
-	var t *terminalError
-	return errors.As(err, &t)
-}
-
-func isPending(err error) bool {
-	var p *pendingError
-	return errors.As(err, &p)
 }
 
 // SetupWithManager wires the controller and its owned Jobs.

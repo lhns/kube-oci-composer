@@ -1,0 +1,135 @@
+// Package reconciler holds the parts of a reconcile loop that both kinds need identically: the
+// error triage that decides Stalled from Reconciling, condition writing, and history rotation.
+//
+// Shared deliberately, and it does not weaken ADR 0004's separation. That ADR separates
+// COMPONENTS — separate binaries, charts and RBAC, and it rejected a feature flag because "a flag
+// set to false is a weaker guarantee than a component that does not exist". A shared library is not
+// a shared controller; api/v1alpha1 is already imported by both.
+//
+// What is NOT shared is which failures qualify as terminal or pending. That is a property of the
+// call sites, and each controller documents its own bar.
+package reconciler
+
+import (
+	"errors"
+	"fmt"
+	"time"
+
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
+)
+
+// Object is what these helpers need of a reconciled object: its generation, and its conditions.
+type Object interface {
+	GetGeneration() int64
+	GetConditions() []metav1.Condition
+	SetConditions([]metav1.Condition)
+}
+
+// TerminalError marks a failure that retrying cannot fix, and maps to Stalled rather than a backoff
+// loop. The bar is narrow: editing THIS object's spec must be what fixes it, because the resulting
+// generation change is the wake-up. A failure fixed by changing anything else raises no event here,
+// so stalling would wait for something that never arrives — use Pending for those.
+type TerminalError struct{ err error }
+
+func (t *TerminalError) Error() string { return t.err.Error() }
+func (t *TerminalError) Unwrap() error { return t.err }
+
+func Terminal(format string, a ...any) error {
+	return &TerminalError{err: fmt.Errorf(format, a...)}
+}
+
+func IsTerminal(err error) bool {
+	var t *TerminalError
+	return errors.As(err, &t)
+}
+
+// PendingError marks a dependency that is absent or not ready yet.
+//
+// Neither terminal nor an ordinary transient failure: it is fixed by changing a DIFFERENT object,
+// which does not bump this generation, and "the GitRepository applied one second after me does not
+// exist yet" is a normal step in converging a commit rather than something to log as an error and
+// back off exponentially over. It reports Reconciling and retries on a short fixed interval.
+type PendingError struct{ err error }
+
+func (p *PendingError) Error() string { return p.err.Error() }
+func (p *PendingError) Unwrap() error { return p.err }
+
+func Pending(format string, a ...any) error {
+	return &PendingError{err: fmt.Errorf(format, a...)}
+}
+
+func IsPending(err error) bool {
+	var p *PendingError
+	return errors.As(err, &p)
+}
+
+// SetCondition writes one condition, stamped with the generation it was observed at.
+func SetCondition(o Object, condType string, status metav1.ConditionStatus, reason, msg string) {
+	conds := o.GetConditions()
+	meta.SetStatusCondition(&conds, metav1.Condition{
+		Type:               condType,
+		Status:             status,
+		Reason:             reason,
+		Message:            Truncate(msg, 32768),
+		ObservedGeneration: o.GetGeneration(),
+	})
+	o.SetConditions(conds)
+}
+
+func RemoveCondition(o Object, condType string) {
+	conds := o.GetConditions()
+	meta.RemoveStatusCondition(&conds, condType)
+	o.SetConditions(conds)
+}
+
+// Truncate keeps a message inside the API server's per-condition limit.
+func Truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
+// Interval is spec.interval, or an hour. The CRD defaults it, so the fallback covers an object
+// created before the default existed and a deliberate zero.
+func Interval(d *metav1.Duration) time.Duration {
+	if d != nil && d.Duration > 0 {
+		return d.Duration
+	}
+	return time.Hour
+}
+
+// RecordHistory prepends a build and trims to the limit.
+//
+// A nil record means the reconcile converged without publishing and must not touch history:
+// appending on every interval would fill the list with duplicates of the current build and evict
+// genuinely distinct older ones within hours.
+//
+// A rebuild that reproduces an earlier digest MOVES that entry to the front rather than duplicating
+// it. Reverting a change and reverting it back is ordinary, and each round trip would otherwise burn
+// two retention slots on one artifact — which matters more now that rebuilds are known to reproduce
+// (ADR 0027).
+func RecordHistory(history []ociv1alpha1.BuildRecord, record *ociv1alpha1.BuildRecord, limit int) []ociv1alpha1.BuildRecord {
+	if record == nil {
+		return history
+	}
+	if limit < 1 {
+		limit = 1
+	}
+
+	out := make([]ociv1alpha1.BuildRecord, 0, limit)
+	out = append(out, *record)
+	for _, h := range history {
+		if h.Digest == record.Digest {
+			continue
+		}
+		if len(out) == limit {
+			break
+		}
+		out = append(out, h)
+	}
+	return out
+}

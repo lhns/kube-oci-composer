@@ -4,39 +4,8 @@
 package buildcontroller
 
 import (
-	"fmt"
 	"time"
 )
-
-// The composer's error triage, re-typed rather than shared. The shapes are identical; what differs
-// is WHICH failures qualify, which is the reason they are not imported — see terminal below.
-
-// terminalError marks a failure that retrying cannot fix.
-//
-// The bar is ADR 0009's and it excludes far more here: editing THIS object's spec must be what
-// fixes it. A failing RUN does not qualify — the Dockerfile lives in a Flux source, whose change
-// raises no generation bump here, so stalling would wait for an event that never arrives. Only
-// spec-level mistakes stall: an unparsable platform, a malformed quantity, an unparsable push
-// target. Build failures take the capped backoff in status.failures instead.
-type terminalError struct{ err error }
-
-func (t *terminalError) Error() string { return t.err.Error() }
-func (t *terminalError) Unwrap() error { return t.err }
-
-func terminal(format string, a ...any) error {
-	return &terminalError{err: fmt.Errorf(format, a...)}
-}
-
-// pendingError marks a dependency that is absent or not ready yet — the Flux source holding the
-// context, a Secret, the builder image.
-type pendingError struct{ err error }
-
-func (p *pendingError) Error() string { return p.err.Error() }
-func (p *pendingError) Unwrap() error { return p.err }
-
-func pending(format string, a ...any) error {
-	return &pendingError{err: fmt.Errorf(format, a...)}
-}
 
 const (
 	// pendingRetryInterval matches the composer's, for the same reason: a same-commit apply
@@ -49,12 +18,9 @@ const (
 	// primary signal.
 	buildPollInterval = 15 * time.Second
 
-	// maxFailureBackoff caps the retry interval after repeated failures.
-	//
-	// A ceiling rather than unbounded exponential backoff, because a build that fails is usually
-	// waiting for a human to push a fix to a Dockerfile — and the retry is what notices the fix,
-	// since a push to the source moves the input hash but a controller backing off for hours would
-	// not act on it promptly.
+	// maxFailureBackoff caps the retry interval. A ceiling rather than unbounded exponential
+	// backoff: a failing build is usually waiting for a human to push a Dockerfile fix, and the
+	// retry is what notices it, so backing off for hours would not act on the fix promptly.
 	maxFailureBackoff = 10 * time.Minute
 )
 

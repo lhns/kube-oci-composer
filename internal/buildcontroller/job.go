@@ -347,14 +347,10 @@ cat %s > /dev/termination-log
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
 					ServiceAccountName: spec.ServiceAccountName,
-					// No API token in the build pod unless the spec asked for an identity.
-					//
-					// This, not a dedicated ServiceAccount, is what "a pod running code from a git
-					// repository carries no credentials" actually requires. A ServiceAccount is
-					// namespaced and builds run in the object's namespace, so a chart-created one
-					// could never have been reachable; suppressing the mount works everywhere and
-					// needs no coordination. Naming an account is opting back in, for the case
-					// where a build genuinely needs an identity.
+					// No API token unless the spec named an identity: a pod running code from a
+					// git repository must not carry the credentials of whatever created it.
+					// Suppressing the mount needs no ServiceAccount to exist, so it works in
+					// whatever namespace a build lands in.
 					AutomountServiceAccountToken: automount(spec.ServiceAccountName),
 					InitContainers:               []corev1.Container{initContainer},
 					Containers:                   []corev1.Container{container},
