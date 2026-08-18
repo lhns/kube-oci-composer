@@ -145,13 +145,51 @@ func TestDockerBuildProducesAnImage(t *testing.T) {
 
 	// The digest must name something the registry actually has. This is what proves the push
 	// happened rather than the controller merely believing it did.
-	manifest := mustKubectl(t, "-n", buildNamespace, "run", "verify-digest",
-		"--rm", "-i", "--restart=Never", "--image=busybox:1.37", "--quiet", "--command", "--",
-		"wget", "-qO-", "--header", "Accept: application/vnd.oci.image.manifest.v1+json",
+	manifest := curlInCluster(t, "verify-digest",
 		fmt.Sprintf("http://%s/v2/e2e/e2e-build/manifests/%s", buildRegistry, st.Artifact.Digest))
 	if !strings.Contains(manifest, "layers") {
-		t.Fatalf("the registry does not serve a manifest at the recorded digest:\n%s", manifest)
+		tags := curlInCluster(t, "verify-tags",
+			fmt.Sprintf("http://%s/v2/e2e/e2e-build/tags/list", buildRegistry))
+		t.Fatalf("the registry does not serve a manifest at the recorded digest %s\n"+
+			"response:\n%s\ntags the registry does have:\n%s", st.Artifact.Digest, manifest, tags)
 	}
+}
+
+// curlInCluster fetches a URL from inside the cluster and returns the body.
+//
+// Deliberately not `kubectl run --rm -i`, which attaches AFTER creating the pod: a container that
+// makes one request and exits finishes before the attach lands, so kubectl returns success with no
+// output and the assertion reads it as an empty response. Creating the pod, waiting for it to
+// finish and then reading its log has no such race.
+//
+// The request asks for every media type containerd would, because BuildKit pushes Docker media
+// types unless told otherwise, and accepting only the OCI ones would fail on a correct manifest.
+func curlInCluster(t *testing.T, name, url string) string {
+	t.Helper()
+
+	const accept = "application/vnd.oci.image.manifest.v1+json," +
+		"application/vnd.oci.image.index.v1+json," +
+		"application/vnd.docker.distribution.manifest.v2+json," +
+		"application/vnd.docker.distribution.manifest.list.v2+json,*/*"
+
+	_, _ = kubectl(t, "-n", buildNamespace, "delete", "pod", name, "--ignore-not-found")
+	mustKubectl(t, "-n", buildNamespace, "run", name,
+		"--restart=Never", "--image=busybox:1.37", "--command", "--",
+		"wget", "-qO-", "--header", "Accept: "+accept, url)
+	t.Cleanup(func() {
+		_, _ = kubectl(t, "-n", buildNamespace, "delete", "pod", name, "--ignore-not-found")
+	})
+
+	// Succeeded or Failed: a non-200 leaves wget's exit code behind and an empty log, and the
+	// caller's assertion reports that better than a timeout here would.
+	for _, cond := range []string{"Succeeded", "Failed"} {
+		if _, err := kubectl(t, "-n", buildNamespace, "wait", "--for=jsonpath={.status.phase}="+cond,
+			"pod/"+name, "--timeout=90s"); err == nil {
+			break
+		}
+	}
+	out, _ := kubectl(t, "-n", buildNamespace, "logs", name)
+	return out
 }
 
 // TestDockerBuildIsIdempotent — the input hash is the whole cost model. A second reconcile of an
