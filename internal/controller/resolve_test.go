@@ -62,6 +62,12 @@ func tarball(t *testing.T, files map[string]string) (url, digest string) {
 }
 
 // gitRepository builds an unstructured Flux GitRepository with a published artifact.
+//
+// It is deliberately a source that has CAUGHT UP: generation equals observedGeneration and Ready is
+// True, which is what source-controller publishes once it has fetched the revision its spec names.
+// Anything less is a source whose status.artifact describes an older spec, and the resolver refuses
+// to build from one (ADR 0026) — so a helper that omitted these fields would quietly be testing the
+// unhappy path everywhere.
 func gitRepository(name, namespace, url, digest, revision string) *unstructured.Unstructured {
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(schema.GroupVersionKind{
@@ -69,9 +75,14 @@ func gitRepository(name, namespace, url, digest, revision string) *unstructured.
 	})
 	obj.SetName(name)
 	obj.SetNamespace(namespace)
+	obj.SetGeneration(1)
 	_ = unstructured.SetNestedMap(obj.Object, map[string]any{
 		"url": url, "digest": digest, "revision": revision,
 	}, "status", "artifact")
+	_ = unstructured.SetNestedField(obj.Object, int64(1), "status", "observedGeneration")
+	_ = unstructured.SetNestedSlice(obj.Object, []any{
+		map[string]any{"type": "Ready", "status": "True", "reason": "Succeeded"},
+	}, "status", "conditions")
 	return obj
 }
 

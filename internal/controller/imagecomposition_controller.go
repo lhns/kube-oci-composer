@@ -17,7 +17,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -941,16 +943,102 @@ func (r *ImageCompositionReconciler) compositionsForConfigMap(ctx context.Contex
 	return out
 }
 
+// compositionsForSource maps a changed Flux source of one kind to the compositions referencing it.
+//
+// Cluster-wide, unlike the ConfigMap mapping: sourceRef carries an explicit namespace and is
+// routinely pointed at a shared source in flux-system, so listing only the source's own namespace
+// would miss exactly the arrangement most clusters use. The namespace comparison below is what
+// keeps a same-named source elsewhere from triggering unrelated rebuilds.
+//
+// The kind is captured rather than read off the incoming object, because an unstructured object
+// arriving from a cache has no guarantee of carrying its GVK, and silently matching every kind
+// would make a Bucket edit rebuild a GitRepository-backed composition.
+func (r *ImageCompositionReconciler) compositionsForSource(kind string) handler.MapFunc {
+	return func(ctx context.Context, obj client.Object) []reconcile.Request {
+		var list ociv1alpha1.ImageCompositionList
+		if err := r.List(ctx, &list); err != nil {
+			log.FromContext(ctx).Error(err, "could not map a source change to compositions", "kind", kind)
+			return nil
+		}
+
+		var out []reconcile.Request
+		for i := range list.Items {
+			item := &list.Items[i]
+			for _, l := range item.Spec.Layers {
+				ref := l.SourceRef
+				if ref == nil || ref.Kind != kind || ref.Name != obj.GetName() {
+					continue
+				}
+				ns := ref.Namespace
+				if ns == "" {
+					ns = item.Namespace
+				}
+				if ns != obj.GetNamespace() {
+					continue
+				}
+				out = append(out, reconcile.Request{
+					NamespacedName: types.NamespacedName{Namespace: item.Namespace, Name: item.Name},
+				})
+				break
+			}
+		}
+		return out
+	}
+}
+
+// fluxSourceKinds are the kinds a sourceRef layer can name — the CRD's enum, and the same list the
+// RBAC above grants read access to.
+var fluxSourceKinds = []string{"GitRepository", "OCIRepository", "Bucket"}
+
+// fluxSourceGVK is the group the source kinds live in.
+const fluxSourceGroup = "source.toolkit.fluxcd.io"
+
+// watchableSourceKinds returns the source kinds this cluster actually serves, paired with the
+// version the API server prefers for each.
+//
+// Flux is NOT a dependency (ADR 0009) and a cluster without it must work unchanged, so a kind the
+// RESTMapper cannot resolve is skipped rather than treated as a startup failure. The cost of that
+// is stated plainly: the mapper is consulted once, at startup, so installing Flux into a running
+// cluster leaves this controller without source watches until it is restarted. It still reconciles
+// those compositions on spec.interval, which is the pre-existing behaviour, so the failure mode is
+// slowness rather than incorrectness — and correctness is now the resolver's job (ADR 0026), not
+// the watch's.
+func watchableSourceKinds(mapper meta.RESTMapper) []schema.GroupVersionKind {
+	var out []schema.GroupVersionKind
+	for _, kind := range fluxSourceKinds {
+		mapping, err := mapper.RESTMapping(schema.GroupKind{Group: fluxSourceGroup, Kind: kind})
+		if err != nil {
+			continue
+		}
+		out = append(out, mapping.GroupVersionKind)
+	}
+	return out
+}
+
 // SetupWithManager wires the controller up.
 func (r *ImageCompositionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.Fetcher == nil {
 		r.Fetcher = oci.NewFetcher()
 	}
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&ociv1alpha1.ImageComposition{}).
 		// Without this a ConfigMap edit would only be noticed at the next interval, which
 		// defaults to an hour. Users reasonably expect editing the source of a layer to rebuild
 		// it, and a silent hour of staleness reads as the controller being broken.
-		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.compositionsForConfigMap)).
-		Complete(r)
+		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.compositionsForConfigMap))
+
+	// And the same argument for Flux sources, with an extra edge. A generator that bumps a
+	// GitRepository's ref.tag and the composition's publish tag in ONE apply reconciles this object
+	// immediately and the source not at all — so without a watch, the window during which the
+	// composition is waiting for its source to catch up lasted until the next interval. The
+	// resolver refuses to build in that window; this is what ends it in seconds.
+	logger := mgr.GetLogger().WithName("imagecomposition")
+	for _, gvk := range watchableSourceKinds(mgr.GetRESTMapper()) {
+		src := &unstructured.Unstructured{}
+		src.SetGroupVersionKind(gvk)
+		b = b.Watches(src, handler.EnqueueRequestsFromMapFunc(r.compositionsForSource(gvk.Kind)))
+		logger.Info("watching Flux source kind", "gvk", gvk.String())
+	}
+
+	return b.Complete(r)
 }
