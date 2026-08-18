@@ -6,6 +6,26 @@ may change between minor versions.
 ## [Unreleased]
 
 ### Added
+- **ADR 0025: Dockerfile builds, as a second kind.** A decision record, no code yet. `DockerBuild`
+  will be a separate kind with its own binary, chart and RBAC, and a deliberately weaker promise —
+  idempotence is a hash of its inputs recorded in status rather than `output = f(spec)`, and it is
+  not bit-reproducible.
+
+  Not a `build:` layer verb, and that part was settled in advance: ADR 0004 wrote down why *"before
+  it looks tempting"*. A non-deterministic entry does not weaken the guarantee for that entry, it
+  deletes it for the whole object — and `kind: ImageComposition` would stop telling a reader which
+  guarantee they have.
+
+  The record is candid that the case is **not proven**. ADR 0016's load-bearing reason for dropping
+  a builder — that in-cluster building earns its keep only when the cluster produces the things
+  being built — is unmet by the motivating needs, and the alpha exists to produce that evidence
+  rather than to claim it already exists. The consequences are stated rather than softened: storage
+  stops being disposable, provenance degrades from exact to scanned (foreclosing one of ADR 0020's
+  open options), spec-hash tags degrade to first-writer-wins, and `internal/oci` contributes
+  nothing to it. Abandonment criteria are listed.
+
+  The README's "it will **never** run a Dockerfile" is rewritten accordingly: `ImageComposition`
+  never will, and that is unchanged.
 - **An `image` layer verb, and `base.ref`.** An image can now be a layer source, and a base can be
   named as one conventional `repo:tag@sha256:…` string.
 
