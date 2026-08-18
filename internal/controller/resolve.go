@@ -26,9 +26,16 @@ import (
 // See ADR 0002.
 //
 // Path is deliberately left empty for remote sources: nothing is fetched until the short-circuit
-// has decided a build is actually needed.
-func (r *ImageCompositionReconciler) resolveInputs(ctx context.Context, obj *ociv1alpha1.ImageComposition, workDir string) ([]oci.LayerInput, error) {
+// has decided a build is actually needed — including an image layer's manifest, whose digest is
+// declared in the spec and so needs nothing from a registry to hash.
+
+// imagePulls maps an input's index to the spec entry describing how to pull it, for the entries
+// whose content is another image. The fetch phase uses it; nothing else does.
+type imagePulls map[int]*ociv1alpha1.ImageSource
+
+func (r *ImageCompositionReconciler) resolveInputs(ctx context.Context, obj *ociv1alpha1.ImageComposition, workDir string) ([]oci.LayerInput, imagePulls, error) {
 	inputs := make([]oci.LayerInput, 0, len(obj.Spec.Layers))
+	pulls := imagePulls{}
 
 	for _, l := range obj.Spec.Layers {
 		in := oci.LayerInput{Name: l.Name, Target: l.To}
@@ -39,10 +46,10 @@ func (r *ImageCompositionReconciler) resolveInputs(ctx context.Context, obj *oci
 		if l.Mode != nil {
 			var err error
 			if in.FileMode, err = parseMode(l.Name, "file", l.Mode.File); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			if in.DirMode, err = parseMode(l.Name, "dir", l.Mode.Dir); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 
@@ -56,7 +63,7 @@ func (r *ImageCompositionReconciler) resolveInputs(ctx context.Context, obj *oci
 		case l.SourceRef != nil:
 			art, err := r.resolveFluxSource(ctx, obj, l.SourceRef)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			in.URL = art.URL
 			in.Digest = art.Digest
@@ -73,9 +80,9 @@ func (r *ImageCompositionReconciler) resolveInputs(ctx context.Context, obj *oci
 					// Creating the ConfigMap fixes this, not editing the layer, so it waits
 					// rather than stalls. ConfigMaps are watched, so the wait is usually over
 					// the moment one appears.
-					return nil, pending("layer %q: %s", l.Name, err)
+					return nil, nil, pending("layer %q: %s", l.Name, err)
 				}
-				return nil, fmt.Errorf("layer %q: %w", l.Name, err)
+				return nil, nil, fmt.Errorf("layer %q: %w", l.Name, err)
 			}
 			if resolved.Empty {
 				// An optional ConfigMap that is absent, or one with no entries. Contributing an
@@ -88,29 +95,17 @@ func (r *ImageCompositionReconciler) resolveInputs(ctx context.Context, obj *oci
 			in.Unpack = oci.UnpackTarGz
 
 		case l.Image != nil:
+			// Not pulled here. The digest is declared in the spec, so the hash needs nothing from
+			// the registry — and pulling would make every reconcile of an image layer cost a
+			// manifest round trip even when the short-circuit is about to decide there is nothing
+			// to do. The pull is recorded for the fetch phase, exactly as Path is left empty for
+			// every other remote source.
 			repository, digest := l.Image.Repository()
-
-			opts, err := r.pullOptions(ctx, obj.Namespace, l.Image.SecretRef)
-			if err != nil {
-				return nil, fmt.Errorf("layer %q: %w", l.Name, err)
-			}
-			img, err := source.PullImage(ctx, repository, digest, opts...)
-			if err != nil {
-				var badRef *source.ErrBadReference
-				if errors.As(err, &badRef) {
-					// A malformed reference, or an index where a platform-specific manifest is
-					// required. Editing the layer is what fixes it, so retrying is pointless.
-					return nil, terminal("layer %q: %v", l.Name, err)
-				}
-				return nil, fmt.Errorf("layer %q: %w", l.Name, err)
-			}
-
-			// The manifest digest is the content address, so it is what reaches InputHash. The
-			// pulled image is carried alongside exactly as a fetched file's Path is.
+			in.URL = repository
 			in.Digest = digest
-			in.Image = img
 			in.Unpack = oci.UnpackImage
 			in.Subpath = l.Image.Subpath
+			pulls[len(inputs)] = l.Image
 
 		case len(l.Remove) > 0:
 			in.Remove = l.Remove
@@ -118,16 +113,37 @@ func (r *ImageCompositionReconciler) resolveInputs(ctx context.Context, obj *oci
 		default:
 			// CEL already enforces the union, so this only fires for a verb the CRD permits and
 			// this build does not implement.
-			return nil, terminal("layer %q: no supported source is set", l.Name)
+			return nil, nil, terminal("layer %q: no supported source is set", l.Name)
 		}
 
 		inputs = append(inputs, in)
 	}
 
 	if len(inputs) == 0 {
-		return nil, terminal("every layer resolved to nothing; there is no content to compose")
+		return nil, nil, terminal("every layer resolved to nothing; there is no content to compose")
 	}
-	return inputs, nil
+	return inputs, pulls, nil
+}
+
+// pullImageLayer fetches the manifest for an image layer, once a build is known to be needed.
+func (r *ImageCompositionReconciler) pullImageLayer(ctx context.Context, obj *ociv1alpha1.ImageComposition,
+	in oci.LayerInput, src *ociv1alpha1.ImageSource) (v1.Image, error) {
+
+	opts, err := r.pullOptions(ctx, obj.Namespace, src.SecretRef)
+	if err != nil {
+		return nil, fmt.Errorf("layer %q: %w", in.Name, err)
+	}
+	img, err := source.PullImage(ctx, in.URL, in.Digest, opts...)
+	if err != nil {
+		var badRef *source.ErrBadReference
+		if errors.As(err, &badRef) {
+			// A malformed reference, or an index where a platform-specific manifest is required.
+			// Editing the layer is what fixes it, so retrying would repeat the same failure.
+			return nil, terminal("layer %q: %v", in.Name, err)
+		}
+		return nil, fmt.Errorf("layer %q: %w", in.Name, err)
+	}
+	return img, nil
 }
 
 // parseMode converts an octal string from the spec into a mode.

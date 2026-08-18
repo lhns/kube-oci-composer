@@ -1,0 +1,83 @@
+{{/*
+A nicer error than the controller's, which refuses to start on the same condition. Both images'
+digests are part of every build's input hash, so a floating tag would let an upgraded builder
+change output without changing the hash. See ADR 0025.
+*/}}
+{{- range $field, $image := dict "buildkitImage" .Values.builder.buildkitImage "dockerfileFrontend" .Values.builder.dockerfileFrontend }}
+{{- if not (contains "@sha256:" $image) }}
+{{- fail (printf "builder.%s must be pinned by digest (repo:tag@sha256:...). See ADR 0025." $field) }}
+{{- end }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kube-oci-builder.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kube-oci-builder.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "kube-oci-builder.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kube-oci-builder.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "kube-oci-builder.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: manager
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --metrics-bind-address={{ .Values.metrics.bindAddress }}
+            - --health-probe-bind-address={{ .Values.healthProbe.bindAddress }}
+            - --leader-elect={{ .Values.builder.leaderElect }}
+            - --buildkit-image={{ .Values.builder.buildkitImage }}
+            - --dockerfile-frontend={{ .Values.builder.dockerfileFrontend }}
+            - --source-date-epoch={{ .Values.builder.sourceDateEpoch }}
+            - --keep-builds={{ .Values.builder.keepBuilds }}
+          ports:
+            - name: metrics
+              containerPort: {{ include "kube-oci-builder.port" .Values.metrics.bindAddress }}
+            - name: probes
+              containerPort: {{ include "kube-oci-builder.port" .Values.healthProbe.bindAddress }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: probes
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: probes
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -34,6 +34,10 @@ const (
 	ReasonPublishFailed     = "PublishFailed"
 	ReasonSuspended         = "Suspended"
 
+	// ReasonBuildFailed covers a DockerBuild whose Job did not succeed. Never sets Stalled: the fix
+	// lives in another object, so no generation change would arrive to wake it up.
+	ReasonBuildFailed = "BuildFailed"
+
 	// ReasonDependencyNotReady covers something the composition refers to that does not exist
 	// yet, or exists but cannot be used: a Flux source, a Secret, a non-optional ConfigMap, or
 	// a serving endpoint the operator was never given.
@@ -167,6 +171,14 @@ func (p *Push) TagsAreImmutable() bool {
 	return p == nil || p.Immutable == nil || *p.Immutable
 }
 
+// DefaultHistoryLimit is how many past builds are retained when nothing says otherwise.
+//
+// Not 1, and not unbounded. Layers are shared between builds so the marginal cost of retaining one
+// is small, while the cost of having reclaimed one too eagerly is a workload that cannot pull the
+// digest it is pinned to. See ADR 0011. Shared by both kinds, so the number and its reasoning stay
+// in one place.
+const DefaultHistoryLimit = 10
+
 // BuildRecord is one past build, retained so garbage collection knows what is still live.
 //
 // Kept in status rather than inferred from what is in storage. Inference would mean deciding an
@@ -188,6 +200,11 @@ type BuildRecord struct {
 	// build it is the union across every child.
 	// +optional
 	Blobs []string `json:"blobs,omitempty"`
+
+	// InputHash the build was produced from. Written by DockerBuild only; ImageComposition's
+	// identity is the output digest rather than the hash. See ADR 0025.
+	// +optional
+	InputHash string `json:"inputHash,omitempty"`
 
 	// Manifests are the CHILD manifest digests when this build is a multi-platform index. Empty
 	// for a single-platform build, where Digest is the manifest itself.

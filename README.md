@@ -90,10 +90,13 @@ Full reasoning and the alternatives: [ADR 0017](docs/adr/0017-updating-the-consu
 
 ## What it does not do
 
-**It cannot run a Dockerfile, and that is the point.** Composition is a pure function of its
+**Composition cannot run a Dockerfile, and that is the point.** It is a pure function of its
 inputs, which is what makes the output digest predictable, the reconcile loop convergent, and the
-provenance exact rather than scanned. One non-deterministic step would remove all three. Anything
-needing a compiler is served by ordinary CI. See [ADR 0001](docs/adr/0001-compose-dont-build.md).
+provenance exact rather than scanned. One non-deterministic step would remove all three — for the
+whole object, not just the step — which is why building is a separate kind with its own promise
+([ADR 0025](docs/adr/0025-dockerfile-builds-as-a-second-kind.md)) and never a layer verb. Anything
+needing a compiler is still best served by ordinary CI. See
+[ADR 0001](docs/adr/0001-compose-dont-build.md).
 
 **So compile in CI, and bring the image in here.** Concretely:
 
@@ -187,10 +190,39 @@ multi-architecture output; and garbage collection.
 Not implemented: SBOM, provenance and signing ([ADR 0008](docs/adr/0008-supply-chain.md) is Proposed, not
 built — and signing is theatre until something verifies it at admission).
 
-**It will never run a Dockerfile.** That is the scope line, and everything else follows from it:
-the output digest is a pure function of the spec, so reconciling is cheap, provenance is exact,
-and nothing privileged runs. Compiling source belongs in ordinary CI. See
+**`ImageComposition` will never run a Dockerfile.** That is the scope line, and everything else
+follows from it: the output digest is a pure function of the spec, so reconciling is cheap,
+provenance is exact, and nothing privileged runs. See
 [ADR 0016](docs/adr/0016-the-scope-line-is-determinism.md).
+
+A **separate** kind that does run one, `DockerBuild`, is in alpha — separate binary, separate
+chart, separate RBAC, and a deliberately weaker promise: its idempotence is a hash of its inputs
+recorded in status, not `output = f(spec)`, and it is not bit-reproducible. It is a second
+component you install on purpose, never a layer verb, so `kind: ImageComposition` keeps telling you
+exactly which guarantee you have. [ADR 0025](docs/adr/0025-dockerfile-builds-as-a-second-kind.md)
+records what that costs, and is candid that the case for it is not yet proven.
+
+```console
+# Installing the composer does NOT install this. Its role can create Jobs — that is, run
+# arbitrary containers — which is exactly why it is a separate thing you opt into.
+helm install kube-oci-builder oci://ghcr.io/lhns/charts/kube-oci-builder \
+  --namespace oci-builder --create-namespace
+```
+
+```yaml
+apiVersion: oci.lhns.de/v1alpha1
+kind: DockerBuild
+metadata: {name: app}
+spec:
+  context: {kind: GitRepository, name: app-src}   # digest resolved by source-controller
+  dockerfile: Dockerfile
+  platforms: [linux/amd64]
+  push: {repository: ghcr.io/me/app, tags: [v1]}
+```
+
+Every `FROM` must be pinned by digest, and the build runs rootless in its own Job under a service
+account bound to nothing. Anyone who can push to the referenced repository can run code in that
+namespace — that is the trade this component makes.
 
 ### The shape
 

@@ -106,10 +106,9 @@ can name its base twice.
 ## Alternatives rejected
 
 **Splice the source image's layers instead of flattening.** Cheaper — it would preserve blob
-sharing and skip the re-pack. Rejected because it reinstates the "one entry, many layers" exception
-[0016](0016-the-scope-line-is-determinism.md) removed, and because it cannot honour `to`,
-`subpath`, `owner` or `mode`: those need the content unpacked, which is the whole point of the
-verb. An entry that silently ignored four of its own options would be worse than not having it.
+sharing and skip the re-pack. Rejected for the reason in *Decision*, and because it cannot honour
+`to`, `subpath`, `owner` or `mode`: those need the content unpacked, which is the whole point of
+the verb. An entry that silently ignored four of its own options would be worse than not having it.
 
 **Make it an `unpack: image` mode on `fetch`.** Superficially tidy, since `unpack` already selects
 how bytes become content. Rejected because a registry pull is not an HTTP fetch — it is a manifest

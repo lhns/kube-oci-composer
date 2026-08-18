@@ -139,6 +139,21 @@ jobs:
           push: false
           load: true
           tags: ghcr.io/lhns/kube-oci-composer:ci
+          build-args: |
+            CMD=oci-composer
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Build the builder image (no push)
+        # Same Dockerfile, other binary. Built here for the same reason: a compile error in
+        # cmd/oci-builder must be a PR failure rather than a tag-time one.
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ghcr.io/lhns/kube-oci-builder:ci
+          build-args: |
+            CMD=oci-builder
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Trivy image scan

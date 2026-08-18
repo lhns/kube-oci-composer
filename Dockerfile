@@ -2,6 +2,10 @@
 # re-resolve the module graph.
 FROM golang:1.26 AS builder
 
+# CMD selects which binary this image carries. The two are built from one Dockerfile because they
+# share every layer up to the compile step; ADR 0004 wants two DEPLOYMENTS, which is about RBAC and
+# blast radius, not about duplicating a build recipe.
+ARG CMD=oci-composer
 ARG VERSION=dev
 ARG COMMIT=none
 ARG BUILD_DATE=unknown
@@ -21,7 +25,7 @@ COPY internal/ internal/
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
     go build -trimpath \
       -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${BUILD_DATE}" \
-      -o manager ./cmd/oci-composer
+      -o manager ./cmd/${CMD}
 
 # Runtime stage.
 #

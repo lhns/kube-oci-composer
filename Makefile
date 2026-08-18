@@ -1,4 +1,5 @@
 IMG ?= ghcr.io/lhns/kube-oci-composer:latest
+BUILDER_IMG ?= ghcr.io/lhns/kube-oci-builder:latest
 CHART_REGISTRY ?= oci://ghcr.io/lhns/charts
 
 CONTROLLER_GEN ?= $(shell go env GOPATH)/bin/controller-gen
@@ -66,10 +67,15 @@ manifests: controller-gen ## Regenerate CRDs, RBAC and deepcopy functions.
 	$(CONTROLLER_GEN) crd paths="./api/v1alpha1/..." output:crd:artifacts:config=config/crd/bases
 	$(CONTROLLER_GEN) rbac:roleName=manager-role paths="./internal/controller/..." \
 		output:rbac:artifacts:config=config/rbac
+	$(CONTROLLER_GEN) rbac:roleName=builder-role paths="./internal/buildcontroller/..." \
+		output:rbac:artifacts:config=config/rbac-builder
 
 .PHONY: chart-crds
-chart-crds: manifests ## Copy generated CRDs into the chart.
-	cp config/crd/bases/*.yaml charts/kube-oci-composer/crds/
+chart-crds: manifests ## Copy generated CRDs into their charts.
+# One CRD per chart, deliberately: shipping DockerBuild's CRD with the composer would mean
+# installing the composer implies the builder's API exists (ADR 0004).
+	cp config/crd/bases/oci.lhns.de_imagecompositions.yaml charts/kube-oci-composer/crds/
+	cp config/crd/bases/oci.lhns.de_dockerbuilds.yaml charts/kube-oci-builder/crds/
 
 .PHONY: schemas
 schemas: manifests ## Publish JSON schemas for kubeconform.
@@ -87,17 +93,23 @@ verify: generate ## Fail if generated output is not committed.
 ##@ Build
 
 .PHONY: build
-build: ## Build the manager binary.
+build: ## Build both manager binaries.
 	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o bin/manager ./cmd/oci-composer
+	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o bin/builder ./cmd/oci-builder
 
 .PHONY: run
 run: manifests ## Run the controller against the current kubecontext.
 	go run ./cmd/oci-composer --serving-host=localhost:5000
 
 .PHONY: docker-build
-docker-build: ## Build the container image.
-	docker build --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) \
+docker-build: ## Build the composer image.
+	docker build --build-arg CMD=oci-composer --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) \
 		--build-arg BUILD_DATE=$(BUILD_DATE) -t $(IMG) .
+
+.PHONY: docker-build-builder
+docker-build-builder: ## Build the builder image.
+	docker build --build-arg CMD=oci-builder --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) \
+		--build-arg BUILD_DATE=$(BUILD_DATE) -t $(BUILDER_IMG) .
 
 .PHONY: docker-push
 docker-push: ## Push the container image.
@@ -105,18 +117,31 @@ docker-push: ## Push the container image.
 
 ##@ Deploy
 
+# One CRD per target, for the reason chart-crds gives: installing the composer must not imply the
+# builder's API exists (ADR 0004). `make uninstall` applying the whole directory would also delete
+# every DockerBuild in a cluster where the builder was installed from its own chart.
 .PHONY: install
-install: manifests ## Install CRDs into the current cluster.
-	kubectl apply -f config/crd/bases
+install: manifests ## Install the composer's CRD into the current cluster.
+	kubectl apply -f config/crd/bases/oci.lhns.de_imagecompositions.yaml
+
+.PHONY: install-builder
+install-builder: manifests ## Install the builder's CRD into the current cluster.
+	kubectl apply -f config/crd/bases/oci.lhns.de_dockerbuilds.yaml
 
 .PHONY: uninstall
-uninstall: ## Remove CRDs from the current cluster.
-	kubectl delete --ignore-not-found -f config/crd/bases
+uninstall: ## Remove the composer's CRD from the current cluster.
+	kubectl delete --ignore-not-found -f config/crd/bases/oci.lhns.de_imagecompositions.yaml
+
+.PHONY: uninstall-builder
+uninstall-builder: ## Remove the builder's CRD from the current cluster.
+	kubectl delete --ignore-not-found -f config/crd/bases/oci.lhns.de_dockerbuilds.yaml
 
 .PHONY: chart-lint
-chart-lint: ## Lint and render the chart.
+chart-lint: ## Lint and render the charts.
 	helm lint charts/kube-oci-composer
 	helm template kube-oci-composer charts/kube-oci-composer >/dev/null
+	helm lint charts/kube-oci-builder
+	helm template kube-oci-builder charts/kube-oci-builder >/dev/null
 
 .PHONY: chart-push
 chart-push: ## Package and push the chart as an OCI artifact.
