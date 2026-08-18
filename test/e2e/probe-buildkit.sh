@@ -35,6 +35,11 @@ probe() {
 
   kubectl -n "$NS" delete pod "probe-$name" --ignore-not-found --wait=false >/dev/null 2>&1
 
+  # An empty caps argument omits the field rather than sending an empty one: "no capabilities
+  # stanza" is itself a candidate, because it is what upstream BuildKit's Kubernetes examples ship.
+  local capline=""
+  [ -n "$caps" ] && capline="      capabilities: $caps"
+
   cat <<EOF | kubectl apply -f - >/dev/null 2>&1
 apiVersion: v1
 kind: Pod
@@ -60,21 +65,23 @@ spec:
       privileged: false
       seccompProfile: {type: Unconfined}
       appArmorProfile: {type: Unconfined}
-      capabilities: $caps
+$capline
 EOF
 }
 
 DROP_ALL='{drop: ["ALL"]}'
+SETUID_CAPS='{drop: ["ALL"], add: ["SETUID", "SETGID"]}'
 MOUNT_CAPS='{drop: ["ALL"], add: ["SYS_ADMIN", "SETUID", "SETGID", "SYS_CHROOT", "MKNOD"]}'
 
 echo "===== applying probes ====="
 probe rootless-userns-noesc  "$ROOTLESS" false 1000 true  false "$DROP_ALL"
-probe rootless-userns-esc    "$ROOTLESS" false 1000 true  true  "$DROP_ALL"
-probe rootless-esc           "$ROOTLESS" true  1000 true  true  "$DROP_ALL"
+probe rootless-userns-esc    "$ROOTLESS" false 1000 true  true  "$SETUID_CAPS"
+probe rootless-esc-caps      "$ROOTLESS" true  1000 true  true  "$SETUID_CAPS"
+probe rootless-esc-nocaps    "$ROOTLESS" true  1000 true  true  ""
 probe standard-userns-caps   "$STANDARD" false 0    false false "$MOUNT_CAPS"
 probe standard-userns-nocaps "$STANDARD" false 0    false false "$DROP_ALL"
 
-NAMES="rootless-userns-noesc rootless-userns-esc rootless-esc standard-userns-caps standard-userns-nocaps"
+NAMES="rootless-userns-noesc rootless-userns-esc rootless-esc-caps rootless-esc-nocaps standard-userns-caps standard-userns-nocaps"
 
 # A pod that cannot be admitted at all never reaches a terminal phase, so this waits on the clock
 # rather than on kubectl wait, and reports whatever each pod managed to become.
@@ -109,13 +116,30 @@ for n in $NAMES; do
   # Admission rejections leave nothing in the log, so the pod's own status is the only record of
   # a config the cluster refused outright.
   if [ "$phase" = "<absent>" ] || [ -z "$logs" ]; then
-    kubectl -n "$NS" get pod "probe-$n" -o jsonpath='{.status.conditions[*].message}{"\n"}' 2>&1 | head -5
-    kubectl -n "$NS" describe pod "probe-$n" 2>&1 | sed -n '/Events:/,$p' | head -15
+    kubectl -n "$NS" get pod "probe-$n" -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason} {.message}{"
+"}{end}' 2>&1 | head -6
+    kubectl -n "$NS" describe pod "probe-$n" 2>&1 | sed -n '/Events:/,$p' | head -20
   fi
   printf '%s\n' "$logs" | head -25
 done
 
 echo
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+  {
+    echo "## BuildKit security-context probe"
+    echo
+    echo "| candidate | verdict |"
+    echo "|---|---|"
+    for n in $NAMES; do
+      if kubectl -n "$NS" logs "probe-$n" --tail=40 2>&1 | grep -q PROBE_OK; then
+        echo "| \`$n\` | **WORKS** |"
+      else
+        echo "| \`$n\` | fails |"
+      fi
+    done
+  } >> "$GITHUB_STEP_SUMMARY"
+fi
+
 echo "===== node support ====="
 # If every userns candidate failed, this is the difference between "the feature is off" and
 # "the feature is on and something else is wrong", which are opposite next steps.
