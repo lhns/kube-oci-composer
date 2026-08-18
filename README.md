@@ -95,6 +95,38 @@ inputs, which is what makes the output digest predictable, the reconcile loop co
 provenance exact rather than scanned. One non-deterministic step would remove all three. Anything
 needing a compiler is served by ordinary CI. See [ADR 0001](docs/adr/0001-compose-dont-build.md).
 
+**So compile in CI, and bring the image in here.** Concretely:
+
+```bash
+# 1. Your existing pipeline builds and pushes, as it already does.
+docker build -t ghcr.io/me/app:v1.2.3 . && docker push ghcr.io/me/app:v1.2.3
+
+# 2. Get the digest. --platform matters: a base must name a platform-specific
+#    manifest unless spec.platforms is set.
+crane digest --platform linux/amd64 ghcr.io/me/app:v1.2.3
+```
+
+```yaml
+# 3a. As the foundation — layers are reused verbatim, so nothing is re-uploaded.
+base:
+  ref: ghcr.io/me/app:v1.2.3@sha256:…
+
+# 3b. …or as content at a path, when it is one component among several.
+layers:
+  - name: app
+    image: {ref: ghcr.io/me/app:v1.2.3@sha256:…}
+    to: /opt/app
+```
+
+Then let whatever templates the spec choose the tag by hashing it, as above, so the workload moves
+with it. Keeping the pin fresh is Renovate's job — a `customManager` regex over the `ref` — or Flux
+image-automation's. See [ADR 0024](docs/adr/0024-images-as-layer-sources.md).
+
+**`unpack: deb` resolves no dependencies.** It takes a package's payload and nothing else, so a
+package needing three others means three more entries, pinned by hand. Nothing here runs
+`postinst`, and a package whose files only work afterwards will not work
+([ADR 0022](docs/adr/0022-distro-packages-as-layer-sources.md)).
+
 ## No registry required
 
 `spec.push` is optional.
@@ -146,8 +178,8 @@ helm install kube-oci-composer oci://ghcr.io/lhns/charts/kube-oci-composer \
 **v0.1, and honest about its limits.**
 
 Implemented: base images with layer reuse and config inheritance; `fetch`, `configMap`,
-`sourceRef` and `remove` layer verbs; unpacking `tar`, `tar.gz`, `tar.xz`, `tar.zst`, `tar.bz2`,
-`zip`, `deb` and single-file `gz`; ownership, modes and archive subpaths; the full OCI config
+`sourceRef`, `image` and `remove` layer verbs; unpacking `tar`, `tar.gz`, `tar.xz`, `tar.zst`,
+`tar.bz2`, `zip`, `deb` and single-file `gz`; ownership, modes and archive subpaths; the full OCI config
 surface; the built-in serving endpoint; external push with `secretRef`; the input-hash
 short-circuit; a two-tier layer cache with optional S3; manifest persistence across restarts;
 multi-architecture output; and garbage collection.
@@ -189,6 +221,16 @@ spec:
       to: /plugins
       owner: {uid: 1001, gid: 0}
       mode: {file: "0644", dir: "0755"}
+
+    # An image your CI already built. Its layers are FLATTENED into one — whiteouts applied —
+    # so this places files at a path, unlike base, which is a foundation under everything.
+    # Config is not inherited from it; only base does that.
+    - name: app
+      image:
+        ref: ghcr.io/me/app:v1.2.3@sha256:…
+        subpath: usr/local/bin      # take one directory out of the image
+      to: /opt/tools
+      mode: {file: "0755"}
 
     # A zip release, which for a great deal of software is the only one published.
     # A zip records unix permissions only if whoever wrote it did: an archive made on Windows

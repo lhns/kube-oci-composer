@@ -44,6 +44,7 @@ question waiting for evidence.
 | [0021](0021-active-standby-or-shared-storage.md) | Is active/standby enough for the serving endpoint? | Open |
 | [0022](0022-distro-packages-as-layer-sources.md) | Distro packages are a layer source: `unpack: deb` | Accepted |
 | [0023](0023-more-archive-formats.md) | More archive formats: `unpack: zip` and the compressed-tar family | Accepted |
+| [0024](0024-images-as-layer-sources.md) | An image can be a layer source, flattened | Accepted |
 
 ## Format
 

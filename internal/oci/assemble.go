@@ -216,6 +216,16 @@ const (
 	UnpackGz      UnpackMode = "gz"
 	UnpackZip     UnpackMode = "zip"
 	UnpackDeb     UnpackMode = "deb"
+
+	// UnpackImage marks a layer whose content is another image's flattened filesystem.
+	//
+	// Not a member of the CRD's unpack enum and never dispatched on: an image layer is recognised
+	// by LayerInput.Image being set, and there is nothing to unpack because nothing was fetched.
+	// It exists so the mode field discriminates image layers inside InputHash. Without it, an
+	// image layer and an `unpack: none` fetch would hash identically whenever their digests
+	// matched — which needs a preimage attack rather than an accident, but costs nothing to rule
+	// out given the field is hashed anyway.
+	UnpackImage UnpackMode = "image"
 )
 
 // LayerInput is one content contribution.
@@ -228,8 +238,16 @@ type LayerInput struct {
 	// URL the content is fetched from. Not part of the output: two URLs serving the same
 	// digest are interchangeable by definition.
 	URL string
-	// Path to the fetched content on local disk. Empty until fetched.
+	// Path to the fetched content on local disk. Empty until fetched, and always empty for an
+	// image layer, which has no fetched file.
 	Path string
+	// Image is the source image for an image layer, resolved and pulled by the caller. Its
+	// flattened filesystem becomes this entry's content. Nil for every other kind of entry.
+	//
+	// Not part of the output by itself: Digest carries the image's manifest digest, and that is
+	// what reaches InputHash. Holding the v1.Image here is the same arrangement Path uses — the
+	// resolved handle for content the hash already identifies.
+	Image v1.Image
 	// Digest of the fetched content, already verified.
 	Digest string
 	// Unpack controls how the bytes become layer content.
@@ -579,6 +597,12 @@ func collectEntries(in LayerInput) ([]tarEntry, error) {
 	}
 
 	target := strings.TrimPrefix(path.Clean("/"+in.Target), "/")
+
+	// An image contributes a filesystem rather than a fetched file, so it returns before the open
+	// below — there is no Path to open. Checked here rather than as a switch arm for that reason.
+	if in.Image != nil {
+		return extractImage(in.Image, target, in.Subpath)
+	}
 
 	// Every mode past this point reads the fetched file, so it is opened once here rather than in
 	// each arm. Every extractor takes it: the content is always streamed to disk before it gets

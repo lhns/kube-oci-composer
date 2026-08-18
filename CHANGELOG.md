@@ -6,6 +6,41 @@ may change between minor versions.
 ## [Unreleased]
 
 ### Added
+- **An `image` layer verb, and `base.ref`.** An image can now be a layer source, and a base can be
+  named as one conventional `repo:tag@sha256:…` string.
+
+  The gap this closes is not "it cannot run a Dockerfile" — it is that **this tool ate tarballs and
+  half the world ships images**. A CI pipeline's natural output is an image, and until now one could
+  enter a composition only as `spec.base`: one per artifact, always underneath everything, always at
+  `/`, with no `to`, `subpath`, `owner` or `mode`. "Put the contents of this image at `/plugins`"
+  was not expressible, and the workaround — unpack it in CI and republish a tarball — discards the
+  digest that made it trustworthy.
+
+  **The image is flattened to exactly one layer**, with its whiteouts applied, so what lands is the
+  filesystem a runtime would see. That is a constraint rather than an implementation detail: ADR
+  0016 hoisted the base out of the layer list precisely because "an image entry contributes many
+  layers where every other entry contributes exactly one", and splicing would reinstate the
+  exception it removed. Everything downstream — `subpath`, rebasing, mode normalisation, symlink
+  handling, traversal refusal, deterministic ordering — is the existing tar path unchanged, so an
+  image and a tarball of the same content produce the same layer.
+
+  The cost is blob sharing. `spec.base` reuses a base's layers verbatim so two artifacts on one base
+  share blobs; flattening re-packs the bytes. Use `base` to build *on* an image and `image` to take
+  files *from* one. Config is inherited only from the base, never from an `image` layer.
+
+  `base.ref` settles a job ADR 0017 left open — the split `image` + `digest` pair is invisible to
+  the two things that keep pins fresh, a Renovate regex and kustomize's `images` transformer, which
+  both expect one string. Both spellings are supported, exactly one may be set, and they resolve and
+  **hash** identically, so rewriting a spec from one to the other republishes nothing. The tag in a
+  ref is decoration: what is pulled is always the digest.
+
+  The scope line does not move. Nothing is executed; the input is a digest-pinned image, which is
+  content-addressed more strictly than a `fetch` whose digest is merely declared. See
+  [ADR 0024](docs/adr/0024-images-as-layer-sources.md).
+
+  The README now also carries the recipe it was missing — CI → `crane digest --platform` → `ref` →
+  spec-hash tag — and states plainly that `unpack: deb` resolves no dependencies.
+
 - **`unpack: zip`**, plus `tar.xz`, `tar.zst`, `tar.bz2` and single-file `gz`. A great deal of
   software is published only as a `.zip` — Kafka Connect plugin bundles, JVM distributions,
   Terraform providers — and none of it could enter an artifact. The workaround was to repack the

@@ -103,7 +103,8 @@ func (r *ImageCompositionReconciler) resolveBases(ctx context.Context, obj *ociv
 		want = append(want, v1.Platform{OS: p.OS, Architecture: p.Architecture, Variant: p.Variant})
 	}
 
-	byKey, err := source.PullImageIndex(ctx, base.Image, base.Digest, want, opts...)
+	repository, digest := base.Repository()
+	byKey, err := source.PullImageIndex(ctx, repository, digest, want, opts...)
 	if err != nil {
 		var badRef *source.ErrBadReference
 		if errors.As(err, &badRef) {

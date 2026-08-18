@@ -87,6 +87,31 @@ func (r *ImageCompositionReconciler) resolveInputs(ctx context.Context, obj *oci
 			in.Path = resolved.Path
 			in.Unpack = oci.UnpackTarGz
 
+		case l.Image != nil:
+			repository, digest := l.Image.Repository()
+
+			opts, err := r.pullOptions(ctx, obj.Namespace, l.Image.SecretRef)
+			if err != nil {
+				return nil, fmt.Errorf("layer %q: %w", l.Name, err)
+			}
+			img, err := source.PullImage(ctx, repository, digest, opts...)
+			if err != nil {
+				var badRef *source.ErrBadReference
+				if errors.As(err, &badRef) {
+					// A malformed reference, or an index where a platform-specific manifest is
+					// required. Editing the layer is what fixes it, so retrying is pointless.
+					return nil, terminal("layer %q: %v", l.Name, err)
+				}
+				return nil, fmt.Errorf("layer %q: %w", l.Name, err)
+			}
+
+			// The manifest digest is the content address, so it is what reaches InputHash. The
+			// pulled image is carried alongside exactly as a fetched file's Path is.
+			in.Digest = digest
+			in.Image = img
+			in.Unpack = oci.UnpackImage
+			in.Subpath = l.Image.Subpath
+
 		case len(l.Remove) > 0:
 			in.Remove = l.Remove
 
@@ -134,7 +159,8 @@ func (r *ImageCompositionReconciler) resolveBase(ctx context.Context, obj *ociv1
 		return nil, err
 	}
 
-	img, err := source.PullImage(ctx, base.Image, base.Digest, opts...)
+	repository, digest := base.Repository()
+	img, err := source.PullImage(ctx, repository, digest, opts...)
 	if err != nil {
 		var badRef *source.ErrBadReference
 		if errors.As(err, &badRef) {

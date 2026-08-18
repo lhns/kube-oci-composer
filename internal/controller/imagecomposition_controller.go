@@ -419,7 +419,11 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	hashPlatforms := declared
 	var baseDigest string
 	if obj.Spec.Base != nil {
-		baseDigest = obj.Spec.Base.Digest
+		// From the accessor, not the field: `ref` and `image`+`digest` name the same base, so they
+		// must hash the same. Reading .Digest directly would make a base spelled as a ref hash as
+		// empty, and rewriting a spec from one spelling to the other would rebuild and republish
+		// every artifact for no change in content.
+		_, baseDigest = obj.Spec.Base.Repository()
 	} else if len(hashPlatforms) == 0 {
 		hashPlatforms = []oci.Platform{oci.RuntimePlatform()}
 	}
@@ -475,6 +479,13 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 
 		// A remove entry has no content to fetch; it produces whiteouts from the spec alone.
 		if len(inputs[i].Remove) > 0 {
+			continue
+		}
+
+		// An image layer was pulled during resolution and has no URL. The registry is the cache
+		// here, so it deliberately does not go through the layer cache: that is keyed by digest
+		// for single blobs, and an image is a manifest plus its layers.
+		if inputs[i].Image != nil {
 			continue
 		}
 
