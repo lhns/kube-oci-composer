@@ -113,7 +113,7 @@ func TestChartFlagsMatchTheBinary(t *testing.T) {
 		"--set", "operator.gc.dryRun=true",
 	)
 
-	known := knownFlags(t)
+	known := knownFlags(t, "../../cmd/oci-composer")
 	var seen int
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
@@ -298,10 +298,11 @@ func readFile(path string) ([]byte, error) { return os.ReadFile(path) }
 
 // knownFlags asks the binary itself which flags it defines, rather than keeping a list here that
 // would need updating in lockstep — the very drift these tests exist to catch.
-func knownFlags(t *testing.T) map[string]struct{} {
+// knownFlags lists the flags a binary defines, so a chart cannot render one that does not exist.
+func knownFlags(t *testing.T, cmdPath string) map[string]struct{} {
 	t.Helper()
 
-	cmd := exec.Command("go", "run", "../../cmd/oci-composer", "-h")
+	cmd := exec.Command("go", "run", cmdPath, "-h")
 	out, _ := cmd.CombinedOutput() // flag.Usage exits non-zero; the output is what matters
 
 	flags := make(map[string]struct{})

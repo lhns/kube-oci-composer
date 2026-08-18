@@ -204,8 +204,7 @@ func TestReconcileShortCircuitsOnUnchangedInputs(t *testing.T) {
 	}
 
 	// Remove the Job, then reconcile again: nothing changed, so nothing should be rebuilt.
-	for i := range jobsIn(t, r, obj.Namespace) {
-		j := jobsIn(t, r, obj.Namespace)[i]
+	for _, j := range jobsIn(t, r, obj.Namespace) {
 		if err := r.Delete(context.Background(), &j); err != nil {
 			t.Fatalf("deleting job: %v", err)
 		}
