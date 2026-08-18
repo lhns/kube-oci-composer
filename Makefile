@@ -117,13 +117,24 @@ docker-push: ## Push the container image.
 
 ##@ Deploy
 
+# One CRD per target, for the reason chart-crds gives: installing the composer must not imply the
+# builder's API exists (ADR 0004). `make uninstall` applying the whole directory would also delete
+# every DockerBuild in a cluster where the builder was installed from its own chart.
 .PHONY: install
-install: manifests ## Install CRDs into the current cluster.
-	kubectl apply -f config/crd/bases
+install: manifests ## Install the composer's CRD into the current cluster.
+	kubectl apply -f config/crd/bases/oci.lhns.de_imagecompositions.yaml
+
+.PHONY: install-builder
+install-builder: manifests ## Install the builder's CRD into the current cluster.
+	kubectl apply -f config/crd/bases/oci.lhns.de_dockerbuilds.yaml
 
 .PHONY: uninstall
-uninstall: ## Remove CRDs from the current cluster.
-	kubectl delete --ignore-not-found -f config/crd/bases
+uninstall: ## Remove the composer's CRD from the current cluster.
+	kubectl delete --ignore-not-found -f config/crd/bases/oci.lhns.de_imagecompositions.yaml
+
+.PHONY: uninstall-builder
+uninstall-builder: ## Remove the builder's CRD from the current cluster.
+	kubectl delete --ignore-not-found -f config/crd/bases/oci.lhns.de_dockerbuilds.yaml
 
 .PHONY: chart-lint
 chart-lint: ## Lint and render the charts.

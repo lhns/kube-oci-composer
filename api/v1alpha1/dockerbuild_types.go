@@ -7,26 +7,20 @@ import (
 
 // DockerBuildSpec builds an OCI image by executing a Dockerfile.
 //
-// THIS KIND SITS ON THE FAR SIDE OF THE LINE ADR 0016 DRAWS. It executes arbitrary code, so its
-// output digest is not a function of its spec — it is an observation, recorded in status after the
-// fact. What this API can offer is that the INPUTS are content-addressed, so an unchanged input
-// hash skips the build entirely. That is the guarantee Flux gives, not the one ImageComposition
-// gives, and the difference is not cosmetic: two clusters applying the same commit can produce two
-// different images.
+// This kind executes arbitrary code, so its output digest is NOT a function of its spec — it is an
+// observation, recorded in status after the fact. What the API can offer is that the INPUTS are
+// content-addressed, so an unchanged input hash skips the build. Two clusters applying the same
+// commit can still produce two different images.
 //
-// If what you need is "take a released artifact and put it in an image", use ImageComposition. It
-// is a strictly stronger tool, it is what this project is for, and since ADR 0024 it can take
-// files out of an image your CI already built. See ADR 0025 for what this kind costs and for the
-// admission that the case for it is not yet proven.
+// If what you need is "take a released artifact and put it in an image", use ImageComposition — it
+// is a strictly stronger tool, and since ADR 0024 it can take files out of an image your CI already
+// built. See ADR 0025 for what this kind costs.
 type DockerBuildSpec struct {
 	// Interval at which to reconcile. Nearly free when nothing has changed: the controller
 	// compares a hash of the resolved inputs rather than building.
 	//
-	// Note what it does NOT do: it never rebuilds on a timer. A build produced on a schedule would
-	// yield a new digest under an unchanged spec, which immutable tags turn into a failed build —
-	// and reinstating "rebuild to find out whether a rebuild was needed" is the exact cost ADR
-	// 0001 refused. To pick up upstream security fixes, change an input: repin FROM, or move the
-	// context.
+	// It never rebuilds on a timer: a new digest under an unchanged spec is what immutable tags
+	// refuse. To pick up upstream fixes, change an input — repin FROM, or move the context.
 	// +kubebuilder:default="1h"
 	// +optional
 	Interval *metav1.Duration `json:"interval,omitempty"`
@@ -38,10 +32,9 @@ type DockerBuildSpec struct {
 
 	// Context is the build context, taken from a Flux source's artifact.
 	//
-	// Deliberately the same type an ImageComposition layer uses: source-controller has already
-	// cloned, verified and content-addressed the revision, and its digest is what makes the input
-	// hash meaningful. There is no inline, URL or ConfigMap form — an unaddressed context would
-	// leave nothing to hash, and every reconcile would be a build.
+	// From a Flux source, so the revision is content-addressed and its digest is what makes the
+	// input hash meaningful. There is no inline or URL form: an unaddressed context would leave
+	// nothing to hash, and every reconcile would be a build.
 	// +required
 	Context SourceRefSource `json:"context"`
 
@@ -58,11 +51,7 @@ type DockerBuildSpec struct {
 
 	// Platforms the image is built for, as "linux/amd64".
 	//
-	// Required, unlike ImageComposition's. Neither of that field's defaults is available here: the
-	// base is named inside the Dockerfile rather than in the spec, and the controller's own
-	// architecture was only an acceptable default there because it was the value that had
-	// previously been hardcoded (ADR 0002). There is no such history to preserve, so the spec says
-	// it.
+	// Required, unlike ImageComposition's — there is no base in the spec to default from.
 	//
 	// More than one entry produces an image index and needs a builder that can emulate or a
 	// multi-node builder. A platform the builder cannot produce fails the build rather than being
@@ -123,11 +112,8 @@ type DockerBuildSpec struct {
 
 	// Push publishes the built image to an external registry.
 	//
-	// Required in this alpha. The built-in serving endpoint accepts writes over loopback only, so
-	// a Job in another pod cannot write to it. That is a clean scope cut rather than a
-	// limitation to work around: pushing to a real registry keeps credentials out of the
-	// controller, and a durable registry avoids the worst failure in ADR 0025 — a rebuild after
-	// storage loss producing a different digest than an immutable tag already names.
+	// Required in this alpha: the build runs in a Job, which cannot reach the controller's
+	// loopback-only serving endpoint. See ADR 0025.
 	// +required
 	Push *Push `json:"push"`
 }
@@ -192,8 +178,8 @@ type BuildAttempt struct {
 	// +optional
 	InputHash string `json:"inputHash,omitempty"`
 
-	// PodName of the build pod. Logs are not copied into status — a status field is the wrong home
-	// for unbounded output and etcd's budget is shared — so this is what `kubectl logs` needs.
+	// PodName of the build pod. Logs are not copied into status, so this is what `kubectl logs`
+	// needs.
 	// +optional
 	PodName string `json:"podName,omitempty"`
 
@@ -221,10 +207,8 @@ type DockerBuildStatus struct {
 
 	// InputHash summarises everything that determines the build.
 	//
-	// Note the difference from ImageComposition's field of the same name, which ADR 0002 spells
-	// out: there the output digest is the identity and the hash is only a short-circuit, checked
-	// afterwards against the real digest. HERE THE HASH IS THE IDENTITY. There is nothing to check
-	// it against until a build has run.
+	// Unlike ImageComposition's field of the same name, this hash is the IDENTITY rather than a
+	// short-circuit: there is nothing to check it against until a build has run. See ADR 0025.
 	// +optional
 	InputHash string `json:"inputHash,omitempty"`
 
@@ -249,12 +233,8 @@ type DockerBuildStatus struct {
 	// +optional
 	LastAttempt *BuildAttempt `json:"lastAttempt,omitempty"`
 
-	// Failures counts consecutive failed attempts, so backoff can be capped and the object can
-	// stop hammering without being Stalled.
-	//
-	// It must not stall: Stalled means editing THIS object's spec is what fixes it, and a failing
-	// RUN is nearly always fixed by editing a Dockerfile, which lives in another object and raises
-	// no generation change here.
+	// Failures counts consecutive failed attempts, so backoff can be capped and the object can stop
+	// hammering without being Stalled — the fix for a failing RUN lives in another object.
 	// +optional
 	Failures int32 `json:"failures,omitempty"`
 

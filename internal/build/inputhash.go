@@ -27,18 +27,15 @@ const RecipeVersion = 1
 
 // Inputs is everything that determines a build's output, as far as anything here can determine it.
 //
-// "As far as anything here can" is the honest qualifier and the difference from
-// oci.InputHash. There the hash is a short-circuit and the output digest remains the identity;
-// here the hash IS the identity, because there is nothing to check it against until a build has
-// run. Two builds with the same Inputs may still produce different bytes — see ADR 0025.
+// The qualifier is the whole difference from oci.InputHash: there the hash is a short-circuit and
+// the output digest remains the identity, here the hash IS the identity. Two builds with the same
+// Inputs may still produce different bytes. See ADR 0025.
 type Inputs struct {
 	// BuilderDigest pins the BuildKit image, and FrontendDigest the Dockerfile frontend.
 	//
-	// These are in the hash because for this kind the algorithm is not in this binary. ADR 0002
-	// argues AssemblyVersion must be hashed or "a controller upgraded to a version that assembles
-	// differently would see an unchanged input hash and keep serving artifacts built by the old
-	// algorithm, forever"; BuildKit is that algorithm here. The consequence is accepted rather
-	// than worked around: upgrading the builder rebuilds every object in the cluster.
+	// Hashed because for this kind the algorithm is not in this binary — BuildKit is. Upgrading
+	// the builder therefore rebuilds every object in the cluster, which is accepted rather than
+	// worked around. See RecipeVersion above and ADR 0025.
 	BuilderDigest  string
 	FrontendDigest string
 
@@ -47,7 +44,7 @@ type Inputs struct {
 	// The Dockerfile's own content needs no separate hashing: it lives inside the context tarball,
 	// which is content-addressed, so a change to it moves this. That is why the hash can be
 	// computed without fetching anything.
-	ContextDigest string
+	ContextDigest  string
 	ContextSubpath string
 
 	Dockerfile string
@@ -61,7 +58,8 @@ type Inputs struct {
 	SourceDateEpoch string
 
 	Platforms []string
-	Args      []Arg
+	// Args is a set: ARG order in a spec does not change what the build sees.
+	Args map[string]string
 
 	// SecretIdentities are "name/resourceVersion" per referenced Secret — never the value.
 	//
@@ -69,12 +67,6 @@ type Inputs struct {
 	// secret is an oracle. Hashing the resourceVersion means a rotation rebuilds; the cost is that
 	// a no-op update to the Secret also rebuilds, which is the right way round.
 	SecretIdentities []string
-}
-
-// Arg is one build argument, hashed by name and value.
-type Arg struct {
-	Name  string
-	Value string
 }
 
 // Hash returns a stable summary of everything in Inputs.
@@ -107,14 +99,15 @@ func (in Inputs) Hash() string {
 		writeField(p)
 	}
 
-	// Args are a set as far as the build is concerned — ARG order in a spec does not change what
-	// the build sees — so they are sorted to keep the hash stable against a reordered spec.
-	args := append([]Arg(nil), in.Args...)
-	sort.Slice(args, func(i, j int) bool { return args[i].Name < args[j].Name })
-	fmt.Fprintf(h, "args=%d;", len(args))
-	for _, a := range args {
-		writeField(a.Name)
-		writeField(a.Value)
+	names := make([]string, 0, len(in.Args))
+	for name := range in.Args {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	fmt.Fprintf(h, "args=%d;", len(names))
+	for _, name := range names {
+		writeField(name)
+		writeField(in.Args[name])
 	}
 
 	ids := append([]string(nil), in.SecretIdentities...)

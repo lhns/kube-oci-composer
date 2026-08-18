@@ -67,7 +67,7 @@ func main() {
 		"Dockerfile frontend image, PINNED BY DIGEST. Required.")
 	flag.StringVar(&sourceDateEpoch, "source-date-epoch", "0",
 		"SOURCE_DATE_EPOCH stamped into builds. Fixed rather than the wall clock, matching the composer's epoch.")
-	flag.IntVar(&historyLimit, "keep-builds", 10, "How many past builds to retain in status.")
+	flag.IntVar(&historyLimit, "keep-builds", ociv1alpha1.DefaultHistoryLimit, "How many past builds to retain in status.")
 	flag.BoolVar(&showVersion, "version", false, "Print the version and exit.")
 
 	opts := zap.Options{Development: false}

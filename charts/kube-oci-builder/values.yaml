@@ -53,9 +53,8 @@ serviceAccount:
 
 # The service account BUILD PODS run as, created separately and left empty of permissions.
 #
-# It exists so that a Dockerfile from a git repository cannot use the controller's token. Do not
-# grant it anything unless a build genuinely needs it, and remember that whoever can push to a
-# referenced repository can then use whatever you grant.
+# Do not grant it anything unless a build genuinely needs it, and remember that whoever can push to
+# a referenced repository can then use whatever you grant.
 buildServiceAccount:
   create: true
   annotations: {}

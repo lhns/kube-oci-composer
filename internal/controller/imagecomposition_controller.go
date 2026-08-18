@@ -401,7 +401,7 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	}
 	defer os.RemoveAll(workDir)
 
-	inputs, err := r.resolveInputs(ctx, obj, workDir)
+	inputs, imagePulls, err := r.resolveInputs(ctx, obj, workDir)
 	if err != nil {
 		return buildResult{}, err
 	}
@@ -482,10 +482,16 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 			continue
 		}
 
-		// An image layer was pulled during resolution and has no URL. The registry is the cache
-		// here, so it deliberately does not go through the layer cache: that is keyed by digest
-		// for single blobs, and an image is a manifest plus its layers.
-		if inputs[i].Image != nil {
+		// An image layer resolves to a manifest rather than a file. Pulled HERE rather than during
+		// resolution, so that the short-circuit above can decide there is nothing to do without
+		// touching a registry. It deliberately skips the layer cache, which is keyed by digest for
+		// single blobs where an image is a manifest plus its layers — the registry is the cache.
+		if src, ok := imagePulls[i]; ok {
+			img, err := r.pullImageLayer(ctx, obj, inputs[i], src)
+			if err != nil {
+				return buildResult{}, err
+			}
+			inputs[i].Image = img
 			continue
 		}
 
@@ -594,13 +600,6 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	}, nil
 }
 
-// DefaultHistoryLimit is how many past builds are retained when nothing says otherwise.
-//
-// Not 1, and not unbounded. Layers are shared between builds so the marginal cost of retaining
-// one is small, while the cost of having reclaimed one too eagerly is a workload that cannot pull
-// the digest it is pinned to. See ADR 0011.
-const DefaultHistoryLimit = 10
-
 // historyLimit resolves the retention count for one object.
 func (r *ImageCompositionReconciler) historyLimit(obj *ociv1alpha1.ImageComposition) int {
 	if obj.Spec.Publish != nil && obj.Spec.Publish.History != nil {
@@ -609,7 +608,7 @@ func (r *ImageCompositionReconciler) historyLimit(obj *ociv1alpha1.ImageComposit
 	if r.HistoryLimit > 0 {
 		return r.HistoryLimit
 	}
-	return DefaultHistoryLimit
+	return ociv1alpha1.DefaultHistoryLimit
 }
 
 // recordHistory prepends a new build and trims to the limit.

@@ -31,10 +31,15 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- default (include "kube-oci-builder.fullname" .) .Values.serviceAccount.name -}}
 {{- end -}}
 
-{{/*
-The service account the BUILD pods run as. Deliberately distinct from the controller's: a pod
-running code from a git repository must not carry the token of the thing that created it.
-*/}}
+{{/* The service account BUILD pods run as — deliberately not the controller's. */}}
 {{- define "kube-oci-builder.buildServiceAccountName" -}}
 {{- printf "%s-build" (include "kube-oci-builder.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{/*
+Port extracted from a ":8080" style bind address, so the container port and the flag can never
+disagree.
+*/}}
+{{- define "kube-oci-builder.port" -}}
+{{- regexReplaceAll "^.*:" . "" -}}
 {{- end -}}

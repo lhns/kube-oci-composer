@@ -19,12 +19,9 @@ import (
 // ordinary tar — so subpath selection, rebasing, mode normalisation, symlink handling, traversal
 // refusal and deterministic ordering are all extractTar's, unchanged.
 //
-// Flattening rather than splicing is a constraint, not a shortcut. ADR 0016 hoisted the base out of
-// the layer list because "an image entry contributes many layers where every other entry
-// contributes exactly one"; carrying the source image's layers through here would reinstate the
-// exact exception that removed. It costs the blob sharing spec.base gets by reusing a base's layers
-// verbatim (ADR 0015) — this re-packs the bytes — which is the price of choosing where the content
-// lands, and the reason this does not replace spec.base for building on top of something.
+// Flattening rather than splicing is a constraint, not a shortcut: splicing would reinstate the
+// "one entry, many layers" exception ADR 0016 removed. It costs blob sharing, which is why this
+// does not replace spec.base for building on top of something. ADR 0024 has the reasoning.
 
 // extractImage returns the flattened filesystem of img, rebased under target and filtered by
 // subpath.

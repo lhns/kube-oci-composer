@@ -1,18 +1,22 @@
 package buildcontroller
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -33,6 +37,10 @@ import (
 type DockerBuildReconciler struct {
 	client.Client
 	JobConfig JobConfig
+
+	// HTTPClient fetches the build context for the Dockerfile check. Nil uses a default with a
+	// timeout; the build itself never streams through this process.
+	HTTPClient *http.Client
 
 	// HistoryLimit is how many past builds are retained in status.
 	HistoryLimit int
@@ -96,8 +104,7 @@ func (r *DockerBuildReconciler) reconcile(ctx context.Context, obj *ociv1alpha1.
 	}
 	inputHash := inputs.Hash()
 
-	// The cheap path, and the whole point of hashing inputs: nothing has changed, so there is
-	// nothing to do. Note what is NOT checked here — that the artifact is still present in the
+	// Note what is NOT checked here — that the artifact is still present in the
 	// registry. The composer verifies that with one HEAD because it can rebuild identical bytes if
 	// it is gone; a rebuild here might not produce the same digest, so re-verifying would risk
 	// turning a missing artifact into a permanent immutable-tag conflict. ADR 0025 records that
@@ -157,9 +164,9 @@ func (r *DockerBuildReconciler) resolveInputs(ctx context.Context, obj *ociv1alp
 		ids = append(ids, s.SecretRef.Name+"/"+secret.ResourceVersion)
 	}
 
-	args := make([]build.Arg, 0, len(spec.Args))
+	args := make(map[string]string, len(spec.Args))
 	for _, a := range spec.Args {
-		args = append(args, build.Arg{Name: a.Name, Value: a.Value})
+		args[a.Name] = a.Value
 	}
 
 	cacheMode := "Auto"
@@ -201,6 +208,20 @@ func (r *DockerBuildReconciler) currentJob(ctx context.Context, obj *ociv1alpha1
 func (r *DockerBuildReconciler) startBuild(ctx context.Context, obj *ociv1alpha1.DockerBuild,
 	inputs build.Inputs, inputHash, contextURL string) error {
 
+	// The FROM check happens here rather than inside the Job, so an unpinned base is refused
+	// BEFORE anything executes. That costs one fetch of the context — but only on the path where a
+	// build is about to run anyway, never on the cheap reconcile that finds an unchanged hash.
+	dockerfile, err := build.FetchDockerfile(ctx, r.httpClient(), contextURL,
+		obj.Spec.Context.Subpath, obj.Spec.Dockerfile)
+	if err != nil {
+		return fmt.Errorf("reading the Dockerfile: %w", err)
+	}
+	if err := build.CheckPinnedBases(bytes.NewReader(dockerfile)); err != nil {
+		// Not terminal: the Dockerfile lives in the Flux source, so pushing a fix there is what
+		// resolves this, and that raises no generation change on this object.
+		return fmt.Errorf("%w", err)
+	}
+
 	job := buildJob(obj, inputHash, contextURL, r.JobConfig)
 	if err := ctrl.SetControllerReference(obj, job, r.Scheme()); err != nil {
 		return fmt.Errorf("setting owner: %w", err)
@@ -217,7 +238,7 @@ func (r *DockerBuildReconciler) startBuild(ctx context.Context, obj *ociv1alpha1
 	obj.Status.BuildRef = &ociv1alpha1.LocalObjectReference{Name: job.Name}
 	obj.Status.LastAttempt = &ociv1alpha1.BuildAttempt{
 		InputHash: inputHash,
-		StartedAt: ptrTime(metav1.Now()),
+		StartedAt: ptr.To(metav1.Now()),
 	}
 	return nil
 }
@@ -244,11 +265,12 @@ func (r *DockerBuildReconciler) observeJob(ctx context.Context, obj *ociv1alpha1
 		}
 		obj.Status.BuildRef = nil
 		obj.Status.Failures++
+		msg := jobFailureMessage(job)
 		if obj.Status.LastAttempt != nil {
-			obj.Status.LastAttempt.FinishedAt = ptrTime(metav1.Now())
-			obj.Status.LastAttempt.Message = jobFailureMessage(job)
+			obj.Status.LastAttempt.FinishedAt = ptr.To(metav1.Now())
+			obj.Status.LastAttempt.Message = msg
 		}
-		return ctrl.Result{}, fmt.Errorf("build failed: %s", jobFailureMessage(job))
+		return ctrl.Result{}, fmt.Errorf("build failed: %s", msg)
 
 	default:
 		return ctrl.Result{RequeueAfter: buildPollInterval}, nil
@@ -262,9 +284,7 @@ type buildMetadata struct {
 
 // readResultDigest recovers the pushed digest from the Job's pod.
 //
-// The digest is the one thing that has to come back out of the build, and it cannot be derived:
-// this is the point at which the output stops being a function of the spec and becomes an
-// observation.
+// The digest is the one thing that has to come back out of the build, and it cannot be derived.
 func (r *DockerBuildReconciler) readResultDigest(ctx context.Context, obj *ociv1alpha1.DockerBuild, job *batchv1.Job) (string, error) {
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods,
@@ -276,31 +296,35 @@ func (r *DockerBuildReconciler) readResultDigest(ctx context.Context, obj *ociv1
 		return "", pending("the build pod for %s has not been observed yet", job.Name)
 	}
 
-	// The metadata file lives in the pod's emptyDir, which the controller cannot read directly.
-	// The build container echoes it as its termination message, which is the supported way to get
-	// a small result out of a pod without granting exec.
+	// The metadata file lives in the pod's emptyDir, which the controller cannot read. The build
+	// container copies it to the termination log, which Kubernetes surfaces here — the supported
+	// way to get a small result out of a pod without granting exec.
 	for _, p := range pods.Items {
-		for _, cs := range p.Status.ContainerStatuses {
-			if cs.Name != "build" || cs.State.Terminated == nil {
-				continue
+		if digest := podBuildDigest(p); digest != "" {
+			if obj.Status.LastAttempt != nil {
+				obj.Status.LastAttempt.PodName = p.Name
 			}
-			raw := strings.TrimSpace(cs.State.Terminated.Message)
-			if raw == "" {
-				continue
-			}
-			var md buildMetadata
-			if err := json.Unmarshal([]byte(raw), &md); err != nil {
-				continue
-			}
-			if md.Digest != "" {
-				if obj.Status.LastAttempt != nil {
-					obj.Status.LastAttempt.PodName = p.Name
-				}
-				return md.Digest, nil
-			}
+			return digest, nil
 		}
 	}
 	return "", fmt.Errorf("the build reported no image digest; check `kubectl logs job/%s`", job.Name)
+}
+
+// podBuildDigest returns the digest the build container reported, or "" if it reported none.
+func podBuildDigest(p corev1.Pod) string {
+	for _, cs := range p.Status.ContainerStatuses {
+		if cs.Name != "build" || cs.State.Terminated == nil {
+			continue
+		}
+		var md buildMetadata
+		if err := json.Unmarshal([]byte(strings.TrimSpace(cs.State.Terminated.Message)), &md); err != nil {
+			continue
+		}
+		if md.Digest != "" {
+			return md.Digest
+		}
+	}
+	return ""
 }
 
 // recordSuccess writes the artifact and rotates history.
@@ -326,19 +350,17 @@ func (r *DockerBuildReconciler) recordSuccess(obj *ociv1alpha1.DockerBuild, inpu
 	obj.Status.BuildRef = nil
 	obj.Status.Failures = 0
 	if obj.Status.LastAttempt != nil {
-		obj.Status.LastAttempt.FinishedAt = ptrTime(metav1.Now())
+		obj.Status.LastAttempt.FinishedAt = ptr.To(metav1.Now())
 		obj.Status.LastAttempt.Succeeded = true
 	}
 
-	// InputHash on the record, unlike the composer's, so a controller that lost status.artifact
-	// but kept history can find what it previously produced for these inputs and re-verify rather
-	// than rebuild blind — which is the mitigation ADR 0025 names for the permanent-conflict trap.
+	// InputHash on the record, unlike the composer's — see BuildRecord.InputHash.
 	record := ociv1alpha1.BuildRecord{Digest: digest, Tags: tags, InputHash: inputHash}
 	history := append([]ociv1alpha1.BuildRecord{record}, obj.Status.History...)
 
 	limit := r.HistoryLimit
 	if limit <= 0 {
-		limit = 10
+		limit = ociv1alpha1.DefaultHistoryLimit
 	}
 	if len(history) > limit {
 		history = history[:limit]
@@ -370,8 +392,7 @@ func (r *DockerBuildReconciler) applyOutcome(obj *ociv1alpha1.DockerBuild, err e
 		removeCondition(obj, ociv1alpha1.StalledCondition)
 
 	default:
-		// Never Stalled. The Dockerfile that would fix a failing RUN lives in another object, so
-		// stalling would wait for a generation change that never comes.
+		// Never Stalled: the fix lives in another object. See errors.go.
 		setCondition(obj, ociv1alpha1.ReadyCondition, metav1.ConditionFalse,
 			ociv1alpha1.ReasonBuildFailed, err.Error())
 		setCondition(obj, ociv1alpha1.ReconcilingCondition, metav1.ConditionTrue,
@@ -387,40 +408,26 @@ func readyMessage(obj *ociv1alpha1.DockerBuild) string {
 	return "built " + obj.Status.Artifact.Ref
 }
 
-func setCondition(obj *ociv1alpha1.DockerBuild, condType string, status metav1.ConditionStatus, reason, message string) {
-	if len(message) > 32768 {
-		message = message[:32768]
-	}
-	meta := metav1.Condition{
+func setCondition(obj *ociv1alpha1.DockerBuild, condType string, status metav1.ConditionStatus, reason, msg string) {
+	meta.SetStatusCondition(&obj.Status.Conditions, metav1.Condition{
 		Type:               condType,
 		Status:             status,
 		Reason:             reason,
-		Message:            message,
+		Message:            truncate(msg, 32768),
 		ObservedGeneration: obj.Generation,
-	}
-	for i := range obj.Status.Conditions {
-		if obj.Status.Conditions[i].Type == condType {
-			if obj.Status.Conditions[i].Status != status {
-				meta.LastTransitionTime = metav1.Now()
-			} else {
-				meta.LastTransitionTime = obj.Status.Conditions[i].LastTransitionTime
-			}
-			obj.Status.Conditions[i] = meta
-			return
-		}
-	}
-	meta.LastTransitionTime = metav1.Now()
-	obj.Status.Conditions = append(obj.Status.Conditions, meta)
+	})
 }
 
 func removeCondition(obj *ociv1alpha1.DockerBuild, condType string) {
-	out := obj.Status.Conditions[:0]
-	for _, c := range obj.Status.Conditions {
-		if c.Type != condType {
-			out = append(out, c)
-		}
+	meta.RemoveStatusCondition(&obj.Status.Conditions, condType)
+}
+
+// truncate keeps a message inside the API server's per-condition limit.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
 	}
-	obj.Status.Conditions = out
+	return s[:n]
 }
 
 func interval(obj *ociv1alpha1.DockerBuild) time.Duration {
@@ -428,6 +435,14 @@ func interval(obj *ociv1alpha1.DockerBuild) time.Duration {
 		return obj.Spec.Interval.Duration
 	}
 	return time.Hour
+}
+
+// httpClient is the client used for the Dockerfile pre-check.
+func (r *DockerBuildReconciler) httpClient() *http.Client {
+	if r.HTTPClient != nil {
+		return r.HTTPClient
+	}
+	return http.DefaultClient
 }
 
 func jobSucceeded(job *batchv1.Job) bool { return job.Status.Succeeded > 0 }
@@ -444,8 +459,6 @@ func jobFailureMessage(job *batchv1.Job) string {
 	}
 	return "the build job failed"
 }
-
-func ptrTime(t metav1.Time) *metav1.Time { return &t }
 
 func isTerminal(err error) bool {
 	var t *terminalError

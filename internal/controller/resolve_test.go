@@ -116,7 +116,7 @@ func TestConfigMapDigestIsResolved(t *testing.T) {
 	obj := composition("cm", configMapLayer("settings", "settings", false, "/config"))
 	r := reconcilerWith(t, cm)
 
-	inputs, err := r.resolveInputs(context.Background(), obj, t.TempDir())
+	inputs, _, err := r.resolveInputs(context.Background(), obj, t.TempDir())
 	if err != nil {
 		t.Fatalf("resolving: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestConfigMapContentChangesTheInputHash(t *testing.T) {
 		obj := composition("cm", configMapLayer("settings", "settings", false, "/config"))
 		r := reconcilerWith(t, cm)
 
-		inputs, err := r.resolveInputs(context.Background(), obj, t.TempDir())
+		inputs, _, err := r.resolveInputs(context.Background(), obj, t.TempDir())
 		if err != nil {
 			t.Fatalf("resolving: %v", err)
 		}
@@ -174,7 +174,7 @@ func TestConfigMapKeyOrderDoesNotAffectTheDigest(t *testing.T) {
 	var first string
 	for i := 0; i < 20; i++ {
 		r := reconcilerWith(t, cm.DeepCopy())
-		inputs, err := r.resolveInputs(context.Background(), obj, t.TempDir())
+		inputs, _, err := r.resolveInputs(context.Background(), obj, t.TempDir())
 		if err != nil {
 			t.Fatalf("resolving: %v", err)
 		}
@@ -193,7 +193,7 @@ func TestMissingConfigMapIsPending(t *testing.T) {
 	obj := composition("cm", configMapLayer("settings", "absent", false, "/config"))
 	r := reconcilerWith(t)
 
-	_, err := r.resolveInputs(context.Background(), obj, t.TempDir())
+	_, _, err := r.resolveInputs(context.Background(), obj, t.TempDir())
 	if err == nil {
 		t.Fatal("expected an error for a missing non-optional ConfigMap")
 	}
@@ -220,11 +220,11 @@ func TestOptionalConfigMapContributesNothing(t *testing.T) {
 
 	r := reconcilerWith(t)
 
-	a, err := r.resolveInputs(context.Background(), withOptional, t.TempDir())
+	a, _, err := r.resolveInputs(context.Background(), withOptional, t.TempDir())
 	if err != nil {
 		t.Fatalf("resolving: %v", err)
 	}
-	b, err := r.resolveInputs(context.Background(), without, t.TempDir())
+	b, _, err := r.resolveInputs(context.Background(), without, t.TempDir())
 	if err != nil {
 		t.Fatalf("resolving: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestConfigMapKeyWithSeparatorIsRejected(t *testing.T) {
 	obj := composition("cm", configMapLayer("bad", "bad", false, "/config"))
 	r := reconcilerWith(t, cm)
 
-	if _, err := r.resolveInputs(context.Background(), obj, t.TempDir()); err == nil {
+	if _, _, err := r.resolveInputs(context.Background(), obj, t.TempDir()); err == nil {
 		t.Fatal("accepted a ConfigMap key containing a path separator")
 	}
 }
@@ -267,7 +267,7 @@ func TestSourceRefDigestComesFromTheSource(t *testing.T) {
 	})
 	r := reconcilerWith(t, repo)
 
-	inputs, err := r.resolveInputs(context.Background(), obj, t.TempDir())
+	inputs, _, err := r.resolveInputs(context.Background(), obj, t.TempDir())
 	if err != nil {
 		t.Fatalf("resolving: %v", err)
 	}
@@ -298,7 +298,7 @@ func TestSourceRefDefaultsToTheObjectNamespace(t *testing.T) {
 	})
 	r := reconcilerWith(t, repo)
 
-	if _, err := r.resolveInputs(context.Background(), obj, t.TempDir()); err != nil {
+	if _, _, err := r.resolveInputs(context.Background(), obj, t.TempDir()); err != nil {
 		t.Fatalf("resolving: %v", err)
 	}
 }
@@ -317,7 +317,7 @@ func TestMissingSourceIsPendingNotTerminal(t *testing.T) {
 	})
 	r := reconcilerWith(t)
 
-	_, err := r.resolveInputs(context.Background(), obj, t.TempDir())
+	_, _, err := r.resolveInputs(context.Background(), obj, t.TempDir())
 	if err == nil {
 		t.Fatal("expected an error for a source that does not exist")
 	}
@@ -348,7 +348,7 @@ func TestSourceWithoutAnArtifactIsTransient(t *testing.T) {
 	})
 	r := reconcilerWith(t, repo)
 
-	_, err := r.resolveInputs(context.Background(), obj, t.TempDir())
+	_, _, err := r.resolveInputs(context.Background(), obj, t.TempDir())
 	if err == nil {
 		t.Fatal("expected an error for a source with no artifact")
 	}
@@ -379,7 +379,7 @@ func TestLayerOrderIsPreservedAcrossSourceKinds(t *testing.T) {
 	)
 	r := reconcilerWith(t, cm, repo)
 
-	inputs, err := r.resolveInputs(context.Background(), obj, t.TempDir())
+	inputs, _, err := r.resolveInputs(context.Background(), obj, t.TempDir())
 	if err != nil {
 		t.Fatalf("resolving: %v", err)
 	}

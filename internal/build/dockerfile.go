@@ -20,16 +20,14 @@ import (
 // else, because everything else is BuildKit's job and a second opinion about Dockerfile semantics
 // is a source of disagreement rather than safety.
 
-// stageNames collects the aliases a Dockerfile defines, so a later FROM referring to an earlier
-// stage is not mistaken for an unpinned registry reference.
-type stageNames map[string]bool
-
 // CheckPinnedBases refuses a Dockerfile whose external base images are not pinned by digest.
 //
 // Returns every offending reference rather than the first, so a Dockerfile with three floating
 // FROMs takes one edit to fix rather than three round trips.
 func CheckPinnedBases(r io.Reader) error {
-	stages := stageNames{}
+	// Aliases this Dockerfile defines, so a later FROM naming an earlier stage is not mistaken
+	// for an unpinned registry reference.
+	stages := map[string]bool{}
 	var unpinned []string
 
 	sc := bufio.NewScanner(r)
@@ -61,12 +59,9 @@ func CheckPinnedBases(r io.Reader) error {
 
 		ref := fields[1]
 
-		// "FROM x AS builder" defines a stage; record the alias so a later "FROM builder" is
-		// recognised as internal.
-		for i := 2; i+1 < len(fields)+1 && i < len(fields); i++ {
-			if strings.EqualFold(fields[i], "AS") && i+1 < len(fields) {
-				stages[strings.ToLower(fields[i+1])] = true
-			}
+		// "FROM x AS builder" defines a stage. AS and its name can only be the last two fields.
+		if n := len(fields); n >= 4 && strings.EqualFold(fields[n-2], "AS") {
+			stages[strings.ToLower(fields[n-1])] = true
 		}
 
 		switch {
@@ -90,24 +85,9 @@ func CheckPinnedBases(r io.Reader) error {
 	}
 
 	if len(unpinned) > 0 {
-		return fmt.Errorf("every FROM must be pinned by digest, but %s %s not: "+
+		return fmt.Errorf("every FROM must be pinned by digest; these are not: %q — "+
 			"pin with repo:tag@sha256:… so that an unchanged spec cannot silently build on a "+
-			"different base", strings.Join(quoteAll(unpinned), ", "), plural(len(unpinned)))
+			"different base", unpinned)
 	}
 	return nil
-}
-
-func quoteAll(in []string) []string {
-	out := make([]string, 0, len(in))
-	for _, s := range in {
-		out = append(out, fmt.Sprintf("%q", s))
-	}
-	return out
-}
-
-func plural(n int) string {
-	if n == 1 {
-		return "is"
-	}
-	return "are"
 }

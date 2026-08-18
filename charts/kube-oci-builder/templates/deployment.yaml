@@ -1,8 +1,12 @@
-{{- if not (contains "@sha256:" .Values.builder.buildkitImage) }}
-{{- fail "builder.buildkitImage must be pinned by digest (repo:tag@sha256:...). Its digest is part of every build's input hash, so a floating tag would let an upgraded builder change output without changing the hash. See ADR 0025." }}
+{{/*
+A nicer error than the controller's, which refuses to start on the same condition. Both images'
+digests are part of every build's input hash, so a floating tag would let an upgraded builder
+change output without changing the hash. See ADR 0025.
+*/}}
+{{- range $field, $image := dict "buildkitImage" .Values.builder.buildkitImage "dockerfileFrontend" .Values.builder.dockerfileFrontend }}
+{{- if not (contains "@sha256:" $image) }}
+{{- fail (printf "builder.%s must be pinned by digest (repo:tag@sha256:...). See ADR 0025." $field) }}
 {{- end }}
-{{- if not (contains "@sha256:" .Values.builder.dockerfileFrontend) }}
-{{- fail "builder.dockerfileFrontend must be pinned by digest (repo:tag@sha256:...). See ADR 0025." }}
 {{- end }}
 apiVersion: apps/v1
 kind: Deployment
@@ -46,9 +50,9 @@ spec:
             - --keep-builds={{ .Values.builder.keepBuilds }}
           ports:
             - name: metrics
-              containerPort: {{ regexReplaceAll "^.*:" .Values.metrics.bindAddress "" }}
+              containerPort: {{ include "kube-oci-builder.port" .Values.metrics.bindAddress }}
             - name: probes
-              containerPort: {{ regexReplaceAll "^.*:" .Values.healthProbe.bindAddress "" }}
+              containerPort: {{ include "kube-oci-builder.port" .Values.healthProbe.bindAddress }}
           livenessProbe:
             httpGet:
               path: /healthz

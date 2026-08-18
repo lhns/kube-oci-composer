@@ -11,7 +11,7 @@ func TestCheckPinnedBasesAccepts(t *testing.T) {
 	const digest = "@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 	cases := map[string]string{
-		"pinned": "FROM golang:1.26" + digest + "\nRUN go build ./...\n",
+		"pinned":  "FROM golang:1.26" + digest + "\nRUN go build ./...\n",
 		"scratch": "FROM scratch\nCOPY x /x\n",
 		"multi-stage with alias": "FROM golang:1.26" + digest + " AS builder\n" +
 			"RUN go build\n" +

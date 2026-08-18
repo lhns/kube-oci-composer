@@ -17,11 +17,10 @@ may change between minor versions.
 
   How it works: the context comes from a Flux source, so its digest is resolved rather than
   declared; that digest, the spec, and **the pinned digests of BuildKit and the Dockerfile
-  frontend** form an input hash. An unchanged hash skips the build entirely — which is what answers
-  ADR 0001's objection that "the reconcile loop would have to rebuild to discover whether a rebuild
-  was needed". The builder digests are in the hash because for this kind the algorithm is not in
-  this binary; the controller **refuses to start** if either is not pinned by digest, and the chart
-  refuses to render.
+  frontend** form an input hash. An unchanged hash skips the build entirely, which answers ADR
+  0001's objection that the loop "would have to rebuild to discover whether a rebuild was needed".
+  The builder digests are hashed because for this kind the algorithm is not in this binary; the
+  controller **refuses to start** if either is unpinned, and the chart refuses to render.
 
   Each build is one Kubernetes Job, rootless, in the object's own namespace, under a service
   account that is deliberately bound to nothing — a pod running code from a git repository must not
@@ -36,35 +35,15 @@ may change between minor versions.
   commit, different image", and it is the one rule about a Dockerfile's *content* this controller
   enforces.
 
-  **Read ADR 0025 before using it.** The promise is deliberately weaker than `ImageComposition`'s:
-  the output digest is an observation recorded in status, not a function of the spec; identical
-  inputs may produce different bytes; storage stops being disposable; spec-hash tags degrade to
-  first-writer-wins; and provenance becomes scanned rather than exact. The record is also candid
-  that ADR 0016's load-bearing objection is unmet by the motivating use cases, and lists what would
-  make it right to abandon this.
+  **Read [ADR 0025](docs/adr/0025-dockerfile-builds-as-a-second-kind.md) before using it.** The
+  promise is deliberately weaker: the output digest is an observation recorded in status, not a
+  function of the spec. The record lists the consequences, is candid that ADR 0016's load-bearing
+  objection is unmet by the motivating use cases, and says what would make it right to abandon
+  this. The README's "it will never run a Dockerfile" is rewritten accordingly — `ImageComposition`
+  never will, and that is unchanged.
 
   Alpha limits: `push` only (a Job in another pod cannot write to the loopback-only serving
   endpoint), no GC integration, no attestations.
-- **ADR 0025: Dockerfile builds, as a second kind.** A decision record, no code yet. `DockerBuild`
-  will be a separate kind with its own binary, chart and RBAC, and a deliberately weaker promise —
-  idempotence is a hash of its inputs recorded in status rather than `output = f(spec)`, and it is
-  not bit-reproducible.
-
-  Not a `build:` layer verb, and that part was settled in advance: ADR 0004 wrote down why *"before
-  it looks tempting"*. A non-deterministic entry does not weaken the guarantee for that entry, it
-  deletes it for the whole object — and `kind: ImageComposition` would stop telling a reader which
-  guarantee they have.
-
-  The record is candid that the case is **not proven**. ADR 0016's load-bearing reason for dropping
-  a builder — that in-cluster building earns its keep only when the cluster produces the things
-  being built — is unmet by the motivating needs, and the alpha exists to produce that evidence
-  rather than to claim it already exists. The consequences are stated rather than softened: storage
-  stops being disposable, provenance degrades from exact to scanned (foreclosing one of ADR 0020's
-  open options), spec-hash tags degrade to first-writer-wins, and `internal/oci` contributes
-  nothing to it. Abandonment criteria are listed.
-
-  The README's "it will **never** run a Dockerfile" is rewritten accordingly: `ImageComposition`
-  never will, and that is unchanged.
 - **An `image` layer verb, and `base.ref`.** An image can now be a layer source, and a base can be
   named as one conventional `repo:tag@sha256:…` string.
 
@@ -76,12 +55,10 @@ may change between minor versions.
   digest that made it trustworthy.
 
   **The image is flattened to exactly one layer**, with its whiteouts applied, so what lands is the
-  filesystem a runtime would see. That is a constraint rather than an implementation detail: ADR
-  0016 hoisted the base out of the layer list precisely because "an image entry contributes many
-  layers where every other entry contributes exactly one", and splicing would reinstate the
-  exception it removed. Everything downstream — `subpath`, rebasing, mode normalisation, symlink
-  handling, traversal refusal, deterministic ordering — is the existing tar path unchanged, so an
-  image and a tarball of the same content produce the same layer.
+  filesystem a runtime would see — a constraint rather than an implementation detail, for the reason
+  ADR 0024 gives. Everything downstream — `subpath`, rebasing, mode normalisation, symlink handling,
+  traversal refusal, deterministic ordering — is the existing tar path unchanged, so an image and a
+  tarball of the same content produce the same layer.
 
   The cost is blob sharing. `spec.base` reuses a base's layers verbatim so two artifacts on one base
   share blobs; flattening re-packs the bytes. Use `base` to build *on* an image and `image` to take

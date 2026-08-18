@@ -1,10 +1,6 @@
 // Package buildcontroller reconciles DockerBuild objects by running a Job per build.
 //
-// A separate package from internal/controller, not extra files in it. The two kinds make different
-// promises — one is a pure function of its spec, the other records a hash of its inputs — and
-// sharing a package would let a refactor of the composer's reconcile silently change the builder's.
-// ADR 0004 wanted separate deployments for the same reason applied to RBAC; this is the same
-// argument applied to code.
+// A separate package from internal/controller: separate promises, separate RBAC (ADR 0004, 0025).
 package buildcontroller
 
 import (
@@ -12,21 +8,16 @@ import (
 	"time"
 )
 
-// The composer's error triage, re-typed rather than shared.
-//
-// The shapes are identical because the conditions are: terminal maps to Stalled, pending to
-// Reconciling with a short fixed retry. What differs is WHICH failures qualify, and that
-// difference is the reason these are not imported from internal/controller — see the note on
-// terminal below.
+// The composer's error triage, re-typed rather than shared. The shapes are identical; what differs
+// is WHICH failures qualify, which is the reason they are not imported — see terminal below.
 
 // terminalError marks a failure that retrying cannot fix.
 //
-// The bar is the same as the composer's and it excludes far more here: editing THIS object's spec
-// must be what fixes it. A failing RUN does not qualify, because the Dockerfile that would fix it
-// lives inside a Flux source — a different object, whose change raises no generation bump here, so
-// stalling would wait for an event that never arrives. In practice only genuinely spec-level
-// mistakes stall: an unparsable platform, a malformed resource quantity, a push target that cannot
-// be parsed. Build failures take the capped backoff in status.failures instead.
+// The bar is ADR 0009's and it excludes far more here: editing THIS object's spec must be what
+// fixes it. A failing RUN does not qualify — the Dockerfile lives in a Flux source, whose change
+// raises no generation bump here, so stalling would wait for an event that never arrives. Only
+// spec-level mistakes stall: an unparsable platform, a malformed quantity, an unparsable push
+// target. Build failures take the capped backoff in status.failures instead.
 type terminalError struct{ err error }
 
 func (t *terminalError) Error() string { return t.err.Error() }

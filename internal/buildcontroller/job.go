@@ -15,13 +15,9 @@ import (
 
 // Turning a DockerBuild into a Job.
 //
-// One Job per build, rootless, in the object's own namespace. ADR 0025 records why this rather
-// than a shared BuildKit Deployment or an in-process builder: a shared daemon makes the controller
-// a confused deputy holding credentials for every namespace and turns its cache into a channel
-// between tenants, and in-process building destroys readOnlyRootFilesystem, drop: [ALL], non-root
-// and distroless in one move — which is the posture ADR 0001 named when it refused to build at
-// all. A Job is also an API object, so it survives leader failover and is adopted rather than
-// restarted.
+// One Job per build, rootless, in the object's own namespace. A Job is an API object, so it
+// survives leader failover and is adopted rather than restarted. The rejected alternatives — a
+// shared BuildKit Deployment, in-process building — are in ADR 0025.
 
 const (
 	// contextVolume holds the fetched build context; resultVolume carries the metadata file back.
@@ -50,9 +46,7 @@ const (
 type JobConfig struct {
 	// BuilderImage is the rootless BuildKit image, pinned by digest.
 	//
-	// Pinned is enforced at startup rather than here: its digest is in the input hash, playing the
-	// role oci.AssemblyVersion plays for the composer, so an unpinned value would make the hash a
-	// lie. See ADR 0025.
+	// Pinning is enforced at startup, not here; the digest is part of the input hash.
 	BuilderImage string
 	// FrontendImage is the Dockerfile frontend, pinned by digest. BuildKit resolves `# syntax=`
 	// over the network unless told otherwise.
@@ -68,15 +62,38 @@ type JobConfig struct {
 // rather than starting a second build, and a controller that restarts mid-build finds the Job it
 // left behind instead of duplicating it.
 func jobName(obj *ociv1alpha1.DockerBuild, inputHash string) string {
-	short := strings.TrimPrefix(inputHash, "sha256:")
-	if len(short) > 12 {
-		short = short[:12]
-	}
-	name := fmt.Sprintf("%s-%s", obj.Name, short)
+	name := fmt.Sprintf("%s-%s", obj.Name, shortHash(inputHash))
 	if len(name) > 63 {
 		name = name[len(name)-63:]
 	}
 	return name
+}
+
+// shortHash is the human-sized form of an input hash, used for the Job name and its label so the
+// two cannot drift.
+func shortHash(inputHash string) string {
+	short := strings.TrimPrefix(inputHash, "sha256:")
+	if len(short) > 12 {
+		short = short[:12]
+	}
+	return short
+}
+
+// rootlessSecurityContext is the posture every container in a build pod runs under.
+//
+// Privileged is not offered at any setting: ADR 0001 named that blast radius as the reason for
+// refusing to build at all, and a flag reinstating it would make every other guarantee here
+// conditional.
+func rootlessSecurityContext() *corev1.SecurityContext {
+	return &corev1.SecurityContext{
+		RunAsUser:                ptr.To[int64](1000),
+		RunAsGroup:               ptr.To[int64](1000),
+		RunAsNonRoot:             ptr.To(true),
+		AllowPrivilegeEscalation: ptr.To(false),
+		Privileged:               ptr.To(false),
+		SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined},
+		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+	}
 }
 
 // buildJob renders the Job for one build.
@@ -114,15 +131,10 @@ func buildJob(obj *ociv1alpha1.DockerBuild, inputHash, contextURL string, cfg Jo
 		args = append(args, "--opt", "no-network=true")
 	}
 
-	// The exporter. rewrite-timestamp needs SOURCE_DATE_EPOCH to mean anything, and both are what
-	// narrow — without closing — the "same inputs, different bytes" gap ADR 0025 documents.
-	output := []string{
-		"type=image",
-		"name=" + pushNames(obj),
-		"push=true",
-		"rewrite-timestamp=true",
-	}
-	args = append(args, "--output", strings.Join(output, ","))
+	// rewrite-timestamp needs SOURCE_DATE_EPOCH to mean anything. Together they narrow the "same
+	// inputs, different bytes" gap; ADR 0025 says why they do not close it.
+	args = append(args, "--output",
+		"type=image,name="+pushNames(obj)+",push=true,rewrite-timestamp=true")
 	args = append(args, "--opt", "build-arg:SOURCE_DATE_EPOCH="+cfg.SourceDateEpoch)
 
 	if cacheRef := cacheRefFor(obj); cacheRef != "" {
@@ -140,9 +152,10 @@ func buildJob(obj *ociv1alpha1.DockerBuild, inputHash, contextURL string, cfg Jo
 		{Name: resultVolume, MountPath: resultPath},
 	}
 
-	// Push credentials are projected into the build pod rather than read by the controller. That
-	// keeps registry tokens out of the controller's memory entirely for the push path.
-	if spec.Push != nil && spec.Push.SecretRef != nil {
+	// Projected into the build pod rather than read by the controller, which keeps registry tokens
+	// out of the controller's memory entirely for the push path.
+	hasPushSecret := spec.Push != nil && spec.Push.SecretRef != nil
+	if hasPushSecret {
 		volumes = append(volumes, corev1.Volume{
 			Name: dockerVolume,
 			VolumeSource: corev1.VolumeSource{
@@ -175,29 +188,33 @@ func buildJob(obj *ociv1alpha1.DockerBuild, inputHash, contextURL string, cfg Jo
 		{Name: "BUILDKITD_FLAGS", Value: "--oci-worker-no-process-sandbox"},
 		{Name: "SOURCE_DATE_EPOCH", Value: cfg.SourceDateEpoch},
 	}
-	if spec.Push != nil && spec.Push.SecretRef != nil {
+	if hasPushSecret {
 		env = append(env, corev1.EnvVar{Name: "DOCKER_CONFIG", Value: dockerPath})
 	}
 
+	// buildctl writes the pushed digest to a file in an emptyDir, which the controller cannot read.
+	// Copying it to the termination log is what gets it back out: Kubernetes surfaces that in the
+	// pod's container status, which is the supported channel for a small result and needs no exec
+	// and no log scraping.
+	//
+	// The `sh -c "$@"` form passes the buildctl arguments positionally, so nothing here has to
+	// quote them and an argument containing a space cannot break the script.
+	script := fmt.Sprintf(`set -e
+buildctl-daemonless.sh "$@"
+cat %s > /dev/termination-log
+`, path.Join(resultPath, metadataFile))
+
 	container := corev1.Container{
-		Name:         "build",
-		Image:        cfg.BuilderImage,
-		Command:      []string{"buildctl-daemonless.sh"},
-		Args:         args,
-		Env:          env,
-		VolumeMounts: mounts,
-		SecurityContext: &corev1.SecurityContext{
-			// Rootless. Privileged is not offered at any setting: ADR 0001:56-57 named that blast
-			// radius as the reason for refusing to build in the first place, and a flag that
-			// reinstates it would make every other guarantee here conditional.
-			RunAsUser:                ptr.To[int64](1000),
-			RunAsGroup:               ptr.To[int64](1000),
-			RunAsNonRoot:             ptr.To(true),
-			AllowPrivilegeEscalation: ptr.To(false),
-			Privileged:               ptr.To(false),
-			SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined},
-			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
-		},
+		Name:  "build",
+		Image: cfg.BuilderImage,
+		// Command is the wrapper, Args the buildctl arguments it passes through as "$@".
+		Command:                  []string{"sh", "-c", script, "sh"},
+		Args:                     args,
+		Env:                      env,
+		VolumeMounts:             mounts,
+		TerminationMessagePath:   corev1.TerminationMessagePathDefault,
+		TerminationMessagePolicy: corev1.TerminationMessageReadFile,
+		SecurityContext:          rootlessSecurityContext(),
 	}
 	if spec.Resources != nil {
 		container.Resources = *spec.Resources
@@ -211,13 +228,8 @@ func buildJob(obj *ociv1alpha1.DockerBuild, inputHash, contextURL string, cfg Jo
 		Image: cfg.BuilderImage,
 		Command: []string{"sh", "-c",
 			fmt.Sprintf("wget -qO- %q | tar -xzf - -C %s", contextURL, contextPath)},
-		VolumeMounts: []corev1.VolumeMount{{Name: contextVolume, MountPath: contextPath}},
-		SecurityContext: &corev1.SecurityContext{
-			RunAsUser:                ptr.To[int64](1000),
-			RunAsNonRoot:             ptr.To(true),
-			AllowPrivilegeEscalation: ptr.To(false),
-			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
-		},
+		VolumeMounts:    []corev1.VolumeMount{{Name: contextVolume, MountPath: contextPath}},
+		SecurityContext: rootlessSecurityContext(),
 	}
 
 	return &batchv1.Job{
@@ -226,7 +238,7 @@ func buildJob(obj *ociv1alpha1.DockerBuild, inputHash, contextURL string, cfg Jo
 			Namespace: obj.Namespace,
 			Labels: map[string]string{
 				ManagedByLabel: "kube-oci-builder",
-				InputHashLabel: strings.TrimPrefix(inputHash, "sha256:")[:12],
+				InputHashLabel: shortHash(inputHash),
 			},
 		},
 		Spec: batchv1.JobSpec{
@@ -267,8 +279,7 @@ func pushNames(obj *ociv1alpha1.DockerBuild) string {
 
 // cacheRefFor returns where this object's build cache lives, or "" when caching is disabled.
 //
-// Always per-object. A cache shared between objects is a channel between whoever can write their
-// Dockerfiles, so there is no setting that shares one.
+// Always per-object; nothing shares one. See the doc on BuildCache.Ref for why.
 func cacheRefFor(obj *ociv1alpha1.DockerBuild) string {
 	cache := obj.Spec.Cache
 	if cache != nil && cache.Mode == "Disabled" {

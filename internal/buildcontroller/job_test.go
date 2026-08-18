@@ -10,6 +10,9 @@ import (
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 )
 
+// testHash stands in for an input hash wherever the value itself does not matter.
+var testHash = "sha256:" + strings.Repeat("a", 64)
+
 func sampleBuild() *ociv1alpha1.DockerBuild {
 	return &ociv1alpha1.DockerBuild{
 		ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: "team-a"},
@@ -55,7 +58,7 @@ func TestJobNameIsDeterministic(t *testing.T) {
 func TestJobNameStaysWithinLimit(t *testing.T) {
 	obj := sampleBuild()
 	obj.Name = strings.Repeat("x", 200)
-	name := jobName(obj, "sha256:"+strings.Repeat("a", 64))
+	name := jobName(obj, testHash)
 	if len(name) > 63 {
 		t.Errorf("name is %d chars, over the limit", len(name))
 	}
@@ -67,36 +70,42 @@ func TestJobNameStaysWithinLimit(t *testing.T) {
 // refusing to build at all. Rootless is the half of that this project accepts; privileged is not
 // offered at any setting, so nothing in the spec can reach these fields.
 func TestBuildJobRunsRootless(t *testing.T) {
-	job := buildJob(sampleBuild(), "sha256:"+strings.Repeat("a", 64), "https://example/ctx.tgz", sampleConfig())
+	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", sampleConfig())
 
 	pod := job.Spec.Template.Spec
 	if len(pod.Containers) != 1 {
 		t.Fatalf("want one build container, got %d", len(pod.Containers))
 	}
-	sc := pod.Containers[0].SecurityContext
-	if sc == nil {
-		t.Fatal("the build container has no security context")
-	}
-	if sc.Privileged == nil || *sc.Privileged {
-		t.Error("the build container is privileged")
-	}
-	if sc.RunAsNonRoot == nil || !*sc.RunAsNonRoot {
-		t.Error("the build container may run as root")
-	}
-	if sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation {
-		t.Error("privilege escalation is allowed")
+
+	// Every container, not just the build one — the init container fetches the context and has no
+	// more reason to be privileged than the build does.
+	for _, c := range append(append([]corev1.Container{}, pod.InitContainers...), pod.Containers...) {
+		sc := c.SecurityContext
+		if sc == nil {
+			t.Errorf("%s has no security context", c.Name)
+			continue
+		}
+		if sc.Privileged == nil || *sc.Privileged {
+			t.Errorf("%s is privileged", c.Name)
+		}
+		if sc.RunAsNonRoot == nil || !*sc.RunAsNonRoot {
+			t.Errorf("%s may run as root", c.Name)
+		}
+		if sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation {
+			t.Errorf("%s allows privilege escalation", c.Name)
+		}
 	}
 	if pod.RestartPolicy != corev1.RestartPolicyNever {
 		t.Errorf("restart policy is %q; a retried RUN just delays the failure", pod.RestartPolicy)
 	}
 }
 
-// TestBuildJobUsesTheObjectsServiceAccount — a pod running code from a git repository must not
-// carry the controller's own token.
+// TestBuildJobUsesTheObjectsServiceAccount — the build pod runs as spec.serviceAccountName, never
+// the controller's.
 func TestBuildJobUsesTheObjectsServiceAccount(t *testing.T) {
 	obj := sampleBuild()
 	obj.Spec.ServiceAccountName = "builder"
-	job := buildJob(obj, "sha256:"+strings.Repeat("a", 64), "https://example/ctx.tgz", sampleConfig())
+	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig())
 
 	if got := job.Spec.Template.Spec.ServiceAccountName; got != "builder" {
 		t.Errorf("service account = %q, want %q", got, "builder")
@@ -111,7 +120,7 @@ func TestBuildJobArgs(t *testing.T) {
 	obj.Spec.Target = "runtime"
 	obj.Spec.Args = []ociv1alpha1.BuildArg{{Name: "VERSION", Value: "1.2.3"}}
 
-	job := buildJob(obj, "sha256:"+strings.Repeat("a", 64), "https://example/ctx.tgz", sampleConfig())
+	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig())
 	argv := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " ")
 
 	for _, want := range []string{
@@ -134,7 +143,7 @@ func TestBuildJobArgs(t *testing.T) {
 func TestNetworkNoneIsPassedThrough(t *testing.T) {
 	obj := sampleBuild()
 	obj.Spec.Network = "None"
-	job := buildJob(obj, "sha256:"+strings.Repeat("a", 64), "https://example/ctx.tgz", sampleConfig())
+	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig())
 
 	argv := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " ")
 	if !strings.Contains(argv, "no-network=true") {
@@ -142,11 +151,8 @@ func TestNetworkNoneIsPassedThrough(t *testing.T) {
 	}
 }
 
-// TestCacheRefIsPerObject is a multi-tenancy assertion.
-//
-// A build cache shared between objects is a channel between whoever can write their Dockerfiles.
-// There is deliberately no setting that shares one, so the default must be scoped by namespace and
-// name.
+// TestCacheRefIsPerObject — nothing may share a cache, so the default must be scoped by namespace
+// and name.
 func TestCacheRefIsPerObject(t *testing.T) {
 	a := sampleBuild()
 	b := sampleBuild()
@@ -176,7 +182,7 @@ func TestSecretsAreMountedNotInlined(t *testing.T) {
 		SecretRef: ociv1alpha1.LocalObjectReference{Name: "npm-creds"},
 	}}
 
-	job := buildJob(obj, "sha256:"+strings.Repeat("a", 64), "https://example/ctx.tgz", sampleConfig())
+	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig())
 	argv := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " ")
 
 	if !strings.Contains(argv, "--secret id=npmrc") {

@@ -34,12 +34,8 @@ const (
 	ReasonPublishFailed     = "PublishFailed"
 	ReasonSuspended         = "Suspended"
 
-	// ReasonBuildFailed covers a DockerBuild whose Job did not succeed.
-	//
-	// Never sets Stalled, and that is the point of having a distinct reason: a failing RUN is
-	// nearly always fixed by editing a Dockerfile, which lives inside a Flux source rather than in
-	// this object's spec, so no generation change would ever arrive to wake a stalled object back
-	// up. It takes a capped backoff instead. See ADR 0025.
+	// ReasonBuildFailed covers a DockerBuild whose Job did not succeed. Never sets Stalled: the fix
+	// lives in another object, so no generation change would arrive to wake it up.
 	ReasonBuildFailed = "BuildFailed"
 
 	// ReasonDependencyNotReady covers something the composition refers to that does not exist
@@ -175,6 +171,14 @@ func (p *Push) TagsAreImmutable() bool {
 	return p == nil || p.Immutable == nil || *p.Immutable
 }
 
+// DefaultHistoryLimit is how many past builds are retained when nothing says otherwise.
+//
+// Not 1, and not unbounded. Layers are shared between builds so the marginal cost of retaining one
+// is small, while the cost of having reclaimed one too eagerly is a workload that cannot pull the
+// digest it is pinned to. See ADR 0011. Shared by both kinds, so the number and its reasoning stay
+// in one place.
+const DefaultHistoryLimit = 10
+
 // BuildRecord is one past build, retained so garbage collection knows what is still live.
 //
 // Kept in status rather than inferred from what is in storage. Inference would mean deciding an
@@ -197,13 +201,8 @@ type BuildRecord struct {
 	// +optional
 	Blobs []string `json:"blobs,omitempty"`
 
-	// InputHash the build was produced from. Written by DockerBuild and ignored by
-	// ImageComposition, whose identity is the output digest rather than the hash.
-	//
-	// It exists because a build's output digest is an observation rather than something derivable:
-	// a controller that lost status.artifact but kept history can find what it previously produced
-	// for a set of inputs and re-verify it, instead of rebuilding blind and risking a different
-	// digest under a tag that immutability will then refuse to move. See ADR 0025.
+	// InputHash the build was produced from. Written by DockerBuild only; ImageComposition's
+	// identity is the output digest rather than the hash. See ADR 0025.
 	// +optional
 	InputHash string `json:"inputHash,omitempty"`
 
