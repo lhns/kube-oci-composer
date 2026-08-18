@@ -195,6 +195,22 @@ may change between minor versions.
   remains the destination rather than the current state.
 
 ### Fixed
+- **`DockerBuild`: every build failed to find its own Dockerfile.** The two halves of the context
+  contract disagreed, and each half was individually right.
+
+  A source-controller artifact wraps the tree in a single top-level directory whose name is not
+  predictable. The controller's pinned-`FROM` check strips that wrapper, so an unpinned base was
+  correctly refused -- and then every build that PASSED the check died inside BuildKit with
+  `failed to read dockerfile: open Dockerfile: no such file or directory`, because the init
+  container extracted the archive verbatim and left the Dockerfile one directory below where
+  `buildctl` looks.
+
+  The init container now applies the same rule the controller does: strip one level only when the
+  archive really is a single wrapper directory, so a tarball whose files sit at the root still
+  builds rather than being silently emptied. The test runs the actual script against both shapes,
+  because no assertion over the rendered pod spec could have caught this -- both halves looked
+  correct in isolation, and only running them together showed the mismatch.
+
 - **`DockerBuild`: a failing build retried in a hot loop and destroyed its own evidence.** Found by
   the first end-to-end run against a real cluster, which is the only place it could have been found:
   the reconcile loop was correct against a fake client, because a fake client has no watches.

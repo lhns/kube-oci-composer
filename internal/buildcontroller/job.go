@@ -125,6 +125,38 @@ func rootlessSecurityContext() *corev1.SecurityContext {
 	}
 }
 
+// fetchContextScript downloads the build context and unwraps it to the directory buildctl reads.
+//
+// The unwrapping is the whole reason this is a script rather than one pipe. A source-controller
+// artifact wraps the tree in a single top-level directory whose name nobody can predict, so a plain
+// extraction leaves the Dockerfile at <wrapper>/Dockerfile while buildctl looks for it at the root.
+// The controller-side check already strips that wrapper (build.matchesContextPath), so before this
+// existed the two halves disagreed: an unpinned FROM was correctly refused by reading the wrapped
+// path, and then every build that passed the check failed inside BuildKit with
+//
+//	failed to read dockerfile: open Dockerfile: no such file or directory
+//
+// Deliberately the SAME rule as matchesContextPath rather than an unconditional --strip-components=1:
+// strip one level only when the archive really is a single wrapper directory, so a tarball whose
+// files sit at the root still builds instead of being silently emptied.
+func fetchContextScript(contextURL string) string {
+	return fmt.Sprintf(`set -e
+staging=%[2]s/.staging
+mkdir -p "$staging"
+wget -qO- %[1]q | tar -xzf - -C "$staging"
+
+src="$staging"
+if [ "$(ls -A "$staging" | wc -l)" -eq 1 ]; then
+  only="$staging/$(ls -A "$staging")"
+  [ -d "$only" ] && src="$only"
+fi
+
+# tar rather than mv: it copies dotfiles without a shell glob that misses them.
+tar -cf - -C "$src" . | tar -xf - -C %[2]s
+rm -rf "$staging"
+`, contextURL, contextPath)
+}
+
 // buildctlArgs assembles the buildctl invocation. Split out because it is the part that decides
 // what gets built, and the only part the argv tests read.
 func buildctlArgs(obj *ociv1alpha1.DockerBuild, cfg JobConfig) []string {
@@ -279,10 +311,9 @@ cat %s > /dev/termination-log
 	// would otherwise have to hold the whole context in memory or on its own read-only filesystem,
 	// and the URL is already a digest-addressed artifact that anything can pull.
 	initContainer := corev1.Container{
-		Name:  "fetch-context",
-		Image: cfg.BuilderImage,
-		Command: []string{"sh", "-c",
-			fmt.Sprintf("wget -qO- %q | tar -xzf - -C %s", contextURL, contextPath)},
+		Name:            "fetch-context",
+		Image:           cfg.BuilderImage,
+		Command:         []string{"sh", "-c", fetchContextScript(contextURL)},
 		VolumeMounts:    []corev1.VolumeMount{{Name: contextVolume, MountPath: contextPath}},
 		SecurityContext: rootlessSecurityContext(),
 	}
