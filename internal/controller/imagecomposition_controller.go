@@ -225,7 +225,7 @@ type buildResult struct {
 // and Manifests names the children themselves. Both matter to GC — the layers are shared between
 // children and so appear once, while the configs differ per platform and would otherwise be
 // reclaimed under a live index.
-func buildRecord(art builtArtifact, tags []string, digest v1.Hash) (*ociv1alpha1.BuildRecord, error) {
+func buildRecord(art builtArtifact, tags []string, digest v1.Hash, inputs []oci.LayerInput) (*ociv1alpha1.BuildRecord, error) {
 	children, err := art.children()
 	if err != nil {
 		return nil, err
@@ -271,8 +271,27 @@ func buildRecord(art builtArtifact, tags []string, digest v1.Hash) (*ociv1alpha1
 		Digest:    digest.String(),
 		Blobs:     blobs,
 		Manifests: manifests,
+		Sources:   sourceRecords(inputs),
 		Time:      &now,
 	}, nil
+}
+
+// sourceRecords is where each layer's content came from, so an artifact can be traced back to a
+// revision without pulling it apart. Layers that carry no revision still record their digest: for a
+// fetch that IS the identity, and an empty revision is honest about there being none.
+func sourceRecords(inputs []oci.LayerInput) []ociv1alpha1.SourceRecord {
+	if len(inputs) == 0 {
+		return nil
+	}
+	out := make([]ociv1alpha1.SourceRecord, 0, len(inputs))
+	for _, in := range inputs {
+		out = append(out, ociv1alpha1.SourceRecord{
+			Name:     in.Name,
+			Revision: in.Identity,
+			Digest:   in.Digest,
+		})
+	}
+	return out
 }
 
 // publishedState is what the registry currently holds for this target: what each tag resolves
@@ -543,7 +562,7 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	r.event(obj, corev1.EventTypeNormal, ociv1alpha1.ReasonSucceeded,
 		fmt.Sprintf("Published %s@%s%s", tgt.pullRepo, digest, tagSuffix(tgt.tags)))
 
-	record, err := buildRecord(art, tgt.tags, digest)
+	record, err := buildRecord(art, tgt.tags, digest, inputs)
 	if err != nil {
 		// The artifact is published and usable; only the retention record is missing. Failing
 		// here would leave storage holding blobs that nothing records as live, which is worse

@@ -176,6 +176,23 @@ func (p *Push) TagsAreImmutable() bool {
 	return p == nil || p.Immutable == nil || *p.Immutable
 }
 
+// SourceRecord is where one layer's content came from.
+type SourceRecord struct {
+	// Name of the layer, matching spec.layers[].name.
+	// +optional
+	Name string `json:"name,omitempty"`
+
+	// Revision the content was resolved at, for a source that has one — a Flux artifact's
+	// "main@sha1:abcd". This is the field that answers "which commit is in this image?".
+	// +optional
+	Revision string `json:"revision,omitempty"`
+
+	// Digest of the resolved content: the declared digest of a fetch, the artifact digest of a
+	// Flux source, the manifest digest of an image layer.
+	// +optional
+	Digest string `json:"digest,omitempty"`
+}
+
 // DefaultHistoryLimit is how many past builds are retained when nothing says otherwise.
 //
 // Not 1, and not unbounded. Layers are shared between builds so the marginal cost of retaining one
@@ -205,6 +222,15 @@ type BuildRecord struct {
 	// build it is the union across every child.
 	// +optional
 	Blobs []string `json:"blobs,omitempty"`
+
+	// Sources records what each layer was resolved FROM, so an artifact can be traced back to the
+	// revision that produced it.
+	//
+	// Without this the only way to answer "which revision is in this image?" is to pull the
+	// manifest, fetch the layer and read its contents — which is how the incident behind ADR 0026
+	// had to be diagnosed, and why a wrong artifact sat unnoticed until a tag conflict surfaced it.
+	// +optional
+	Sources []SourceRecord `json:"sources,omitempty"`
 
 	// InputHash the build was produced from. Written by DockerBuild only; ImageComposition's
 	// identity is the output digest rather than the hash. See ADR 0025.

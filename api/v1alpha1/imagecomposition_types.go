@@ -166,7 +166,12 @@ type SourceRefSource struct {
 	// +required
 	Name string `json:"name"`
 
-	// Namespace of the referenced source. Defaults to the ImageComposition's namespace.
+	// Namespace of the referenced source. Must be the consuming object's own namespace, which is
+	// also the default — the field remains only so an explicit value is not a schema error.
+	//
+	// A source elsewhere is REFUSED. Both controllers read Flux sources cluster-wide, so honouring
+	// another namespace would let anyone who can create one of these objects pull that namespace's
+	// content into an image they control and can read.
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
 

@@ -130,8 +130,13 @@ spec:
                     description: Name of the referenced source.
                     type: string
                   namespace:
-                    description: Namespace of the referenced source. Defaults to the
-                      ImageComposition's namespace.
+                    description: |-
+                      Namespace of the referenced source. Must be the consuming object's own namespace, which is
+                      also the default — the field remains only so an explicit value is not a schema error.
+
+                      A source elsewhere is REFUSED. Both controllers read Flux sources cluster-wide, so honouring
+                      another namespace would let anyone who can create one of these objects pull that namespace's
+                      content into an image they control and can read.
                     type: string
                   subpath:
                     description: Subpath selects one directory from the artifact.
@@ -497,6 +502,33 @@ spec:
                         time, long after the change that caused it.
                       items:
                         type: string
+                      type: array
+                    sources:
+                      description: |-
+                        Sources records what each layer was resolved FROM, so an artifact can be traced back to the
+                        revision that produced it.
+
+                        Without this the only way to answer "which revision is in this image?" is to pull the
+                        manifest, fetch the layer and read its contents — which is how the incident behind ADR 0026
+                        had to be diagnosed, and why a wrong artifact sat unnoticed until a tag conflict surfaced it.
+                      items:
+                        description: SourceRecord is where one layer's content came
+                          from.
+                        properties:
+                          digest:
+                            description: |-
+                              Digest of the resolved content: the declared digest of a fetch, the artifact digest of a
+                              Flux source, the manifest digest of an image layer.
+                            type: string
+                          name:
+                            description: Name of the layer, matching spec.layers[].name.
+                            type: string
+                          revision:
+                            description: |-
+                              Revision the content was resolved at, for a source that has one — a Flux artifact's
+                              "main@sha1:abcd". This is the field that answers "which commit is in this image?".
+                            type: string
+                        type: object
                       type: array
                     tags:
                       description: |-
