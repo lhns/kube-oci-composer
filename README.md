@@ -132,18 +132,57 @@ package needing three others means three more entries, pinned by hand. Nothing h
 `postinst`, and a package whose files only work afterwards will not work
 ([ADR 0022](docs/adr/0022-distro-packages-as-layer-sources.md)).
 
-## No registry required
+## Two shapes, and which one you are in
 
-`spec.push` is optional.
+`spec.push` is optional, and the choice is more consequential than it looks.
 
-- **Omitted** — the controller serves the artifact from its own read-only OCI endpoint. Nothing
-  else to install, no registry credentials anywhere. An ordinary Service behind your existing
-  ingress and certificate is enough for containerd to pull over HTTPS, with **no node
-  configuration** — no `hosts.toml`, no DaemonSet, no containerd socket.
-- **Present** — push to an external registry for sharing beyond the cluster.
+**Serving — `spec.push` omitted.** The controller serves the artifact from its own read-only OCI
+endpoint. Nothing else to install, no registry credentials anywhere; an ordinary Service behind your
+existing ingress and certificate is enough for containerd to pull over HTTPS, with **no node
+configuration** — no `hosts.toml`, no DaemonSet, no containerd socket.
 
-Determinism is what makes serving mode cheap: nothing here is a system of record, because any lost
-artifact can be rebuilt from its spec. See [ADR 0006](docs/adr/0006-push-is-optional.md).
+Determinism is what makes this cheap: nothing here is a system of record, because any lost artifact
+can be rebuilt from its spec. Run **one replica** — the endpoint is active/standby, not scale-out.
+
+**Registry — `spec.push` set.** Both kinds publish to a registry you run. This is the recommended
+shape once you are **building images** rather than only composing them, and it is required for
+`ImageBuild`, whose Job runs in another pod and cannot reach the controller's loopback-only endpoint.
+
+Which you want follows from one question: *can what you publish be reproduced from its spec?*
+
+|  | Serving | Registry |
+|---|---|---|
+| `ImageComposition` | supported, simplest | supported |
+| `ImageBuild` | not available | **required** |
+| System of record | no — rebuildable | **yes, for builds** |
+| You back up | nothing | the registry's storage |
+
+An `ImageBuild`'s output is an *observation*, not a function of its spec
+([ADR 0025](docs/adr/0025-dockerfile-builds-as-a-second-kind.md)), so a rebuild may not reproduce the
+digest. The registry holding it is the only copy.
+
+See [ADR 0006](docs/adr/0006-push-is-optional.md) and
+[ADR 0030](docs/adr/0030-a-real-registry-serves-both-kinds.md).
+
+### Keeping published images from being deleted
+
+A registry with an expiry policy will reclaim anything it has not seen used recently — including
+images your workloads are still running. Both controllers therefore **re-pull every image a live
+object still references**, on `--retention-refresh-interval` (default `1h`), which is what tells the
+registry they are in use.
+
+Three things about it are worth knowing:
+
+- **It only reads.** No write permission, no delete permission; nothing it does can destroy an image.
+- **The ratio is the guarantee**, not either number. The default assumes a registry window of 30
+  days, a margin of 720. If you shorten the window, shorten the interval with it.
+- **It never rebuilds.** A refresh is a pull, which matters most where a rebuild would produce
+  different bytes.
+
+An object **Stalled on a spec error keeps refreshing what it already published** — those images may
+be running right now. Sustained failure raises a `RetentionDegraded` event, because this design fails
+*unsafe*: the symptom of silence is deletion, one window later. See
+[ADR 0031](docs/adr/0031-the-retention-guarantee.md) and [docs/registry.md](docs/registry.md).
 
 ## Operational notes
 
@@ -345,6 +384,13 @@ draws: this controller owns what is **available**, git owns what is **deployed**
 
 [`docs/adr/`](docs/adr/) records every decision with its rejected alternatives, including several
 that were built, measured, and removed. Start with the index.
+
+- [`docs/registry.md`](docs/registry.md) — running a registry: what it has to support, a verified
+  zot configuration, and what you own once you have one.
+- [`docs/threat-model.md`](docs/threat-model.md) — STRIDE over the whole system, with what is
+  mitigated and what is not.
+- [`docs/examples/spec-hash-tag/`](docs/examples/spec-hash-tag/) — deriving a tag from a hash of the
+  spec, which is what makes referencing a tag safe.
 
 ## Licence
 

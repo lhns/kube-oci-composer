@@ -39,7 +39,7 @@ graph TB
     end
 
     EXT["External origins<br/>HTTP URLs, upstream registries"]
-    REG["Target registry"]
+    REG["Target registry<br/>anonymous read, authenticated write<br/>expires what is not pulled"]
     CONSUMER["Workloads pulling images"]
 
     IC -->|watch| COMP
@@ -50,12 +50,14 @@ graph TB
     COMP --> STORE
     STORE --> SERVE
     COMP -->|push| REG
+    COMP -->|"refresh: pull only,<br/>renews the retention lease"| REG
     SERVE -->|pull| CONSUMER
     REG -->|pull| CONSUMER
 
     DB -->|watch| BUILD
     SRC -->|get artifact| BUILD
     SEC -->|get| BUILD
+    BUILD -->|"refresh: pull only"| REG
     BUILD -->|create Job| JOB
     JOB -->|fetch context| EXT
     JOB -->|push| REG
@@ -164,6 +166,8 @@ another's readers.
 | D3 | A failing build hot-loops against the API server | **Mitigated** | Capped exponential backoff, and the failed Job is retained until its backoff elapses so that deleting it cannot wake the controller through its own watch. This was a real defect. |
 | D4 | Builds exhaust node resources | **Partially mitigated** | `spec.resources` applies to both the build and fetch containers, but is optional; a namespace `ResourceQuota` is the real control and is the cluster's job. |
 | D5 | Unbounded history growth in status | **Mitigated** | Rotation is capped by `historyLimit`, and a rebuild reproducing an earlier digest moves that entry rather than adding one. |
+| D6 | A registry reclaims images live workloads are still running | **Mitigated, and it fails unsafe** | Both controllers re-pull every image a live object references (`--retention-refresh-interval`, default `1h`), which is what keeps a recency-based expiry policy from collecting them. A refresh only READS, so no bug in it can delete anything. The mitigation depends on the interval staying far below the registry's window — the RATIO is the guarantee — and on refreshing actually running: sustained failure raises `RetentionDegraded`, because the symptom of silence here is deletion one window later. See ADR 0031. |
+| D7 | Refreshing is disabled or misconfigured against a registry that expires content | **NOT mitigated by this code** | `--retention-refresh-interval=0`, or a registry window shorter than the interval, silently removes the protection in D6. Nothing can detect this from inside the controller: it cannot know the registry's policy. Documented in `docs/registry.md`, and the operator owns it. |
 
 ## E — Elevation of privilege
 
@@ -308,6 +312,7 @@ These are not mitigations. They are things assumed true, and each one is somebod
 | `sourceRef.revision` is opt-in | T1 | A spec that omits it still consumes whatever the source publishes |
 | `AssemblyVersion` is a human discipline | T5 | Has been missed |
 | Build pods share the node kernel with seccomp unconfined | E1 | User namespaces are the destination (ADR 0027) |
+| Retention depends on two numbers in different systems | D7 | The refresh interval is a controller flag; the window is registry config. Nothing enforces the relationship between them |
 
 ## Reviewing this document
 
