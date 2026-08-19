@@ -1,6 +1,6 @@
 //go:build e2e
 
-// DockerBuild against a real cluster.
+// ImageBuild against a real cluster.
 //
 // This is the first thing that runs the builder end to end, and it exists because two pieces of it
 // could not be verified any other way. The digest comes back out of the build through the pod's
@@ -49,8 +49,8 @@ func buildEventually(t *testing.T, what string, fn func() error) {
 	ctrl, _ := kubectl(t, "-n", "oci-builder", "logs", "deploy/kube-oci-builder", "--tail=120")
 	jobs, _ := kubectl(t, "-n", buildNamespace, "get", "jobs,pods", "-o", "wide")
 	pods, _ := kubectl(t, "-n", buildNamespace, "logs", "-l", "job-name", "--tail=120", "--all-containers")
-	obj, _ := kubectl(t, "-n", buildNamespace, "get", "dockerbuild", "-o", "yaml")
-	t.Fatalf("timed out waiting for %s: %v\n\nbuilder logs:\n%s\n\nobjects:\n%s\n\nbuild logs:\n%s\n\ndockerbuilds:\n%s",
+	obj, _ := kubectl(t, "-n", buildNamespace, "get", "imagebuild", "-o", "yaml")
+	t.Fatalf("timed out waiting for %s: %v\n\nbuilder logs:\n%s\n\nobjects:\n%s\n\nbuild logs:\n%s\n\nimagebuilds:\n%s",
 		what, last, ctrl, jobs, pods, obj)
 }
 
@@ -74,7 +74,7 @@ type statusCondition struct {
 
 func buildStatus(t *testing.T, name string) dockerBuildStatus {
 	t.Helper()
-	out := mustKubectl(t, "-n", buildNamespace, "get", "dockerbuild", name,
+	out := mustKubectl(t, "-n", buildNamespace, "get", "imagebuild", name,
 		"-o", "jsonpath={.status}")
 	var st dockerBuildStatus
 	if strings.TrimSpace(out) == "" {
@@ -98,13 +98,13 @@ func readyCondition(st dockerBuildStatus) *statusCondition {
 	return nil
 }
 
-// applyBuild creates a DockerBuild. extraSpec is appended verbatim under spec, already indented
+// applyBuild creates an ImageBuild. extraSpec is appended verbatim under spec, already indented
 // two spaces, for the fields only one test needs.
 func applyBuild(t *testing.T, name, dockerfile string, extraSpec ...string) {
 	t.Helper()
 	applyStdin(t, fmt.Sprintf(`
 apiVersion: oci.lhns.de/v1alpha1
-kind: DockerBuild
+kind: ImageBuild
 metadata:
   name: %s
   namespace: %s
@@ -122,15 +122,15 @@ spec:
 %s
 `, name, buildNamespace, dockerfile, buildRegistry, name, strings.Join(extraSpec, "\n")))
 	t.Cleanup(func() {
-		_, _ = kubectl(t, "-n", buildNamespace, "delete", "dockerbuild", name, "--ignore-not-found")
+		_, _ = kubectl(t, "-n", buildNamespace, "delete", "imagebuild", name, "--ignore-not-found")
 	})
 }
 
-// TestDockerBuildProducesAnImage is the whole point of the kind.
+// TestImageBuildProducesAnImage is the whole point of the kind.
 //
 // It proves the three things only a cluster can: rootless BuildKit runs, the built digest makes it
 // back through the pod's termination message, and the image is actually in the registry afterwards.
-func TestDockerBuildProducesAnImage(t *testing.T) {
+func TestImageBuildProducesAnImage(t *testing.T) {
 	applyBuild(t, "e2e-build", "Dockerfile")
 
 	buildEventually(t, "the build to become Ready", func() error {
@@ -204,10 +204,10 @@ func curlInCluster(t *testing.T, name, url string) string {
 	return out
 }
 
-// TestDockerBuildIsIdempotent — the input hash is the whole cost model. A second reconcile of an
+// TestImageBuildIsIdempotent — the input hash is the whole cost model. A second reconcile of an
 // unchanged object must not build again, which is visible as the digest and hash both holding still
 // while no new Job appears.
-func TestDockerBuildIsIdempotent(t *testing.T) {
+func TestImageBuildIsIdempotent(t *testing.T) {
 	applyBuild(t, "e2e-idempotent", "Dockerfile")
 
 	buildEventually(t, "the first build to finish", func() error {
@@ -224,7 +224,7 @@ func TestDockerBuildIsIdempotent(t *testing.T) {
 	// THAT request rather than sleeping and hoping. A fixed sleep would pass even if the
 	// short-circuit had regressed and a rebuild simply had not started yet.
 	requested := fmt.Sprintf("%d", time.Now().Unix())
-	mustKubectl(t, "-n", buildNamespace, "annotate", "dockerbuild", "e2e-idempotent",
+	mustKubectl(t, "-n", buildNamespace, "annotate", "imagebuild", "e2e-idempotent",
 		"reconcile.fluxcd.io/requestedAt="+requested, "--overwrite")
 	buildEventually(t, "the reconcile request to be handled", func() error {
 		if got := buildStatus(t, "e2e-idempotent").LastHandledReconcileAt; got != requested {
@@ -262,10 +262,10 @@ func jobsFor(t *testing.T, name string) []string {
 	return mine
 }
 
-// TestDockerBuildRefusesAnUnpinnedFrom — the one rule the controller enforces on a Dockerfile's
+// TestImageBuildRefusesAnUnpinnedFrom — the one rule the controller enforces on a Dockerfile's
 // CONTENT, and the reason it is enforced before a Job exists: an unpinned base means an unchanged
 // spec can silently build on something else.
-func TestDockerBuildRefusesAnUnpinnedFrom(t *testing.T) {
+func TestImageBuildRefusesAnUnpinnedFrom(t *testing.T) {
 	applyBuild(t, "e2e-unpinned", "Dockerfile.unpinned")
 
 	buildEventually(t, "the unpinned FROM to be refused", func() error {

@@ -13,7 +13,7 @@ import (
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 )
 
-// Turning a DockerBuild into a Job.
+// Turning an ImageBuild into a Job.
 //
 // One Job per build, rootless, in the object's own namespace. A Job is an API object, so it
 // survives leader failover and is adopted rather than restarted. The rejected alternatives — a
@@ -68,7 +68,7 @@ type JobConfig struct {
 // That is what makes a brief two-leader window harmless: the second Create gets AlreadyExists
 // rather than starting a second build, and a controller that restarts mid-build finds the Job it
 // left behind instead of duplicating it.
-func jobName(obj *ociv1alpha1.DockerBuild, inputHash string) string {
+func jobName(obj *ociv1alpha1.ImageBuild, inputHash string) string {
 	name := fmt.Sprintf("%s-%s", obj.Name, shortHash(inputHash))
 	if len(name) > 63 {
 		name = name[len(name)-63:]
@@ -153,7 +153,7 @@ rm -rf "$staging"
 
 // buildctlArgs assembles the buildctl invocation. Split out because it is the part that decides
 // what gets built, and the only part the argv tests read.
-func buildctlArgs(obj *ociv1alpha1.DockerBuild, cfg JobConfig) []string {
+func buildctlArgs(obj *ociv1alpha1.ImageBuild, cfg JobConfig) []string {
 	spec := obj.Spec
 	args := []string{
 		"build",
@@ -225,7 +225,7 @@ func insecureAttr(push *ociv1alpha1.Push, insecure []string) string {
 //
 // Paired through one closure rather than two appends per source: a volume and the mount that names
 // it have to agree, and building them in separate lists is how they stop agreeing.
-func buildVolumes(spec ociv1alpha1.DockerBuildSpec) ([]corev1.Volume, []corev1.VolumeMount) {
+func buildVolumes(spec ociv1alpha1.ImageBuildSpec) ([]corev1.Volume, []corev1.VolumeMount) {
 	var volumes []corev1.Volume
 	var mounts []corev1.VolumeMount
 
@@ -259,7 +259,7 @@ func buildVolumes(spec ociv1alpha1.DockerBuildSpec) ([]corev1.Volume, []corev1.V
 }
 
 // buildJob renders the Job for one build.
-func buildJob(obj *ociv1alpha1.DockerBuild, inputHash, contextURL string, cfg JobConfig) *batchv1.Job {
+func buildJob(obj *ociv1alpha1.ImageBuild, inputHash, contextURL string, cfg JobConfig) *batchv1.Job {
 	spec := obj.Spec
 	args := buildctlArgs(obj, cfg)
 	volumes, mounts := buildVolumes(spec)
@@ -371,7 +371,7 @@ func automount(serviceAccount string) *bool {
 }
 
 // pushNames renders the comma-separated image names the exporter pushes to.
-func pushNames(obj *ociv1alpha1.DockerBuild) string {
+func pushNames(obj *ociv1alpha1.ImageBuild) string {
 	if obj.Spec.Push == nil {
 		return ""
 	}
@@ -389,7 +389,7 @@ func pushNames(obj *ociv1alpha1.DockerBuild) string {
 // cacheRefFor returns where this object's build cache lives, or "" when caching is disabled.
 //
 // Always per-object; nothing shares one. See the doc on BuildCache.Ref for why.
-func cacheRefFor(obj *ociv1alpha1.DockerBuild) string {
+func cacheRefFor(obj *ociv1alpha1.ImageBuild) string {
 	cache := obj.Spec.Cache
 	if cache != nil && cache.Mode == "Disabled" {
 		return ""

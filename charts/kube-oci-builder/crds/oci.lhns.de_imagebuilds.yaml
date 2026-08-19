@@ -4,16 +4,16 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.19.0
-  name: dockerbuilds.oci.lhns.de
+  name: imagebuilds.oci.lhns.de
 spec:
   group: oci.lhns.de
   names:
-    kind: DockerBuild
-    listKind: DockerBuildList
-    plural: dockerbuilds
+    kind: ImageBuild
+    listKind: ImageBuildList
+    plural: imagebuilds
     shortNames:
-    - dbuild
-    singular: dockerbuild
+    - ibuild
+    singular: imagebuild
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
@@ -32,7 +32,7 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: DockerBuild builds an OCI image from a Dockerfile and a content-addressed
+        description: ImageBuild builds an OCI image from a Dockerfile and a content-addressed
           context.
         properties:
           apiVersion:
@@ -54,7 +54,7 @@ spec:
             type: object
           spec:
             description: |-
-              DockerBuildSpec builds an OCI image by executing a Dockerfile.
+              ImageBuildSpec builds an OCI image by executing a Dockerfile.
 
               This kind executes arbitrary code, so its output digest is NOT a function of its spec — it is an
               observation, recorded in status after the fact. What the API can offer is that the INPUTS are
@@ -329,7 +329,7 @@ spec:
                       description: |-
                         SecretRef names a Secret in this object's namespace.
 
-                        Cross-namespace is not offered: it would let anyone who can create a DockerBuild read any
+                        Cross-namespace is not offered: it would let anyone who can create an ImageBuild read any
                         Secret in the cluster.
                       properties:
                         name:
@@ -375,7 +375,7 @@ spec:
             - push
             type: object
           status:
-            description: DockerBuildStatus is the observed state.
+            description: ImageBuildStatus is the observed state.
             properties:
               artifact:
                 description: Artifact is what was produced. Deliberately the same
@@ -507,7 +507,7 @@ spec:
                       type: string
                     inputHash:
                       description: |-
-                        InputHash the build was produced from. Written by DockerBuild only; ImageComposition's
+                        InputHash the build was produced from. Written by ImageBuild only; ImageComposition's
                         identity is the output digest rather than the hash. See ADR 0025.
                       type: string
                     manifests:

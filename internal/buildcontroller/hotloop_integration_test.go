@@ -25,7 +25,7 @@ import (
 // countingReconciler wraps the real one and counts how often the queue delivers work, which is the
 // quantity the hot loop was pathological in.
 type countingReconciler struct {
-	inner *DockerBuildReconciler
+	inner *ImageBuildReconciler
 	calls atomic.Int64
 }
 
@@ -67,7 +67,7 @@ func TestAFailingBuildDoesNotSpinTheQueue(t *testing.T) {
 	obj.Namespace = "hotloop"
 	obj.Spec.Context.Name = "src"
 	if err := k8s.Create(ctx, obj); err != nil {
-		t.Fatalf("creating DockerBuild: %v", err)
+		t.Fatalf("creating ImageBuild: %v", err)
 	}
 
 	mgr, err := manager.New(cfg, manager.Options{
@@ -78,11 +78,11 @@ func TestAFailingBuildDoesNotSpinTheQueue(t *testing.T) {
 		t.Fatalf("manager: %v", err)
 	}
 
-	counted := &countingReconciler{inner: &DockerBuildReconciler{
+	counted := &countingReconciler{inner: &ImageBuildReconciler{
 		Client: mgr.GetClient(), JobConfig: sampleConfig(), HTTPClient: srv.Client(),
 	}}
 	if err := ctrl.NewControllerManagedBy(mgr).
-		For(&ociv1alpha1.DockerBuild{}).
+		For(&ociv1alpha1.ImageBuild{}).
 		Owns(&batchv1.Job{}).
 		Complete(reconcile.Func(counted.Reconcile)); err != nil {
 		t.Fatalf("wiring controller: %v", err)

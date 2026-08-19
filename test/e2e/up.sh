@@ -10,7 +10,7 @@ CLUSTER="${CLUSTER:-kube-oci-composer-e2e}"
 # is deployed to (containerd 2.3.x).
 NODE_IMAGE="${NODE_IMAGE:-kindest/node:v1.36.1}"
 IMG="${IMG:-ghcr.io/lhns/kube-oci-composer:e2e}"
-# The namespace the DockerBuild fixtures live in. Builds run in their object's namespace, so this
+# The namespace the ImageBuild fixtures live in. Builds run in their object's namespace, so this
 # is also where the build Jobs appear.
 BUILD_NS="${BUILD_NS:-oci-builder-e2e}"
 
@@ -60,7 +60,7 @@ helm upgrade --install kube-oci-composer charts/kube-oci-composer \
 
 kubectl -n oci-composer rollout status deploy/kube-oci-composer --timeout=5m
 
-# --- DockerBuild ------------------------------------------------------------------------------
+# --- ImageBuild ------------------------------------------------------------------------------
 #
 # The builder is a SECOND component with its own chart and RBAC (ADR 0004), so it is installed
 # separately here exactly as an operator would install it.
@@ -78,7 +78,7 @@ E2E_REGISTRY="e2e-registry.${BUILD_NS}.svc.cluster.local:5000"
 make docker-build-builder BUILDER_IMG="$BUILDER_IMG"
 kind load docker-image "$BUILDER_IMG" --name "$CLUSTER"
 
-kubectl apply -f config/crd/bases/oci.lhns.de_dockerbuilds.yaml
+kubectl apply -f config/crd/bases/oci.lhns.de_imagebuilds.yaml
 kubectl apply -f "$HERE/../crds/gitrepository.yaml"
 
 kubectl create namespace "$BUILD_NS" --dry-run=client -o yaml | kubectl apply -f -

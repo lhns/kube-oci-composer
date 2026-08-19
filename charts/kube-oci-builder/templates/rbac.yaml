@@ -10,10 +10,10 @@ metadata:
     {{- include "kube-oci-builder.labels" . | nindent 4 }}
 rules:
   - apiGroups: [oci.lhns.de]
-    resources: [dockerbuilds]
+    resources: [imagebuilds]
     verbs: [get, list, watch]
   - apiGroups: [oci.lhns.de]
-    resources: [dockerbuilds/status]
+    resources: [imagebuilds/status]
     verbs: [get, update, patch]
   # Creating Jobs is the ability to run arbitrary containers. This is the permission that makes
   # this a separate component rather than a flag on the composer.

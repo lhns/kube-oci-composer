@@ -27,7 +27,7 @@ import (
 	"github.com/lhns/kube-oci-composer/internal/source"
 )
 
-// DockerBuildReconciler runs a Job per build and records what it produced.
+// ImageBuildReconciler runs a Job per build and records what it produced.
 //
 // The reconcile is deliberately the composer's three-phase shape: resolve everything from the API
 // without transferring anything, hash it, and only past that point do expensive work. That is what
@@ -35,7 +35,7 @@ import (
 // rebuild was needed" — because every input here is resolvable from the API server. What it cannot
 // do is the composer's SECOND check, against the real output digest, because there is nothing to
 // compare against until a build has run. See ADR 0025.
-type DockerBuildReconciler struct {
+type ImageBuildReconciler struct {
 	client.Client
 	JobConfig JobConfig
 
@@ -51,8 +51,8 @@ type DockerBuildReconciler struct {
 	HistoryLimit int
 }
 
-// +kubebuilder:rbac:groups=oci.lhns.de,resources=dockerbuilds,verbs=get;list;watch
-// +kubebuilder:rbac:groups=oci.lhns.de,resources=dockerbuilds/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=oci.lhns.de,resources=imagebuilds,verbs=get;list;watch
+// +kubebuilder:rbac:groups=oci.lhns.de,resources=imagebuilds/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // Secrets are read for their resourceVersion only, so a rotation moves the input hash and
@@ -62,10 +62,10 @@ type DockerBuildReconciler struct {
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=gitrepositories;ocirepositories;buckets,verbs=get;list;watch
 
-func (r *DockerBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *ImageBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	var obj ociv1alpha1.DockerBuild
+	var obj ociv1alpha1.ImageBuild
 	if err := r.Get(ctx, req.NamespacedName, &obj); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -111,7 +111,7 @@ func (r *DockerBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 }
 
 // reconcile is the state machine over the owned Job.
-func (r *DockerBuildReconciler) reconcile(ctx context.Context, obj *ociv1alpha1.DockerBuild) (ctrl.Result, error) {
+func (r *ImageBuildReconciler) reconcile(ctx context.Context, obj *ociv1alpha1.ImageBuild) (ctrl.Result, error) {
 	inputs, contextURL, err := r.resolveInputs(ctx, obj)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -142,7 +142,7 @@ func (r *DockerBuildReconciler) reconcile(ctx context.Context, obj *ociv1alpha1.
 }
 
 // resolveInputs gathers everything the hash needs, using only the API server.
-func (r *DockerBuildReconciler) resolveInputs(ctx context.Context, obj *ociv1alpha1.DockerBuild) (build.Inputs, string, error) {
+func (r *ImageBuildReconciler) resolveInputs(ctx context.Context, obj *ociv1alpha1.ImageBuild) (build.Inputs, string, error) {
 	spec := obj.Spec
 
 	if spec.Push == nil {
@@ -150,13 +150,13 @@ func (r *DockerBuildReconciler) resolveInputs(ctx context.Context, obj *ociv1alp
 	}
 
 	// Same namespace only, for the reason the composer refuses it: the RBAC is cluster-wide, so
-	// naming another namespace's source would let anyone who can create a DockerBuild read content
+	// naming another namespace's source would let anyone who can create an ImageBuild read content
 	// they have no access to.
 	ns := obj.Namespace
 	if spec.Context.Namespace != "" && spec.Context.Namespace != obj.Namespace {
 		return build.Inputs{}, "", recon.Terminal(
 			"build context %s/%s is in namespace %q: a context must be in the same namespace as the "+
-				"DockerBuild that consumes it", spec.Context.Kind, spec.Context.Name, spec.Context.Namespace)
+				"ImageBuild that consumes it", spec.Context.Kind, spec.Context.Name, spec.Context.Namespace)
 	}
 	art, err := source.FluxSource(ctx, r.Client, spec.Context.Kind, ns, spec.Context.Name)
 	if err != nil {
@@ -219,7 +219,7 @@ func (r *DockerBuildReconciler) resolveInputs(ctx context.Context, obj *ociv1alp
 }
 
 // currentJob returns the Job for these inputs, adopting one left behind by a previous leader.
-func (r *DockerBuildReconciler) currentJob(ctx context.Context, obj *ociv1alpha1.DockerBuild, inputHash string) (*batchv1.Job, error) {
+func (r *ImageBuildReconciler) currentJob(ctx context.Context, obj *ociv1alpha1.ImageBuild, inputHash string) (*batchv1.Job, error) {
 	var job batchv1.Job
 	key := types.NamespacedName{Namespace: obj.Namespace, Name: jobName(obj, inputHash)}
 	switch err := r.Get(ctx, key, &job); {
@@ -232,7 +232,7 @@ func (r *DockerBuildReconciler) currentJob(ctx context.Context, obj *ociv1alpha1
 }
 
 // startBuild validates the Dockerfile and creates the Job.
-func (r *DockerBuildReconciler) startBuild(ctx context.Context, obj *ociv1alpha1.DockerBuild,
+func (r *ImageBuildReconciler) startBuild(ctx context.Context, obj *ociv1alpha1.ImageBuild,
 	inputs build.Inputs, inputHash, contextURL string) error {
 
 	// The FROM check happens here rather than inside the Job, so an unpinned base is refused
@@ -271,7 +271,7 @@ func (r *DockerBuildReconciler) startBuild(ctx context.Context, obj *ociv1alpha1
 }
 
 // observeJob turns a Job's state into this object's.
-func (r *DockerBuildReconciler) observeJob(ctx context.Context, obj *ociv1alpha1.DockerBuild,
+func (r *ImageBuildReconciler) observeJob(ctx context.Context, obj *ociv1alpha1.ImageBuild,
 	job *batchv1.Job, inputHash string) (ctrl.Result, error) {
 
 	switch {
@@ -328,7 +328,7 @@ type buildMetadata struct {
 // readResultDigest recovers the pushed digest from the Job's pod.
 //
 // The digest is the one thing that has to come back out of the build, and it cannot be derived.
-func (r *DockerBuildReconciler) readResultDigest(ctx context.Context, obj *ociv1alpha1.DockerBuild, job *batchv1.Job) (string, error) {
+func (r *ImageBuildReconciler) readResultDigest(ctx context.Context, obj *ociv1alpha1.ImageBuild, job *batchv1.Job) (string, error) {
 	pods, err := r.buildPods(ctx, obj, job)
 	if err != nil {
 		return "", err
@@ -369,7 +369,7 @@ func podBuildDigest(p corev1.Pod) string {
 }
 
 // recordSuccess writes the artifact and rotates history.
-func (r *DockerBuildReconciler) recordSuccess(obj *ociv1alpha1.DockerBuild, inputHash, digest string) {
+func (r *ImageBuildReconciler) recordSuccess(obj *ociv1alpha1.ImageBuild, inputHash, digest string) {
 	repo := obj.Spec.Push.Repository
 	tags := make([]string, 0, len(obj.Spec.Push.Tags))
 	for _, t := range obj.Spec.Push.Tags {
@@ -405,7 +405,7 @@ func (r *DockerBuildReconciler) recordSuccess(obj *ociv1alpha1.DockerBuild, inpu
 }
 
 // applyOutcome sets the conditions for whatever just happened.
-func (r *DockerBuildReconciler) applyOutcome(obj *ociv1alpha1.DockerBuild, err error) {
+func (r *ImageBuildReconciler) applyOutcome(obj *ociv1alpha1.ImageBuild, err error) {
 	switch {
 	case err == nil:
 		recon.SetCondition(obj, ociv1alpha1.ReadyCondition, metav1.ConditionTrue,
@@ -437,7 +437,7 @@ func (r *DockerBuildReconciler) applyOutcome(obj *ociv1alpha1.DockerBuild, err e
 	}
 }
 
-func readyMessage(obj *ociv1alpha1.DockerBuild) string {
+func readyMessage(obj *ociv1alpha1.ImageBuild) string {
 	if obj.Status.Artifact == nil {
 		return "reconciled"
 	}
@@ -445,7 +445,7 @@ func readyMessage(obj *ociv1alpha1.DockerBuild) string {
 }
 
 // httpClient is the client used for the Dockerfile pre-check.
-func (r *DockerBuildReconciler) httpClient() *http.Client {
+func (r *ImageBuildReconciler) httpClient() *http.Client {
 	if r.HTTPClient != nil {
 		return r.HTTPClient
 	}
@@ -456,7 +456,7 @@ func jobSucceeded(job *batchv1.Job) bool { return job.Status.Succeeded > 0 }
 func jobFailed(job *batchv1.Job) bool    { return job.Status.Failed > 0 }
 
 // buildPods lists the pods of one build's Job.
-func (r *DockerBuildReconciler) buildPods(ctx context.Context, obj *ociv1alpha1.DockerBuild,
+func (r *ImageBuildReconciler) buildPods(ctx context.Context, obj *ociv1alpha1.ImageBuild,
 	job *batchv1.Job) (corev1.PodList, error) {
 
 	var pods corev1.PodList
@@ -469,7 +469,7 @@ func (r *DockerBuildReconciler) buildPods(ctx context.Context, obj *ociv1alpha1.
 }
 
 // storedFailureMessage is what a previous pass already worked out about this failure.
-func storedFailureMessage(obj *ociv1alpha1.DockerBuild, job *batchv1.Job) string {
+func storedFailureMessage(obj *ociv1alpha1.ImageBuild, job *batchv1.Job) string {
 	if la := obj.Status.LastAttempt; la != nil && la.Message != "" {
 		return la.Message
 	}
@@ -478,7 +478,7 @@ func storedFailureMessage(obj *ociv1alpha1.DockerBuild, job *batchv1.Job) string
 
 // retryDue reports whether enough time has passed since the last failure to try again. It mirrors
 // the interval Reconcile requeues at, so the wait is the backoff rather than a second policy.
-func retryDue(obj *ociv1alpha1.DockerBuild) bool {
+func retryDue(obj *ociv1alpha1.ImageBuild) bool {
 	la := obj.Status.LastAttempt
 	if la == nil || la.FinishedAt == nil {
 		return true
@@ -491,7 +491,7 @@ func retryDue(obj *ociv1alpha1.DockerBuild) bool {
 // The Job's own condition says only "BackoffLimitExceeded", which names the mechanism and not the
 // cause. The cause is the build container's exit code and termination message, so those are read
 // from the pod and appended — otherwise status shows a failure with no way to act on it.
-func (r *DockerBuildReconciler) jobFailureDetail(ctx context.Context, obj *ociv1alpha1.DockerBuild, job *batchv1.Job) string {
+func (r *ImageBuildReconciler) jobFailureDetail(ctx context.Context, obj *ociv1alpha1.ImageBuild, job *batchv1.Job) string {
 	msg := jobFailureMessage(job)
 
 	pods, err := r.buildPods(ctx, obj, job)
@@ -530,9 +530,9 @@ func jobFailureMessage(job *batchv1.Job) string {
 }
 
 // SetupWithManager wires the controller and its owned Jobs.
-func (r *DockerBuildReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *ImageBuildReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&ociv1alpha1.DockerBuild{}).
+		For(&ociv1alpha1.ImageBuild{}).
 		Owns(&batchv1.Job{}).
 		Complete(r)
 }

@@ -17,10 +17,10 @@ import (
 // testHash stands in for an input hash wherever the value itself does not matter.
 var testHash = "sha256:" + strings.Repeat("a", 64)
 
-func sampleBuild() *ociv1alpha1.DockerBuild {
-	return &ociv1alpha1.DockerBuild{
+func sampleBuild() *ociv1alpha1.ImageBuild {
+	return &ociv1alpha1.ImageBuild{
 		ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: "team-a"},
-		Spec: ociv1alpha1.DockerBuildSpec{
+		Spec: ociv1alpha1.ImageBuildSpec{
 			Context:    ociv1alpha1.SourceRefSource{Kind: "GitRepository", Name: "src"},
 			Dockerfile: "Dockerfile",
 			Platforms:  []string{"linux/amd64"},

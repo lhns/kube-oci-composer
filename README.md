@@ -195,7 +195,7 @@ follows from it: the output digest is a pure function of the spec, so reconcilin
 provenance is exact, and nothing privileged runs. See
 [ADR 0016](docs/adr/0016-the-scope-line-is-determinism.md).
 
-A **separate** kind that does run one, `DockerBuild`, is in alpha — separate binary, separate
+A **separate** kind that does run one, `ImageBuild`, is in alpha — separate binary, separate
 chart, separate RBAC, and a deliberately weaker promise: its idempotence is a hash of its inputs
 recorded in status, not `output = f(spec)`, and it is not bit-reproducible. It is a second
 component you install on purpose, never a layer verb, so `kind: ImageComposition` keeps telling you
@@ -211,7 +211,7 @@ helm install kube-oci-builder oci://ghcr.io/lhns/charts/kube-oci-builder \
 
 ```yaml
 apiVersion: oci.lhns.de/v1alpha1
-kind: DockerBuild
+kind: ImageBuild
 metadata: {name: app}
 spec:
   context: {kind: GitRepository, name: app-src}   # digest resolved by source-controller

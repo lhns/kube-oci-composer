@@ -1,4 +1,4 @@
-// Package buildcontroller reconciles DockerBuild objects by running a Job per build.
+// Package buildcontroller reconciles ImageBuild objects by running a Job per build.
 //
 // A separate package from internal/controller: separate promises, separate RBAC (ADR 0004, 0025).
 package buildcontroller
