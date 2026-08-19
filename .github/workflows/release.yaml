@@ -106,7 +106,16 @@ jobs:
             BRANCH=$(echo "${GITHUB_REF_NAME}" | tr -c 'a-zA-Z0-9-' '-' | sed 's/-\+/-/g; s/^-//; s/-$//')
             {
               echo "mode=dev"
-              echo "version=0.0.0-dev.${SHORT}"
+              # g-prefixed, git-describe style, and NOT decoration. A semver prerelease identifier
+              # made only of digits is NUMERIC, and a numeric identifier may not carry a leading
+              # zero -- so a commit whose short sha happens to be all digits and starts with one
+              # (0054012, say) produced 0.0.0-dev.0054012, which every semver parser rejects and the
+              # chart push refused with "version segment starts with 0".
+              #
+              # Roughly one push in a few hundred, which is exactly often enough to look like a
+              # flake and rare enough never to be chased. The image TAGS keep the bare sha, since
+              # they are not semver and something may already reference them.
+              echo "version=0.0.0-dev.g${SHORT}"
               echo "platforms=linux/amd64"
               echo "extra_tags=ghcr.io/lhns/kube-oci-composer:sha-${SHORT},ghcr.io/lhns/kube-oci-composer:${BRANCH}"
               echo "builder_extra_tags=ghcr.io/lhns/kube-oci-builder:sha-${SHORT},ghcr.io/lhns/kube-oci-builder:${BRANCH}"

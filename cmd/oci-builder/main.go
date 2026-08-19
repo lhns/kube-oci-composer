@@ -165,8 +165,9 @@ func main() {
 			Source: source,
 			// The builder has no Readiness to borrow -- it serves nothing -- so completeness is
 			// answered from generation versus observedGeneration by the source itself.
-			Pending:            source,
-			Interval:           refreshInterval,
+			Pending:  source,
+			Interval: refreshInterval,
+			//nolint:staticcheck // SA1019: the new events API has no Event method; same as above.
 			Recorder:           mgr.GetEventRecorderFor("retention"),
 			InsecureRegistries: splitList(insecureRegs),
 		}

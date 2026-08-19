@@ -356,10 +356,11 @@ func main() {
 
 	if refreshInterval > 0 {
 		refresher := &retention.Refresher{
-			Client:             mgr.GetClient(),
-			Source:             retention.CompositionSource{Client: mgr.GetClient()},
-			Pending:            readiness,
-			Interval:           refreshInterval,
+			Client:   mgr.GetClient(),
+			Source:   retention.CompositionSource{Client: mgr.GetClient()},
+			Pending:  readiness,
+			Interval: refreshInterval,
+			//nolint:staticcheck // SA1019: the new events API has no Event method; same as above.
 			Recorder:           mgr.GetEventRecorderFor("retention"),
 			InsecureRegistries: splitList(insecureRegs),
 		}
