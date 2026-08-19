@@ -38,7 +38,7 @@ rules:
 - apiGroups:
   - oci.lhns.de
   resources:
-  - dockerbuilds
+  - imagebuilds
   verbs:
   - get
   - list
@@ -46,7 +46,7 @@ rules:
 - apiGroups:
   - oci.lhns.de
   resources:
-  - dockerbuilds/status
+  - imagebuilds/status
   verbs:
   - get
   - patch

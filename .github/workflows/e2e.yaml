@@ -23,7 +23,7 @@ concurrency:
 jobs:
   e2e:
     runs-on: ubuntu-latest
-    # 25 was enough when the only build was the composer's own image. The DockerBuild e2e adds a
+    # 25 was enough when the only build was the composer's own image. The ImageBuild e2e adds a
     # second image build, a registry, and a real BuildKit run inside the cluster.
     timeout-minutes: 30
     steps:
@@ -92,8 +92,8 @@ jobs:
           kubectl -n oci-composer logs deploy/kube-oci-composer --previous --tail=100 || true
           echo "===== builder ====="
           kubectl -n oci-builder logs deploy/kube-oci-builder --tail=300 || true
-          echo "===== dockerbuilds ====="
-          kubectl -n oci-builder-e2e get dockerbuilds -o yaml || true
+          echo "===== imagebuilds ====="
+          kubectl -n oci-builder-e2e get imagebuilds -o yaml || true
           echo "===== build jobs and pods ====="
           # A build that fails inside BuildKit leaves its reason here and nowhere else, and the
           # pod goes away with the cluster one step later.

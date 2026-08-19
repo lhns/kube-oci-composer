@@ -221,6 +221,31 @@ may change between minor versions.
   rather than by reproducibility.
 
 ### Changed
+- **BREAKING: `DockerBuild` is renamed `ImageBuild`.** Nothing in the implementation uses Docker --
+  the build runs rootless BuildKit driven by `buildctl`, and what the kind consumes is a *Dockerfile*.
+  [ADR 0028](docs/adr/0028-the-kind-is-called-imagebuild.md) records why this reverses
+  [0025](docs/adr/0025-dockerfile-builds-as-a-second-kind.md)'s naming.
+
+  **Upgrading requires manual action; existing objects are not migrated.** Kubernetes cannot rename
+  a CRD's `spec.names`, so `imagebuilds.oci.lhns.de` is a different resource and nothing carries
+  objects across:
+
+  ```
+  kubectl get dockerbuilds -A -o yaml > builds.yaml
+  # rewrite `kind: DockerBuild` to `kind: ImageBuild`
+  kubectl apply -f builds.yaml
+  kubectl delete crd dockerbuilds.oci.lhns.de
+  ```
+
+  Helm never upgrades or deletes `crds/`, so a chart upgrade leaves the old CRD in place and adds
+  the new one -- delete the old one by hand, and note that doing so deletes anything still under it.
+
+  Status is lost with the objects, so every build runs once more. That is harmless today only
+  because `push.immutable` is inert on this kind; it is why the rename lands before the tag policy
+  is made real.
+
+  The short name becomes `ibuild`. **The component keeps its name** -- the binary is still
+  `oci-builder`, the chart still `kube-oci-builder` -- because neither ever contained "docker".
 - **A `sourceRef` must now name a source in the object's OWN namespace.** Both controllers read Flux
   sources cluster-wide, so honouring `sourceRef.namespace` let anyone who could create an
   `ImageComposition` or `DockerBuild` pull another namespace's content into an image they control

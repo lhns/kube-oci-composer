@@ -1,4 +1,4 @@
-// Command oci-builder runs the DockerBuild controller.
+// Command oci-builder runs the ImageBuild controller.
 //
 // A SECOND binary, deliberately. ADR 0004 rejected one binary with a flag — "a flag set to false
 // is a weaker guarantee than a component that does not exist" — and the RBAC makes the point
@@ -132,10 +132,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := (&buildcontroller.DockerBuildReconciler{
+	if err := (&buildcontroller.ImageBuildReconciler{
 		Client: mgr.GetClient(),
 		//nolint:staticcheck // SA1019: the new events API has no Event method; see the composer.
-		Recorder: mgr.GetEventRecorderFor("dockerbuild-controller"),
+		Recorder: mgr.GetEventRecorderFor("imagebuild-controller"),
 		JobConfig: buildcontroller.JobConfig{
 			BuilderImage:       builderImage,
 			FrontendImage:      frontendImage,
@@ -144,7 +144,7 @@ func main() {
 		},
 		HistoryLimit: historyLimit,
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to set up the DockerBuild controller")
+		setupLog.Error(err, "unable to set up the ImageBuild controller")
 		os.Exit(1)
 	}
 

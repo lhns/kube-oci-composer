@@ -72,10 +72,10 @@ manifests: controller-gen ## Regenerate CRDs, RBAC and deepcopy functions.
 
 .PHONY: chart-crds
 chart-crds: manifests ## Copy generated CRDs into their charts.
-# One CRD per chart, deliberately: shipping DockerBuild's CRD with the composer would mean
+# One CRD per chart, deliberately: shipping ImageBuild's CRD with the composer would mean
 # installing the composer implies the builder's API exists (ADR 0004).
 	cp config/crd/bases/oci.lhns.de_imagecompositions.yaml charts/kube-oci-composer/crds/
-	cp config/crd/bases/oci.lhns.de_dockerbuilds.yaml charts/kube-oci-builder/crds/
+	cp config/crd/bases/oci.lhns.de_imagebuilds.yaml charts/kube-oci-builder/crds/
 
 .PHONY: schemas
 schemas: manifests ## Publish JSON schemas for kubeconform.
@@ -119,14 +119,14 @@ docker-push: ## Push the container image.
 
 # One CRD per target, for the reason chart-crds gives: installing the composer must not imply the
 # builder's API exists (ADR 0004). `make uninstall` applying the whole directory would also delete
-# every DockerBuild in a cluster where the builder was installed from its own chart.
+# every ImageBuild in a cluster where the builder was installed from its own chart.
 .PHONY: install
 install: manifests ## Install the composer's CRD into the current cluster.
 	kubectl apply -f config/crd/bases/oci.lhns.de_imagecompositions.yaml
 
 .PHONY: install-builder
 install-builder: manifests ## Install the builder's CRD into the current cluster.
-	kubectl apply -f config/crd/bases/oci.lhns.de_dockerbuilds.yaml
+	kubectl apply -f config/crd/bases/oci.lhns.de_imagebuilds.yaml
 
 .PHONY: uninstall
 uninstall: ## Remove the composer's CRD from the current cluster.
@@ -134,7 +134,7 @@ uninstall: ## Remove the composer's CRD from the current cluster.
 
 .PHONY: uninstall-builder
 uninstall-builder: ## Remove the builder's CRD from the current cluster.
-	kubectl delete --ignore-not-found -f config/crd/bases/oci.lhns.de_dockerbuilds.yaml
+	kubectl delete --ignore-not-found -f config/crd/bases/oci.lhns.de_imagebuilds.yaml
 
 .PHONY: chart-lint
 chart-lint: ## Lint and render the charts.

@@ -27,7 +27,7 @@ builder:
   # part of every build's input hash, playing the role AssemblyVersion plays for the composer. With
   # a floating tag, an upgraded BuildKit would produce different output under an unchanged hash and
   # the controller would keep serving the old artifact forever — the exact failure ADR 0002
-  # describes. Bumping it rebuilds every DockerBuild in the cluster, which is correct and is the
+  # describes. Bumping it rebuilds every ImageBuild in the cluster, which is correct and is the
   # cost of the guarantee.
   buildkitImage: "moby/buildkit:v0.17.2-rootless@sha256:5b45405a38c579692f6fcd47ceef2002fe4fa61bb04ef0c2c644cf74cbbd57b8"
 
@@ -63,7 +63,7 @@ serviceAccount:
 # A ServiceAccount is namespaced and builds run in their own object's namespace, so one created by
 # this chart could never have been reachable from them. What the guarantee actually needs is that a
 # build pod carries no API token, and the controller sets automountServiceAccountToken: false on
-# every build pod that does not name an account. Set spec.serviceAccountName on a DockerBuild only
+# every build pod that does not name an account. Set spec.serviceAccountName on an ImageBuild only
 # when a build genuinely needs an identity — that opts the token back in.
 
 resources:

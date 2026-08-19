@@ -34,7 +34,7 @@ const (
 	ReasonPublishFailed     = "PublishFailed"
 	ReasonSuspended         = "Suspended"
 
-	// ReasonBuildFailed covers a DockerBuild whose Job did not succeed. Never sets Stalled: the fix
+	// ReasonBuildFailed covers an ImageBuild whose Job did not succeed. Never sets Stalled: the fix
 	// lives in another object, so no generation change would arrive to wake it up.
 	ReasonBuildFailed = "BuildFailed"
 
@@ -232,7 +232,7 @@ type BuildRecord struct {
 	// +optional
 	Sources []SourceRecord `json:"sources,omitempty"`
 
-	// InputHash the build was produced from. Written by DockerBuild only; ImageComposition's
+	// InputHash the build was produced from. Written by ImageBuild only; ImageComposition's
 	// identity is the output digest rather than the hash. See ADR 0025.
 	// +optional
 	InputHash string `json:"inputHash,omitempty"`
@@ -312,5 +312,5 @@ type ArtifactStatus struct {
 func (o *ImageComposition) GetConditions() []metav1.Condition  { return o.Status.Conditions }
 func (o *ImageComposition) SetConditions(c []metav1.Condition) { o.Status.Conditions = c }
 
-func (o *DockerBuild) GetConditions() []metav1.Condition  { return o.Status.Conditions }
-func (o *DockerBuild) SetConditions(c []metav1.Condition) { o.Status.Conditions = c }
+func (o *ImageBuild) GetConditions() []metav1.Condition  { return o.Status.Conditions }
+func (o *ImageBuild) SetConditions(c []metav1.Condition) { o.Status.Conditions = c }

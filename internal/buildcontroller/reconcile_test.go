@@ -104,7 +104,7 @@ func gitRepositoryAt(namespace, name, url, digest, revision string) *unstructure
 }
 
 // harness wires a reconciler over a fake client, with a server standing in for the context.
-func harness(t *testing.T, dockerfile string, objs ...client.Object) *DockerBuildReconciler {
+func harness(t *testing.T, dockerfile string, objs ...client.Object) *ImageBuildReconciler {
 	t.Helper()
 	srv := contextServer(t, contextTarball(t, "src-abc123/", dockerfile))
 	all := append([]client.Object{gitRepository("team-a", "src", srv.URL, "sha256:ctx")}, objs...)
@@ -112,13 +112,13 @@ func harness(t *testing.T, dockerfile string, objs ...client.Object) *DockerBuil
 	c := fake.NewClientBuilder().
 		WithScheme(testScheme(t)).
 		WithObjects(all...).
-		WithStatusSubresource(&ociv1alpha1.DockerBuild{}).
+		WithStatusSubresource(&ociv1alpha1.ImageBuild{}).
 		Build()
 
-	return &DockerBuildReconciler{Client: c, JobConfig: sampleConfig(), HTTPClient: srv.Client()}
+	return &ImageBuildReconciler{Client: c, JobConfig: sampleConfig(), HTTPClient: srv.Client()}
 }
 
-func buildOf(t *testing.T, mutate func(*ociv1alpha1.DockerBuild)) *ociv1alpha1.DockerBuild {
+func buildOf(t *testing.T, mutate func(*ociv1alpha1.ImageBuild)) *ociv1alpha1.ImageBuild {
 	t.Helper()
 	obj := sampleBuild()
 	obj.Generation = 1
@@ -128,16 +128,16 @@ func buildOf(t *testing.T, mutate func(*ociv1alpha1.DockerBuild)) *ociv1alpha1.D
 	return obj
 }
 
-func reconcileOnce(t *testing.T, r *DockerBuildReconciler, obj *ociv1alpha1.DockerBuild) (ctrl.Result, error) {
+func reconcileOnce(t *testing.T, r *ImageBuildReconciler, obj *ociv1alpha1.ImageBuild) (ctrl.Result, error) {
 	t.Helper()
 	return r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Namespace: obj.Namespace, Name: obj.Name},
 	})
 }
 
-func reload(t *testing.T, r *DockerBuildReconciler, obj *ociv1alpha1.DockerBuild) *ociv1alpha1.DockerBuild {
+func reload(t *testing.T, r *ImageBuildReconciler, obj *ociv1alpha1.ImageBuild) *ociv1alpha1.ImageBuild {
 	t.Helper()
-	var out ociv1alpha1.DockerBuild
+	var out ociv1alpha1.ImageBuild
 	key := types.NamespacedName{Namespace: obj.Namespace, Name: obj.Name}
 	if err := r.Get(context.Background(), key, &out); err != nil {
 		t.Fatalf("reloading: %v", err)
@@ -145,7 +145,7 @@ func reload(t *testing.T, r *DockerBuildReconciler, obj *ociv1alpha1.DockerBuild
 	return &out
 }
 
-func conditionOf(obj *ociv1alpha1.DockerBuild, condType string) *metav1.Condition {
+func conditionOf(obj *ociv1alpha1.ImageBuild, condType string) *metav1.Condition {
 	for i := range obj.Status.Conditions {
 		if obj.Status.Conditions[i].Type == condType {
 			return &obj.Status.Conditions[i]
@@ -154,7 +154,7 @@ func conditionOf(obj *ociv1alpha1.DockerBuild, condType string) *metav1.Conditio
 	return nil
 }
 
-func jobsIn(t *testing.T, r *DockerBuildReconciler, ns string) []batchv1.Job {
+func jobsIn(t *testing.T, r *ImageBuildReconciler, ns string) []batchv1.Job {
 	t.Helper()
 	var list batchv1.JobList
 	if err := r.List(context.Background(), &list, client.InNamespace(ns)); err != nil {
@@ -342,7 +342,7 @@ func TestFailedBuildDoesNotRetryInAHotLoop(t *testing.T) {
 
 // TestSuspendSaysSo — a suspended object must not look stalled or silently idle.
 func TestSuspendSaysSo(t *testing.T) {
-	obj := buildOf(t, func(o *ociv1alpha1.DockerBuild) { o.Spec.Suspend = true })
+	obj := buildOf(t, func(o *ociv1alpha1.ImageBuild) { o.Spec.Suspend = true })
 	r := harness(t, pinnedFrom, obj)
 
 	if _, err := reconcileOnce(t, r, obj); err != nil {
@@ -360,7 +360,7 @@ func TestSuspendSaysSo(t *testing.T) {
 // TestMissingSourceIsPendingNotStalled — creating the GitRepository fixes it, and that is a
 // different object, so this retries rather than stalls.
 func TestMissingSourceIsPendingNotStalled(t *testing.T) {
-	obj := buildOf(t, func(o *ociv1alpha1.DockerBuild) { o.Spec.Context.Name = "absent" })
+	obj := buildOf(t, func(o *ociv1alpha1.ImageBuild) { o.Spec.Context.Name = "absent" })
 	r := harness(t, pinnedFrom, obj)
 
 	res, err := reconcileOnce(t, r, obj)
@@ -401,7 +401,7 @@ func TestUnpinnedFromIsRefusedBeforeAJobExists(t *testing.T) {
 // TestMissingPushIsTerminal — spec.push is required in this alpha, and only editing THIS spec fixes
 // it, so it is the one class of failure that legitimately stalls.
 func TestMissingPushIsTerminal(t *testing.T) {
-	obj := buildOf(t, func(o *ociv1alpha1.DockerBuild) { o.Spec.Push = nil })
+	obj := buildOf(t, func(o *ociv1alpha1.ImageBuild) { o.Spec.Push = nil })
 	r := harness(t, pinnedFrom, obj)
 
 	res, err := reconcileOnce(t, r, obj)
@@ -418,7 +418,7 @@ func TestMissingPushIsTerminal(t *testing.T) {
 
 // succeedJob marks the object's Job succeeded and plants a pod reporting the digest the way the
 // build container's termination message does.
-func succeedJob(t *testing.T, r *DockerBuildReconciler, obj *ociv1alpha1.DockerBuild, digest string) {
+func succeedJob(t *testing.T, r *ImageBuildReconciler, obj *ociv1alpha1.ImageBuild, digest string) {
 	t.Helper()
 	jobs := jobsIn(t, r, obj.Namespace)
 	if len(jobs) != 1 {
@@ -452,7 +452,7 @@ func succeedJob(t *testing.T, r *DockerBuildReconciler, obj *ociv1alpha1.DockerB
 }
 
 // failJob marks the object's Job failed.
-func failJob(t *testing.T, r *DockerBuildReconciler, obj *ociv1alpha1.DockerBuild, msg string) {
+func failJob(t *testing.T, r *ImageBuildReconciler, obj *ociv1alpha1.ImageBuild, msg string) {
 	t.Helper()
 	jobs := jobsIn(t, r, obj.Namespace)
 	if len(jobs) != 1 {
@@ -473,7 +473,7 @@ func failJob(t *testing.T, r *DockerBuildReconciler, obj *ociv1alpha1.DockerBuil
 // Echoed on failures too, or the hang is worst exactly when someone is debugging.
 func TestReconcileRequestIsEchoed(t *testing.T) {
 	const requested = "2026-01-01T00:00:00Z"
-	obj := buildOf(t, func(o *ociv1alpha1.DockerBuild) {
+	obj := buildOf(t, func(o *ociv1alpha1.ImageBuild) {
 		o.Annotations = map[string]string{ociv1alpha1.ReconcileRequestAnnotation: requested}
 	})
 	r := harness(t, pinnedFrom, obj)
@@ -496,10 +496,10 @@ func TestReconcileRequestIsEchoed(t *testing.T) {
 }
 
 // TestContextMustBeInTheSameNamespace — the builder reads Flux sources cluster-wide, so honouring
-// another namespace would let anyone who can create a DockerBuild pull that namespace's content
+// another namespace would let anyone who can create an ImageBuild pull that namespace's content
 // into an image they control and can read.
 func TestContextMustBeInTheSameNamespace(t *testing.T) {
-	obj := buildOf(t, func(o *ociv1alpha1.DockerBuild) {
+	obj := buildOf(t, func(o *ociv1alpha1.ImageBuild) {
 		o.Spec.Context.Namespace = "other-team"
 	})
 	r := harness(t, pinnedFrom, obj)
@@ -522,15 +522,15 @@ func TestContextMustBeInTheSameNamespace(t *testing.T) {
 // TestContextRevisionIsHonoured — spec.context.revision is the same pin a sourceRef layer gets, and
 // a mismatch must wait rather than build the wrong commit.
 func TestContextRevisionIsHonoured(t *testing.T) {
-	obj := buildOf(t, func(o *ociv1alpha1.DockerBuild) {
+	obj := buildOf(t, func(o *ociv1alpha1.ImageBuild) {
 		o.Spec.Context.Revision = "v0.6.8"
 	})
 	srv := contextServer(t, contextTarball(t, "src-abc123/", pinnedFrom))
 	src := gitRepositoryAt("team-a", "src", srv.URL, "sha256:ctx", "v0.6.5@sha1:aaaaaaa")
 
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
-		WithObjects(src, obj).WithStatusSubresource(&ociv1alpha1.DockerBuild{}).Build()
-	r := &DockerBuildReconciler{Client: c, JobConfig: sampleConfig(), HTTPClient: srv.Client()}
+		WithObjects(src, obj).WithStatusSubresource(&ociv1alpha1.ImageBuild{}).Build()
+	r := &ImageBuildReconciler{Client: c, JobConfig: sampleConfig(), HTTPClient: srv.Client()}
 
 	if _, err := reconcileOnce(t, r, obj); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -548,15 +548,15 @@ func TestContextRevisionIsHonoured(t *testing.T) {
 
 // And a matching revision builds, so the pin is a check rather than a block.
 func TestContextRevisionMatchingBuilds(t *testing.T) {
-	obj := buildOf(t, func(o *ociv1alpha1.DockerBuild) {
+	obj := buildOf(t, func(o *ociv1alpha1.ImageBuild) {
 		o.Spec.Context.Revision = "v0.6.8"
 	})
 	srv := contextServer(t, contextTarball(t, "src-abc123/", pinnedFrom))
 	src := gitRepositoryAt("team-a", "src", srv.URL, "sha256:ctx", "v0.6.8@sha1:b739efb5")
 
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
-		WithObjects(src, obj).WithStatusSubresource(&ociv1alpha1.DockerBuild{}).Build()
-	r := &DockerBuildReconciler{Client: c, JobConfig: sampleConfig(), HTTPClient: srv.Client()}
+		WithObjects(src, obj).WithStatusSubresource(&ociv1alpha1.ImageBuild{}).Build()
+	r := &ImageBuildReconciler{Client: c, JobConfig: sampleConfig(), HTTPClient: srv.Client()}
 
 	if _, err := reconcileOnce(t, r, obj); err != nil {
 		t.Fatalf("reconcile: %v", err)

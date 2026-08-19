@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "description": "DockerBuild builds an OCI image from a Dockerfile and a content-addressed context.",
+  "description": "ImageBuild builds an OCI image from a Dockerfile and a content-addressed context.",
   "properties": {
     "apiVersion": {
       "description": "APIVersion defines the versioned schema of this representation of an object.\nServers should convert recognized schemas to the latest internal value, and\nmay reject unrecognized values.\nMore info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
@@ -14,7 +14,7 @@
       "type": "object"
     },
     "spec": {
-      "description": "DockerBuildSpec builds an OCI image by executing a Dockerfile.\n\nThis kind executes arbitrary code, so its output digest is NOT a function of its spec — it is an\nobservation, recorded in status after the fact. What the API can offer is that the INPUTS are\ncontent-addressed, so an unchanged input hash skips the build. Two clusters applying the same\ncommit can still produce two different images.\n\nIf what you need is \"take a released artifact and put it in an image\", use ImageComposition — it\nis a strictly stronger tool, and since ADR 0024 it can take files out of an image your CI already\nbuilt. See ADR 0025 for what this kind costs.",
+      "description": "ImageBuildSpec builds an OCI image by executing a Dockerfile.\n\nThis kind executes arbitrary code, so its output digest is NOT a function of its spec — it is an\nobservation, recorded in status after the fact. What the API can offer is that the INPUTS are\ncontent-addressed, so an unchanged input hash skips the build. Two clusters applying the same\ncommit can still produce two different images.\n\nIf what you need is \"take a released artifact and put it in an image\", use ImageComposition — it\nis a strictly stronger tool, and since ADR 0024 it can take files out of an image your CI already\nbuilt. See ADR 0025 for what this kind costs.",
       "properties": {
         "args": {
           "description": "Args are Dockerfile ARG values.\n\nThey are part of the input hash, and they are PLAINTEXT in the spec, in etcd and in\n`kubectl get -o yaml`. Never put a credential here; use secrets, which are mounted for the\nduration of one RUN and never land in a layer.",
@@ -249,7 +249,7 @@
                 "type": "string"
               },
               "secretRef": {
-                "description": "SecretRef names a Secret in this object's namespace.\n\nCross-namespace is not offered: it would let anyone who can create a DockerBuild read any\nSecret in the cluster.",
+                "description": "SecretRef names a Secret in this object's namespace.\n\nCross-namespace is not offered: it would let anyone who can create an ImageBuild read any\nSecret in the cluster.",
                 "properties": {
                   "name": {
                     "description": "Name of the referent.",
@@ -300,7 +300,7 @@
       "type": "object"
     },
     "status": {
-      "description": "DockerBuildStatus is the observed state.",
+      "description": "ImageBuildStatus is the observed state.",
       "properties": {
         "artifact": {
           "description": "Artifact is what was produced. Deliberately the same shape every kind in this group uses.",
@@ -422,7 +422,7 @@
                 "type": "string"
               },
               "inputHash": {
-                "description": "InputHash the build was produced from. Written by DockerBuild only; ImageComposition's\nidentity is the output digest rather than the hash. See ADR 0025.",
+                "description": "InputHash the build was produced from. Written by ImageBuild only; ImageComposition's\nidentity is the output digest rather than the hash. See ADR 0025.",
                 "type": "string"
               },
               "manifests": {

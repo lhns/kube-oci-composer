@@ -1,4 +1,4 @@
-// Package build turns a DockerBuild spec into a build, and decides when one is needed.
+// Package build turns an ImageBuild spec into a build, and decides when one is needed.
 //
 // Deliberately separate from internal/oci. Nothing here assembles a tar or fetches a blob by
 // digest, and nothing there executes anything; sharing a package would let a refactor of one

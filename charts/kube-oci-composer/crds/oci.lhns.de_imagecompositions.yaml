@@ -689,7 +689,7 @@ spec:
                       type: string
                     inputHash:
                       description: |-
-                        InputHash the build was produced from. Written by DockerBuild only; ImageComposition's
+                        InputHash the build was produced from. Written by ImageBuild only; ImageComposition's
                         identity is the output digest rather than the hash. See ADR 0025.
                       type: string
                     manifests:

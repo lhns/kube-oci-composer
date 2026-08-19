@@ -9,7 +9,7 @@
 # A minimal stand-in for source-controller's GitRepository.
 #
 # The e2e cluster does not run Flux, and installing it would test Flux rather than this controller.
-# What DockerBuild actually consumes is three fields of the contract — status.artifact.url,
+# What ImageBuild actually consumes is three fields of the contract — status.artifact.url,
 # .digest and .revision — so this declares exactly those and nothing else.
 #
 # Deliberately NO status subresource: without one, `kubectl apply` can set status directly, which

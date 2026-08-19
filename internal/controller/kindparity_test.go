@@ -64,7 +64,7 @@ func controllerSources(t *testing.T) map[string]string {
 func TestBothKindsScopeReferencesToTheirOwnNamespace(t *testing.T) {
 	want := map[string]string{
 		"resolve.go":                "the composer's layer sourceRef",
-		"dockerbuild_controller.go": "the builder's build context",
+		"imagebuild_controller.go": "the builder's build context",
 	}
 	for file, body := range controllerSources(t) {
 		base := filepath.Base(file)

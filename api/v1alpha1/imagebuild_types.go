@@ -5,7 +5,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// DockerBuildSpec builds an OCI image by executing a Dockerfile.
+// ImageBuildSpec builds an OCI image by executing a Dockerfile.
 //
 // This kind executes arbitrary code, so its output digest is NOT a function of its spec — it is an
 // observation, recorded in status after the fact. What the API can offer is that the INPUTS are
@@ -15,7 +15,7 @@ import (
 // If what you need is "take a released artifact and put it in an image", use ImageComposition — it
 // is a strictly stronger tool, and since ADR 0024 it can take files out of an image your CI already
 // built. See ADR 0025 for what this kind costs.
-type DockerBuildSpec struct {
+type ImageBuildSpec struct {
 	// Interval at which to reconcile. Nearly free when nothing has changed: the controller
 	// compares a hash of the resolved inputs rather than building.
 	//
@@ -143,7 +143,7 @@ type BuildSecret struct {
 
 	// SecretRef names a Secret in this object's namespace.
 	//
-	// Cross-namespace is not offered: it would let anyone who can create a DockerBuild read any
+	// Cross-namespace is not offered: it would let anyone who can create an ImageBuild read any
 	// Secret in the cluster.
 	// +required
 	SecretRef LocalObjectReference `json:"secretRef"`
@@ -200,8 +200,8 @@ type BuildAttempt struct {
 	Message string `json:"message,omitempty"`
 }
 
-// DockerBuildStatus is the observed state.
-type DockerBuildStatus struct {
+// ImageBuildStatus is the observed state.
+type ImageBuildStatus struct {
 	// ObservedGeneration is the spec generation this status reflects.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
@@ -244,29 +244,29 @@ type DockerBuildStatus struct {
 	LastHandledReconcileAt string `json:"lastHandledReconcileAt,omitempty"`
 }
 
-// DockerBuild builds an OCI image from a Dockerfile and a content-addressed context.
+// ImageBuild builds an OCI image from a Dockerfile and a content-addressed context.
 //
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:shortName=dbuild
+// +kubebuilder:resource:shortName=ibuild
 // +kubebuilder:printcolumn:name="Ref",type=string,JSONPath=`.status.artifact.ref`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Status",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].message`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
-type DockerBuild struct {
+type ImageBuild struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
 	// +required
-	Spec DockerBuildSpec `json:"spec"`
+	Spec ImageBuildSpec `json:"spec"`
 	// +optional
-	Status DockerBuildStatus `json:"status,omitempty"`
+	Status ImageBuildStatus `json:"status,omitempty"`
 }
 
-// DockerBuildList is a list of DockerBuild.
+// ImageBuildList is a list of ImageBuild.
 // +kubebuilder:object:root=true
-type DockerBuildList struct {
+type ImageBuildList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []DockerBuild `json:"items"`
+	Items           []ImageBuild `json:"items"`
 }

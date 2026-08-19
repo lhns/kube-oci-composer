@@ -18,7 +18,7 @@ and the composer's role cannot create a single object.
 graph TB
     subgraph tenant["Tenant namespace (untrusted input)"]
         IC["ImageComposition"]
-        DB["DockerBuild"]
+        DB["ImageBuild"]
         CM["ConfigMap"]
         SEC["Secret<br/>push + build credentials"]
         SRC["Flux source<br/>GitRepository / OCIRepository / Bucket"]
@@ -90,7 +90,7 @@ review of the artifact. `publish.immutable: true` (the default) refuses to move 
 resolves to different bytes — which is what caught a real incident where a tag was published holding
 a previous revision's content ([ADR 0026](adr/0026-a-source-artifact-can-lag-its-own-spec.md)).
 
-For `DockerBuild` the invariant is weaker by construction: the output is an *observation*, not a
+For `ImageBuild` the invariant is weaker by construction: the output is an *observation*, not a
 function of the spec ([ADR 0025](adr/0025-dockerfile-builds-as-a-second-kind.md)). Rebuilds do
 reproduce for builds whose steps are themselves deterministic ([ADR 0027](adr/0027-what-rootless-buildkit-actually-needs.md)),
 but a `RUN` that installs packages or reads the clock can still differ. The immutable-tag guard is
@@ -141,10 +141,10 @@ the answer exists only while the object does.
 
 | # | Threat | Status | Evidence |
 |---|---|---|---|
-| I1 | Secret **values** leak through `status.inputHash` | **Mitigated** | Only `name` + `resourceVersion` reach the hash (`internal/buildcontroller/dockerbuild_controller.go`). Status is readable by anyone with `get`, and a hash of a low-entropy secret is an oracle. |
+| I1 | Secret **values** leak through `status.inputHash` | **Mitigated** | Only `name` + `resourceVersion` reach the hash (`internal/buildcontroller/imagebuild_controller.go`). Status is readable by anyone with `get`, and a hash of a low-entropy secret is an oracle. |
 | I2 | Secret values leak through build args | **Mitigated** | Secrets are projected via BuildKit's secret mount, never as `--opt build-arg`. Build args *are* hashed, so anything placed there is world-readable by design. |
 | I3 | The controller holds credentials it does not need | **Mitigated** | Both roles grant `get` on secrets — never `list` or `watch` — and a chart drift guard fails the build if that ever changes (`TestBuilderChartNeverGrantsSecretListOrWatch`). Push credentials for builds are projected straight into the build pod and never read by the controller. |
-| I4 | A tenant reads another namespace's source content | **Mitigated** | A `sourceRef` naming any namespace but the object's own is refused with a terminal error (`internal/controller/resolve.go`), and `DockerBuild.spec.context` the same. It had to be fixed controller-side rather than in CEL: a CRD validation rule cannot read `metadata.namespace`. Both controllers still hold cluster-wide `get;list;watch` on Flux sources, so this rule is the whole of the boundary — which is why it is asserted by tests on both kinds. Secrets and ConfigMaps were never exposed this way; both always resolved against `obj.Namespace`. |
+| I4 | A tenant reads another namespace's source content | **Mitigated** | A `sourceRef` naming any namespace but the object's own is refused with a terminal error (`internal/controller/resolve.go`), and `ImageBuild.spec.context` the same. It had to be fixed controller-side rather than in CEL: a CRD validation rule cannot read `metadata.namespace`. Both controllers still hold cluster-wide `get;list;watch` on Flux sources, so this rule is the whole of the boundary — which is why it is asserted by tests on both kinds. Secrets and ConfigMaps were never exposed this way; both always resolved against `obj.Namespace`. |
 | I5 | Anyone on the network pulls any served image | **NOT mitigated by this code** | The serve endpoint has no authentication. Any client that can reach the Service or NodePort can pull every artifact the composer serves, across all namespaces. |
 | I6 | An SSRF via a `fetch` URL reaches cluster-internal services | **NOT mitigated** | `fetch.url` is used to build a request directly (`internal/oci/fetch.go`); there is no allow-list or private-range block. The response must match a declared digest to become a layer, which limits *exfiltration* — but the request itself is still made from the controller's network position. |
 
@@ -170,7 +170,7 @@ another's readers.
 | E1 | **A build escapes the pod and reaches the node** | **Reduced, not eliminated — accepted** | See below. |
 | E2 | A build uses the controller's API credentials | **Mitigated** | `automountServiceAccountToken: false` unless the spec names an identity. A pod running code from a git repository must not carry the token of whatever created it. |
 | E3 | Installing the composer implies the ability to run containers | **Mitigated** | The builder is a separate component. ADR 0004 rejected a feature flag: *"a flag set to `false` is a weaker guarantee than a component that does not exist."* The composer's role cannot create a single object. |
-| E4 | A tenant escalates by pointing a build at a privileged service account | **Partially mitigated** | `spec.serviceAccountName` is honoured, so a tenant who can create a `DockerBuild` can run a build under any service account **in their own namespace**. That is the same privilege they already have via a Pod, so it is not an escalation — but it is worth stating, because it means the builder inherits the namespace's Pod-creation trust model. |
+| E4 | A tenant escalates by pointing a build at a privileged service account | **Partially mitigated** | `spec.serviceAccountName` is honoured, so a tenant who can create a `ImageBuild` can run a build under any service account **in their own namespace**. That is the same privilege they already have via a Pod, so it is not an escalation — but it is worth stating, because it means the builder inherits the namespace's Pod-creation trust model. |
 | E5 | Someone reintroduces `privileged` | **Mitigated by test** | `privileged: false` is asserted for every container in the build pod, and the capability set is asserted **exactly** — `drop: ALL` plus `SETUID`/`SETGID` and nothing else. |
 
 ### E1 in detail
@@ -251,7 +251,7 @@ sequenceDiagram
     participant J as Build pod
     participant R as Registry
 
-    T->>K: apply DockerBuild
+    T->>K: apply ImageBuild
     K-->>B: watch event
     B->>S: read status.artifact
     B->>K: get Secret (resourceVersion only)
@@ -285,11 +285,11 @@ granting the controller `pods/exec` or reading logs.
 
 These are not mitigations. They are things assumed true, and each one is somebody else's job.
 
-1. **`create` on `ImageComposition` / `DockerBuild` is a privilege.** A `DockerBuild` runs code, and
+1. **`create` on `ImageComposition` / `ImageBuild` is a privilege.** A `ImageBuild` runs code, and
    both read every source in their own namespace. Grant them like you grant Pod creation.
 2. **The serve endpoint is not exposed with its write path reachable** (S1), and network policy —
    not this code — restricts who can pull (I5).
-3. **The registry is durable.** For `DockerBuild`, losing the store or status can mean a rebuild
+3. **The registry is durable.** For `ImageBuild`, losing the store or status can mean a rebuild
    producing a digest that conflicts with an already-published immutable tag (ADR 0025).
 4. **Nodes running builds are acceptable to share.** See E1.
 5. **The cluster enforces `ResourceQuota`** where builds could otherwise exhaust nodes (D4).
