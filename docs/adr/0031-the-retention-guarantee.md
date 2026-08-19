@@ -84,11 +84,22 @@ destroy the very thing it exists to preserve, and burn a build pod every cycle d
 
 Each of these can silently defeat the guarantee, and silence is the failure mode that matters.
 
-1. **A pull must actually renew recency.** If it does not, the refresh is a no-op and live images
-   expire quietly. This is the assumption the whole design rests on, and it is measured against the
-   bundled version in `test/e2e/retention_test.go` — with a negative control, because a registry
-   that never deletes anything satisfies the guarantee vacuously and looks identical to one that
-   works.
+1. **A pull must actually renew recency, and it must be a `GET`.** If it does not, the refresh is a
+   no-op and live images expire quietly. This is the assumption the whole design rests on, and it is
+   measured against the bundled version in `test/e2e/retention_test.go` — with a negative control,
+   because a registry that never deletes anything satisfies the guarantee vacuously and looks
+   identical to one that works.
+
+   **A `HEAD` does not count, and that is measured rather than assumed.** The first run of that file
+   polled a tagged manifest with `HEAD` and polled an untagged one with `GET`; the `HEAD` case was
+   collected while being polled every five seconds, and the `GET` case survived past two windows.
+   Reasonable behaviour — an existence check is not a pull — but it is a trap: `HEAD` is the natural
+   thing to reach for when the question is "does this still exist", it is cheaper, and a refresh
+   built that way does *nothing at all* while looking correct in every log. The symptom would arrive
+   one retention window later, as missing images.
+
+   This is the single most valuable thing the measurement produced, and it is why the plan called
+   for measuring rather than reading documentation.
 2. **Refresh is driven by `status.history`, never by a successful reconcile.** An object Stalled on
    a spec error must keep refreshing what it already published; those images may be running right
    now. This is the most likely implementation mistake, and stalling is exactly when an operator is
