@@ -189,8 +189,15 @@ func buildctlArgs(obj *ociv1alpha1.ImageBuild, cfg JobConfig, cacheAvailable boo
 
 	// rewrite-timestamp needs SOURCE_DATE_EPOCH to mean anything. Together they narrow the "same
 	// inputs, different bytes" gap; ADR 0025 says why they do not close it.
+	// oci-mediatypes=true, because BuildKit otherwise emits DOCKER media types and an OCI-native
+	// registry answers a manifest PUT with 415 Unsupported Media Type. zot does exactly that.
+	//
+	// Not an accommodation for one registry. This project is OCI-oriented throughout, the composer
+	// already writes OCI manifests, and the two kinds emitting different media types into the same
+	// registry is the kind of divergence the rest of this work has been removing. The Docker types
+	// were never chosen here; they were BuildKit's default and nothing had contradicted it.
 	args = append(args, "--output",
-		"type=image,name="+pushNames(obj)+",push=true,rewrite-timestamp=true"+
+		"type=image,name="+pushNames(obj)+",push=true,rewrite-timestamp=true,oci-mediatypes=true"+
 			insecureAttr(obj.Spec.Push, cfg.InsecureRegistries))
 	args = append(args, "--opt", "build-arg:SOURCE_DATE_EPOCH="+cfg.SourceDateEpoch)
 
@@ -209,7 +216,13 @@ func buildctlArgs(obj *ociv1alpha1.ImageBuild, cfg JobConfig, cacheAvailable boo
 			args = append(args, "--import-cache", "type=registry,ref="+cacheRef+insecure)
 		}
 		// Export unconditionally: this is what creates the cache the next build imports.
-		args = append(args, "--export-cache", "type=registry,ref="+cacheRef+",mode=max"+insecure)
+		//
+		// image-manifest=true with oci-mediatypes=true for the same reason as the image above, and
+		// then some: BuildKit's default cache format is a manifest LIST carrying a config a
+		// spec-conformant registry has no obligation to accept. The pair renders the cache as an
+		// ordinary OCI image manifest, which any registry can store.
+		args = append(args, "--export-cache",
+			"type=registry,ref="+cacheRef+",mode=max,oci-mediatypes=true,image-manifest=true"+insecure)
 	}
 
 	return args

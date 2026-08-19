@@ -207,8 +207,9 @@ func TestImageBuildProducesAnImage(t *testing.T) {
 // output and the assertion reads it as an empty response. Creating the pod, waiting for it to
 // finish and then reading its log has no such race.
 //
-// The request asks for every media type containerd would, because BuildKit pushes Docker media
-// types unless told otherwise, and accepting only the OCI ones would fail on a correct manifest.
+// The request asks for every media type containerd would. Builds now push OCI types explicitly
+// (see buildctlArgs), but a registry may still hold Docker-typed manifests pushed by anything else,
+// and narrowing the Accept header would fail on a manifest that is perfectly correct.
 func curlInCluster(t *testing.T, name, url string) string {
 	t.Helper()
 

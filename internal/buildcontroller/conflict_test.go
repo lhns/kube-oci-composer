@@ -302,3 +302,22 @@ func TestAMissingCacheIsNotImported(t *testing.T) {
 		t.Error("a cache that does exist is not imported, so caching never takes effect")
 	}
 }
+
+// BuildKit emits DOCKER media types unless told otherwise, and an OCI-native registry answers a
+// manifest PUT with 415 Unsupported Media Type. That is what zot did, and it failed every build.
+//
+// The Docker types were never chosen here -- they were BuildKit's default and nothing had
+// contradicted it. The composer already writes OCI manifests, so this also stops the two kinds
+// putting different media types into one registry.
+func TestBuildsPushOCIMediaTypes(t *testing.T) {
+	argv := strings.Join(buildctlArgs(buildOf(t, nil), sampleConfig(), true), " ")
+
+	if !strings.Contains(argv, "oci-mediatypes=true") {
+		t.Error("the image exporter does not request OCI media types; an OCI-native registry " +
+			"answers the manifest PUT with 415 and the build fails at the very last step")
+	}
+	if !strings.Contains(argv, "image-manifest=true") {
+		t.Error("the cache exporter does not render the cache as an ordinary image manifest; " +
+			"BuildKit's default cache format carries a config a conformant registry need not accept")
+	}
+}
