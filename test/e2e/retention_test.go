@@ -127,18 +127,27 @@ func putBlob(t *testing.T, repository, body string) string {
 	return digest
 }
 
+// manifestExists fetches a manifest, and the choice of GET over HEAD is a MEASURED RESULT rather
+// than a style preference.
+//
+// The first run of this file used HEAD here and GET in manifestExistsByDigest. The HEAD case was
+// collected while being polled every five seconds; the GET case survived. A HEAD does not renew
+// pull recency in zot — reasonably, since an existence check is not a pull.
+//
+// That is exactly the kind of fact this file exists to establish, and it constrains the refresh
+// implementation directly: a refresh that HEADs is a refresh that does nothing, and the symptom
+// arrives one retention window later as missing images.
 func manifestExists(t *testing.T, repository, tag string) bool {
 	t.Helper()
 	return strings.Contains(
-		registryRequest(t, "head-"+shortName(repository, tag), "HEAD",
+		registryRequest(t, "get-"+shortName(repository, tag), "GET",
 			fmt.Sprintf("/v2/%s/manifests/%s", repository, tag), "", ""),
 		"200 OK")
 }
 
 func manifestExistsByDigest(t *testing.T, repository, digest string) bool {
 	t.Helper()
-	// GET rather than HEAD: what is under test is that a real pull refreshes recency, and a
-	// registry is entitled to treat an existence check differently from a fetch.
+	// GET rather than HEAD, for the reason manifestExists now documents from measurement.
 	return strings.Contains(
 		registryRequest(t, "get-"+shortName(repository, "digest"), "GET",
 			fmt.Sprintf("/v2/%s/manifests/%s", repository, digest), "", ""),
@@ -151,6 +160,9 @@ func deleteTag(t *testing.T, repository, tag string) {
 		fmt.Sprintf("/v2/%s/manifests/%s", repository, tag), "", "")
 }
 
+// contentDigest deliberately uses HEAD, which the measurement above shows does NOT renew recency.
+// That matters: this is called on the abandoned repository too, and a call that refreshed would
+// quietly destroy the negative control and make the whole file vacuous.
 func contentDigest(t *testing.T, repository, tag string) string {
 	t.Helper()
 	out := registryRequest(t, "digest-"+shortName(repository, tag), "HEAD",
