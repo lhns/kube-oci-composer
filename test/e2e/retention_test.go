@@ -10,17 +10,22 @@
 // So each test here has a NEGATIVE CONTROL: something that is not refreshed, asserted to actually
 // disappear. Without it, "the image is still there" is not evidence of anything.
 //
-// The registry is configured with a 20-second window and collection every 10 (see
+// The registry is configured with a short window and frequent collection (see
 // manifests/registry.yaml). A real deployment would use 30 days against an hourly refresh; the
-// margin is what makes it a guarantee rather than a race.
+// RATIO between the two is what makes it a guarantee rather than a race, and the ratio is what this
+// file reproduces in miniature.
 package e2e
 
 import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 )
+
+// retentionWindow mirrors pulledWithin in manifests/registry.yaml, for the failure messages. It is
+// not read by the registry; the two are kept in step by hand and the negative control is what
+// catches them drifting apart.
+const retentionWindow = "30s"
 
 // keepaliveRepo scopes these tests to the repository prefix the retention policy applies to, so
 // nothing else in the suite can be collected out from under it.
@@ -42,24 +47,49 @@ func TestPullingAnImageKeepsItFromExpiring(t *testing.T) {
 	pushTinyImage(t, refreshed, "v1")
 	pushTinyImage(t, abandoned, "v1")
 
-	// Long enough that an unrefreshed image is well past its window and collection has run several
-	// times over. The refreshed one is pulled throughout.
-	deadline := time.Now().Add(75 * time.Second)
-	for time.Now().Before(deadline) {
-		if !manifestExists(t, refreshed, "v1") {
-			t.Fatalf("%s:v1 was collected while being pulled every few seconds; a pull does NOT "+
-				"reset the retention clock, and the entire registry-backed retention design is "+
-				"inert. Nothing built on top of this measurement means anything.", refreshed)
-		}
-		time.Sleep(5 * time.Second)
+	// Refreshed from INSIDE the cluster, in one shell loop, rather than by polling from the test.
+	//
+	// This is not a tidiness preference. Each kubectl exec costs seconds on a loaded runner, so a
+	// loop that sleeps 5s between requests can easily leave 20s between pulls -- longer than the
+	// retention window it is trying to stay inside. The measurement then reports that pulls do not
+	// renew recency, when what it actually measured was kubectl.
+	//
+	// One exec, a tight loop, and the assertions afterwards keeps the harness out of the result.
+	refreshFor(t, refreshed, "v1", 90)
+
+	if !manifestExists(t, refreshed, "v1") {
+		t.Fatalf("%s:v1 was collected while being pulled every two seconds for 90s against a %s "+
+			"window; a pull does NOT renew recency, and the registry-backed retention design is "+
+			"inert. Nothing built on top of this measurement means anything.",
+			refreshed, retentionWindow)
 	}
 
-	// The negative control. Without this the test above proves only that zot deletes nothing.
+	// The negative control. Without it the assertion above proves only that zot deletes nothing.
 	if manifestExists(t, abandoned, "v1") {
-		t.Fatalf("%s:v1 survived %v with no pulls and a 20s window, so this suite cannot observe a "+
-			"deletion at all. Every retention assertion here is vacuous until that is fixed — "+
-			"check gcInterval, the retention policy and the repository pattern.",
-			abandoned, 75*time.Second)
+		t.Fatalf("%s:v1 survived 90s with no pulls against a %s window, so this suite cannot "+
+			"observe a deletion at all and every retention assertion here is vacuous. Check "+
+			"gcInterval, the keepTags patterns, and the repository glob.", abandoned, retentionWindow)
+	}
+}
+
+// refreshFor pulls a manifest every two seconds for the given number of seconds, in-cluster.
+//
+// The exec blocks for the whole duration, which is the point: the loop IS the refresh, and nothing
+// about the test's own latency can get between two pulls.
+func refreshFor(t *testing.T, repository, tag string, seconds int) {
+	t.Helper()
+	ensureCurlPod(t)
+
+	url := "http://" + buildRegistry + "/v2/" + repository + "/manifests/" + tag
+	script := fmt.Sprintf(
+		"i=0; while [ $i -lt %d ]; do curl -sS -o /dev/null "+
+			"-H 'Accept: application/vnd.oci.image.manifest.v1+json' %s; sleep 2; i=$((i+2)); done",
+		seconds, url)
+
+	// No timeout wrapper: the exec is expected to block for the whole duration, and go test's own
+	// timeout is the outer bound.
+	if out, err := kubectl(t, "-n", buildNamespace, "exec", curlPod, "--", "sh", "-c", script); err != nil {
+		t.Fatalf("refreshing %s:%s: %v\n%s", repository, tag, err, out)
 	}
 }
 
@@ -76,14 +106,12 @@ func TestPullingByDigestKeepsAnUntaggedImageAlive(t *testing.T) {
 	// Remove the tag, leaving the manifest reachable only by digest.
 	deleteTag(t, repo, "temporary")
 
-	deadline := time.Now().Add(45 * time.Second)
-	for time.Now().Before(deadline) {
-		if !manifestExistsByDigest(t, repo, digest) {
-			t.Fatalf("an untagged manifest was collected while being pulled by digest. ADR 0010 "+
-				"tells users to reference digests, so this would delete content a rescheduled pod "+
-				"re-pulls. Set deleteUntagged: false. (%s@%s)", repo, digest)
-		}
-		time.Sleep(5 * time.Second)
+	refreshFor(t, repo, digest, 90)
+
+	if !manifestExistsByDigest(t, repo, digest) {
+		t.Fatalf("an untagged manifest was collected while being pulled by digest. ADR 0010 tells "+
+			"users to reference digests, so this deletes content a rescheduled pod re-pulls. Set "+
+			"deleteUntagged: false. (%s@%s)", repo, digest)
 	}
 }
 

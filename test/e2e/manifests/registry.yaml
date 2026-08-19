@@ -29,9 +29,9 @@ data:
               "deleteUntagged": true,
               "deleteReferrers": true,
               "keepTags": [
-                { "patterns": [".*"], "pulledWithin": "20s" }
+                { "patterns": [".*"], "pulledWithin": "30s" }
               ],
-              "keepUntagged": { "pulledWithin": "20s" }
+              "keepUntagged": { "pulledWithin": "30s" }
             }
           ]
         }
@@ -40,10 +40,14 @@ data:
       "log": { "level": "info" }
     }
 ---
-# The retention window is 20 SECONDS and collection runs every 10, where a real deployment would use
-# 30 days against an hourly refresh. Compressed on purpose: a test that cannot observe a deletion
-# inside its own runtime proves only that nothing was deleted, which is exactly what a broken
-# retention guarantee also looks like.
+# The retention window is 30 SECONDS and collection runs every 10, against a refresh every 2 -- a
+# ratio of 15x, where a deployment would run 30 days against an hourly refresh for 720x. Compressed
+# on purpose: a test that cannot observe a deletion inside its own runtime proves only that nothing
+# was deleted, which is exactly what a broken retention guarantee also looks like.
+#
+# The RATIO is what has to be preserved when tuning these, not the absolute values. A window that
+# creeps down toward the refresh interval turns the guarantee into a race, and the failure shows up
+# as flakiness rather than as anything that names the cause.
 #
 # keepTags carries an explicit `patterns` of `.*`, and it is NOT optional. zot retains
 # `patterns` AND (`pulledWithin` OR ...), so an entry with no patterns matches no tags and every tag
