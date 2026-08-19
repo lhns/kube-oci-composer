@@ -420,16 +420,23 @@ func TestIntegrationDefaultsAreApplied(t *testing.T) {
 	if len(obj.Spec.Publish.Tags) != 0 {
 		t.Errorf("publish tags defaulted to %v, want none", obj.Spec.Publish.Tags)
 	}
-	// ...but immutability defaults ON, so a tag cannot be silently remeaned by accident.
-	if !obj.Spec.Publish.TagsAreImmutable() {
-		t.Error("publish.immutable defaulted to false, want true")
+	// ...but the conflict policy resolves to Fail, so a tag cannot be silently remeaned by
+	// accident. Asserted through the resolver rather than through a materialised field value,
+	// because onConflict deliberately has no schema default -- see
+	// TestIntegrationOnConflictHasNoSchemaDefault for why.
+	if got := obj.Spec.Publish.ResolveConflictPolicy(); got != ociv1alpha1.ConflictFail {
+		t.Errorf("an object that says nothing resolves to %q, want Fail", got)
 	}
 }
 
 // TestIntegrationImmutableFalseSurvivesTheRoundTrip — immutable is a *bool precisely so that an
-// explicit false is not swallowed. A plain bool with omitempty would serialise false as absent,
-// the API server would apply the default of true, and a deliberately moving tag would start
-// failing its own builds. Exactly the bug this project already hit once with interval.
+// explicit false is not swallowed. A plain bool with omitempty would serialise false as absent and
+// a deliberately moving tag would start failing its own builds. Exactly the bug this project
+// already hit once with interval.
+//
+// Still worth running now that the field is deprecated, and arguably more so: this is the shape of
+// every object written before onConflict existed, and the whole claim of the deprecation is that
+// they keep working untouched.
 func TestIntegrationImmutableFalseSurvivesTheRoundTrip(t *testing.T) {
 	obj := &ociv1alpha1.ImageComposition{
 		ObjectMeta: metav1.ObjectMeta{Name: "moving-pointer", Namespace: "default"},
@@ -458,7 +465,8 @@ func TestIntegrationImmutableFalseSurvivesTheRoundTrip(t *testing.T) {
 	if fetched.Spec.Publish.Immutable == nil {
 		t.Fatal("explicit immutable: false was dropped on the wire and defaulted back to true")
 	}
-	if fetched.Spec.Publish.TagsAreImmutable() {
-		t.Error("immutable resolved to true despite being set false")
+	if got := fetched.Spec.Publish.ResolveConflictPolicy(); got != ociv1alpha1.ConflictOverwrite {
+		t.Errorf("a deprecated immutable:false resolved to %q, want Overwrite; objects written "+
+			"before onConflict existed must keep behaving as they did", got)
 	}
 }

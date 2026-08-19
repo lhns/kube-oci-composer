@@ -49,6 +49,7 @@ question waiting for evidence.
 | [0026](0026-a-source-artifact-can-lag-its-own-spec.md) | A source's artifact can lag its own spec, and the tag moved first | Accepted, sharpens 0009 and 0017 |
 | [0027](0027-what-rootless-buildkit-actually-needs.md) | What rootless BuildKit actually needs | Accepted |
 | [0028](0028-the-kind-is-called-imagebuild.md) | The kind is called ImageBuild | Accepted, reverses 0025's naming |
+| [0029](0029-three-valued-tag-conflict-policy.md) | A tag conflict has three answers, not two | Accepted, amends 0017 |
 
 ## Format
 

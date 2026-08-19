@@ -63,10 +63,12 @@ digest-pinned inputs, so a hash of those inputs identifies the output as precise
 does. A spec-hash tag cannot change meaning without the spec changing — which is what makes
 referencing a tag acceptable here, and `pullPolicy: IfNotPresent` correct alongside it.
 
-**`publish.immutable` defaults to true** and enforces exactly that: the controller will not move a
-tag to different content, it fails the build instead. Republishing identical content is always a
-no-op, so a steady reconcile loop never trips it. Set it false for a deliberately moving pointer
-such as `main`.
+**`publish.onConflict` defaults to `Fail`** and enforces exactly that: the controller will not move
+a tag to different content, it fails the build instead. Republishing identical content is always a
+no-op, so a steady reconcile loop never trips it. Two other answers are available — `Overwrite` for
+a deliberately moving pointer such as `main`, and `Keep` to leave an existing tag alone and publish
+nothing, which is usually what you want with a spec-hash tag. The same field, with the same three
+values, exists on `ImageBuild`'s `push`. See [ADR 0029](docs/adr/0029-three-valued-tag-conflict-policy.md).
 
 **`publish.tags` is optional.** Omit it and the artifact is published by digest alone, which is all
 a workload pinned by Flux image-automation needs.

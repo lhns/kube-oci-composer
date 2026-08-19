@@ -28,6 +28,6 @@ spec:
             #
             # IfNotPresent is correct here for the same reason it is correct with a digest: this
             # tag identifies content, so a cached copy cannot be stale. That only holds because
-            # immutable is on — without it the tag could be remeaned and this would keep old bytes.
+            # onConflict defaults to Fail — without it the tag could be remeaned and this would keep old bytes.
             reference: {{ include "spec-hash-tag.image" . }}
             pullPolicy: IfNotPresent

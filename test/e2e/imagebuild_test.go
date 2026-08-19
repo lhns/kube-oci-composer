@@ -62,6 +62,11 @@ type dockerBuildStatus struct {
 		Digest string `json:"digest"`
 		Ref    string `json:"ref"`
 	} `json:"artifact"`
+	Conflict *struct {
+		Tag      string `json:"tag"`
+		Existing string `json:"existing"`
+		Dropped  string `json:"dropped"`
+	} `json:"conflict"`
 	Conditions []statusCondition `json:"conditions"`
 }
 
@@ -121,6 +126,34 @@ spec:
     tags: [v1]
 %s
 `, name, buildNamespace, dockerfile, buildRegistry, name, strings.Join(extraSpec, "\n")))
+	t.Cleanup(func() {
+		_, _ = kubectl(t, "-n", buildNamespace, "delete", "imagebuild", name, "--ignore-not-found")
+	})
+}
+
+// applyBuildTo is applyBuild with the push target chosen, so two objects can be pointed at one
+// repository -- which is the only way to produce a real tag conflict.
+func applyBuildTo(t *testing.T, name, dockerfile, repository string, extraSpec ...string) {
+	t.Helper()
+	applyStdin(t, fmt.Sprintf(`
+apiVersion: oci.lhns.de/v1alpha1
+kind: ImageBuild
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  interval: 1h
+  context:
+    kind: GitRepository
+    name: e2e-src
+  dockerfile: %s
+  platforms: [linux/amd64]
+  timeout: 10m
+  push:
+    repository: %s
+    tags: [v1]
+%s
+`, name, buildNamespace, dockerfile, repository, strings.Join(extraSpec, "\n")))
 	t.Cleanup(func() {
 		_, _ = kubectl(t, "-n", buildNamespace, "delete", "imagebuild", name, "--ignore-not-found")
 	})
@@ -194,6 +227,40 @@ func curlInCluster(t *testing.T, name, url string) string {
 
 	// Succeeded or Failed: a non-200 leaves wget's exit code behind and an empty log, and the
 	// caller's assertion reports that better than a timeout here would.
+	for _, cond := range []string{"Succeeded", "Failed"} {
+		if _, err := kubectl(t, "-n", buildNamespace, "wait", "--for=jsonpath={.status.phase}="+cond,
+			"pod/"+name, "--timeout=90s"); err == nil {
+			break
+		}
+	}
+	out, _ := kubectl(t, "-n", buildNamespace, "logs", name)
+	return out
+}
+
+// curlHeaders fetches only the response headers from inside the cluster.
+//
+// Same create/wait/logs shape as curlInCluster, and for the same reason: `kubectl run --rm -i`
+// attaches after the pod is created, so a container that makes one request and exits finishes
+// before the attach lands and the output is lost.
+//
+// `wget -S --spider` sends a HEAD and prints the headers on stderr, which is where the digest a
+// registry reports for a tag lives.
+func curlHeaders(t *testing.T, name, url string) string {
+	t.Helper()
+
+	const accept = "application/vnd.oci.image.manifest.v1+json," +
+		"application/vnd.oci.image.index.v1+json," +
+		"application/vnd.docker.distribution.manifest.v2+json," +
+		"application/vnd.docker.distribution.manifest.list.v2+json,*/*"
+
+	_, _ = kubectl(t, "-n", buildNamespace, "delete", "pod", name, "--ignore-not-found")
+	mustKubectl(t, "-n", buildNamespace, "run", name,
+		"--restart=Never", "--image=busybox:1.37", "--command", "--",
+		"wget", "-S", "--spider", "--header", "Accept: "+accept, url)
+	t.Cleanup(func() {
+		_, _ = kubectl(t, "-n", buildNamespace, "delete", "pod", name, "--ignore-not-found")
+	})
+
 	for _, cond := range []string{"Succeeded", "Failed"} {
 		if _, err := kubectl(t, "-n", buildNamespace, "wait", "--for=jsonpath={.status.phase}="+cond,
 			"pod/"+name, "--timeout=90s"); err == nil {
@@ -325,4 +392,105 @@ func TestRebuildingTheSameContextReproducesTheDigest(t *testing.T) {
 			"after losing status or the store can permanently conflict with an already-published "+
 			"immutable tag (ADR 0025)", a, b)
 	}
+}
+
+// The tag-conflict policy, end to end and against a real registry.
+//
+// This is the assertion that could not have existed before ADR 0029: `push.immutable` was in this
+// kind's CRD from the day it shipped and nothing read it, so BuildKit overwrote whatever the tag
+// held. Two objects are pointed at one repository, which is the only way to produce a genuine
+// conflict, and each policy is then checked against what the registry actually serves.
+func TestImageBuildTagConflictPolicy(t *testing.T) {
+	repo := fmt.Sprintf("%s/e2e/e2e-conflict", buildRegistry)
+
+	// The incumbent. Its digest is what every assertion below compares against.
+	applyBuildTo(t, "e2e-conflict-first", "Dockerfile", repo)
+	buildEventually(t, "the first build to publish", func() error {
+		st := buildStatus(t, "e2e-conflict-first")
+		if st.Artifact == nil || st.Artifact.Digest == "" {
+			return fmt.Errorf("no digest yet: %+v", readyCondition(st))
+		}
+		return nil
+	})
+	original := buildStatus(t, "e2e-conflict-first").Artifact.Digest
+
+	// A second object, different content, same tag. Under the default it must refuse -- and it must
+	// refuse without ever creating a Job, because a push from inside one cannot be undone.
+	applyBuildTo(t, "e2e-conflict-fail", "Dockerfile.other", repo)
+	buildEventually(t, "the conflicting build to be refused", func() error {
+		st := buildStatus(t, "e2e-conflict-fail")
+		ready := readyCondition(st)
+		if ready == nil || ready.Status != "False" {
+			return fmt.Errorf("Ready=%+v, want False", ready)
+		}
+		if !strings.Contains(ready.Message, "already resolves to") {
+			return fmt.Errorf("refused for the wrong reason: %s", ready.Message)
+		}
+		return nil
+	})
+
+	if got := tagDigest(t, "e2e/e2e-conflict", "v1"); got != original {
+		t.Fatalf("the tag moved to %s despite the build being refused; it should still be %s",
+			got, original)
+	}
+
+	// Keep leaves the tag alone, runs no build, reports Ready -- and records the divergence, which
+	// is the only thing separating this from a silent one.
+	applyBuildTo(t, "e2e-conflict-keep", "Dockerfile.other", repo, "    onConflict: Keep")
+	buildEventually(t, "the kept build to report Ready", func() error {
+		st := buildStatus(t, "e2e-conflict-keep")
+		ready := readyCondition(st)
+		if ready == nil || ready.Status != "True" {
+			return fmt.Errorf("Ready=%+v, want True", ready)
+		}
+		if st.Conflict == nil {
+			return fmt.Errorf("Ready but nothing records what was kept")
+		}
+		return nil
+	})
+
+	kept := buildStatus(t, "e2e-conflict-keep")
+	if kept.Conflict.Tag != "v1" || kept.Conflict.Existing != original {
+		t.Errorf("conflict = %+v, want tag v1 at %s", kept.Conflict, original)
+	}
+	if got := tagDigest(t, "e2e/e2e-conflict", "v1"); got != original {
+		t.Errorf("Keep moved the tag to %s; it must be left at %s", got, original)
+	}
+
+	// And Overwrite really does move it, or the whole enum would be one behaviour with three names.
+	applyBuildTo(t, "e2e-conflict-overwrite", "Dockerfile.other", repo, "    onConflict: Overwrite")
+	buildEventually(t, "the overwriting build to publish", func() error {
+		st := buildStatus(t, "e2e-conflict-overwrite")
+		if st.Artifact == nil || st.Artifact.Digest == "" {
+			return fmt.Errorf("no digest yet: %+v", readyCondition(st))
+		}
+		if st.Artifact.Digest == original {
+			return fmt.Errorf("built the same digest as the incumbent, so this proves nothing " +
+				"about overwriting; the two Dockerfiles must differ")
+		}
+		return nil
+	})
+	moved := buildStatus(t, "e2e-conflict-overwrite").Artifact.Digest
+	if got := tagDigest(t, "e2e/e2e-conflict", "v1"); got != moved {
+		t.Errorf("the tag is at %s after an Overwrite that produced %s", got, moved)
+	}
+}
+
+// tagDigest asks the registry what a tag resolves to, from inside the cluster.
+//
+// Reads the Docker-Content-Digest header rather than hashing the body, because the body a registry
+// returns depends on the media types requested and hashing the wrong representation would compare
+// two different digests of the same image.
+func tagDigest(t *testing.T, repository, tag string) string {
+	t.Helper()
+	out := curlHeaders(t, "tag-digest",
+		fmt.Sprintf("http://%s/v2/%s/manifests/%s", buildRegistry, repository, tag))
+	for _, line := range strings.Split(out, "\n") {
+		k, v, ok := strings.Cut(line, ":")
+		if ok && strings.EqualFold(strings.TrimSpace(k), "Docker-Content-Digest") {
+			return strings.TrimSpace(v)
+		}
+	}
+	t.Fatalf("no Docker-Content-Digest for %s:%s\n%s", repository, tag, out)
+	return ""
 }

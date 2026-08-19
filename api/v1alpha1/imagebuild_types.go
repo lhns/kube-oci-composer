@@ -226,6 +226,11 @@ type ImageBuildStatus struct {
 	// +optional
 	History []BuildRecord `json:"history,omitempty"`
 
+	// Conflict records content this object produced and did not publish, because onConflict: Keep
+	// left an existing tag in place. Cleared as soon as a reconcile publishes cleanly.
+	// +optional
+	Conflict *TagConflictStatus `json:"conflict,omitempty"`
+
 	// BuildRef is the Job currently executing, so a controller that restarts mid-build adopts it
 	// rather than starting a second one.
 	// +optional
