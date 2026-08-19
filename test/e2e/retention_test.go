@@ -77,33 +77,53 @@ func TestPullingAnImageKeepsItFromExpiring(t *testing.T) {
 	// THE NEGATIVE CONTROL, and it is deliberately about the TAG rather than about content.
 	//
 	// Something has to be observed dying, or "it is still there" is not evidence of anything. An
-	// unrefreshed tag is what this registry demonstrably collects inside a test's runtime.
-	// Unrefreshed untagged CONTENT was measured surviving well past the window, so asserting on that
-	// instead would fail for a reason that has nothing to do with the guarantee — see
-	// TestUnrefreshedContentIsNotPromptlyReclaimed, which records that separately rather than
-	// letting it quietly weaken this one.
-	if manifestExists(t, abandoned, "v1") {
-		t.Fatalf("%s:v1 survived 90s with no pulls against a %s window, so this suite cannot "+
-			"observe a deletion at all and every retention assertion here is vacuous. Check "+
-			"gcInterval, the keepTags patterns, and the repository glob.\ntags now: %s%s",
-			abandoned, retentionWindow, tagsList(t, abandoned), registryLogs(t))
+	// unrefreshed tag is what this registry demonstrably collects; unrefreshed CONTENT was measured
+	// surviving far past its window, so asserting on that instead would fail for a reason with
+	// nothing to do with the guarantee.
+	//
+	// Waited for rather than checked once. The first version checked immediately after the refresh
+	// loop and passed — but a separate test that pushed an image and waited the same 90s saw its tag
+	// still present, which is the same scenario with the opposite result. That is what a marginal
+	// assertion looks like from the outside: green, and one slow runner away from red.
+	eventuallyUntagged(t, abandoned, "v1", 240)
+}
+
+// eventuallyUntagged waits for a tag to be collected, and fails loudly if it never is.
+//
+// Polls the TAGS LIST rather than the manifest, and that is the whole trick: fetching the manifest
+// to ask whether it still exists would renew its recency and keep alive the very thing this is
+// waiting to see die. A negative control that refreshes its own subject can never fire.
+func eventuallyUntagged(t *testing.T, repository, tag string, maxSeconds int) {
+	t.Helper()
+
+	for waited := 0; waited < maxSeconds; waited += 10 {
+		if !strings.Contains(tagsList(t, repository), `"`+tag+`"`) {
+			return
+		}
+		sleepInCluster(t, 10)
 	}
+
+	t.Fatalf("%s:%s survived %ds with no pulls against a %s window, so this suite cannot observe a "+
+		"deletion at all and every retention assertion here is vacuous. Check gcInterval, the "+
+		"keepTags patterns, and the repository glob.\ntags now: %s%s",
+		repository, tag, maxSeconds, retentionWindow, tagsList(t, repository), registryLogs(t))
 }
 
 // What is NOT true, recorded so that nobody builds on the assumption that it is.
 //
-// Untagged content is not reclaimed promptly once its window elapses: measured surviving 90s against
-// a 30s window with no pulls at all, while tags in the same registry were collected in the same
-// period. Whatever governs it is slower and less predictable than the tag-level policy.
+// Expiry is not prompt. Measured: content untouched for 90s against a 30s window was still there,
+// tag included, while an equivalent image in the guarantee test had been collected by then. Whatever
+// schedules collection is coarser and less predictable than the window suggests.
 //
 // That is acceptable, for a stated reason rather than by shrugging. The guarantee is that live
 // content survives, and expiry beyond it is explicitly best-effort (ADR 0031): leaking bytes is
 // acceptable, losing live content is not. What would NOT be acceptable is quietly assuming storage
-// is bounded by this policy when the measurement says it is not.
+// is bounded by this policy on any particular schedule when the measurement says it is not.
 //
-// Reported rather than asserted, because pinning "does not expire promptly" down as an expectation
-// would make an improvement in zot show up here as a regression.
-func TestUnrefreshedContentIsNotPromptlyReclaimed(t *testing.T) {
+// Reported rather than asserted. Pinning "does not expire promptly" down as an expectation would
+// make an improvement in zot show up here as a regression — and asserting the opposite is what made
+// the negative control marginal in the first place.
+func TestExpiryIsNotPrompt(t *testing.T) {
 	repo := keepaliveRepo("cold")
 	digest := pushTinyImage(t, repo)
 
