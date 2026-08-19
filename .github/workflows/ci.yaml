@@ -95,10 +95,20 @@ jobs:
         # combinations the chart actually branches on.
         run: |
           set -euo pipefail
-          # Both replicas serving requires shared storage; the chart must ACCEPT this.
+          # Both replicas serving requires shared storage, and "shared" has to be true rather than
+          # merely asserted: with persistence off the volume is a per-pod emptyDir, so each replica
+          # would restore nothing, report ready and 404 every pull routed to it. Both genuinely
+          # shared shapes must render.
           helm template t charts/kube-oci-composer \
             --set replicaCount=2 \
-            --set operator.storage.shared=true > /dev/null
+            --set operator.storage.shared=true \
+            --set persistence.enabled=true > /dev/null
+          helm template t charts/kube-oci-composer \
+            --set replicaCount=2 \
+            --set operator.storage.backend=s3 \
+            --set operator.s3.endpoint=https://s3.test \
+            --set operator.s3.bucket=blobs \
+            --set operator.servingHost=oci.test > /dev/null
           # NodePort with a pinned port, as the cluster deployment uses.
           helm template t charts/kube-oci-composer \
             --set service.type=NodePort \

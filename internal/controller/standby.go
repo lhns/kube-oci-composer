@@ -93,12 +93,30 @@ func (s *StandbyReplay) replayAll(ctx context.Context) error {
 	return nil
 }
 
+// fullyRestored reports whether this replica already serves a build under its digest AND under
+// every tag it published.
+func (s *StandbyReplay) fullyRestored(ctx context.Context, repoPath string, h ociv1alpha1.BuildRecord) bool {
+	if !s.Server.HasManifest(ctx, repoPath, h.Digest) {
+		return false
+	}
+	for _, tag := range h.Tags {
+		if !s.Server.HasManifest(ctx, repoPath, tag) {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *StandbyReplay) replayOne(ctx context.Context, obj *ociv1alpha1.ImageComposition) {
 	logger := log.FromContext(ctx).WithValues("imagecomposition", objKey(obj).String())
 	repoPath := publishName(obj)
 
 	for _, h := range obj.Status.History {
-		if h.Digest == "" || s.Server.HasManifest(ctx, repoPath, h.Digest) {
+		// Every reference, not just the digest. Skipping on the digest alone made a failed tag
+		// restore permanent: the tag PUT below only logs, so one failure left the digest present,
+		// this build skipped on every later pass, and that tag 404ing on this replica for the life
+		// of the process while another replica served it.
+		if h.Digest == "" || s.fullyRestored(ctx, repoPath, h) {
 			continue
 		}
 
