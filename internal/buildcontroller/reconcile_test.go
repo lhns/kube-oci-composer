@@ -293,6 +293,11 @@ func TestFailureDoesNotStall(t *testing.T) {
 
 // TestFailedBuildDoesNotRetryInAHotLoop is a regression test for a real hot loop.
 //
+// This half asserts the STATE: the Job survives its backoff and the failure is counted once. The
+// RATE — that the controller is not reconciling continuously — needs real watch delivery and lives
+// in TestAFailingBuildDoesNotSpinTheQueue. Neither subsumes the other, and this one passed
+// throughout the period the bug was live.
+//
 // Deleting the failed Job as soon as the failure was seen woke this controller through its own Job
 // watch, which reconciled immediately, found no Job and started another — retrying every few
 // seconds forever while destroying each failed pod before its logs could be read. The failed Job

@@ -72,7 +72,7 @@ func TestBothKindsScopeReferencesToTheirOwnNamespace(t *testing.T) {
 		if !ok {
 			continue
 		}
-		if !strings.Contains(body, "same namespace") {
+		if !strings.Contains(body, "!= obj.Namespace") {
 			t.Errorf("%s does not refuse a reference outside its own namespace: %s is the one "+
 				"tenancy boundary a spec can cross on its own", base, what)
 		}
@@ -138,9 +138,6 @@ func TestNeitherKindKeepsItsOwnCopyOfTheSharedHelpers(t *testing.T) {
 func TestBothKindsRecordEventsThroughTheSharedHelper(t *testing.T) {
 	for file, body := range controllerSources(t) {
 		if !strings.Contains(body, "Recorder.Event(") {
-			continue
-		}
-		if strings.Contains(body, "recon.Event(") {
 			continue
 		}
 		t.Errorf("%s calls Recorder.Event directly instead of recon.Event, which is what applies "+

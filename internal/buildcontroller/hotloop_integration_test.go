@@ -98,7 +98,7 @@ func TestAFailingBuildDoesNotSpinTheQueue(t *testing.T) {
 	// when every attempt fails, which is what a broken Dockerfile does in production. Failing just
 	// the first Job lets the recreated one sit pending forever, and the test then passes with the
 	// bug present — which it did, before this existed.
-	go failEveryJob(ctx, t, k8s, "hotloop")
+	go failEveryJob(ctx, k8s, "hotloop")
 
 	waitForJob(t, ctx, k8s, "hotloop")
 
@@ -132,7 +132,7 @@ func TestAFailingBuildDoesNotSpinTheQueue(t *testing.T) {
 // failEveryJob keeps every Job in the namespace failed, standing in for the kubelet and the job
 // controller. It is what makes a retry loop observable: with the failure path deleting the Job on
 // sight, each recreation fails again immediately and the controller never reaches its backoff.
-func failEveryJob(ctx context.Context, t *testing.T, k8s client.Client, namespace string) {
+func failEveryJob(ctx context.Context, k8s client.Client, namespace string) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -177,18 +177,17 @@ func markJobFailed(ctx context.Context, k8s client.Client, job *batchv1.Job) err
 	return k8s.Status().Update(ctx, job)
 }
 
-func waitForJob(t *testing.T, ctx context.Context, k8s client.Client, namespace string) *batchv1.Job {
+func waitForJob(t *testing.T, ctx context.Context, k8s client.Client, namespace string) {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		var jobs batchv1.JobList
 		if err := k8s.List(ctx, &jobs, client.InNamespace(namespace)); err == nil && len(jobs.Items) == 1 {
-			return &jobs.Items[0]
+			return
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
 	t.Fatal("no Job was created; the controller never got as far as starting a build")
-	return nil
 }
 
 // fluxSource is a GitRepository with a published artifact, as source-controller would leave one.
