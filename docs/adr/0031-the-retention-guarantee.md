@@ -90,23 +90,42 @@ Each of these can silently defeat the guarantee, and silence is the failure mode
    that never deletes anything satisfies the guarantee vacuously and looks identical to one that
    works.
 
-   **The retention policy has to be written exactly right, and getting it wrong looks like the
-   mechanism failing.** zot retains `patterns` AND (`pulledWithin` OR …), so a `keepTags` entry with
-   no `patterns` matches no tags and every tag becomes a deletion candidate however often it is
-   pulled. That is what the first two runs of the measurement showed: a tagged image collected while
-   being pulled every five seconds, next to an untagged one that survived because `keepUntagged` is
-   a separate rule and was correct.
+   **Getting there took seven runs, and six of them produced a wrong answer that looked like a
+   finding.** The failure was always the same — a tag collected while being pulled every couple of
+   seconds — and each explanation was plausible: that a `HEAD` does not count as a pull, that
+   `keepTags` needed explicit `patterns`, that `kubectl exec` latency was leaving gaps wider than
+   the window, that zot's metadata database was not enabled.
 
-   The instructive part is what that near-miss nearly cost. The obvious reading was that a `HEAD`
-   does not count as a pull, which is plausible, tidy, and wrong. Had the measurement been trusted
-   one step earlier, the conclusion recorded here would have been a false fact about the registry,
-   and the real defect — a policy that protected nothing — would have shipped in the chart. **The
-   refresh is only as good as the policy it renews against, so the policy is part of what has to be
-   verified, not part of the setup.**
+   The actual cause was none of them. The registry's own log said so from the first run:
 
-   The refresh uses `GET` because that is unambiguously a pull. Whether `HEAD` also renews recency
+   ```
+   failed to update stats on download image   error: image meta not found
+   ```
+
+   zot was recording no pulls because it could not derive image metadata from the **test fixture** —
+   a hand-built manifest with an empty config and no layers, valid per the distribution spec and
+   accepted with a `201`. `pulledWithin` had nothing to match on. The measurement was reporting a
+   property of the fixture as a property of the registry.
+
+   Three things are worth carrying out of that, because each would have cost less than the runs did:
+
+   - **Ask the system before theorising about it.** The answer was in the registry's logs the whole
+     time, and six hypotheses were tested against CI instead.
+   - **A fixture reduced until it is minimal for the code under test can stop being valid input for
+     the system around it.** The failure then looks like a discovery rather than like a bug.
+   - **The policy is part of what must be verified, not part of the setup.** A refresh is only as
+     good as the rule it renews against, and a rule that protects nothing is indistinguishable from
+     a refresh that does nothing.
+
+   Measured against a real image, a pull does renew recency, and the guarantee holds.
+
+   The refresh uses `GET`, because that is unambiguously a pull. Whether `HEAD` also renews recency
    is untested and there is no reason to find out: the saving is a few KB on the one request the
-   guarantee depends on.
+   whole guarantee depends on.
+
+   **Both references must be pulled, not just one.** Pulling only the digest keeps the CONTENT alive
+   and lets the TAG be collected — `keepUntagged` and `keepTags` are separate rules — so the refresh
+   keeps alive exactly what it asks for and nothing else.
 
 2. **Refresh is driven by `status.history`, never by a successful reconcile.** An object Stalled on
    a spec error must keep refreshing what it already published; those images may be running right
@@ -151,6 +170,17 @@ retention entirely; the guarantee then holds trivially and storage grows.
 **The window is now a correctness parameter, not a preference.** It must stay far larger than the
 refresh interval, and anyone tuning either has to move both. That relationship belongs in the
 documentation next to the values, not in a comment.
+
+**Expiry is not prompt, and nothing should assume it is.** Measured: an image untouched for 90
+seconds against a 30-second window was still present, tag included, while an equivalent image
+elsewhere in the same registry had already been collected. Whatever schedules collection is coarser
+and less predictable than the window suggests.
+
+This costs nothing given the asymmetry the whole record rests on — late collection leaks bytes,
+which is acceptable — but it does mean **storage is not bounded on any particular schedule**, and
+capacity planning cannot treat the window as a deadline. It also means a test asserting that
+something has been collected must WAIT for it rather than check once; asserting it promptly is how
+the suite's own negative control ended up green by luck.
 
 **`ImageBuild` makes the registry a system of record.** Its content cannot be rebuilt
 ([0025](0025-dockerfile-builds-as-a-second-kind.md)), so for that kind this guarantee is the only

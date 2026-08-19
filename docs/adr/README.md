@@ -52,6 +52,7 @@ question waiting for evidence.
 | [0029](0029-three-valued-tag-conflict-policy.md) | A tag conflict has three answers, not two | Accepted, amends 0017 |
 | [0030](0030-a-real-registry-serves-both-kinds.md) | A real registry serves both kinds, and zot is the one we ship | Accepted, amends 0006 |
 | [0031](0031-the-retention-guarantee.md) | Live objects' images are never reclaimed, by anything | Accepted, sharpens 0011 |
+| [0032](0032-the-embedded-registrys-future.md) | The embedded registry stays, and stops being the default | Accepted, revisits 0012 |
 
 ## Format
 
