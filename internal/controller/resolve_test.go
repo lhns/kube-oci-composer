@@ -268,12 +268,12 @@ func TestConfigMapKeyWithSeparatorIsRejected(t *testing.T) {
 // must not need one.
 func TestSourceRefDigestComesFromTheSource(t *testing.T) {
 	url, digest := tarball(t, map[string]string{"config/app.conf": "x"})
-	repo := gitRepository("platform-config", "flux-system", url, digest, "main@sha1:abcd")
+	repo := gitRepository("platform-config", "default", url, digest, "main@sha1:abcd")
 
 	obj := composition("git", ociv1alpha1.Layer{
 		Name: "config",
 		SourceRef: &ociv1alpha1.SourceRefSource{
-			Kind: "GitRepository", Name: "platform-config", Namespace: "flux-system", Subpath: "config",
+			Kind: "GitRepository", Name: "platform-config", Subpath: "config",
 		},
 		To: "/config",
 	})
@@ -409,3 +409,117 @@ func TestLayerOrderIsPreservedAcrossSourceKinds(t *testing.T) {
 
 // asTerminalErr is errors.As, named so the intent reads at each call site.
 func asTerminalErr(err error, target **recon.TerminalError) bool { return errors.As(err, target) }
+
+// TestSourceRefRefusesAnotherNamespace — the controller's RBAC over Flux sources is cluster-wide,
+// so without this a tenant who can create an ImageComposition could name any namespace's source and
+// bake its content into an image they control and can read. It is the one tenancy boundary a spec
+// could otherwise cross on its own.
+//
+// Terminal rather than pending: editing this spec is what fixes it.
+func TestSourceRefRefusesAnotherNamespace(t *testing.T) {
+	url, digest := tarball(t, map[string]string{"secrets/app.conf": "not yours"})
+	repo := gitRepository("platform-config", "other-team", url, digest, "main@sha1:abcd")
+
+	obj := composition("cross", ociv1alpha1.Layer{
+		Name: "config",
+		SourceRef: &ociv1alpha1.SourceRefSource{
+			Kind: "GitRepository", Name: "platform-config", Namespace: "other-team",
+		},
+		To: "/config",
+	})
+	r := reconcilerWith(t, repo)
+
+	inputs, _, err := r.resolveInputs(context.Background(), obj, t.TempDir())
+	if err == nil {
+		t.Fatalf("another namespace's source resolved: %+v", inputs)
+	}
+	if !recon.IsTerminal(err) {
+		t.Errorf("error is not terminal, so it would be retried forever: %v", err)
+	}
+	if !strings.Contains(err.Error(), "same namespace") {
+		t.Errorf("the refusal does not say why: %v", err)
+	}
+}
+
+// The same namespace stated explicitly must still work — the field is not banned, only a value
+// pointing somewhere else.
+func TestSourceRefAllowsItsOwnNamespaceStatedExplicitly(t *testing.T) {
+	url, digest := tarball(t, map[string]string{"config/app.conf": "x"})
+	repo := gitRepository("platform-config", "default", url, digest, "main@sha1:abcd")
+
+	obj := composition("explicit", ociv1alpha1.Layer{
+		Name: "config",
+		SourceRef: &ociv1alpha1.SourceRefSource{
+			Kind: "GitRepository", Name: "platform-config", Namespace: "default",
+		},
+		To: "/config",
+	})
+	r := reconcilerWith(t, repo)
+
+	if _, _, err := r.resolveInputs(context.Background(), obj, t.TempDir()); err != nil {
+		t.Fatalf("a source in the object's own namespace was refused: %v", err)
+	}
+}
+
+// TestSourceRefHashesTheRevisionNotTheTarball — source-controller re-packs artifacts on restart, so
+// the tarball's digest moves while the revision it describes does not. Hashing the digest rebuilt
+// every composition consuming that source for bytes that were identical.
+func TestSourceRefHashesTheRevisionNotTheTarball(t *testing.T) {
+	url, digest := tarball(t, map[string]string{"config/app.conf": "x"})
+	repo := gitRepository("platform-config", "default", url, digest, "main@sha1:abcd")
+
+	obj := composition("identity", ociv1alpha1.Layer{
+		Name:      "config",
+		SourceRef: &ociv1alpha1.SourceRefSource{Kind: "GitRepository", Name: "platform-config"},
+		To:        "/config",
+	})
+	r := reconcilerWith(t, repo)
+
+	inputs, _, err := r.resolveInputs(context.Background(), obj, t.TempDir())
+	if err != nil {
+		t.Fatalf("resolving: %v", err)
+	}
+	if inputs[0].Identity != "main@sha1:abcd" {
+		t.Errorf("identity = %q, want the revision; a repack would otherwise rebuild everything",
+			inputs[0].Identity)
+	}
+	// The digest still has to be what the fetch is verified against.
+	if inputs[0].Digest != digest {
+		t.Errorf("digest = %q, want the artifact's %q", inputs[0].Digest, digest)
+	}
+}
+
+// TestHistoryRecordsWhereEachLayerCameFrom — the gap that made ADR 0026's incident expensive.
+//
+// A wrong artifact was published and the only way to find out was to pull the manifest, fetch the
+// layer and read its payload, because nothing linked the digest to what produced it. This proves
+// the record reaches history; TestSourceRefHashesTheRevisionNotTheTarball proves a Flux source
+// contributes its revision to it.
+//
+// A fetch layer records no revision, and that is correct rather than missing: its declared digest
+// IS its identity, so there is nothing else to name.
+func TestHistoryRecordsWhereEachLayerCameFrom(t *testing.T) {
+	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
+	obj := composition("provenance", urlLayer("core", url, digest, "/core"))
+	r, _ := servingReconciler(t, obj)
+
+	if _, err := reconcileOnce(t, r, obj); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	got := reload(t, r, obj)
+	if len(got.Status.History) == 0 {
+		t.Fatal("no build recorded")
+	}
+	sources := got.Status.History[0].Sources
+	if len(sources) != 1 {
+		t.Fatalf("recorded %d sources, want 1: %+v", len(sources), sources)
+	}
+	if sources[0].Name != "core" {
+		t.Errorf("source name = %q, want %q", sources[0].Name, "core")
+	}
+	if sources[0].Digest != digest {
+		t.Errorf("digest = %q, want the layer's %q; without it an artifact cannot be traced back "+
+			"to what produced it", sources[0].Digest, digest)
+	}
+}

@@ -6,6 +6,12 @@ may change between minor versions.
 ## [Unreleased]
 
 ### Added
+- **`status.history[].sources` records where each layer came from** — its name, the resolved digest,
+  and the revision for a source that has one. Answering "which commit is in this image?" previously
+  meant pulling the manifest, fetching the layer and reading its payload, which is exactly how the
+  incident behind [ADR 0026](docs/adr/0026-a-source-artifact-can-lag-its-own-spec.md) had to be
+  diagnosed, and why a wrong artifact sat unnoticed until a tag conflict surfaced it.
+
 - **`--insecure-registry`** on the builder: registry hosts to push to over plain HTTP,
   comma-separated. Opt-in **per host** rather than a global switch -- an internal or air-gapped
   registry without TLS is a real deployment, but naming one must not quietly downgrade every other
@@ -154,6 +160,20 @@ may change between minor versions.
   rather than by reproducibility.
 
 ### Changed
+- **A `sourceRef` must now name a source in the object's OWN namespace.** Both controllers read Flux
+  sources cluster-wide, so honouring `sourceRef.namespace` let anyone who could create an
+  `ImageComposition` or `DockerBuild` pull another namespace's content into an image they control
+  and can read — the one tenancy boundary a spec could cross on its own. A source elsewhere is now a
+  terminal error naming the reason. The field is kept so an explicit same-namespace value is not a
+  schema error. **Breaking** for anyone who genuinely relied on a shared source namespace: copy the
+  source into the consuming namespace, or publish it to a registry and consume it as an image.
+- **`sourceRef` layers hash the artifact's REVISION rather than its tarball digest.** Source
+  controller re-packs artifacts on restart, so the digest moved while the content did not, and every
+  composition consuming that source rebuilt for bytes that were identical. The digest is still what
+  the fetch is verified against. One-time effect: input hashes for `sourceRef` layers change once,
+  so those objects rebuild — and because composition is deterministic they reproduce the same digest,
+  so no tag conflicts.
+
 - The `DockerBuild` reconcile loop has tests: coverage of `internal/buildcontroller` goes from
   **23.6% to 82.9%**. The whole state machine was previously unexercised — only the pure Job
   rendering was covered — which is how the three defects above shipped. The new suite drives the

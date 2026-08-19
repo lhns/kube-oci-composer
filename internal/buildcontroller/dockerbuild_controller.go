@@ -149,9 +149,14 @@ func (r *DockerBuildReconciler) resolveInputs(ctx context.Context, obj *ociv1alp
 		return build.Inputs{}, "", recon.Terminal("spec.push is required: the built image is produced by a Job in another pod, which cannot write to the controller's loopback-only serving endpoint")
 	}
 
-	ns := spec.Context.Namespace
-	if ns == "" {
-		ns = obj.Namespace
+	// Same namespace only, for the reason the composer refuses it: the RBAC is cluster-wide, so
+	// naming another namespace's source would let anyone who can create a DockerBuild read content
+	// they have no access to.
+	ns := obj.Namespace
+	if spec.Context.Namespace != "" && spec.Context.Namespace != obj.Namespace {
+		return build.Inputs{}, "", recon.Terminal(
+			"build context %s/%s is in namespace %q: a context must be in the same namespace as the "+
+				"DockerBuild that consumes it", spec.Context.Kind, spec.Context.Name, spec.Context.Namespace)
 	}
 	art, err := source.FluxSource(ctx, r.Client, spec.Context.Kind, ns, spec.Context.Name)
 	if err != nil {

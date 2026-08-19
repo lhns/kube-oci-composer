@@ -68,6 +68,10 @@ func (r *ImageCompositionReconciler) resolveInputs(ctx context.Context, obj *oci
 			}
 			in.URL = art.URL
 			in.Digest = art.Digest
+			// The revision identifies the CONTENT; the digest identifies the tarball carrying it.
+			// source-controller re-packs on restart, so hashing the digest rebuilt every
+			// composition consuming this source for bytes that had not changed.
+			in.Identity = art.Revision
 			// source-controller always publishes a gzipped tar, whatever the source kind.
 			in.Unpack = oci.UnpackTarGz
 			in.Subpath = l.SourceRef.Subpath
@@ -192,9 +196,15 @@ func (r *ImageCompositionReconciler) resolveBase(ctx context.Context, obj *ociv1
 
 // resolveFluxSource reads the referenced source's published artifact.
 func (r *ImageCompositionReconciler) resolveFluxSource(ctx context.Context, obj *ociv1alpha1.ImageComposition, ref *ociv1alpha1.SourceRefSource) (source.FluxArtifact, error) {
-	ns := ref.Namespace
-	if ns == "" {
-		ns = obj.Namespace
+	// Same namespace only. The controller's RBAC is cluster-wide, so without this a tenant who can
+	// create an ImageComposition could name any namespace's source and bake its content into an
+	// image they control and can read — the one tenancy boundary a spec could cross on its own.
+	// Terminal because editing THIS spec is what fixes it.
+	ns := obj.Namespace
+	if ref.Namespace != "" && ref.Namespace != obj.Namespace {
+		return source.FluxArtifact{}, recon.Terminal(
+			"layer source %s/%s is in namespace %q: a source must be in the same namespace as the "+
+				"ImageComposition that consumes it", ref.Kind, ref.Name, ref.Namespace)
 	}
 
 	art, err := source.FluxSource(ctx, r.Client, ref.Kind, ns, ref.Name)

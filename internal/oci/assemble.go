@@ -38,6 +38,14 @@ var epoch = time.Unix(0, 0).UTC()
 // hash, and keeps serving it forever.
 const AssemblyVersion = 1
 
+// identity returns what the hash should treat as this entry's content.
+func (in LayerInput) identity() string {
+	if in.Identity != "" {
+		return in.Identity
+	}
+	return in.Digest
+}
+
 // InputHash returns a stable hash of everything that determines the assembled output.
 //
 // Only the fields that actually affect the result are included: the ordered layer digests, their
@@ -76,7 +84,7 @@ func InputHash(inputs []LayerInput, cfg Config, baseDigest string, platforms []P
 
 	fmt.Fprintf(h, "layers=%d;", len(inputs))
 	for _, in := range inputs {
-		writeField(in.Digest)
+		writeField(in.identity())
 		writeField(string(in.Unpack))
 		writeField(in.Subpath)
 		writeField(in.Target)
@@ -235,6 +243,13 @@ const (
 type LayerInput struct {
 	// Name of the entry, used in error messages and provenance. Not part of the output.
 	Name string
+	// Identity is what names this entry's CONTENT for hashing, when Digest names its transport
+	// instead. A Flux artifact is the case: source-controller re-packs on restart, so the tarball's
+	// digest changes while the revision it describes does not, and hashing the digest rebuilt every
+	// composition for bytes that were identical. Digest is still what the fetch is verified
+	// against; only the hash reads this. Empty means Digest identifies the content, which is true
+	// for everything else.
+	Identity string
 	// URL the content is fetched from. Not part of the output: two URLs serving the same
 	// digest are interchangeable by definition.
 	URL string

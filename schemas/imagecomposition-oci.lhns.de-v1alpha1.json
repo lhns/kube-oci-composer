@@ -301,7 +301,7 @@
                     "type": "string"
                   },
                   "namespace": {
-                    "description": "Namespace of the referenced source. Defaults to the ImageComposition's namespace.",
+                    "description": "Namespace of the referenced source. Must be the consuming object's own namespace, which is\nalso the default — the field remains only so an explicit value is not a schema error.\n\nA source elsewhere is REFUSED. Both controllers read Flux sources cluster-wide, so honouring\nanother namespace would let anyone who can create one of these objects pull that namespace's\ncontent into an image they control and can read.",
                     "type": "string"
                   },
                   "subpath": {
@@ -565,6 +565,28 @@
                 "description": "Manifests are the CHILD manifest digests when this build is a multi-platform index. Empty\nfor a single-platform build, where Digest is the manifest itself.\n\nGarbage collection reads this, and must: without it the index is retained while its children\nare swept, leaving a manifest that resolves to nothing. That is indistinguishable from\nhaving deleted the artifact, except that it fails at pull time rather than at collection\ntime, long after the change that caused it.",
                 "items": {
                   "type": "string"
+                },
+                "type": "array"
+              },
+              "sources": {
+                "description": "Sources records what each layer was resolved FROM, so an artifact can be traced back to the\nrevision that produced it.\n\nWithout this the only way to answer \"which revision is in this image?\" is to pull the\nmanifest, fetch the layer and read its contents — which is how the incident behind ADR 0026\nhad to be diagnosed, and why a wrong artifact sat unnoticed until a tag conflict surfaced it.",
+                "items": {
+                  "description": "SourceRecord is where one layer's content came from.",
+                  "properties": {
+                    "digest": {
+                      "description": "Digest of the resolved content: the declared digest of a fetch, the artifact digest of a\nFlux source, the manifest digest of an image layer.",
+                      "type": "string"
+                    },
+                    "name": {
+                      "description": "Name of the layer, matching spec.layers[].name.",
+                      "type": "string"
+                    },
+                    "revision": {
+                      "description": "Revision the content was resolved at, for a source that has one — a Flux artifact's\n\"main@sha1:abcd\". This is the field that answers \"which commit is in this image?\".",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
                 },
                 "type": "array"
               },
