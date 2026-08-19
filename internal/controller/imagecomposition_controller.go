@@ -166,7 +166,7 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		var te *recon.TerminalError
 		if errors.As(err, &te) {
 			logger.Error(err, "terminal error; not retrying until the spec changes")
-			r.event(&obj, corev1.EventTypeWarning, reasonFor(err), err.Error())
+			recon.Event(r.Recorder, &obj, corev1.EventTypeWarning, reasonFor(err), err.Error())
 			// No requeue: Stalled means a human must act. The generation change that fixes it
 			// wakes the controller anyway.
 			return ctrl.Result{}, r.patchStatus(ctx, &obj, func(o *ociv1alpha1.ImageComposition) {
@@ -177,7 +177,7 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 
 		logger.Error(err, "transient failure; will retry")
-		r.event(&obj, corev1.EventTypeWarning, ociv1alpha1.ReasonFetchFailed, err.Error())
+		recon.Event(r.Recorder, &obj, corev1.EventTypeWarning, ociv1alpha1.ReasonFetchFailed, err.Error())
 		if perr := r.patchStatus(ctx, &obj, func(o *ociv1alpha1.ImageComposition) {
 			recon.SetCondition(o, ociv1alpha1.ReconcilingCondition, metav1.ConditionTrue,
 				ociv1alpha1.ReasonProgressing, err.Error())
@@ -559,7 +559,7 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 		}
 	}
 
-	r.event(obj, corev1.EventTypeNormal, ociv1alpha1.ReasonSucceeded,
+	recon.Event(r.Recorder, obj, corev1.EventTypeNormal, ociv1alpha1.ReasonSucceeded,
 		fmt.Sprintf("Published %s@%s%s", tgt.pullRepo, digest, tagSuffix(tgt.tags)))
 
 	record, err := buildRecord(art, tgt.tags, digest, inputs)
@@ -793,12 +793,6 @@ func reasonFor(err error) string {
 		return ociv1alpha1.ReasonImmutableConflict
 	default:
 		return ociv1alpha1.ReasonInvalidSpec
-	}
-}
-
-func (r *ImageCompositionReconciler) event(obj *ociv1alpha1.ImageComposition, kind, reason, msg string) {
-	if r.Recorder != nil {
-		r.Recorder.Event(obj, kind, reason, msg)
 	}
 }
 

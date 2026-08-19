@@ -17,6 +17,8 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 )
@@ -64,6 +66,18 @@ func Pending(format string, a ...any) error {
 func IsPending(err error) bool {
 	var p *PendingError
 	return errors.As(err, &p)
+}
+
+// Event records one, if a recorder was wired. Nil is normal in tests that do not care.
+//
+// Truncated because the API server rejects an over-long event message outright, and the cases that
+// produce one — a build's stderr, a list of every unpinned FROM — are exactly the failures worth
+// seeing. Losing the whole event to keep the tail is the wrong trade.
+func Event(rec record.EventRecorder, obj runtime.Object, eventType, reason, msg string) {
+	if rec == nil {
+		return
+	}
+	rec.Event(obj, eventType, reason, Truncate(msg, 1024))
 }
 
 // SetCondition writes one condition, stamped with the generation it was observed at.

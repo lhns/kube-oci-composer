@@ -263,6 +263,11 @@ may change between minor versions.
   remains the destination rather than the current state.
 
 ### Fixed
+- **Long event messages were dropped by the API server.** The two controllers each had their own
+  `event` helper and they were not the same: the builder truncated to the API server's limit, the
+  composer did not, so an over-long message was rejected outright rather than shortened. The cases
+  that produce one -- a build's stderr, a list of every unpinned `FROM` -- are exactly the failures
+  worth seeing. One shared helper now, which is also how the difference was noticed.
 - **An interrupted layer pull could never resume.** containerd asks for `Range: bytes=<offset>-`
   when continuing a download, which is valid per RFC 9110; the upstream registry handler parses the
   header with `fmt.Sscanf(h, "bytes=%d-%d")` and answered **416 BLOB_UNKNOWN**, so an interrupted

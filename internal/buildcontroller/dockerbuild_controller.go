@@ -96,7 +96,7 @@ func (r *DockerBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	case recon.IsTerminal(err):
 		// Stalled. No requeue: the generation change from editing the spec is the wake-up.
 		logger.Error(err, "stalled")
-		r.event(&obj, corev1.EventTypeWarning, ociv1alpha1.ReasonInvalidSpec, err.Error())
+		recon.Event(r.Recorder, &obj, corev1.EventTypeWarning, ociv1alpha1.ReasonInvalidSpec, err.Error())
 		return ctrl.Result{}, nil
 	case recon.IsPending(err):
 		return ctrl.Result{RequeueAfter: pendingRetryInterval}, nil
@@ -105,7 +105,7 @@ func (r *DockerBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		// forever, because the fix is usually a push to the Dockerfile's repository and the retry
 		// is what notices it.
 		logger.Error(err, "build failed", "failures", obj.Status.Failures)
-		r.event(&obj, corev1.EventTypeWarning, ociv1alpha1.ReasonBuildFailed, err.Error())
+		recon.Event(r.Recorder, &obj, corev1.EventTypeWarning, ociv1alpha1.ReasonBuildFailed, err.Error())
 		return ctrl.Result{RequeueAfter: failureBackoff(obj.Status.Failures)}, nil
 	}
 }
@@ -349,13 +349,6 @@ func (r *DockerBuildReconciler) readResultDigest(ctx context.Context, obj *ociv1
 		}
 	}
 	return "", fmt.Errorf("the build reported no image digest; check `kubectl logs job/%s`", job.Name)
-}
-
-// event records one, if a recorder was wired. Nil in tests that do not care.
-func (r *DockerBuildReconciler) event(obj *ociv1alpha1.DockerBuild, kind, reason, msg string) {
-	if r.Recorder != nil {
-		r.Recorder.Event(obj, kind, reason, recon.Truncate(msg, 1024))
-	}
 }
 
 // podBuildDigest returns the digest the build container reported, or "" if it reported none.

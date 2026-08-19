@@ -7,6 +7,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -82,16 +83,23 @@ func contextServer(t *testing.T, body []byte) *httptest.Server {
 
 // gitRepository is a Flux source with a published artifact.
 func gitRepository(namespace, name, url, digest string) *unstructured.Unstructured {
+	return gitRepositoryAt(namespace, name, url, digest, "main@sha1:abcd")
+}
+
+// gitRepositoryAt is the same with the revision stated, for the checks that read it.
+func gitRepositoryAt(namespace, name, url, digest, revision string) *unstructured.Unstructured {
 	u := &unstructured.Unstructured{}
 	u.SetGroupVersionKind(schema.GroupVersion{Group: "source.toolkit.fluxcd.io", Version: "v1"}.
 		WithKind("GitRepository"))
 	u.SetNamespace(namespace)
 	u.SetName(name)
+	u.SetGeneration(1)
 	_ = unstructured.SetNestedMap(u.Object, map[string]any{
 		"url":      url,
 		"digest":   digest,
-		"revision": "main@sha1:abcd",
+		"revision": revision,
 	}, "status", "artifact")
+	_ = unstructured.SetNestedField(u.Object, int64(1), "status", "observedGeneration")
 	return u
 }
 
@@ -479,5 +487,76 @@ func TestReconcileRequestIsEchoed(t *testing.T) {
 	}
 	if got := reload(t, r, obj).Status.LastHandledReconcileAt; got != requested {
 		t.Errorf("after a failed build lastHandledReconcileAt = %q, want %q", got, requested)
+	}
+}
+
+// TestContextMustBeInTheSameNamespace — the builder reads Flux sources cluster-wide, so honouring
+// another namespace would let anyone who can create a DockerBuild pull that namespace's content
+// into an image they control and can read.
+func TestContextMustBeInTheSameNamespace(t *testing.T) {
+	obj := buildOf(t, func(o *ociv1alpha1.DockerBuild) {
+		o.Spec.Context.Namespace = "other-team"
+	})
+	r := harness(t, pinnedFrom, obj)
+
+	if _, err := reconcileOnce(t, r, obj); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if jobs := jobsIn(t, r, obj.Namespace); len(jobs) != 0 {
+		t.Fatalf("a build started from another namespace's context: %v", jobs)
+	}
+	c := conditionOf(reload(t, r, obj), ociv1alpha1.ReadyCondition)
+	if c == nil || c.Status != metav1.ConditionFalse {
+		t.Fatalf("Ready = %+v, want False", c)
+	}
+	if !strings.Contains(c.Message, "same namespace") {
+		t.Errorf("the refusal does not say why: %q", c.Message)
+	}
+}
+
+// TestContextRevisionIsHonoured — spec.context.revision is the same pin a sourceRef layer gets, and
+// a mismatch must wait rather than build the wrong commit.
+func TestContextRevisionIsHonoured(t *testing.T) {
+	obj := buildOf(t, func(o *ociv1alpha1.DockerBuild) {
+		o.Spec.Context.Revision = "v0.6.8"
+	})
+	srv := contextServer(t, contextTarball(t, "src-abc123/", pinnedFrom))
+	src := gitRepositoryAt("team-a", "src", srv.URL, "sha256:ctx", "v0.6.5@sha1:aaaaaaa")
+
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(src, obj).WithStatusSubresource(&ociv1alpha1.DockerBuild{}).Build()
+	r := &DockerBuildReconciler{Client: c, JobConfig: sampleConfig(), HTTPClient: srv.Client()}
+
+	if _, err := reconcileOnce(t, r, obj); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if jobs := jobsIn(t, r, obj.Namespace); len(jobs) != 0 {
+		t.Fatalf("built from the wrong revision: %v", jobs)
+	}
+	// Pending, not stalled: the SOURCE catching up is what resolves it, and that raises no
+	// generation bump here, so stalling would wait for an event that cannot come.
+	cond := conditionOf(reload(t, r, obj), ociv1alpha1.ReadyCondition)
+	if cond == nil || cond.Reason != ociv1alpha1.ReasonDependencyNotReady {
+		t.Fatalf("Ready = %+v, want reason %s", cond, ociv1alpha1.ReasonDependencyNotReady)
+	}
+}
+
+// And a matching revision builds, so the pin is a check rather than a block.
+func TestContextRevisionMatchingBuilds(t *testing.T) {
+	obj := buildOf(t, func(o *ociv1alpha1.DockerBuild) {
+		o.Spec.Context.Revision = "v0.6.8"
+	})
+	srv := contextServer(t, contextTarball(t, "src-abc123/", pinnedFrom))
+	src := gitRepositoryAt("team-a", "src", srv.URL, "sha256:ctx", "v0.6.8@sha1:b739efb5")
+
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(src, obj).WithStatusSubresource(&ociv1alpha1.DockerBuild{}).Build()
+	r := &DockerBuildReconciler{Client: c, JobConfig: sampleConfig(), HTTPClient: srv.Client()}
+
+	if _, err := reconcileOnce(t, r, obj); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if jobs := jobsIn(t, r, obj.Namespace); len(jobs) != 1 {
+		t.Fatalf("a matching revision did not build: %d jobs", len(jobs))
 	}
 }

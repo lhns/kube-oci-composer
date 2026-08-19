@@ -112,7 +112,7 @@ terminating in front, routing only `/v2/`.
 
 | # | Threat | Status | Evidence |
 |---|---|---|---|
-| T1 | Layer content changes without the spec changing | **Mitigated for `fetch`, partially for `sourceRef`** | `fetch` carries a declared digest. `sourceRef` resolves at reconcile time, so content *can* move under a fixed spec — documented in [ADR 0017](adr/0017-updating-the-consumed-digest.md), and now refused when the source's artifact predates its own spec (`internal/source/flux.go`, ADR 0026). Not covered: a branch or semver range, which produces no generation bump. |
+| T1 | Layer content changes without the spec changing | **Mitigated, with one opt-in** | `fetch` carries a declared digest. For `sourceRef`: an artifact that predates its own source's spec is refused (`internal/source/flux.go`, ADR 0026), and `sourceRef.revision` pins the revision a layer expects. The pin is what covers a **branch or semver range**, which moves with no generation bump for the staleness check to see — but it is optional, so a spec that omits it still consumes whatever the source publishes. |
 | T2 | A published tag is repointed at different content | **Mitigated by default** | `publish.immutable: true` refuses to move a tag resolving to a different digest. Note the inherent limit: it cannot validate a tag's **first** publish, because there is nothing to compare against. |
 | T3 | A malicious archive escapes the target directory on unpack | **Mitigated** | Traversal is refused rather than sanitised (`internal/oci/extract.go`): any entry whose cleaned path is `..` or starts with `../` is an error. Zip entries normalise `\` to `/` **before** the check (`internal/oci/zip.go`). |
 | T4 | A build tampers with another build's cache | **Mitigated** | The cache ref is per-object, derived from namespace and name (`cacheRefFor`). A shared cache would be a channel between whoever can write Dockerfiles. |
@@ -123,11 +123,13 @@ terminating in front, routing only `/v2/`.
 
 | # | Threat | Status | Evidence |
 |---|---|---|---|
-| R1 | An artifact exists and nobody can say what produced it | **Partially mitigated** | `status.history` retains digests, tags and (for `DockerBuild`) the input hash. But no OCI provenance annotations are emitted, and `artifactStatus.Revision` is the **output** digest, not the source revision. ADR 0026 records this as the reason a wrong artifact had to be found by extracting a layer and reading its payload. |
+| R1 | An artifact exists and nobody can say what produced it | **Partially mitigated** | `status.history[].sources` records each layer's name, resolved digest and revision, which is what ADR 0026's incident needed and did not have — it had to be diagnosed by extracting a layer and reading its payload. Still missing: no OCI annotations carry provenance, so the record lives only in the object's status and is lost with it. |
 | R2 | A failure leaves no trace after the pod is gone | **Mitigated** | A failed build's Job is kept for the whole backoff so its pod's logs survive; the exit code, reason and termination message are copied into status and raised as an Event. |
 
-**R1 is the weakest area of this model.** Provenance is the gap: an operator cannot currently answer
-*"which source revision produced this digest?"* from the API.
+R1 is materially better than it was: `status.history[].sources` now records each layer's name,
+resolved digest and revision, so *"which source revision produced this digest?"* is answerable from
+the API. What is still missing is provenance **in the artifact** — no OCI annotations carry it — so
+the answer exists only while the object does.
 
 ## I — Information disclosure
 
@@ -136,12 +138,14 @@ terminating in front, routing only `/v2/`.
 | I1 | Secret **values** leak through `status.inputHash` | **Mitigated** | Only `name` + `resourceVersion` reach the hash (`internal/buildcontroller/dockerbuild_controller.go`). Status is readable by anyone with `get`, and a hash of a low-entropy secret is an oracle. |
 | I2 | Secret values leak through build args | **Mitigated** | Secrets are projected via BuildKit's secret mount, never as `--opt build-arg`. Build args *are* hashed, so anything placed there is world-readable by design. |
 | I3 | The controller holds credentials it does not need | **Mitigated** | Both roles grant `get` on secrets — never `list` or `watch` — and a chart drift guard fails the build if that ever changes (`TestBuilderChartNeverGrantsSecretListOrWatch`). Push credentials for builds are projected straight into the build pod and never read by the controller. |
-| I4 | **A tenant reads another namespace's source content** | **NOT mitigated — accepted, and the sharpest tenancy issue here** | `sourceRef.namespace` defaults to the object's namespace but may name any other (`internal/controller/resolve.go:195-197`), and the composer's RBAC grants cluster-wide `get;list;watch` on Flux sources. A tenant who can create an `ImageComposition` can therefore bake another namespace's artifact into an image they control and read it. Secrets and ConfigMaps are **not** exposed this way — both resolve against `obj.Namespace` only. |
+| I4 | A tenant reads another namespace's source content | **Mitigated** | A `sourceRef` naming any namespace but the object's own is refused with a terminal error (`internal/controller/resolve.go`), and `DockerBuild.spec.context` the same. It had to be fixed controller-side rather than in CEL: a CRD validation rule cannot read `metadata.namespace`. Both controllers still hold cluster-wide `get;list;watch` on Flux sources, so this rule is the whole of the boundary — which is why it is asserted by tests on both kinds. Secrets and ConfigMaps were never exposed this way; both always resolved against `obj.Namespace`. |
 | I5 | Anyone on the network pulls any served image | **NOT mitigated by this code** | The serve endpoint has no authentication. Any client that can reach the Service or NodePort can pull every artifact the composer serves, across all namespaces. |
 | I6 | An SSRF via a `fetch` URL reaches cluster-internal services | **NOT mitigated** | `fetch.url` is used to build a request directly (`internal/oci/fetch.go`); there is no allow-list or private-range block. The response must match a declared digest to become a layer, which limits *exfiltration* — but the request itself is still made from the controller's network position. |
 
-I4 and I5 compose badly: a tenant can pull another namespace's content into an image, and the
-endpoint serving it is unauthenticated.
+I5 is now the sharpest item in this section, and it is deliberate: the endpoint has no
+authentication, and restricting who can reach it is the deployment's job. Note what that means in a
+multi-tenant cluster — a NetworkPolicy is the only thing separating one namespace's artifacts from
+another's readers.
 
 ## D — Denial of service
 
@@ -275,9 +279,8 @@ granting the controller `pods/exec` or reading logs.
 
 These are not mitigations. They are things assumed true, and each one is somebody else's job.
 
-1. **`create` on `ImageComposition` / `DockerBuild` is a privilege.** Both are equivalent to running
-   code (builds) or reading cross-namespace source content (I4). Grant them like you grant Pod
-   creation.
+1. **`create` on `ImageComposition` / `DockerBuild` is a privilege.** A `DockerBuild` runs code, and
+   both read every source in their own namespace. Grant them like you grant Pod creation.
 2. **The serve endpoint is not exposed with its write path reachable** (S1), and network policy —
    not this code — restricts who can pull (I5).
 3. **The registry is durable.** For `DockerBuild`, losing the store or status can mean a rebuild
@@ -289,11 +292,10 @@ These are not mitigations. They are things assumed true, and each one is somebod
 
 | Gap | Threat | Note |
 |---|---|---|
-| Cross-namespace `sourceRef` with no policy control | I4 | The only tenancy boundary a tenant can cross by writing a spec |
-| No provenance linking an artifact to a source revision | R1 | Made a real incident hard to diagnose (ADR 0026) |
-| Serve endpoint unauthenticated and plaintext | S1, I5 | Deliberate; pushed to the deployment |
-| No SSRF controls on `fetch.url` | I6 | Digest verification limits exfiltration, not reachability |
-| A moving branch or semver range still bypasses the staleness check | T1 | `sourceRef.revision` is the recorded follow-up (ADR 0026) |
+| Serve endpoint unauthenticated and plaintext | S1, I5 | Deliberate; pushed to the deployment. The largest remaining item |
+| No SSRF controls on `fetch.url` | I6 | Digest verification limits exfiltration, not reachability. Considered and declined |
+| Provenance lives only in status, not in the artifact | R1 | OCI annotations would survive the object; config labels would change the digest |
+| `sourceRef.revision` is opt-in | T1 | A spec that omits it still consumes whatever the source publishes |
 | `AssemblyVersion` is a human discipline | T5 | Has been missed |
 | Build pods share the node kernel with seccomp unconfined | E1 | User namespaces are the destination (ADR 0027) |
 
