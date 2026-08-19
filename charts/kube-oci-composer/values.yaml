@@ -103,6 +103,25 @@ operator:
     # kubectl describe.
     existingSecret: ""
 
+  # Registry hosts that may be reached over plain HTTP, comma separated. Matched on host, so naming
+  # one internal registry does not downgrade any other request this controller makes.
+  insecureRegistry: ""
+
+  # Keeping published images from being reclaimed by the registry.
+  #
+  # Applies to objects using spec.push. A registry with an expiry policy will delete anything it has
+  # not seen used recently; this re-pulls every image a live ImageComposition still references, which
+  # is what tells the registry they are still in use. Refreshing only READS -- it needs no write or
+  # delete permission and can destroy nothing. See ADR 0031.
+  retention:
+    # Must stay MUCH shorter than the registry's retention window. The RATIO is the guarantee, not
+    # either number: the default assumes a window of 30 days, which is a margin of 720. Anyone
+    # shortening the window has to shorten this with it.
+    #
+    # Zero disables refreshing entirely. Correct only when serving from the built-in endpoint, or
+    # when the registry has no expiry policy at all.
+    refreshInterval: 1h
+
   gc:
     # How often to reclaim blobs, manifests and cache entries nothing references. Zero disables it,
     # and storage then grows without bound.

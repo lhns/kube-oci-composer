@@ -90,6 +90,10 @@ spec:
             - --gc-interval={{ .Values.operator.gc.interval }}
             - --gc-grace={{ .Values.operator.gc.grace }}
             - --keep-builds={{ .Values.operator.gc.keepBuilds }}
+            - --retention-refresh-interval={{ .Values.operator.retention.refreshInterval }}
+            {{- with .Values.operator.insecureRegistry }}
+            - --insecure-registry={{ . }}
+            {{- end }}
             {{- if .Values.operator.gc.dryRun }}
             - --gc-dry-run
             {{- end }}

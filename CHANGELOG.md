@@ -6,6 +6,40 @@ may change between minor versions.
 ## [Unreleased]
 
 ### Added
+- **The retention guarantee: images a live object still references are never reclaimed** (ADR 0031),
+  and a `retention` refresher on both controllers that enforces it.
+
+  Handing retention to a registry hands it a delete button pointed at content your workloads are
+  running. The refresher periodically re-PULLS every image a live object still names, under both its
+  digest and its tags; a registry with a recency-based expiry policy keeps what has been used
+  recently. "Still referenced" becomes a lease the object renews, not something inferred from a scan.
+
+  **The refresh only reads.** It needs no write and no delete permission, so no bug in it can destroy
+  an image. Two objects publishing the same digest need no coordination — both refresh it, and it
+  survives while either lives. Eviction needs no action at all: a record falling out of
+  `status.history` simply stops being refreshed, and the expiry window doubles as an undo period.
+
+  It is driven by `status.history` and never by a successful reconcile, so an object **Stalled on a
+  spec error keeps refreshing what it already published** — those images may be running right now.
+  A partial view refreshes nothing rather than most things, because under-refreshing is invisible
+  until the window elapses.
+
+  Configured by `--retention-refresh-interval` (default `1h`) on both controllers. **The ratio to the
+  registry's window is the guarantee, not either number**; the default assumes 30 days, a margin of
+  720. Anyone shortening the window has to shorten this with it. Sustained failure raises a
+  `RetentionDegraded` event, because this design fails *unsafe*: the symptom of silence is deletion.
+
+### Fixed
+- **A missing build cache failed the build.** BuildKit configures its registry cache importer eagerly
+  and treats a reference it cannot resolve as fatal rather than as a warning, so `--import-cache`
+  broke every *first* build against a registry that answers a missing manifest strictly. It is now
+  passed only when the cache actually resolves; export stays unconditional.
+
+- **Builds pushed Docker media types**, which an OCI-native registry may refuse with
+  `415 Unsupported Media Type` — after the image was built and the layers pushed. They now push OCI
+  types explicitly, which also stops the two kinds putting different media types into one registry.
+
+### Added
 - **`onConflict` on both kinds**, replacing the two-valued `immutable` with `Fail` (refuse and
   stall, the default), `Overwrite` (move the tag) and `Keep` (leave it, publish nothing, report
   Ready).

@@ -37,6 +37,10 @@ const (
 	ReasonFetchFailed       = "FetchFailed"
 	ReasonPublishFailed     = "PublishFailed"
 	ReasonSuspended         = "Suspended"
+	// ReasonRetentionDegraded reports that the refresh keeping this object's images from being
+	// reclaimed has been failing. See ADR 0031: the refresh fails UNSAFE, so sustained failure
+	// ends in deletion rather than in a stuck object, and this is the warning before that.
+	ReasonRetentionDegraded = "RetentionDegraded"
 
 	// ReasonBuildFailed covers an ImageBuild whose Job did not succeed. Never sets Stalled: the fix
 	// lives in another object, so no generation change would arrive to wake it up.
