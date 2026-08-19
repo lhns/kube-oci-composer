@@ -304,6 +304,11 @@
                     "description": "Namespace of the referenced source. Must be the consuming object's own namespace, which is\nalso the default — the field remains only so an explicit value is not a schema error.\n\nA source elsewhere is REFUSED. Both controllers read Flux sources cluster-wide, so honouring\nanother namespace would let anyone who can create one of these objects pull that namespace's\ncontent into an image they control and can read.",
                     "type": "string"
                   },
+                  "revision": {
+                    "description": "Revision the artifact is expected to be at. Optional; unset consumes whatever the source\ncurrently publishes.\n\nThis is the only way to make a sourceRef layer a pure function of the spec. Without it the\nsource can move under a fixed spec — a branch or a semver range does so with no edit to\nanything, so nothing observes it. It is also independent of the source controller's own\nbookkeeping: the staleness check compares generation against observedGeneration, which is the\nsource reporting on itself, whereas this is an assertion from the consuming side.\n\nMatched against Flux's \"\u003cref\u003e@\u003calgo\u003e:\u003chash\u003e\" by whichever half you give:\n\n\trevision: v0.6.8                  matches v0.6.8@sha1:\u003canything\u003e\n\trevision: v0.6.8@sha1:b739efb5    matches only that commit\n\nThe short form exists because a generator usually knows the tag it asked for and not the\ncommit it resolved to, and the useful check should not require the half it cannot supply.",
+                    "maxLength": 256,
+                    "type": "string"
+                  },
                   "subpath": {
                     "description": "Subpath selects one directory from the artifact. Defaults to the whole thing.",
                     "maxLength": 4096,

@@ -523,3 +523,77 @@ func TestHistoryRecordsWhereEachLayerCameFrom(t *testing.T) {
 			"to what produced it", sources[0].Digest, digest)
 	}
 }
+
+// TestSourceRefRevisionRefusesTheWrongRevision reproduces the incident behind ADR 0026 from the
+// consuming side.
+//
+// A generator moved a GitRepository to v0.6.8 and rotated the composition's spec-hash tag in one
+// apply. The source had not cloned the new tag yet, so its artifact still described v0.6.5 — and
+// the composition published v0.6.5's content under v0.6.8's tag, permanently, because a tag's first
+// publish has nothing to compare against.
+//
+// The staleness check catches that by comparing generation against observedGeneration, which is the
+// source reporting on itself. This is the independent version: the spec states what it expects, so
+// a mismatch waits regardless of whether the source's bookkeeping is right.
+func TestSourceRefRevisionRefusesTheWrongRevision(t *testing.T) {
+	url, digest := tarball(t, map[string]string{"config/app.conf": "old"})
+	repo := gitRepository("platform-config", "default", url, digest, "v0.6.5@sha1:aaaaaaa")
+
+	obj := composition("pinned", ociv1alpha1.Layer{
+		Name: "config",
+		SourceRef: &ociv1alpha1.SourceRefSource{
+			Kind: "GitRepository", Name: "platform-config", Revision: "v0.6.8",
+		},
+		To: "/config",
+	})
+	r := reconcilerWith(t, repo)
+
+	inputs, _, err := r.resolveInputs(context.Background(), obj, t.TempDir())
+	if err == nil {
+		t.Fatalf("built from the wrong revision: %+v", inputs)
+	}
+	// Pending, not terminal: the SOURCE catching up is what fixes this, and that raises no
+	// generation bump here, so stalling would wait for an event that cannot come.
+	if !recon.IsPending(err) {
+		t.Errorf("a revision that has not arrived yet is not pending: %v", err)
+	}
+	if !strings.Contains(err.Error(), "v0.6.8") || !strings.Contains(err.Error(), "v0.6.5") {
+		t.Errorf("the error does not say what it has and what it wants: %v", err)
+	}
+}
+
+// The tag half is enough, because a generator knows the tag and not the commit.
+func TestSourceRefRevisionAcceptsTheTagAlone(t *testing.T) {
+	url, digest := tarball(t, map[string]string{"config/app.conf": "x"})
+	repo := gitRepository("platform-config", "default", url, digest, "v0.6.8@sha1:b739efb5")
+
+	obj := composition("tagpin", ociv1alpha1.Layer{
+		Name: "config",
+		SourceRef: &ociv1alpha1.SourceRefSource{
+			Kind: "GitRepository", Name: "platform-config", Revision: "v0.6.8",
+		},
+		To: "/config",
+	})
+	r := reconcilerWith(t, repo)
+
+	if _, _, err := r.resolveInputs(context.Background(), obj, t.TempDir()); err != nil {
+		t.Fatalf("a tag-only pin was refused against its own commit: %v", err)
+	}
+}
+
+// Unset must stay unchanged: the field is opt-in, and every existing object omits it.
+func TestSourceRefWithoutARevisionConsumesWhatIsPublished(t *testing.T) {
+	url, digest := tarball(t, map[string]string{"config/app.conf": "x"})
+	repo := gitRepository("platform-config", "default", url, digest, "whatever@sha1:1234")
+
+	obj := composition("unpinned", ociv1alpha1.Layer{
+		Name:      "config",
+		SourceRef: &ociv1alpha1.SourceRefSource{Kind: "GitRepository", Name: "platform-config"},
+		To:        "/config",
+	})
+	r := reconcilerWith(t, repo)
+
+	if _, _, err := r.resolveInputs(context.Background(), obj, t.TempDir()); err != nil {
+		t.Fatalf("an unpinned sourceRef stopped working: %v", err)
+	}
+}

@@ -233,5 +233,18 @@ func (r *ImageCompositionReconciler) resolveFluxSource(ctx context.Context, obj 
 		// simply not have finished its first reconcile.
 		return source.FluxArtifact{}, err
 	}
+	// The spec asked for a specific revision, so anything else waits rather than being consumed.
+	//
+	// PENDING, not terminal, and the distinction is the whole of ADR 0009's rule: what fixes this
+	// is the SOURCE catching up, which is a different object and raises no generation bump here.
+	// Stalling would wait for an event that cannot come. The source is watched, so the usual case
+	// resolves in seconds; a revision that never arrives costs one cheap GET every 30 seconds and
+	// says plainly what it is waiting for.
+	if !ociv1alpha1.RevisionMatches(ref.Revision, art.Revision) {
+		return source.FluxArtifact{}, recon.Pending(
+			"source %s/%s is at revision %q, waiting for %q",
+			ref.Kind, ref.Name, art.Revision, ref.Revision)
+	}
+
 	return art, nil
 }

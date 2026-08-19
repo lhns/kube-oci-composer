@@ -168,6 +168,14 @@ func (r *DockerBuildReconciler) resolveInputs(ctx context.Context, obj *ociv1alp
 		return build.Inputs{}, "", fmt.Errorf("build context: %w", err)
 	}
 
+	// Same rule as the composer's layers: an explicit revision waits for the source to reach it
+	// rather than building from whatever is currently published.
+	if !ociv1alpha1.RevisionMatches(spec.Context.Revision, art.Revision) {
+		return build.Inputs{}, "", recon.Pending(
+			"build context %s/%s is at revision %q, waiting for %q",
+			spec.Context.Kind, spec.Context.Name, art.Revision, spec.Context.Revision)
+	}
+
 	// Secret identities, never values. status.inputHash is world-readable to anyone with get, and
 	// a hash of a low-entropy secret is an oracle.
 	ids := make([]string, 0, len(spec.Secrets))

@@ -175,10 +175,48 @@ type SourceRefSource struct {
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
 
+	// Revision the artifact is expected to be at. Optional; unset consumes whatever the source
+	// currently publishes.
+	//
+	// This is the only way to make a sourceRef layer a pure function of the spec. Without it the
+	// source can move under a fixed spec — a branch or a semver range does so with no edit to
+	// anything, so nothing observes it. It is also independent of the source controller's own
+	// bookkeeping: the staleness check compares generation against observedGeneration, which is the
+	// source reporting on itself, whereas this is an assertion from the consuming side.
+	//
+	// Matched against Flux's "<ref>@<algo>:<hash>" by whichever half you give:
+	//
+	//	revision: v0.6.8                  matches v0.6.8@sha1:<anything>
+	//	revision: v0.6.8@sha1:b739efb5    matches only that commit
+	//
+	// The short form exists because a generator usually knows the tag it asked for and not the
+	// commit it resolved to, and the useful check should not require the half it cannot supply.
+	// +kubebuilder:validation:MaxLength=256
+	// +optional
+	Revision string `json:"revision,omitempty"`
+
 	// Subpath selects one directory from the artifact. Defaults to the whole thing.
 	// +kubebuilder:validation:MaxLength=4096
 	// +optional
 	Subpath string `json:"subpath,omitempty"`
+}
+
+// RevisionMatches reports whether an artifact's revision satisfies what the spec asked for.
+//
+// Flux revisions are "<ref>@<algo>:<hash>". A want with no "@" is compared against the ref half
+// only, so pinning a tag does not require knowing the commit it resolved to.
+func RevisionMatches(want, got string) bool {
+	if want == "" {
+		return true
+	}
+	if want == got {
+		return true
+	}
+	if strings.Contains(want, "@") {
+		return false
+	}
+	ref, _, found := strings.Cut(got, "@")
+	return found && ref == want
 }
 
 // Repository returns the registry reference to pull from, with any tag stripped, and the digest
