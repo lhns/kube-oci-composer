@@ -11,8 +11,6 @@
 package e2e
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"strings"
 	"testing"
@@ -73,13 +71,6 @@ func registryRequest(t *testing.T, _, method, path, body, contentType string) st
 
 	out, _ := kubectl(t, args...)
 	return out
-}
-
-// sha256Of is the digest of a blob, computed here rather than in the cluster.
-func sha256Of(t *testing.T, body string) string {
-	t.Helper()
-	sum := sha256.Sum256([]byte(body))
-	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // shortName builds a readable label for a request. Kept because callers pass one and it makes a

@@ -44,8 +44,8 @@ func TestPullingAnImageKeepsItFromExpiring(t *testing.T) {
 	refreshed := keepaliveRepo("refreshed")
 	abandoned := keepaliveRepo("abandoned")
 
-	keptDigest := pushTinyImage(t, refreshed, "v1")
-	pushTinyImage(t, abandoned, "v1")
+	keptDigest := pushTinyImage(t, refreshed)
+	pushTinyImage(t, abandoned)
 
 	// Refreshed from INSIDE the cluster, in one shell loop, rather than by polling from the test.
 	// Each kubectl exec costs seconds on a loaded runner, so a loop that sleeps between requests can
@@ -105,7 +105,7 @@ func TestPullingAnImageKeepsItFromExpiring(t *testing.T) {
 // would make an improvement in zot show up here as a regression.
 func TestUnrefreshedContentIsNotPromptlyReclaimed(t *testing.T) {
 	repo := keepaliveRepo("cold")
-	digest := pushTinyImage(t, repo, "v1")
+	digest := pushTinyImage(t, repo)
 
 	sleepInCluster(t, 90)
 
@@ -121,9 +121,10 @@ func TestUnrefreshedContentIsNotPromptlyReclaimed(t *testing.T) {
 // is removed first, so the manifest is protected by `keepUntagged` alone.
 func TestPullingByDigestKeepsAnUntaggedImageAlive(t *testing.T) {
 	repo := keepaliveRepo("untagged")
-	digest := pushTinyImage(t, repo, "temporary")
+	digest := pushTinyImage(t, repo)
 
-	deleteTag(t, repo, "temporary")
+	// Remove the tag, leaving the manifest reachable only by digest.
+	deleteTag(t, repo, "v1")
 	refreshFor(t, repo, digest, 90)
 
 	if !manifestExistsByDigest(t, repo, digest) {
@@ -200,64 +201,45 @@ func tagsList(t *testing.T, repository string) string {
 	return strings.TrimSpace(out)
 }
 
-// pushTinyImage publishes a small but COMPLETE image and returns its manifest digest.
+// pushTinyImage publishes a REAL image, by running a build, and returns its manifest digest.
 //
-// Built by hand rather than by running a build, because what is under test is the registry's
-// retention behaviour and a real build would add minutes and a dependency on BuildKit to a question
-// that has nothing to do with either.
-//
-// "Complete" is the load-bearing word, and it cost several runs to learn. The first version pushed
-// an empty config and no layers — valid per the distribution spec, and accepted with a 201. But zot
-// could not derive image metadata from it, so on every pull it logged
+// It started as a hand-crafted manifest — an empty config, no layers — which is valid per the
+// distribution spec and was accepted with a 201. That cost six runs. zot could not derive image
+// metadata from it, so on every pull it logged
 //
 //	failed to update stats on download image ... error: image meta not found
 //
-// and recorded nothing. `pulledWithin` then had nothing to match on, and the tag expired however
-// often it was fetched. Five runs read that as "a pull does not renew recency" — a conclusion about
-// the registry drawn from a defect in the fixture.
+// and recorded nothing. `pulledWithin` then had nothing to match on and the tag expired however
+// often it was fetched, which reads exactly like "a pull does not renew recency" — a conclusion
+// about the registry drawn from a defect in the fixture. Fleshing the manifest out did not help;
+// what settled it was that the error appeared ONLY for the fixture, never for images the builder had
+// actually pushed.
 //
-// So the config carries the fields an image config is expected to have, and there is a real layer
-// descriptor. The bytes are not a valid tarball, which no registry checks, but the SHAPE is what
-// zot's metadata parser needs.
-func pushTinyImage(t *testing.T, repository, tag string) string {
+// So the fixture is now the real thing. It costs a build per repository, which is the price of
+// measuring the registry's behaviour on the images this project actually produces rather than on a
+// reduction of them that the registry treats differently.
+//
+// The general lesson is worth more than the fix: a fixture pared down until it is minimal for the
+// code under test can quietly stop being valid input for the system AROUND it, and the resulting
+// failure looks like a finding rather than like a bug.
+func pushTinyImage(t *testing.T, repository string) string {
 	t.Helper()
 
-	const layerBody = "not really a tarball, and no registry checks"
-	layerDigest := putBlob(t, repository, layerBody)
-
-	config := fmt.Sprintf(`{"architecture":"amd64","os":"linux",`+
-		`"config":{},`+
-		`"rootfs":{"type":"layers","diff_ids":["%s"]},`+
-		`"history":[{"created_by":"e2e retention fixture"}]}`, layerDigest)
-	configDigest := putBlob(t, repository, config)
-
-	manifest := fmt.Sprintf(`{"schemaVersion":2,`+
-		`"mediaType":"application/vnd.oci.image.manifest.v1+json",`+
-		`"config":{"mediaType":"application/vnd.oci.image.config.v1+json","size":%d,"digest":"%s"},`+
-		`"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","size":%d,"digest":"%s"}],`+
-		`"annotations":{"e2e":"%s"}}`,
-		len(config), configDigest, len(layerBody), layerDigest, repository)
-
-	out := registryRequest(t, "push-"+shortName(repository, tag), "PUT",
-		fmt.Sprintf("/v2/%s/manifests/%s", repository, tag), manifest,
-		"Content-Type: application/vnd.oci.image.manifest.v1+json")
-	if !strings.Contains(out, "201") && !strings.Contains(out, "Created") {
-		t.Fatalf("pushing %s:%s did not succeed:\n%s", repository, tag, out)
+	// The repository is <host>/<name>; the object is named after the name half.
+	name := repository
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
 	}
-	return contentDigest(t, repository, tag)
-}
 
-// putBlob uploads a blob in one monolithic POST and returns its digest.
-func putBlob(t *testing.T, repository, body string) string {
-	t.Helper()
-	digest := sha256Of(t, body)
-	out := registryRequest(t, "blob-"+shortName(repository, digest[7:15]), "POST",
-		fmt.Sprintf("/v2/%s/blobs/uploads/?digest=%s", repository, digest), body,
-		"Content-Type: application/octet-stream")
-	if !strings.Contains(out, "201") && !strings.Contains(out, "Created") {
-		t.Fatalf("uploading a blob to %s failed:\n%s", repository, out)
-	}
-	return digest
+	applyBuildTo(t, name, "Dockerfile", buildRegistry+"/"+repository)
+	buildEventually(t, "the retention fixture "+name+" to publish", func() error {
+		st := buildStatus(t, name)
+		if st.Artifact == nil || st.Artifact.Digest == "" {
+			return fmt.Errorf("no digest yet: %+v", readyCondition(st))
+		}
+		return nil
+	})
+	return buildStatus(t, name).Artifact.Digest
 }
 
 // manifestExists fetches a manifest with GET, which is what a real pull is.
@@ -292,21 +274,4 @@ func deleteTag(t *testing.T, repository, tag string) {
 	t.Helper()
 	registryRequest(t, "untag-"+shortName(repository, tag), "DELETE",
 		fmt.Sprintf("/v2/%s/manifests/%s", repository, tag), "", "")
-}
-
-// contentDigest uses HEAD. Since it is unknown whether that renews recency, it is called only
-// immediately after a push — never during a waiting period — so it cannot contaminate a negative
-// control whichever way the answer falls.
-func contentDigest(t *testing.T, repository, tag string) string {
-	t.Helper()
-	out := registryRequest(t, "digest-"+shortName(repository, tag), "HEAD",
-		fmt.Sprintf("/v2/%s/manifests/%s", repository, tag), "", "")
-	for _, line := range strings.Split(out, "\n") {
-		if k, v, ok := strings.Cut(line, ":"); ok &&
-			strings.EqualFold(strings.TrimSpace(k), "Docker-Content-Digest") {
-			return strings.TrimSpace(v)
-		}
-	}
-	t.Fatalf("no digest for %s:%s\n%s", repository, tag, out)
-	return ""
 }
