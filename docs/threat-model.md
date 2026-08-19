@@ -100,13 +100,19 @@ therefore load-bearing rather than decorative for this kind.
 
 | # | Threat | Status | Evidence |
 |---|---|---|---|
-| S1 | A client impersonates the controller and **writes** to the serve endpoint | **Partially mitigated — depends on deployment** | The registry handler has no authentication at all; `grep WWW-Authenticate` over `pkg/registry` returns nothing. Writes are expected to arrive only over loopback (`internal/serve/server.go:88-93`), and the comment says so explicitly: *"Restricting writes at the network layer is the deployment's job, not this handler's."* If the endpoint is exposed with the write path reachable, anyone can `PUT` a manifest. |
+| S1 | A client impersonates the controller and **writes** to the serve endpoint | **Mitigated** | `loopbackWritesOnly` (`internal/serve/writepath.go`) refuses `PUT`/`POST`/`PATCH`/`DELETE` unless the TCP peer is loopback, which means this process. Enforced in the handler rather than left to the deployment. **This row previously read "partially mitigated — depends on deployment", and that was wrong**: the bind address defaults to every interface, the chart exposes it as a Service, the Ingress routes `/v2/` including `PUT`, and there was no authentication — a test confirmed an arbitrary pod's `PUT` returned **201 Created**. ADR 0025:87-90 rested on the same false premise when it said a build Job could not write here. |
 | S2 | A registry impersonates the origin of a base image or layer | **Mitigated** | Base images and image layers are pulled by digest only — `name.NewDigest` fails on a tag (`internal/source/image.go`), and the CRD pattern requires `@sha256:`. Fetched layers are verified against the declared digest (`internal/oci/fetch.go`). |
 | S3 | A build pushes to a registry impersonating the intended one over plain HTTP | **Mitigated, opt-in per host** | `--insecure-registry` is a list of hosts, matched on the push target's host rather than applied globally (`insecureAttr`, `internal/buildcontroller/job.go`). Naming one internal registry does not downgrade every other push. |
 
-**S1 is the sharpest deployment-time question in this model.** The endpoint is HTTP-only —
-`ListenAndServe`, no TLS anywhere in `internal/serve` — and the chart's TLS story is an Ingress
-terminating in front, routing only `/v2/`.
+**I5 is now the sharpest item in this section.** Writes are closed, but reads remain anonymous by
+design, and the endpoint is HTTP-only — `ListenAndServe`, no TLS anywhere in `internal/serve` — with
+the chart's TLS story being an Ingress terminating in front, routing only `/v2/`. In a multi-tenant
+cluster a NetworkPolicy is the only thing separating one namespace's artifacts from another's
+readers.
+
+The lesson worth keeping from S1: the guarantee had been *written down* in a package comment for a
+long time without ever being *implemented*, and nothing tested it. A claim about behaviour is not
+behaviour.
 
 ## T — Tampering
 
@@ -292,7 +298,7 @@ These are not mitigations. They are things assumed true, and each one is somebod
 
 | Gap | Threat | Note |
 |---|---|---|
-| Serve endpoint unauthenticated and plaintext | S1, I5 | Deliberate; pushed to the deployment. The largest remaining item |
+| Serve endpoint serves reads anonymously over plaintext | I5 | Deliberate; a kubelet must pull without credentials. Restricting *who* may pull is a NetworkPolicy question. The largest remaining item |
 | No SSRF controls on `fetch.url` | I6 | Digest verification limits exfiltration, not reachability. Considered and declined |
 | Provenance lives only in status, not in the artifact | R1 | OCI annotations would survive the object; config labels would change the digest |
 | `sourceRef.revision` is opt-in | T1 | A spec that omits it still consumes whatever the source publishes |

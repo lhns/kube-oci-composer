@@ -86,14 +86,17 @@ func New(host, addr string, blobs store.Store, presign bool) (*Server, error) {
 
 	// Wrapped, not replaced: the registry handler is upstream and correct apart from the one
 	// header shape it cannot parse. See rangefix.go.
-	return &Server{Host: host, Addr: addr, Blobs: blobs, handler: closeOpenEndedRanges(h, bh)}, nil
+	// Innermost first: the range fix rewrites a header the upstream handler cannot parse, and the
+	// write guard sits outside it so a refused write never reaches either.
+	handler := loopbackWritesOnly(closeOpenEndedRanges(h, bh))
+	return &Server{Host: host, Addr: addr, Blobs: blobs, handler: handler}, nil
 }
 
 // Handler exposes the distribution endpoint.
 //
-// Writes arrive only from the controller itself over loopback; the Service exposes this for
-// pulls. Restricting writes at the network layer is the deployment's job, not this handler's —
-// the chart binds the write path to localhost.
+// Reads are anonymous; writes are refused unless they arrive over loopback, which means from this
+// process. That is enforced here rather than left to the deployment — see writepath.go for why the
+// previous version of this comment, which claimed the chart did it, was wrong.
 func (s *Server) Handler() http.Handler { return s.handler }
 
 // LocalRef returns the loopback reference the controller pushes to, e.g.

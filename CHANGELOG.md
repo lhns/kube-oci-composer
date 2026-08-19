@@ -306,6 +306,20 @@ may change between minor versions.
   remains the destination rather than the current state.
 
 ### Fixed
+- **Anything in the cluster could push to the serving endpoint.** `--serving-bind-address` defaults
+  to `:5000` -- every interface -- the chart exposes that as a Service, and the Ingress routes
+  `/v2/`, a prefix that includes `PUT`. There is no authentication in that package. So any pod able
+  to reach the Service could publish a manifest or repoint a mutable tag, and a test confirms an
+  arbitrary pod's `PUT` returned **201 Created**.
+
+  Writes are now refused unless the TCP peer is loopback, which means the controller itself. Reads
+  stay anonymous, which is the point of the endpoint and unchanged.
+
+  The uncomfortable part is how long it was written down without being true: `internal/serve`'s
+  package doc has always claimed writes arrive only over loopback, and `Handler` said "the chart
+  binds the write path to localhost". Neither was implemented, nothing tested it, and
+  [ADR 0025](docs/adr/0025-dockerfile-builds-as-a-second-kind.md):87-90 built a design decision on
+  the same false premise.
 - **Long event messages were dropped by the API server.** The two controllers each had their own
   `event` helper and they were not the same: the builder truncated to the API server's limit, the
   composer did not, so an over-long message was rejected outright rather than shortened. The cases
