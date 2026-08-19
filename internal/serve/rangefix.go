@@ -28,9 +28,6 @@ type blobSizer interface {
 // (`bytes=-N`) are left alone: upstream rejects those too, but containerd does not send them, and
 // inventing behaviour for a case nothing exercises would be worse than the honest 416.
 func closeOpenEndedRanges(next http.Handler, blobs blobSizer) http.Handler {
-	if blobs == nil {
-		return next
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if closed, ok := closedRangeFor(r, blobs); ok {
 			r.Header.Set("Range", closed)

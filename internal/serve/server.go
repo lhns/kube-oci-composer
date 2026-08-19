@@ -5,8 +5,9 @@
 // push credentials anywhere, and no node configuration — an ordinary Service behind the
 // cluster's existing ingress and certificate is enough for containerd to pull over HTTPS.
 //
-// Storage is pluggable and deliberately disposable. Composition is deterministic, so the controller can always
-// re-assemble an artifact from its spec; losing the blob directory costs a rebuild, not data.
+// Storage is pluggable and deliberately disposable. Composition is deterministic, so the controller
+// can always re-assemble an artifact from its spec; losing the blob directory costs a rebuild, not
+// data.
 // That is why there is no PVC here and nothing to back up. A registry has to persist bytes; a
 // deterministic composer does not.
 //
