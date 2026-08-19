@@ -6,6 +6,24 @@ may change between minor versions.
 ## [Unreleased]
 
 ### Added
+- **`sourceRef.revision` pins the revision a layer expects.** Optional; unset keeps today's
+  behaviour of consuming whatever the source publishes.
+
+  It is the only way to make a `sourceRef` layer a pure function of the spec. A branch or a semver
+  range moves with no edit to anything, so the staleness check in
+  [ADR 0026](docs/adr/0026-a-source-artifact-can-lag-its-own-spec.md) cannot see it — that compares
+  `generation` against `observedGeneration`, which is the source reporting on itself. This is the
+  assertion from the consuming side, and holds even if that bookkeeping is wrong.
+
+  Matched against Flux's `<ref>@<algo>:<hash>` by whichever half you give: `v0.6.8` matches
+  `v0.6.8@sha1:<anything>`, `v0.6.8@sha1:b739efb5` matches only that commit. The short form exists
+  because a generator usually knows the tag it asked for and not the commit it resolved to, and the
+  check should not require the half it cannot supply.
+
+  A mismatch is **pending, not stalled**: what fixes it is the source catching up, which raises no
+  generation bump here, so stalling would wait for an event that cannot come. Honoured by
+  `DockerBuild.spec.context` too.
+
 - **`status.history[].sources` records where each layer came from** — its name, the resolved digest,
   and the revision for a source that has one. Answering "which commit is in this image?" previously
   meant pulling the manifest, fetching the layer and reading its payload, which is exactly how the
