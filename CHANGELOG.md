@@ -6,6 +6,26 @@ may change between minor versions.
 ## [Unreleased]
 
 ### Added
+- **An envtest suite for the builder, and parity tests across the two kinds** -- both aimed at one
+  failure mode: a test that passes while being wrong about what it checks. Three of those shipped
+  this cycle.
+
+  The fake client cannot deliver WATCH events, so a reconcile provoked by the controller's own
+  writes is invisible to the unit suite. That is exactly how the retry hot loop survived: deleting a
+  failed Job woke the controller through its own `Owns()` watch, the backoff never applied, and
+  every unit test passed. `TestAFailingBuildDoesNotSpinTheQueue` runs a real manager and asserts a
+  RATE -- with the defect reinstated it observes **251 reconciles in 15 seconds** against a
+  tolerance of 12.
+
+  The parity tests apply `unpackparity_test.go`'s argument to the controllers: a property held in
+  two hand-maintained places needs something that reads both. They check that both kinds scope
+  references to their own namespace, both honour a pinned revision, neither keeps a private copy of
+  the shared helpers, and both record events through the helper that applies the length limit --
+  the last being a difference that already shipped.
+
+  The `GitRepository` stand-in moved to `test/crds/` so the e2e cluster and envtest load the same
+  one; envtest loads CRDs by directory, so a directory of only CRDs is what makes it shareable.
+
 - **`sourceRef.revision` pins the revision a layer expects.** Optional; unset keeps today's
   behaviour of consuming whatever the source publishes.
 

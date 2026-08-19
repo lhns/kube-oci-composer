@@ -79,7 +79,7 @@ make docker-build-builder BUILDER_IMG="$BUILDER_IMG"
 kind load docker-image "$BUILDER_IMG" --name "$CLUSTER"
 
 kubectl apply -f config/crd/bases/oci.lhns.de_dockerbuilds.yaml
-kubectl apply -f "$HERE/manifests/gitrepository-crd.yaml"
+kubectl apply -f "$HERE/../crds/gitrepository.yaml"
 
 kubectl create namespace "$BUILD_NS" --dry-run=client -o yaml | kubectl apply -f -
 

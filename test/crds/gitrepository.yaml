@@ -1,3 +1,11 @@
+# A stand-in for Flux's GitRepository, shared by the e2e cluster and the envtest suites.
+#
+# Installing Flux to test this controller would test Flux. What both suites need is the CONTRACT:
+# an object with a status.artifact carrying url, digest and revision. This declares exactly that
+# and nothing else.
+#
+# Lives here rather than under test/e2e/manifests because envtest loads CRDs by DIRECTORY, so a
+# directory holding only CRDs is what makes it usable from both.
 # A minimal stand-in for source-controller's GitRepository.
 #
 # The e2e cluster does not run Flux, and installing it would test Flux rather than this controller.
