@@ -147,6 +147,67 @@ operator:
 # that mounts the result. A ClusterIP *name* is therefore unusable — nodes resolve with the host
 # resolver, which knows nothing of cluster DNS — so this must be exposed somewhere the nodes can
 # actually reach: a LoadBalancer address, a NodePort, or an Ingress.
+# An optional bundled registry (zot), OFF by default.
+#
+# ADR 0030 makes a real registry the serving surface for both kinds. Without this, that would turn
+# "helm install and you are done" into "helm install, then go and run a registry". Turn it on if you
+# have not already got one; leave it off if you have, and point spec.push.repository at yours.
+#
+# Deliberately plain: no HA, no object storage, no TLS termination. If you need any of those, run
+# zot's own chart or Harbor instead of this.
+#
+# What you own once this is on: the volume, and backing it up. For ImageComposition that is a
+# convenience -- artifacts rebuild from their specs. For ImageBuild the registry is a SYSTEM OF
+# RECORD, because a rebuild may not reproduce the digest, so losing this volume loses those images.
+# See docs/registry.md.
+registry:
+  enabled: false
+
+  # Pinned by digest, like every other image this project consumes.
+  image: ghcr.io/project-zot/zot:v2.1.20@sha256:542e25be4d32e7879c0cfad93492a93c81b1e059cbd2d30d485d4bd567318234
+
+  # Retention. The controllers keep live images alive by re-pulling them; this is the other half of
+  # that bargain, and the two have to be set together.
+  retention:
+    # How long an image survives without being pulled.
+    #
+    # MUST stay much longer than operator.retention.refreshInterval. The RATIO is the guarantee, not
+    # either number: 720h against 1h is a margin of 720, which means refreshing has to fail
+    # continuously for weeks before anything is at risk. Shortening this without shortening the
+    # interval turns the guarantee into a race, and the failure mode is deletion.
+    window: 720h
+    # How often collection runs, and how long something must be eligible before it goes.
+    gcInterval: 6h
+    gcDelay: 1h
+    # Log what would be reclaimed and reclaim nothing. Useful when first tuning the window.
+    dryRun: false
+
+  # Anonymous read, authenticated write -- enforced by the registry itself, with no proxy in front.
+  #
+  # Leave secretName empty and the registry accepts writes from anything that can reach the Service;
+  # acceptable only when a NetworkPolicy is doing that job instead. To enable auth, create an
+  # htpasswd Secret and give the controllers a dockerconfigjson Secret with the same credentials via
+  # spec.push.secretRef:
+  #
+  #   htpasswd -bBn composer "$PASSWORD" > htpasswd
+  #   kubectl create secret generic registry-htpasswd --from-file=htpasswd
+  auth:
+    secretName: ""
+    username: composer
+
+  persistence:
+    # ON by default, unlike most optional components here, and for one reason: an ImageBuild's output
+    # cannot be reproduced from its spec, so an emptyDir turns every restart into permanent loss.
+    enabled: true
+    size: 20Gi
+    storageClass: ""
+
+  logLevel: info
+
+  resources:
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {memory: 1Gi}
+
 service:
   type: ClusterIP
   port: 5000

@@ -1,0 +1,78 @@
+{{- if .Values.registry.enabled }}
+{{- /*
+An optional bundled registry, off by default.
+
+ADR 0030 makes a real registry the serving surface for both kinds, which would otherwise turn "helm
+install and you are done" into "helm install, then go and run a registry". Bundling one keeps
+installation a single command for anyone who has not already got one.
+
+It is deliberately plain. This is a working registry with the retention policy the guarantee needs,
+not a general-purpose deployment of one: no HA, no object storage, no TLS termination. An operator
+who needs any of that should turn this off and run zot's own chart, or Harbor, and point
+spec.push.repository at it.
+
+WHAT THE OPERATOR OWNS once this is on: the volume, and backing it up. For ImageComposition that is a
+convenience, since every artifact is rebuildable from its spec. For ImageBuild the registry is a
+SYSTEM OF RECORD -- a rebuild may not reproduce the digest (ADR 0025) -- so losing this volume loses
+those images. See docs/registry.md.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kube-oci-composer.fullname" . }}-registry
+  labels:
+    {{- include "kube-oci-composer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: registry
+data:
+  config.json: |
+    {
+      "distSpecVersion": "1.1.0",
+      "storage": {
+        "rootDirectory": "/var/lib/registry",
+        "gc": true,
+        "gcDelay": {{ .Values.registry.retention.gcDelay | quote }},
+        "gcInterval": {{ .Values.registry.retention.gcInterval | quote }},
+        "retention": {
+          "dryRun": {{ .Values.registry.retention.dryRun }},
+          "policies": [
+            {
+              "repositories": ["**"],
+              "deleteUntagged": true,
+              "keepTags": [
+                { "patterns": [".*"], "pulledWithin": {{ .Values.registry.retention.window | quote }} }
+              ],
+              "keepUntagged": { "pulledWithin": {{ .Values.registry.retention.window | quote }} }
+            }
+          ]
+        }
+      },
+      "http": {
+        "address": "0.0.0.0",
+        "port": "5000"
+        {{- if .Values.registry.auth.secretName }},
+        "auth": { "htpasswd": { "path": "/etc/zot/auth/htpasswd" } },
+        "accessControl": {
+          "repositories": {
+            "**": {
+              "anonymousPolicy": ["read"],
+              "policies": [
+                {
+                  "users": [{{ .Values.registry.auth.username | quote }}],
+                  "actions": ["read", "create", "update"]
+                }
+              ]
+            }
+          }
+        }
+        {{- end }}
+      },
+      {{- /*
+        NOT optional, and the single easiest thing to remove while believing it is decoration.
+        Pull-recency retention needs the registry to have RECORDED a pull, and that metadata lives
+        here. Without it `pulledWithin` matches nothing and every tag expires however often it is
+        fetched -- silently, and in the direction that deletes.
+      */}}
+      "extensions": { "search": { "enable": true } },
+      "log": { "level": {{ .Values.registry.logLevel | quote }} }
+    }
+{{- end }}

@@ -29,6 +29,17 @@ may change between minor versions.
   720. Anyone shortening the window has to shorten this with it. Sustained failure raises a
   `RetentionDegraded` event, because this design fails *unsafe*: the symptom of silence is deletion.
 
+- **An optional bundled registry in the composer chart** (`registry.enabled`, off by default), so
+  that "a registry becomes the recommended path" does not turn `helm install` into `helm install,
+  then go and run a registry`. It ships the retention policy the guarantee needs, and CI asserts that
+  the policy actually protects something -- every one of those settings fails by silently protecting
+  nothing rather than by erroring.
+
+  Deliberately plain: one replica, one volume, no TLS termination. Anyone needing more should turn it
+  off and run zot's own chart or Harbor. Persistence defaults ON, unlike most optional components
+  here, because an `ImageBuild`'s output cannot be reproduced from its spec and an `emptyDir` would
+  turn every restart into permanent loss.
+
 ### Fixed
 - **A missing build cache failed the build.** BuildKit configures its registry cache importer eagerly
   and treats a reference it cannot resolve as fatal rather than as a warning, so `--import-cache`
