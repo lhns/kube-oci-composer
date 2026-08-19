@@ -138,7 +138,7 @@ func (r *ImageBuildReconciler) reconcile(ctx context.Context, obj *ociv1alpha1.I
 		}
 		return ctrl.Result{RequeueAfter: buildPollInterval}, nil
 	}
-	return r.observeJob(ctx, obj, job, inputHash)
+	return r.observeJob(ctx, obj, job, inputs, inputHash)
 }
 
 // resolveInputs gathers everything the hash needs, using only the API server.
@@ -147,6 +147,12 @@ func (r *ImageBuildReconciler) resolveInputs(ctx context.Context, obj *ociv1alph
 
 	if spec.Push == nil {
 		return build.Inputs{}, "", recon.Terminal("spec.push is required: the built image is produced by a Job in another pod, which cannot write to the controller's loopback-only serving endpoint")
+	}
+
+	// Validated before a Job exists: a malformed ref must not reach buildctl as a broken push
+	// target, and editing this spec is what fixes it.
+	if _, err := recon.EffectiveTags(spec.Push.GetTags(), spec.Push.GetRef()); err != nil {
+		return build.Inputs{}, "", err
 	}
 
 	// Same namespace only, for the reason the composer refuses it: the RBAC is cluster-wide, so
@@ -205,6 +211,7 @@ func (r *ImageBuildReconciler) resolveInputs(ctx context.Context, obj *ociv1alph
 		BuilderDigest:    r.JobConfig.BuilderImage,
 		FrontendDigest:   r.JobConfig.FrontendImage,
 		ContextDigest:    art.Digest,
+		ContextRevision:  art.Revision,
 		ContextSubpath:   spec.Context.Subpath,
 		Dockerfile:       spec.Dockerfile,
 		Target:           spec.Target,
@@ -272,7 +279,7 @@ func (r *ImageBuildReconciler) startBuild(ctx context.Context, obj *ociv1alpha1.
 
 // observeJob turns a Job's state into this object's.
 func (r *ImageBuildReconciler) observeJob(ctx context.Context, obj *ociv1alpha1.ImageBuild,
-	job *batchv1.Job, inputHash string) (ctrl.Result, error) {
+	job *batchv1.Job, inputs build.Inputs, inputHash string) (ctrl.Result, error) {
 
 	switch {
 	case jobSucceeded(job):
@@ -280,7 +287,7 @@ func (r *ImageBuildReconciler) observeJob(ctx context.Context, obj *ociv1alpha1.
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		r.recordSuccess(obj, inputHash, digest)
+		r.recordSuccess(obj, inputs, inputHash, digest)
 		return ctrl.Result{RequeueAfter: recon.Interval(obj.Spec.Interval)}, nil
 
 	case jobFailed(job):
@@ -369,16 +376,22 @@ func podBuildDigest(p corev1.Pod) string {
 }
 
 // recordSuccess writes the artifact and rotates history.
-func (r *ImageBuildReconciler) recordSuccess(obj *ociv1alpha1.ImageBuild, inputHash, digest string) {
+func (r *ImageBuildReconciler) recordSuccess(obj *ociv1alpha1.ImageBuild, inputs build.Inputs, inputHash, digest string) {
 	repo := obj.Spec.Push.Repository
-	tags := make([]string, 0, len(obj.Spec.Push.Tags))
-	for _, t := range obj.Spec.Push.Tags {
+	// Same list the Job was told to push, so status cannot describe a different set of tags than
+	// the build actually wrote.
+	effective, err := recon.EffectiveTags(obj.Spec.Push.GetTags(), obj.Spec.Push.GetRef())
+	if err != nil {
+		effective = obj.Spec.Push.Tags
+	}
+	tags := make([]string, 0, len(effective))
+	for _, t := range effective {
 		tags = append(tags, repo+":"+t)
 	}
 
 	revision := digest
-	if len(obj.Spec.Push.Tags) > 0 {
-		revision = obj.Spec.Push.Tags[0] + "@" + digest
+	if len(effective) > 0 {
+		revision = effective[0] + "@" + digest
 	}
 
 	obj.Status.Artifact = &ociv1alpha1.ArtifactStatus{
@@ -396,12 +409,33 @@ func (r *ImageBuildReconciler) recordSuccess(obj *ociv1alpha1.ImageBuild, inputH
 	}
 
 	// InputHash on the record, unlike the composer's — see BuildRecord.InputHash.
-	record := ociv1alpha1.BuildRecord{Digest: digest, Tags: tags, InputHash: inputHash}
-	limit := r.HistoryLimit
-	if limit <= 0 {
-		limit = ociv1alpha1.DefaultHistoryLimit
+	record := ociv1alpha1.BuildRecord{
+		Digest: digest, Tags: tags, InputHash: inputHash,
+		// Where the build came from, so an artifact can be traced back to a revision without
+		// pulling it apart. The composer records this per layer; a build has exactly one source.
+		Sources: []ociv1alpha1.SourceRecord{{
+			Name:     obj.Spec.Context.Name,
+			Revision: inputs.ContextRevision,
+			Digest:   inputs.ContextDigest,
+		}},
 	}
+	limit := r.historyLimit(obj)
 	obj.Status.History = recon.RecordHistory(obj.Status.History, &record, limit)
+}
+
+// historyLimit is the object's own retention if it sets one, else the operator's, else the default.
+//
+// Per-object retention matters MORE here than on a composition: a composition can rebuild any
+// artifact from its spec, so retention is a convenience. A build cannot (ADR 0025), so this is how
+// much of the only copy is kept.
+func (r *ImageBuildReconciler) historyLimit(obj *ociv1alpha1.ImageBuild) int {
+	if p := obj.Spec.Push; p != nil && p.History != nil && *p.History > 0 {
+		return int(*p.History)
+	}
+	if r.HistoryLimit > 0 {
+		return r.HistoryLimit
+	}
+	return ociv1alpha1.DefaultHistoryLimit
 }
 
 // applyOutcome sets the conditions for whatever just happened.

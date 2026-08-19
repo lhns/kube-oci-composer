@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"regexp"
 	"strings"
 	"time"
 
@@ -618,58 +617,6 @@ type target struct {
 	insecure bool
 }
 
-// tagPattern is the CRD's own constraint on a tag, applied here too because a tag arriving via
-// publish.ref never passed through that validation.
-var tagPattern = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9._-]*$`)
-
-// tagFromRef extracts the tag from a full image reference, and NOTHING else — the host and
-// repository are the caller's business, not this field's.
-//
-// Deliberately hand-parsed rather than handed to name.ParseReference, which would default a bare
-// "my-artifact" to "index.docker.io/library/my-artifact:latest". Inventing a `latest` out of an
-// untemplated placeholder is exactly the wrong answer: it would publish a moving tag nobody asked
-// for. No tag in, no tag out.
-func tagFromRef(ref string) (string, error) {
-	if ref == "" {
-		return "", nil
-	}
-	if strings.ContainsRune(ref, '@') {
-		return "", recon.Terminal("publish.ref %q carries a digest; it must name a tag, since the digest is an output rather than an input", ref)
-	}
-	// A colon before the last slash is a port, not a tag: "registry:5000/repo".
-	colon := strings.LastIndexByte(ref, ':')
-	if colon <= strings.LastIndexByte(ref, '/') {
-		return "", nil
-	}
-	tag := ref[colon+1:]
-	if !tagPattern.MatchString(tag) {
-		return "", recon.Terminal("publish.ref %q has an invalid tag %q", ref, tag)
-	}
-	return tag, nil
-}
-
-// effectiveTags is the explicit list plus whatever ref carries, in order and without duplicates.
-func effectiveTags(tags []string, ref string) ([]string, error) {
-	fromRef, err := tagFromRef(ref)
-	if err != nil {
-		return nil, err
-	}
-
-	out := make([]string, 0, len(tags)+1)
-	seen := make(map[string]struct{}, len(tags)+1)
-	for _, t := range append(append([]string(nil), tags...), fromRef) {
-		if t == "" {
-			continue
-		}
-		if _, dup := seen[t]; dup {
-			continue
-		}
-		seen[t] = struct{}{}
-		out = append(out, t)
-	}
-	return out, nil
-}
-
 // resolve picks the publication target: an external registry when push is set, otherwise the
 // built-in endpoint.
 func (r *ImageCompositionReconciler) target(obj *ociv1alpha1.ImageComposition) (target, error) {
@@ -687,7 +634,7 @@ func (r *ImageCompositionReconciler) target(obj *ociv1alpha1.ImageComposition) (
 		// object, so stalling would leave every composition wedged after the fix. It waits.
 		return target{}, recon.Pending("spec.push is unset and no serving endpoint is configured yet")
 	}
-	tags, err := effectiveTags(obj.Spec.Publish.GetTags(), obj.Spec.Publish.GetRef())
+	tags, err := recon.EffectiveTags(obj.Spec.Publish.GetTags(), obj.Spec.Publish.GetRef())
 	if err != nil {
 		return target{}, err
 	}

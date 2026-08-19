@@ -148,7 +148,7 @@ artifact can be rebuilt from its spec. See [ADR 0006](docs/adr/0006-push-is-opti
 **Reconciling is nearly free.** `status.inputHash` summarises everything that determines the
 output, so a reconcile that changes nothing costs one `HEAD` — no fetch, no assembly.
 
-**Old builds are retained, but not forever.** `--gc-keep-builds` (default 10, overridable per
+**Old builds are retained, but not forever.** `--keep-builds` (default 10, overridable per
 object via `spec.publish.history`) decides how many past builds stay pullable. Garbage collection
 refuses to run at all while any `ImageComposition` has not been reconciled, honours a grace
 period, and logs every deletion. See [ADR 0011](docs/adr/0011-content-tags-expire.md).

@@ -6,6 +6,44 @@ may change between minor versions.
 ## [Unreleased]
 
 ### Added
+- **`push.history` and `push.ref` on `ImageBuild`**, closing the two gaps that mattered most in the
+  drift between `publish` and `push`.
+
+  `history` caps how many past builds are retained. It had existed only on `publish` -- that is, only
+  on the kind that can rebuild any artifact from its spec, where retention is a convenience. An
+  `ImageBuild` cannot (ADR 0025), so retention there is how much of the ONLY copy is kept, and that
+  was the kind without the knob.
+
+  `ref` appends a reference's TAG to the tag list, which is what makes the documented spec-hash tag
+  pattern usable from a Helm chart or a kustomize images transformer. Without it the pattern could
+  not be used from `ImageBuild` at all -- the place it is wanted most, since a build's tag is the
+  only thing identifying which inputs produced it.
+
+- **`status.history[].sources` is now populated for builds.** The field was in the CRD for both kinds
+  and only ever written by the composer, so a build record carried a digest with no way to learn
+  which revision produced it. That is the exact question ADR 0026's incident was stuck on. Each
+  record now names the build context, its resolved revision and its artifact digest.
+
+  The revision is deliberately not part of the input hash: the digest already identifies the content,
+  so hashing both would rebuild on a repack that changed nothing. A test holds that line.
+
+- **A parity guard over `Publish` and `Push`** (`kindparity_test.go`). Both divergences above were
+  oversights rather than decisions, and they survived because nothing compared the two structs. The
+  guard reads both and fails on any field present in one and not the other, unless the difference is
+  recorded with the reason the destination makes it meaningless. Verified to fail on drift.
+
+### Changed
+- **`--gc-keep-builds` is renamed `--keep-builds`**, which is what the builder already called it. The
+  `gc-` prefix was misleading: the flag caps `status.history`, and collection merely honours that cap.
+  The old name keeps working as a deprecated alias, so a values file written against the previous
+  release does not become a crash-loop on an unknown flag. Setting both takes the new one.
+
+- Schema parity fixes with no behaviour change: `platforms` items are length-limited on both kinds,
+  `buildSecret.secretRef` is a pointer like every other `secretRef`, and the status printcolumn
+  carries `priority=1` on both so `kubectl get` renders them alike. `SourceRefSource` and
+  `RevisionMatches` moved to `shared_types.go`, where both kinds' shared API surface lives.
+
+### Added
 - **Tests for the class of mistake that produced most of this release's bugs**: an assertion written
   alongside the code, describing what it does rather than what it should do. Three shipped that way
   -- a security context demanding a value that stops BuildKit starting, a test asserting a failed

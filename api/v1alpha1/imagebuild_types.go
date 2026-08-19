@@ -58,6 +58,7 @@ type ImageBuildSpec struct {
 	// silently dropped.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:MaxLength=64
 	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]+/[a-z0-9]+(/[a-z0-9]+)?$`
 	// +required
 	Platforms []string `json:"platforms"`
@@ -146,7 +147,7 @@ type BuildSecret struct {
 	// Cross-namespace is not offered: it would let anyone who can create an ImageBuild read any
 	// Secret in the cluster.
 	// +required
-	SecretRef LocalObjectReference `json:"secretRef"`
+	SecretRef *LocalObjectReference `json:"secretRef"`
 
 	// Key within the Secret. Defaults to the ID.
 	// +kubebuilder:validation:MaxLength=253
@@ -251,7 +252,7 @@ type ImageBuildStatus struct {
 // +kubebuilder:resource:shortName=ibuild
 // +kubebuilder:printcolumn:name="Ref",type=string,JSONPath=`.status.artifact.ref`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
-// +kubebuilder:printcolumn:name="Status",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].message`
+// +kubebuilder:printcolumn:name="Status",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].message`,priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 type ImageBuild struct {
 	metav1.TypeMeta   `json:",inline"`

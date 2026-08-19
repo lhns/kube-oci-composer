@@ -85,6 +85,7 @@ func main() {
 		s3Presign             bool
 		gcInterval            time.Duration
 		gcGrace               time.Duration
+		keepBuilds            int
 		gcKeepBuilds          int
 		gcDryRun              bool
 		sharedStorage         bool
@@ -139,11 +140,16 @@ func main() {
 		"Never reclaim anything written more recently than this. A build writes its blobs before "+
 			"recording them in status, so a sweep landing in that window would delete content that "+
 			"is moments from being referenced.")
-	flag.IntVar(&gcKeepBuilds, "gc-keep-builds", ociv1alpha1.DefaultHistoryLimit,
-		"How many past builds to retain per ImageComposition, unless the object overrides it. "+
-			"Retention is the ONLY thing keeping an old digest pullable, so reverting a commit or "+
-			"rescheduling a pod pinned to an older build both depend on it. Layers are shared "+
-			"between builds, so a generous value costs far less than the count suggests.")
+	flag.IntVar(&keepBuilds, "keep-builds", ociv1alpha1.DefaultHistoryLimit,
+		"How many past builds to retain per object, unless the object overrides it. Retention is "+
+			"the ONLY thing keeping an old digest pullable, so reverting a commit or rescheduling a "+
+			"pod pinned to an older build both depend on it. Layers are shared between builds, so a "+
+			"generous value costs far less than the count suggests. Same name and meaning on both "+
+			"controllers.")
+	// Deprecated alias. The gc- prefix was misleading: this caps status.history, and collection
+	// merely honours that cap. Kept because silently dropping a flag someone set in a values file
+	// becomes a crash-loop on an unknown flag, which is a worse upgrade than a rename.
+	flag.IntVar(&gcKeepBuilds, "gc-keep-builds", 0, "Deprecated alias for --keep-builds.")
 	flag.BoolVar(&gcDryRun, "gc-dry-run", false,
 		"Log what garbage collection would reclaim without deleting anything.")
 
@@ -164,6 +170,8 @@ func main() {
 	opts := zap.Options{Development: false}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+
+	keepBuilds = effectiveKeepBuilds(keepBuilds, gcKeepBuilds)
 
 	if showVersion {
 		fmt.Printf("kube-oci-composer %s (commit %s, built %s)\n", version, commit, date)
@@ -304,7 +312,7 @@ func main() {
 		Server:       server,
 		Readiness:    readiness,
 		Cache:        layerCache,
-		HistoryLimit: gcKeepBuilds,
+		HistoryLimit: keepBuilds,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ImageComposition")
 		os.Exit(1)
@@ -327,7 +335,7 @@ func main() {
 			os.Exit(1)
 		}
 		setupLog.Info("garbage collection enabled",
-			"interval", gcInterval, "grace", gcGrace, "keepBuilds", gcKeepBuilds, "dryRun", gcDryRun)
+			"interval", gcInterval, "grace", gcGrace, "keepBuilds", keepBuilds, "dryRun", gcDryRun)
 	} else {
 		setupLog.Info("garbage collection disabled; blobs and cache entries will accumulate")
 	}
@@ -355,4 +363,17 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+// effectiveKeepBuilds resolves --keep-builds against its deprecated alias --gc-keep-builds.
+//
+// The old name wins only when the new one was left at its default, so a deployment that sets both
+// gets the one it most likely meant, and one that sets only the old name keeps working. Dropping the
+// alias outright would turn a values file written against the previous release into a crash-loop on
+// an unknown flag, which is a worse upgrade than a rename.
+func effectiveKeepBuilds(keepBuilds, deprecated int) int {
+	if deprecated > 0 && keepBuilds == ociv1alpha1.DefaultHistoryLimit {
+		return deprecated
+	}
+	return keepBuilds
 }

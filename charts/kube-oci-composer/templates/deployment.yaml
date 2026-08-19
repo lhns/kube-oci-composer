@@ -89,7 +89,7 @@ spec:
             {{- end }}
             - --gc-interval={{ .Values.operator.gc.interval }}
             - --gc-grace={{ .Values.operator.gc.grace }}
-            - --gc-keep-builds={{ .Values.operator.gc.keepBuilds }}
+            - --keep-builds={{ .Values.operator.gc.keepBuilds }}
             {{- if .Values.operator.gc.dryRun }}
             - --gc-dry-run
             {{- end }}

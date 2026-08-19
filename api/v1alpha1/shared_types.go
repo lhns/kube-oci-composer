@@ -1,6 +1,10 @@
 package v1alpha1
 
-import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+import (
+	"strings"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
 
 // Condition types and reasons, following the kstatus conventions Flux uses so that
 // `kubectl wait --for=condition=Ready`, `flux get` and notification-controller all behave the
@@ -132,7 +136,7 @@ type Publish struct {
 	Immutable *bool `json:"immutable,omitempty"`
 
 	// History is how many past builds to keep before garbage collection reclaims their blobs.
-	// Defaults to the controller's --gc-keep-builds.
+	// Defaults to the controller's --keep-builds.
 	//
 	// Old builds are worth keeping for three independent reasons: reverting a commit must find
 	// the old reference still pullable; a pod pinned to one that gets rescheduled must be able
@@ -174,6 +178,23 @@ func (p *Publish) TagsAreImmutable() bool {
 // TagsAreImmutable is the Push equivalent, deliberately identical to Publish's.
 func (p *Push) TagsAreImmutable() bool {
 	return p == nil || p.Immutable == nil || *p.Immutable
+}
+
+// GetTags and GetRef are the Push equivalents, deliberately identical to Publish's. Both kinds
+// resolve their tag list the same way, so the retagging pattern documented for one works on the
+// other without a second code path to keep in step.
+func (p *Push) GetTags() []string {
+	if p == nil {
+		return nil
+	}
+	return p.Tags
+}
+
+func (p *Push) GetRef() string {
+	if p == nil {
+		return ""
+	}
+	return p.Ref
 }
 
 // SourceRecord is where one layer's content came from.
@@ -270,6 +291,27 @@ type Push struct {
 	// +optional
 	SecretRef *LocalObjectReference `json:"secretRef,omitempty"`
 
+	// Ref behaves exactly as on Publish: a reference whose TAG is appended to Tags, so a
+	// kustomize images transformer or a Helm value can retag without editing this list.
+	//
+	// Absent until now, which meant the spec-hash tag pattern documented for ImageComposition
+	// could not be used from ImageBuild at all — the one place a generator most wants it, since a
+	// build's tag is the only thing identifying which inputs produced it.
+	// +kubebuilder:validation:MaxLength=512
+	// +optional
+	Ref string `json:"ref,omitempty"`
+
+	// History is how many past builds to retain, overriding the controller's default. Identical
+	// to Publish's.
+	//
+	// It matters MORE here than there, not less: a composition can rebuild any artifact from its
+	// spec, so retention is a convenience. A build cannot (ADR 0025), so retention is how much of
+	// the only copy is kept. That this knob existed only on the kind where it matters least was an
+	// oversight rather than a decision.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	History *int32 `json:"history,omitempty"`
+
 	// Immutable behaves exactly as on Publish, including the default of true. Identical on both
 	// so the field cannot mean different things depending on where it sits — and an external
 	// registry is where a silently remeaned tag does the most damage.
@@ -314,3 +356,71 @@ func (o *ImageComposition) SetConditions(c []metav1.Condition) { o.Status.Condit
 
 func (o *ImageBuild) GetConditions() []metav1.Condition  { return o.Status.Conditions }
 func (o *ImageBuild) SetConditions(c []metav1.Condition) { o.Status.Conditions = c }
+
+// SourceRefSource takes content from a Flux source's artifact.
+//
+// source-controller already clones, tracks revisions and publishes a digest-addressed tarball, so
+// this consumes that rather than forming a second opinion about what the repository contains. The
+// digest is resolved from status.artifact. See ADR 0002.
+type SourceRefSource struct {
+	// Kind of the referenced source.
+	// +kubebuilder:validation:Enum=GitRepository;OCIRepository;Bucket
+	// +required
+	Kind string `json:"kind"`
+
+	// Name of the referenced source.
+	// +required
+	Name string `json:"name"`
+
+	// Namespace of the referenced source. Must be the consuming object's own namespace, which is
+	// also the default — the field remains only so an explicit value is not a schema error.
+	//
+	// A source elsewhere is REFUSED. Both controllers read Flux sources cluster-wide, so honouring
+	// another namespace would let anyone who can create one of these objects pull that namespace's
+	// content into an image they control and can read.
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+
+	// Revision the artifact is expected to be at. Optional; unset consumes whatever the source
+	// currently publishes.
+	//
+	// This is the only way to make a sourceRef layer a pure function of the spec. Without it the
+	// source can move under a fixed spec — a branch or a semver range does so with no edit to
+	// anything, so nothing observes it. It is also independent of the source controller's own
+	// bookkeeping: the staleness check compares generation against observedGeneration, which is the
+	// source reporting on itself, whereas this is an assertion from the consuming side.
+	//
+	// Matched against Flux's "<ref>@<algo>:<hash>" by whichever half you give:
+	//
+	//	revision: v0.6.8                  matches v0.6.8@sha1:<anything>
+	//	revision: v0.6.8@sha1:b739efb5    matches only that commit
+	//
+	// The short form exists because a generator usually knows the tag it asked for and not the
+	// commit it resolved to, and the useful check should not require the half it cannot supply.
+	// +kubebuilder:validation:MaxLength=256
+	// +optional
+	Revision string `json:"revision,omitempty"`
+
+	// Subpath selects one directory from the artifact. Defaults to the whole thing.
+	// +kubebuilder:validation:MaxLength=4096
+	// +optional
+	Subpath string `json:"subpath,omitempty"`
+}
+
+// RevisionMatches reports whether an artifact's revision satisfies what the spec asked for.
+//
+// Flux revisions are "<ref>@<algo>:<hash>". A want with no "@" is compared against the ref half
+// only, so pinning a tag does not require knowing the commit it resolved to.
+func RevisionMatches(want, got string) bool {
+	if want == "" {
+		return true
+	}
+	if want == got {
+		return true
+	}
+	if strings.Contains(want, "@") {
+		return false
+	}
+	ref, _, found := strings.Cut(got, "@")
+	return found && ref == want
+}
