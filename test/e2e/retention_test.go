@@ -44,32 +44,79 @@ func TestPullingAnImageKeepsItFromExpiring(t *testing.T) {
 	refreshed := keepaliveRepo("refreshed")
 	abandoned := keepaliveRepo("abandoned")
 
-	pushTinyImage(t, refreshed, "v1")
-	pushTinyImage(t, abandoned, "v1")
+	keptDigest := pushTinyImage(t, refreshed, "v1")
+	goneDigest := pushTinyImage(t, abandoned, "v1")
 
 	// Refreshed from INSIDE the cluster, in one shell loop, rather than by polling from the test.
 	//
 	// This is not a tidiness preference. Each kubectl exec costs seconds on a loaded runner, so a
-	// loop that sleeps 5s between requests can easily leave 20s between pulls -- longer than the
-	// retention window it is trying to stay inside. The measurement then reports that pulls do not
-	// renew recency, when what it actually measured was kubectl.
+	// loop that sleeps between requests can leave more time between pulls than the retention window
+	// it is trying to stay inside. The measurement then reports on kubectl rather than on zot, and
+	// it did: an earlier version of this file failed for exactly that reason.
 	//
 	// One exec, a tight loop, and the assertions afterwards keeps the harness out of the result.
-	refreshFor(t, refreshed, "v1", 90)
+	// Pulls go by DIGEST, because that is what the refresh will do and what ADR 0010 says workloads
+	// reference.
+	refreshFor(t, refreshed, keptDigest, 90)
 
-	if !manifestExists(t, refreshed, "v1") {
-		t.Fatalf("%s:v1 was collected while being pulled every two seconds for 90s against a %s "+
-			"window; a pull does NOT renew recency, and the registry-backed retention design is "+
-			"inert. Nothing built on top of this measurement means anything.",
-			refreshed, retentionWindow)
+	// THE GUARANTEE. Content named by a live object survives; everything else here is detail.
+	if !manifestExistsByDigest(t, refreshed, keptDigest) {
+		t.Fatalf("%s@%s was collected while being pulled every two seconds for 90s against a %s "+
+			"window. A pull does NOT renew recency, and the registry-backed retention design is "+
+			"inert -- nothing built on top of this measurement means anything.\n\ntags now: %s",
+			refreshed, keptDigest, retentionWindow, tagsList(t, refreshed))
 	}
 
 	// The negative control. Without it the assertion above proves only that zot deletes nothing.
-	if manifestExists(t, abandoned, "v1") {
-		t.Fatalf("%s:v1 survived 90s with no pulls against a %s window, so this suite cannot "+
+	if manifestExistsByDigest(t, abandoned, goneDigest) {
+		t.Fatalf("%s@%s survived 90s with no pulls against a %s window, so this suite cannot "+
 			"observe a deletion at all and every retention assertion here is vacuous. Check "+
-			"gcInterval, the keepTags patterns, and the repository glob.", abandoned, retentionWindow)
+			"gcInterval, the keepTags patterns, and the repository glob.",
+			abandoned, goneDigest, retentionWindow)
 	}
+}
+
+// Whether the TAG survives is a separate question from whether the content does, and a much less
+// important one -- but it has to be answered rather than assumed, because "the image is still
+// pullable by the name I wrote down" is what an operator will expect.
+//
+// Reported rather than asserted while the answer is being established. A pulled-by-digest manifest
+// is protected by keepUntagged, which is a different rule from the keepTags one that governs the
+// tag, so the two can diverge and the divergence is worth seeing plainly.
+func TestWhetherAPullAlsoKeepsTheTag(t *testing.T) {
+	repo := keepaliveRepo("tagged")
+	digest := pushTinyImage(t, repo, "v1")
+
+	refreshFor(t, repo, digest, 90)
+
+	tagAlive := manifestExists(t, repo, "v1")
+	contentAlive := manifestExistsByDigest(t, repo, digest)
+
+	t.Logf("after 90s of pulling BY DIGEST against a %s window: tag alive=%v, content alive=%v\n"+
+		"tags now: %s", retentionWindow, tagAlive, contentAlive, tagsList(t, repo))
+
+	if !contentAlive {
+		t.Fatalf("content was collected despite being pulled; see " +
+			"TestPullingAnImageKeepsItFromExpiring, which is the assertion that matters")
+	}
+	if !tagAlive {
+		t.Log("NOTE: pulling by digest keeps the CONTENT alive but not the TAG. That is survivable " +
+			"-- ADR 0010 has workloads reference digests, and a tag can be re-pushed -- but the " +
+			"retention policy shipped in the chart must say so, and the refresh should pull each " +
+			"tag as well if keeping tags is wanted.")
+	}
+}
+
+// tagsList reports what tags a repository currently has, for failure messages. A retention question
+// answered with "it is gone" and nothing else is not much of an answer.
+func tagsList(t *testing.T, repository string) string {
+	t.Helper()
+	out := registryRequest(t, "tags-"+shortName(repository, "list"), "GET",
+		"/v2/"+repository+"/tags/list", "", "")
+	if i := strings.LastIndex(out, "{"); i >= 0 {
+		return out[i:]
+	}
+	return strings.TrimSpace(out)
 }
 
 // refreshFor pulls a manifest every two seconds for the given number of seconds, in-cluster.
