@@ -6,6 +6,29 @@ may change between minor versions.
 ## [Unreleased]
 
 ### Added
+- **Tests for the class of mistake that produced most of this release's bugs**: an assertion written
+  alongside the code, describing what it does rather than what it should do. Three shipped that way
+  -- a security context demanding a value that stops BuildKit starting, a test asserting a failed
+  Job was deleted while that was the bug, and a CI check asserting the broken chart config must
+  render. All three passed continuously.
+
+  They share a shape: each was a claim about how an EXTERNAL system reacts -- the kernel, watch
+  delivery, helm at install time -- in an environment that could not falsify it. So an assertion
+  about an environment the test does not have is a belief, not a test. Two mechanisms follow.
+
+  **envtest for `internal/buildcontroller`.** The fake client cannot deliver watch events, which is
+  exactly why the hot retry loop was invisible: deleting an owned Job woke the controller through
+  its own watch. A real manager makes the watch real, and the assertion is a rate. Reinstating the
+  bug produces 251 reconciles in 15 seconds against a tolerance of 12.
+
+  **Parity tests across the two kinds** (`internal/controller/kindparity_test.go`), applying
+  `unpackparity_test.go`'s argument to the controllers: a property held in two hand-maintained places
+  needs something that reads both. They cover the namespace scope, the revision pin, event recording
+  and the shared helpers -- each verified to fail when one kind drifts from the other.
+
+  The `GitRepository` stand-in moved to `test/crds/` so the e2e cluster and envtest load the same
+  file rather than keeping two.
+
 - **An envtest suite for the builder, and parity tests across the two kinds** -- both aimed at one
   failure mode: a test that passes while being wrong about what it checks. Three of those shipped
   this cycle.
