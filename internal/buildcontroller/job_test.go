@@ -74,7 +74,7 @@ func TestJobNameStaysWithinLimit(t *testing.T) {
 // refusing to build at all. Rootless is the half of that this project accepts; privileged is not
 // offered at any setting, so nothing in the spec can reach these fields.
 func TestBuildJobRunsRootless(t *testing.T) {
-	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", sampleConfig())
+	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", sampleConfig(), true)
 
 	pod := job.Spec.Template.Spec
 	if len(pod.Containers) != 1 {
@@ -150,7 +150,7 @@ func TestBuildJobRunsRootless(t *testing.T) {
 func TestBuildJobUsesTheObjectsServiceAccount(t *testing.T) {
 	obj := sampleBuild()
 	obj.Spec.ServiceAccountName = "builder"
-	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig())
+	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig(), true)
 
 	if got := job.Spec.Template.Spec.ServiceAccountName; got != "builder" {
 		t.Errorf("service account = %q, want %q", got, "builder")
@@ -165,7 +165,7 @@ func TestBuildJobArgs(t *testing.T) {
 	obj.Spec.Target = "runtime"
 	obj.Spec.Args = []ociv1alpha1.BuildArg{{Name: "VERSION", Value: "1.2.3"}}
 
-	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig())
+	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig(), true)
 	argv := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " ")
 
 	for _, want := range []string{
@@ -188,7 +188,7 @@ func TestBuildJobArgs(t *testing.T) {
 func TestNetworkNoneIsPassedThrough(t *testing.T) {
 	obj := sampleBuild()
 	obj.Spec.Network = "None"
-	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig())
+	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig(), true)
 
 	argv := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " ")
 	if !strings.Contains(argv, "no-network=true") {
@@ -227,7 +227,7 @@ func TestSecretsAreMountedNotInlined(t *testing.T) {
 		SecretRef: &ociv1alpha1.LocalObjectReference{Name: "npm-creds"},
 	}}
 
-	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig())
+	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig(), true)
 	argv := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " ")
 
 	if !strings.Contains(argv, "--secret id=npmrc") {
@@ -268,14 +268,14 @@ func TestInsecureRegistryIsOptInPerHost(t *testing.T) {
 	cfg := sampleConfig()
 	cfg.InsecureRegistries = []string{"registry.internal:5000"}
 
-	secure := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", cfg)
+	secure := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", cfg, true)
 	if argv := strings.Join(secure.Spec.Template.Spec.Containers[0].Args, " "); strings.Contains(argv, "registry.insecure") {
 		t.Errorf("a non-listed host was pushed insecurely\ngot: %s", argv)
 	}
 
 	obj := sampleBuild()
 	obj.Spec.Push.Repository = "registry.internal:5000/team/app"
-	listed := buildJob(obj, testHash, "https://example/ctx.tgz", cfg)
+	listed := buildJob(obj, testHash, "https://example/ctx.tgz", cfg, true)
 	if argv := strings.Join(listed.Spec.Template.Spec.Containers[0].Args, " "); !strings.Contains(argv, "registry.insecure=true") {
 		t.Errorf("a listed host was not allowed plain HTTP\ngot: %s", argv)
 	}
@@ -292,8 +292,8 @@ func TestInsecureRegistryIsNotInTheInputHash(t *testing.T) {
 	insecure.InsecureRegistries = []string{"registry.internal:5000"}
 
 	// The Job name is derived from the input hash, so identical names prove the hash did not move.
-	a := buildJob(obj, testHash, "https://example/ctx.tgz", plain)
-	b := buildJob(obj, testHash, "https://example/ctx.tgz", insecure)
+	a := buildJob(obj, testHash, "https://example/ctx.tgz", plain, true)
+	b := buildJob(obj, testHash, "https://example/ctx.tgz", insecure, true)
 	if a.Name != b.Name {
 		t.Errorf("the insecure list moved the input hash: %q vs %q", a.Name, b.Name)
 	}

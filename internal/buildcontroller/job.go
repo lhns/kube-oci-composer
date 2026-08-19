@@ -154,7 +154,7 @@ rm -rf "$staging"
 
 // buildctlArgs assembles the buildctl invocation. Split out because it is the part that decides
 // what gets built, and the only part the argv tests read.
-func buildctlArgs(obj *ociv1alpha1.ImageBuild, cfg JobConfig) []string {
+func buildctlArgs(obj *ociv1alpha1.ImageBuild, cfg JobConfig, cacheAvailable bool) []string {
 	spec := obj.Spec
 	args := []string{
 		"build",
@@ -196,9 +196,20 @@ func buildctlArgs(obj *ociv1alpha1.ImageBuild, cfg JobConfig) []string {
 
 	if cacheRef := cacheRefFor(obj); cacheRef != "" {
 		insecure := insecureAttr(obj.Spec.Push, cfg.InsecureRegistries)
-		args = append(args,
-			"--import-cache", "type=registry,ref="+cacheRef+insecure,
-			"--export-cache", "type=registry,ref="+cacheRef+",mode=max"+insecure)
+		// Import ONLY when the cache reference actually resolves. BuildKit configures the registry
+		// cache importer eagerly, and a reference it cannot resolve is a fatal error rather than a
+		// warning -- so passing this unconditionally fails every build whose cache does not exist
+		// yet, which is every FIRST build.
+		//
+		// That went unnoticed for as long as the e2e ran against registry:2, whose answer for a
+		// missing manifest BuildKit happened to tolerate. zot's is not, and the difference is not
+		// something to depend on either way: a missing build cache must never fail a build, whatever
+		// the registry replies.
+		if cacheAvailable {
+			args = append(args, "--import-cache", "type=registry,ref="+cacheRef+insecure)
+		}
+		// Export unconditionally: this is what creates the cache the next build imports.
+		args = append(args, "--export-cache", "type=registry,ref="+cacheRef+",mode=max"+insecure)
 	}
 
 	return args
@@ -269,9 +280,11 @@ func buildVolumes(spec ociv1alpha1.ImageBuildSpec) ([]corev1.Volume, []corev1.Vo
 }
 
 // buildJob renders the Job for one build.
-func buildJob(obj *ociv1alpha1.ImageBuild, inputHash, contextURL string, cfg JobConfig) *batchv1.Job {
+func buildJob(obj *ociv1alpha1.ImageBuild, inputHash, contextURL string, cfg JobConfig,
+	cacheAvailable bool) *batchv1.Job {
+
 	spec := obj.Spec
-	args := buildctlArgs(obj, cfg)
+	args := buildctlArgs(obj, cfg, cacheAvailable)
 	volumes, mounts := buildVolumes(spec)
 	hasPushSecret := spec.Push != nil && spec.Push.SecretRef != nil
 

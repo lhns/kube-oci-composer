@@ -134,3 +134,35 @@ func (r *ImageBuildReconciler) remoteOptions(
 	}
 	return append(opts, remote.WithAuthFromKeychain(kc)), nil
 }
+
+// cacheAvailable reports whether this object's build cache reference resolves.
+//
+// Asked because BuildKit treats a cache reference it cannot resolve as a fatal error rather than a
+// warning, so importing one that does not exist yet fails the build -- see buildctlArgs. Answering
+// it costs one HEAD on a path that is about to run a build anyway.
+//
+// Any failure answers "no". A registry that cannot be reached, a malformed reference, an
+// unreadable secret: none of them are reasons to fail a build over a cache, and the worst outcome
+// of a wrong "no" is that this build repopulates a cache that was already there.
+func (r *ImageBuildReconciler) cacheAvailable(ctx context.Context, obj *ociv1alpha1.ImageBuild) bool {
+	cacheRef := cacheRefFor(obj)
+	if cacheRef == "" {
+		return false
+	}
+
+	opts, err := r.remoteOptions(ctx, obj)
+	if err != nil {
+		return false
+	}
+	var refOpts []name.Option
+	if insecureHost(cacheRef, r.JobConfig.InsecureRegistries) {
+		refOpts = append(refOpts, name.Insecure)
+	}
+
+	ref, err := name.ParseReference(cacheRef, refOpts...)
+	if err != nil {
+		return false
+	}
+	_, err = remote.Head(ref, opts...)
+	return err == nil
+}

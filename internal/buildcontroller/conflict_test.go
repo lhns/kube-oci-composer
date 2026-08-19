@@ -273,3 +273,32 @@ func mustUpdate(t *testing.T, r *ImageBuildReconciler, obj *ociv1alpha1.ImageBui
 		t.Fatalf("updating the object: %v", err)
 	}
 }
+
+// A missing build cache must never fail a build, and for as long as the e2e ran against registry:2
+// this was true only by accident.
+//
+// BuildKit configures the registry cache importer eagerly and treats a reference it cannot resolve
+// as a fatal error rather than a warning. registry:2's answer for a missing manifest happened to be
+// one BuildKit tolerated; zot's is not, and every FIRST build failed the moment the e2e registry
+// changed -- with an error about a cache, on a build that had no cache because it had never run.
+//
+// Asserted on the rendered argv rather than through a registry, because what went wrong was which
+// flags were passed, not what any registry replied.
+func TestAMissingCacheIsNotImported(t *testing.T) {
+	obj := buildOf(t, nil)
+
+	absent := strings.Join(buildctlArgs(obj, sampleConfig(), false), " ")
+	if strings.Contains(absent, "--import-cache") {
+		t.Error("a cache that does not exist yet is still imported; BuildKit fails the build " +
+			"rather than warning, so this is every first build broken")
+	}
+	if !strings.Contains(absent, "--export-cache") {
+		t.Error("export was dropped along with import; nothing would ever create the cache and " +
+			"no build would be cached again")
+	}
+
+	present := strings.Join(buildctlArgs(obj, sampleConfig(), true), " ")
+	if !strings.Contains(present, "--import-cache") {
+		t.Error("a cache that does exist is not imported, so caching never takes effect")
+	}
+}
