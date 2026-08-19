@@ -63,15 +63,15 @@ func TestPullingAnImageKeepsItFromExpiring(t *testing.T) {
 	if !manifestExistsByDigest(t, refreshed, keptDigest) {
 		t.Fatalf("%s@%s was collected while being pulled every two seconds for 90s against a %s "+
 			"window. A pull does NOT renew recency, and the registry-backed retention design is "+
-			"inert -- nothing built on top of this measurement means anything.\ntags now: %s",
-			refreshed, keptDigest, retentionWindow, tagsList(t, refreshed))
+			"inert -- nothing built on top of this measurement means anything.\ntags now: %s%s",
+			refreshed, keptDigest, retentionWindow, tagsList(t, refreshed), registryLogs(t))
 	}
 
 	// And the name it was published under still resolves, which is what an operator expects.
 	if !manifestExists(t, refreshed, "v1") {
 		t.Fatalf("%s:v1 was collected while the tag itself was being pulled every two seconds, so "+
-			"tags are not retainable by this mechanism and the design has to say so.\ntags now: %s",
-			refreshed, tagsList(t, refreshed))
+			"tags are not retainable by this mechanism and the design has to say so.\ntags now: %s%s",
+			refreshed, tagsList(t, refreshed), registryLogs(t))
 	}
 
 	// THE NEGATIVE CONTROL, and it is deliberately about the TAG rather than about content.
@@ -85,8 +85,8 @@ func TestPullingAnImageKeepsItFromExpiring(t *testing.T) {
 	if manifestExists(t, abandoned, "v1") {
 		t.Fatalf("%s:v1 survived 90s with no pulls against a %s window, so this suite cannot "+
 			"observe a deletion at all and every retention assertion here is vacuous. Check "+
-			"gcInterval, the keepTags patterns, and the repository glob.\ntags now: %s",
-			abandoned, retentionWindow, tagsList(t, abandoned))
+			"gcInterval, the keepTags patterns, and the repository glob.\ntags now: %s%s",
+			abandoned, retentionWindow, tagsList(t, abandoned), registryLogs(t))
 	}
 }
 
@@ -172,6 +172,20 @@ func sleepInCluster(t *testing.T, seconds int) {
 		"sleep", fmt.Sprint(seconds)); err != nil {
 		t.Fatalf("waiting: %v\n%s", err, out)
 	}
+}
+
+// registryLogs returns what the registry itself says it decided.
+//
+// Included in every retention failure because the alternative is guessing, and guessing cost several
+// runs here: three plausible explanations for a failure were wrong in a row, and the registry knew
+// the answer the whole time.
+func registryLogs(t *testing.T) string {
+	t.Helper()
+	out, err := kubectl(t, "-n", buildNamespace, "logs", "deploy/e2e-registry", "--tail=120")
+	if err != nil {
+		return "\n\n(registry logs unavailable: " + err.Error() + ")"
+	}
+	return "\n\nregistry logs:\n" + out
 }
 
 // tagsList reports what tags a repository currently has, for failure messages. A retention question

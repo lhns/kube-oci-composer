@@ -37,7 +37,10 @@ data:
         }
       },
       "http": { "address": "0.0.0.0", "port": "5000" },
-      "log": { "level": "info" }
+      "log": { "level": "debug" },
+      "extensions": {
+        "search": { "enable": true }
+      }
     }
 ---
 # The retention window is 30 SECONDS and collection runs every 10, against a refresh every 2 -- a
@@ -48,6 +51,15 @@ data:
 # The RATIO is what has to be preserved when tuning these, not the absolute values. A window that
 # creeps down toward the refresh interval turns the guarantee into a race, and the failure shows up
 # as flakiness rather than as anything that names the cause.
+#
+# The search extension is enabled, and it is NOT cosmetic. Pull-recency retention needs zot to have
+# recorded a pull, which is metadata the search extension's database holds. Without it `pulledWithin`
+# has nothing to match on, so every tag expires however often it is fetched -- which is precisely
+# what was measured before this was turned on, over several runs that each looked like "a pull does
+# not renew recency".
+#
+# Log level is debug so that a retention decision leaves a trace. A guarantee whose mechanism is
+# invisible when it fails is one nobody can debug.
 #
 # keepTags carries an explicit `patterns` of `.*`, and it is NOT optional. zot retains
 # `patterns` AND (`pulledWithin` OR ...), so an entry with no patterns matches no tags and every tag
