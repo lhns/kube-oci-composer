@@ -200,42 +200,48 @@ func jsonFieldsOf(t *testing.T, typeName string) map[string]bool {
 	t.Helper()
 
 	dir := filepath.Join("..", "..", "api", "v1alpha1")
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, dir, func(fi os.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
+	// ParseFile over a glob rather than ParseDir: the latter is deprecated because it ignores build
+	// tags when grouping files into packages, and here there is no package to assemble anyway --
+	// only one type declaration to find.
+	files, err := filepath.Glob(filepath.Join(dir, "*.go"))
 	if err != nil {
-		t.Fatalf("parsing %s: %v", dir, err)
+		t.Fatalf("listing %s: %v", dir, err)
 	}
 
-	for _, pkg := range pkgs {
-		for _, file := range pkg.Files {
-			for _, decl := range file.Decls {
-				gen, ok := decl.(*ast.GenDecl)
-				if !ok || gen.Tok != token.TYPE {
+	fset := token.NewFileSet()
+	for _, path := range files {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", path, err)
+		}
+		for _, decl := range file.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.TYPE {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				ts, ok := spec.(*ast.TypeSpec)
+				if !ok || ts.Name.Name != typeName {
 					continue
 				}
-				for _, spec := range gen.Specs {
-					ts, ok := spec.(*ast.TypeSpec)
-					if !ok || ts.Name.Name != typeName {
+				st, ok := ts.Type.(*ast.StructType)
+				if !ok {
+					t.Fatalf("%s is not a struct", typeName)
+				}
+				out := map[string]bool{}
+				for _, f := range st.Fields.List {
+					if f.Tag == nil {
 						continue
 					}
-					st, ok := ts.Type.(*ast.StructType)
-					if !ok {
-						t.Fatalf("%s is not a struct", typeName)
+					name := jsonName(f.Tag.Value)
+					if name != "" && name != "-" {
+						out[name] = true
 					}
-					out := map[string]bool{}
-					for _, f := range st.Fields.List {
-						if f.Tag == nil {
-							continue
-						}
-						name := jsonName(f.Tag.Value)
-						if name != "" && name != "-" {
-							out[name] = true
-						}
-					}
-					return out
 				}
+				return out
 			}
 		}
 	}
