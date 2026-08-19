@@ -127,16 +127,16 @@ func putBlob(t *testing.T, repository, body string) string {
 	return digest
 }
 
-// manifestExists fetches a manifest, and the choice of GET over HEAD is a MEASURED RESULT rather
-// than a style preference.
+// manifestExists fetches a manifest with GET, which is what a real pull is.
 //
-// The first run of this file used HEAD here and GET in manifestExistsByDigest. The HEAD case was
-// collected while being polled every five seconds; the GET case survived. A HEAD does not renew
-// pull recency in zot — reasonably, since an existence check is not a pull.
+// Whether a HEAD would also renew recency is UNMEASURED and deliberately left that way. An early
+// version of this file used HEAD here, and when the tagged case was collected the obvious reading
+// was that HEAD does not count as a pull. That reading was wrong — the cause was a retention policy
+// that matched no tags at all (see manifests/registry.yaml) — and it is recorded here because it is
+// the kind of plausible, tidy explanation that is worth being suspicious of.
 //
-// That is exactly the kind of fact this file exists to establish, and it constrains the refresh
-// implementation directly: a refresh that HEADs is a refresh that does nothing, and the symptom
-// arrives one retention window later as missing images.
+// GET stays regardless: it is unambiguously a pull, the difference in cost is a few KB, and the
+// refresh has no reason to economise on the one request that the whole guarantee depends on.
 func manifestExists(t *testing.T, repository, tag string) bool {
 	t.Helper()
 	return strings.Contains(
@@ -147,7 +147,7 @@ func manifestExists(t *testing.T, repository, tag string) bool {
 
 func manifestExistsByDigest(t *testing.T, repository, digest string) bool {
 	t.Helper()
-	// GET rather than HEAD, for the reason manifestExists now documents from measurement.
+	// GET rather than HEAD, for the reason manifestExists gives.
 	return strings.Contains(
 		registryRequest(t, "get-"+shortName(repository, "digest"), "GET",
 			fmt.Sprintf("/v2/%s/manifests/%s", repository, digest), "", ""),
@@ -160,9 +160,9 @@ func deleteTag(t *testing.T, repository, tag string) {
 		fmt.Sprintf("/v2/%s/manifests/%s", repository, tag), "", "")
 }
 
-// contentDigest deliberately uses HEAD, which the measurement above shows does NOT renew recency.
-// That matters: this is called on the abandoned repository too, and a call that refreshed would
-// quietly destroy the negative control and make the whole file vacuous.
+// contentDigest uses HEAD. Since it is unknown whether that renews recency, it is called only
+// immediately after a push -- never during a polling loop -- so it cannot contaminate the negative
+// control whichever way the answer falls.
 func contentDigest(t *testing.T, repository, tag string) string {
 	t.Helper()
 	out := registryRequest(t, "digest-"+shortName(repository, tag), "HEAD",

@@ -29,7 +29,7 @@ data:
               "deleteUntagged": true,
               "deleteReferrers": true,
               "keepTags": [
-                { "pulledWithin": "20s" }
+                { "patterns": [".*"], "pulledWithin": "20s" }
               ],
               "keepUntagged": { "pulledWithin": "20s" }
             }
@@ -45,7 +45,13 @@ data:
 # inside its own runtime proves only that nothing was deleted, which is exactly what a broken
 # retention guarantee also looks like.
 #
-# The policy is scoped by REPOSITORY, not by tag pattern, and that distinction is deliberate. A tag
+# keepTags carries an explicit `patterns` of `.*`, and it is NOT optional. zot retains
+# `patterns` AND (`pulledWithin` OR ...), so an entry with no patterns matches no tags and every tag
+# is a deletion candidate no matter how often it is pulled. That is what it did: the tagged image
+# was collected while being pulled every five seconds, and the untagged one survived because
+# keepUntagged is a separate rule that was correct.
+#
+# The policy is otherwise scoped by REPOSITORY rather than by tag pattern, and that is deliberate. A tag
 # matching no keepTags entry is a candidate for deletion rather than something retained by default,
 # so a `**` policy with a tag pattern would quietly collect every ordinary e2e image and make
 # unrelated tests flaky in a way that looks like a controller bug. Repositories outside
