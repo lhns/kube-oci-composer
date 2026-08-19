@@ -200,23 +200,43 @@ func tagsList(t *testing.T, repository string) string {
 	return strings.TrimSpace(out)
 }
 
-// pushTinyImage publishes a minimal image and returns its manifest digest.
+// pushTinyImage publishes a small but COMPLETE image and returns its manifest digest.
 //
 // Built by hand rather than by running a build, because what is under test is the registry's
-// retention behaviour and a real build would add several minutes and a dependency on BuildKit to a
-// question that has nothing to do with either.
+// retention behaviour and a real build would add minutes and a dependency on BuildKit to a question
+// that has nothing to do with either.
+//
+// "Complete" is the load-bearing word, and it cost several runs to learn. The first version pushed
+// an empty config and no layers — valid per the distribution spec, and accepted with a 201. But zot
+// could not derive image metadata from it, so on every pull it logged
+//
+//	failed to update stats on download image ... error: image meta not found
+//
+// and recorded nothing. `pulledWithin` then had nothing to match on, and the tag expired however
+// often it was fetched. Five runs read that as "a pull does not renew recency" — a conclusion about
+// the registry drawn from a defect in the fixture.
+//
+// So the config carries the fields an image config is expected to have, and there is a real layer
+// descriptor. The bytes are not a valid tarball, which no registry checks, but the SHAPE is what
+// zot's metadata parser needs.
 func pushTinyImage(t *testing.T, repository, tag string) string {
 	t.Helper()
 
-	// An empty config blob is a valid image config as far as the distribution spec is concerned, and
-	// a manifest with no layers is a valid manifest. That is all retention operates on.
-	const empty = "{}"
-	configDigest := putBlob(t, repository, empty)
+	const layerBody = "not really a tarball, and no registry checks"
+	layerDigest := putBlob(t, repository, layerBody)
+
+	config := fmt.Sprintf(`{"architecture":"amd64","os":"linux",`+
+		`"config":{},`+
+		`"rootfs":{"type":"layers","diff_ids":["%s"]},`+
+		`"history":[{"created_by":"e2e retention fixture"}]}`, layerDigest)
+	configDigest := putBlob(t, repository, config)
 
 	manifest := fmt.Sprintf(`{"schemaVersion":2,`+
 		`"mediaType":"application/vnd.oci.image.manifest.v1+json",`+
 		`"config":{"mediaType":"application/vnd.oci.image.config.v1+json","size":%d,"digest":"%s"},`+
-		`"layers":[],"annotations":{"e2e":"%s"}}`, len(empty), configDigest, repository)
+		`"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","size":%d,"digest":"%s"}],`+
+		`"annotations":{"e2e":"%s"}}`,
+		len(config), configDigest, len(layerBody), layerDigest, repository)
 
 	out := registryRequest(t, "push-"+shortName(repository, tag), "PUT",
 		fmt.Sprintf("/v2/%s/manifests/%s", repository, tag), manifest,
@@ -227,15 +247,15 @@ func pushTinyImage(t *testing.T, repository, tag string) string {
 	return contentDigest(t, repository, tag)
 }
 
-// putBlob uploads a blob and returns its digest.
+// putBlob uploads a blob in one monolithic POST and returns its digest.
 func putBlob(t *testing.T, repository, body string) string {
 	t.Helper()
 	digest := sha256Of(t, body)
-	out := registryRequest(t, "blob-"+shortName(repository, "cfg"), "POST",
+	out := registryRequest(t, "blob-"+shortName(repository, digest[7:15]), "POST",
 		fmt.Sprintf("/v2/%s/blobs/uploads/?digest=%s", repository, digest), body,
 		"Content-Type: application/octet-stream")
 	if !strings.Contains(out, "201") && !strings.Contains(out, "Created") {
-		t.Fatalf("uploading a config blob to %s failed:\n%s", repository, out)
+		t.Fatalf("uploading a blob to %s failed:\n%s", repository, out)
 	}
 	return digest
 }
