@@ -25,7 +25,10 @@ jobs:
     runs-on: ubuntu-latest
     # 25 was enough when the only build was the composer's own image. The ImageBuild e2e adds a
     # second image build, a registry, and a real BuildKit run inside the cluster.
-    timeout-minutes: 30
+    # 50, against the test binary's own 40m. The retention suite is mostly WAITING -- for something
+    # to be collected, and then for something else not to be -- and the last run reached 29 minutes
+    # against a 30-minute cap, which fails as a timeout rather than as whatever went wrong.
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
