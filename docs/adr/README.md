@@ -25,23 +25,9 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0014](0014-pluggable-storage.md) | Pluggable storage and a two-tier input cache | Accepted |
 | [0015](0015-base-images-are-platform-pinned.md) | Base images are platform-pinned; config inheritance is opt-in | Accepted |
 | [0016](0016-the-scope-line-is-determinism.md) | The scope line is determinism, not Dockerfile parity | Accepted, supersedes 0004 and part of 0003 |
-
-## Open questions
-
-Recorded in the same format, because the shape fits — context, options, consequences — even
-though nothing is decided. Each states **what would decide it**, which is the part that otherwise
-gets lost: an open question with no exit criterion just becomes background noise.
-
-`Open` is not `Proposed`. A Proposed record is a plan waiting to be built; an Open one is a
-question waiting for evidence.
-
-| # | Question | Status |
-|---|---|---|
-| [0017](0017-updating-the-consumed-digest.md) | How does a workload's digest reference get updated? | Open |
-| [0018](0018-multi-architecture-output.md) | Multi-architecture output | Open |
-| [0019](0019-pod-reference-protection-revisited.md) | Should garbage collection protect Pod-referenced digests? | Open, reopened |
-| [0020](0020-is-the-supply-chain-work-worth-building.md) | Is the supply-chain work worth building? | Open |
-| [0021](0021-active-standby-or-shared-storage.md) | Is active/standby enough for the serving endpoint? | Open |
+| [0017](0017-updating-the-consumed-digest.md) | How a workload's digest reference gets updated | Accepted, amends 0010 |
+| [0018](0018-multi-architecture-output.md) | Multi-architecture output | Accepted, implemented |
+| [0021](0021-active-standby-or-shared-storage.md) | Active/standby, or shared storage for the serving endpoint | Accepted, in favour of shared storage |
 | [0022](0022-distro-packages-as-layer-sources.md) | Distro packages are a layer source: `unpack: deb` | Accepted |
 | [0023](0023-more-archive-formats.md) | More archive formats: `unpack: zip` and the compressed-tar family | Accepted |
 | [0024](0024-images-as-layer-sources.md) | An image can be a layer source, flattened | Accepted |
@@ -53,6 +39,26 @@ question waiting for evidence.
 | [0030](0030-a-real-registry-serves-both-kinds.md) | A real registry serves both kinds, and zot is the one we ship | Accepted, amends 0006 |
 | [0031](0031-the-retention-guarantee.md) | Live objects' images are never reclaimed, by anything | Accepted, sharpens 0011 |
 | [0032](0032-the-embedded-registrys-future.md) | The embedded registry stays, and stops being the default | Accepted, revisits 0012 |
+
+## Open questions
+
+Recorded in the same format, because the shape fits — context, options, consequences — even
+though nothing is decided. Each states **what would decide it**, which is the part that otherwise
+gets lost: an open question with no exit criterion just becomes background noise.
+
+`Open` is not `Proposed`. A Proposed record is a plan waiting to be built; an Open one is a
+question waiting for evidence.
+
+A record that gets answered moves UP into the table above rather than staying here with its status
+edited. This table drifted badly once — 0017, 0018 and 0021 sat here reading `Open` long after their
+own records said `Accepted`, and 0022 onwards were filed here purely because they were written later.
+An index that disagrees with the records is worse than no index, because it is the thing people read
+first.
+
+| # | Question | Status |
+|---|---|---|
+| [0019](0019-pod-reference-protection-revisited.md) | Should garbage collection protect Pod-referenced digests? | Open, reopened |
+| [0020](0020-is-the-supply-chain-work-worth-building.md) | Is the supply-chain work worth building? | Open |
 
 ## Format
 

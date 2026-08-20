@@ -78,7 +78,7 @@ host-level power — is not reinstated, and `privileged` is still not offered at
 is a container running code from somebody's git repository, and it can now run setuid binaries from
 its own image. Anyone weighing whether to install the builder should weigh that, and it is a further
 reason the builder is a separate component with its own chart and RBAC rather than a flag on the
-composer ([0004](0004-dockerfile-support.md)).
+composer ([0004](0004-two-kinds-two-controllers.md)).
 
 **0025's abandon criterion is not met, on a reading worth stating.** Rootless BuildKit does run;
 `privileged` was never required. The criterion said privileged is not an acceptable fallback, and it

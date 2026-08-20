@@ -11,7 +11,7 @@ guarantee actually rests on one of them, that is stated rather than assumed.
 ## Components and trust boundaries
 
 The two components are deliberately separate: separate binaries, charts and RBAC
-([ADR 0004](adr/0004-dockerfile-support.md)). Installing the composer does not install the builder,
+([ADR 0004](adr/0004-two-kinds-two-controllers.md)). Installing the composer does not install the builder,
 and the composer's role cannot create a single object.
 
 ```mermaid
