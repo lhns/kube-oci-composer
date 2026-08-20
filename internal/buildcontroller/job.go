@@ -154,7 +154,7 @@ rm -rf "$staging"
 
 // buildctlArgs assembles the buildctl invocation. Split out because it is the part that decides
 // what gets built, and the only part the argv tests read.
-func buildctlArgs(obj *ociv1alpha1.ImageBuild, cfg JobConfig) []string {
+func buildctlArgs(obj *ociv1alpha1.ImageBuild, cfg JobConfig, cacheAvailable bool) []string {
 	spec := obj.Spec
 	args := []string{
 		"build",
@@ -189,16 +189,40 @@ func buildctlArgs(obj *ociv1alpha1.ImageBuild, cfg JobConfig) []string {
 
 	// rewrite-timestamp needs SOURCE_DATE_EPOCH to mean anything. Together they narrow the "same
 	// inputs, different bytes" gap; ADR 0025 says why they do not close it.
+	// oci-mediatypes=true, because BuildKit otherwise emits DOCKER media types and an OCI-native
+	// registry answers a manifest PUT with 415 Unsupported Media Type. zot does exactly that.
+	//
+	// Not an accommodation for one registry. This project is OCI-oriented throughout, the composer
+	// already writes OCI manifests, and the two kinds emitting different media types into the same
+	// registry is the kind of divergence the rest of this work has been removing. The Docker types
+	// were never chosen here; they were BuildKit's default and nothing had contradicted it.
 	args = append(args, "--output",
-		"type=image,name="+pushNames(obj)+",push=true,rewrite-timestamp=true"+
+		"type=image,name="+pushNames(obj)+",push=true,rewrite-timestamp=true,oci-mediatypes=true"+
 			insecureAttr(obj.Spec.Push, cfg.InsecureRegistries))
 	args = append(args, "--opt", "build-arg:SOURCE_DATE_EPOCH="+cfg.SourceDateEpoch)
 
 	if cacheRef := cacheRefFor(obj); cacheRef != "" {
 		insecure := insecureAttr(obj.Spec.Push, cfg.InsecureRegistries)
-		args = append(args,
-			"--import-cache", "type=registry,ref="+cacheRef+insecure,
-			"--export-cache", "type=registry,ref="+cacheRef+",mode=max"+insecure)
+		// Import ONLY when the cache reference actually resolves. BuildKit configures the registry
+		// cache importer eagerly, and a reference it cannot resolve is a fatal error rather than a
+		// warning -- so passing this unconditionally fails every build whose cache does not exist
+		// yet, which is every FIRST build.
+		//
+		// That went unnoticed for as long as the e2e ran against registry:2, whose answer for a
+		// missing manifest BuildKit happened to tolerate. zot's is not, and the difference is not
+		// something to depend on either way: a missing build cache must never fail a build, whatever
+		// the registry replies.
+		if cacheAvailable {
+			args = append(args, "--import-cache", "type=registry,ref="+cacheRef+insecure)
+		}
+		// Export unconditionally: this is what creates the cache the next build imports.
+		//
+		// image-manifest=true with oci-mediatypes=true for the same reason as the image above, and
+		// then some: BuildKit's default cache format is a manifest LIST carrying a config a
+		// spec-conformant registry has no obligation to accept. The pair renders the cache as an
+		// ordinary OCI image manifest, which any registry can store.
+		args = append(args, "--export-cache",
+			"type=registry,ref="+cacheRef+",mode=max,oci-mediatypes=true,image-manifest=true"+insecure)
 	}
 
 	return args
@@ -269,9 +293,11 @@ func buildVolumes(spec ociv1alpha1.ImageBuildSpec) ([]corev1.Volume, []corev1.Vo
 }
 
 // buildJob renders the Job for one build.
-func buildJob(obj *ociv1alpha1.ImageBuild, inputHash, contextURL string, cfg JobConfig) *batchv1.Job {
+func buildJob(obj *ociv1alpha1.ImageBuild, inputHash, contextURL string, cfg JobConfig,
+	cacheAvailable bool) *batchv1.Job {
+
 	spec := obj.Spec
-	args := buildctlArgs(obj, cfg)
+	args := buildctlArgs(obj, cfg, cacheAvailable)
 	volumes, mounts := buildVolumes(spec)
 	hasPushSecret := spec.Push != nil && spec.Push.SecretRef != nil
 

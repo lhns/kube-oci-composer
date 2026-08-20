@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -27,6 +28,7 @@ import (
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 	"github.com/lhns/kube-oci-composer/internal/buildcontroller"
+	"github.com/lhns/kube-oci-composer/internal/retention"
 )
 
 // Stamped at build time via -ldflags, matching the composer.
@@ -66,6 +68,7 @@ func main() {
 		frontendImage   string
 		sourceDateEpoch string
 		insecureRegs    string
+		refreshInterval time.Duration
 		historyLimit    int
 		showVersion     bool
 	)
@@ -79,6 +82,13 @@ func main() {
 		"Dockerfile frontend image, PINNED BY DIGEST. Required.")
 	flag.StringVar(&sourceDateEpoch, "source-date-epoch", "0",
 		"SOURCE_DATE_EPOCH stamped into builds. Fixed rather than the wall clock, matching the composer's epoch.")
+	flag.DurationVar(&refreshInterval, "retention-refresh-interval", retention.DefaultInterval,
+		"How often to re-pull the images every live ImageBuild still references, so that a registry "+
+			"with an expiry policy does not reclaim them. Zero disables it.\n"+
+			"Same flag name and meaning on both controllers. It must stay MUCH shorter than the "+
+			"registry's retention window -- the ratio is the guarantee, not either number. It matters "+
+			"more here than on the composer: a build cannot be reproduced from its spec, so a reclaimed "+
+			"image is gone rather than rebuildable. See ADR 0031.")
 	flag.StringVar(&insecureRegs, "insecure-registry", "",
 		"Comma-separated registry hosts to push to over plain HTTP. Opt-in per host, for an "+
 			"internal or air-gapped registry without TLS.")
@@ -146,6 +156,31 @@ func main() {
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to set up the ImageBuild controller")
 		os.Exit(1)
+	}
+
+	if refreshInterval > 0 {
+		source := retention.BuildSource{Client: mgr.GetClient()}
+		refresher := &retention.Refresher{
+			Client: mgr.GetClient(),
+			Source: source,
+			// The builder has no Readiness to borrow -- it serves nothing -- so completeness is
+			// answered from generation versus observedGeneration by the source itself.
+			Pending:  source,
+			Interval: refreshInterval,
+			//nolint:staticcheck // SA1019: the new events API has no Event method; same as above.
+			Recorder:           mgr.GetEventRecorderFor("retention"),
+			InsecureRegistries: splitList(insecureRegs),
+		}
+		if err := refresher.SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to set up retention refresh")
+			os.Exit(1)
+		}
+		setupLog.Info("retention refresh enabled", "interval", refreshInterval)
+	} else {
+		// Worth saying out loud on this kind in particular. A build cannot be reproduced from its
+		// spec (ADR 0025), so an image a registry reclaims here is gone rather than rebuildable.
+		setupLog.Info("retention refresh DISABLED; a registry with an expiry policy will delete " +
+			"images this operator's builds still reference, and a build cannot be reproduced")
 	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

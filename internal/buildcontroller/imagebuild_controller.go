@@ -266,7 +266,7 @@ func (r *ImageBuildReconciler) startBuild(ctx context.Context, obj *ociv1alpha1.
 		return fmt.Errorf("%w", err)
 	}
 
-	job := buildJob(obj, inputHash, contextURL, r.JobConfig)
+	job := buildJob(obj, inputHash, contextURL, r.JobConfig, r.cacheAvailable(ctx, obj))
 	if err := ctrl.SetControllerReference(obj, job, r.Scheme()); err != nil {
 		return fmt.Errorf("setting owner: %w", err)
 	}

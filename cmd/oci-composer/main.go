@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -24,6 +25,7 @@ import (
 	"github.com/lhns/kube-oci-composer/internal/cache"
 	"github.com/lhns/kube-oci-composer/internal/controller"
 	gcpkg "github.com/lhns/kube-oci-composer/internal/gc"
+	"github.com/lhns/kube-oci-composer/internal/retention"
 	"github.com/lhns/kube-oci-composer/internal/serve"
 	"github.com/lhns/kube-oci-composer/internal/store"
 )
@@ -85,6 +87,8 @@ func main() {
 		s3Presign             bool
 		gcInterval            time.Duration
 		gcGrace               time.Duration
+		refreshInterval       time.Duration
+		insecureRegs          string
 		keepBuilds            int
 		gcKeepBuilds          int
 		gcDryRun              bool
@@ -136,6 +140,16 @@ func main() {
 
 	flag.DurationVar(&gcInterval, "gc-interval", gcpkg.DefaultInterval,
 		"How often to reclaim blobs and cache entries nothing references. Zero disables collection.")
+	flag.DurationVar(&refreshInterval, "retention-refresh-interval", retention.DefaultInterval,
+		"How often to re-pull the images every live object still references, so that a registry "+
+			"with an expiry policy does not reclaim them. Zero disables it.\n"+
+			"This must stay MUCH shorter than the registry's retention window -- the ratio is the "+
+			"guarantee, not either number, and the default assumes a window of 30 days. Refreshing "+
+			"only reads: it needs no write or delete permission and can destroy nothing. See "+
+			"ADR 0031.")
+	flag.StringVar(&insecureRegs, "insecure-registry", "",
+		"Comma-separated registry hosts that may be reached over plain HTTP. Matched on host, so "+
+			"naming one internal registry does not downgrade any other request.")
 	flag.DurationVar(&gcGrace, "gc-grace", gcpkg.DefaultGrace,
 		"Never reclaim anything written more recently than this. A build writes its blobs before "+
 			"recording them in status, so a sweep landing in that window would delete content that "+
@@ -340,6 +354,26 @@ func main() {
 		setupLog.Info("garbage collection disabled; blobs and cache entries will accumulate")
 	}
 
+	if refreshInterval > 0 {
+		refresher := &retention.Refresher{
+			Client:   mgr.GetClient(),
+			Source:   retention.CompositionSource{Client: mgr.GetClient()},
+			Pending:  readiness,
+			Interval: refreshInterval,
+			//nolint:staticcheck // SA1019: the new events API has no Event method; same as above.
+			Recorder:           mgr.GetEventRecorderFor("retention"),
+			InsecureRegistries: splitList(insecureRegs),
+		}
+		if err := refresher.SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to set up retention refresh")
+			os.Exit(1)
+		}
+		setupLog.Info("retention refresh enabled", "interval", refreshInterval)
+	} else {
+		setupLog.Info("retention refresh DISABLED; a registry with an expiry policy will delete " +
+			"images this operator's objects still reference (ADR 0031)")
+	}
+
 	// Liveness stays a bare ping. A standby replica is alive and must not be restarted just
 	// because it is not the leader.
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
@@ -376,4 +410,15 @@ func effectiveKeepBuilds(keepBuilds, deprecated int) int {
 		return deprecated
 	}
 	return keepBuilds
+}
+
+// splitList parses a comma-separated flag value, ignoring blanks and surrounding spaces.
+func splitList(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }

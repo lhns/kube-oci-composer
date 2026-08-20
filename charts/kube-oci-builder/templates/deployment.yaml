@@ -51,6 +51,7 @@ spec:
             - --insecure-registry={{ . }}
             {{- end }}
             - --keep-builds={{ .Values.builder.keepBuilds }}
+            - --retention-refresh-interval={{ .Values.builder.retention.refreshInterval }}
           ports:
             - name: metrics
               containerPort: {{ include "kube-oci-builder.port" .Values.metrics.bindAddress }}

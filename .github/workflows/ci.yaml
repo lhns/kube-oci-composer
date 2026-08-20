@@ -120,6 +120,18 @@ jobs:
             --set persistence.accessMode=ReadWriteMany \
             --set metrics.serviceMonitor.enabled=true > /dev/null
 
+      - name: The bundled registry renders, and its retention policy protects something
+        # Each of the settings checked here fails by silently protecting NOTHING rather than by
+        # erroring, which is how they were found: seven e2e runs that read like the registry was
+        # broken when the policy simply matched nothing. See ADR 0031 and docs/registry.md.
+        run: |
+          set -euo pipefail
+          pip install --quiet pyyaml
+          helm template t charts/kube-oci-composer --set registry.enabled=true > /dev/null
+          helm template t charts/kube-oci-composer --set registry.enabled=true             --set registry.auth.secretName=htpw > /dev/null
+          helm template t charts/kube-oci-composer --set registry.enabled=true             --set registry.persistence.enabled=false > /dev/null
+          helm template t charts/kube-oci-composer --set registry.enabled=true             | python3 hack/check-bundled-registry.py
+
       - name: The chart must REFUSE multiple replicas without shared storage
         # A guard is only a guard if it fails. Asserted here because the failure it prevents —
         # a standby replica serving 404 for content that exists — looks like a registry bug

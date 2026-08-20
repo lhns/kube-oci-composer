@@ -1,8 +1,77 @@
-# A registry for the build to push to.
+# zot, standing in for the registry an operator runs.
 #
-# spec.push is required in the alpha (a Job in another pod cannot reach the controller's
-# loopback-only serving endpoint), so an e2e needs a real registry. Plain HTTP, which is why the
-# builder is started with --insecure-registry naming this host.
+# Was `registry:2`. Swapped because the retention behaviour this suite has to prove cannot be
+# exercised on it at all: CNCF distribution has no retention or expiry, and its garbage collection
+# is an offline mark-and-sweep whose own documentation says to run the registry read-only during the
+# pass. zot collects online and has configurable retention, which is the property the whole
+# registry-backed design rests on.
+#
+# Plain HTTP, which is why the builder is started with --insecure-registry naming this host.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: e2e-registry-config
+data:
+  config.json: |
+    {
+      "distSpecVersion": "1.1.0",
+      "storage": {
+        "rootDirectory": "/var/lib/registry",
+        "gc": true,
+        "gcDelay": "1s",
+        "gcInterval": "10s",
+        "retention": {
+          "dryRun": false,
+          "delay": "1s",
+          "policies": [
+            {
+              "repositories": ["keepalive-*", "keepalive-**"],
+              "deleteUntagged": true,
+              "deleteReferrers": true,
+              "keepTags": [
+                { "patterns": [".*"], "pulledWithin": "30s" }
+              ],
+              "keepUntagged": { "pulledWithin": "30s" }
+            }
+          ]
+        }
+      },
+      "http": { "address": "0.0.0.0", "port": "5000" },
+      "log": { "level": "debug" },
+      "extensions": {
+        "search": { "enable": true }
+      }
+    }
+---
+# The retention window is 30 SECONDS and collection runs every 10, against a refresh every 2 -- a
+# ratio of 15x, where a deployment would run 30 days against an hourly refresh for 720x. Compressed
+# on purpose: a test that cannot observe a deletion inside its own runtime proves only that nothing
+# was deleted, which is exactly what a broken retention guarantee also looks like.
+#
+# The RATIO is what has to be preserved when tuning these, not the absolute values. A window that
+# creeps down toward the refresh interval turns the guarantee into a race, and the failure shows up
+# as flakiness rather than as anything that names the cause.
+#
+# The search extension is enabled, and it is NOT cosmetic. Pull-recency retention needs zot to have
+# recorded a pull, which is metadata the search extension's database holds. Without it `pulledWithin`
+# has nothing to match on, so every tag expires however often it is fetched -- which is precisely
+# what was measured before this was turned on, over several runs that each looked like "a pull does
+# not renew recency".
+#
+# Log level is debug so that a retention decision leaves a trace. A guarantee whose mechanism is
+# invisible when it fails is one nobody can debug.
+#
+# keepTags carries an explicit `patterns` of `.*`, and it is NOT optional. zot retains
+# `patterns` AND (`pulledWithin` OR ...), so an entry with no patterns matches no tags and every tag
+# is a deletion candidate no matter how often it is pulled. That is what it did: the tagged image
+# was collected while being pulled every five seconds, and the untagged one survived because
+# keepUntagged is a separate rule that was correct.
+#
+# The policy is otherwise scoped by REPOSITORY rather than by tag pattern, and that is deliberate. A tag
+# matching no keepTags entry is a candidate for deletion rather than something retained by default,
+# so a `**` policy with a tag pattern would quietly collect every ordinary e2e image and make
+# unrelated tests flaky in a way that looks like a controller bug. Repositories outside
+# `keepalive-` match no policy at all and are therefore untouched.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -17,16 +86,22 @@ spec:
     spec:
       containers:
         - name: registry
-          image: registry:2
+          # Pinned by digest like every other image this project consumes: a tag is a pointer, and
+          # a registry whose behaviour the test suite asserts is the last place to accept a moving
+          # one.
+          image: ghcr.io/project-zot/zot:v2.1.20@sha256:542e25be4d32e7879c0cfad93492a93c81b1e059cbd2d30d485d4bd567318234
+          args: ["serve", "/etc/zot/config.json"]
           ports: [{containerPort: 5000}]
-          env:
-            # Ephemeral: storage is the container's own writable layer, thrown away with the
-            # cluster, so no volume is needed. Deletion is enabled so a test can clean up after
-            # itself without restarting the registry.
-            - {name: REGISTRY_STORAGE_DELETE_ENABLED, value: "true"}
+          volumeMounts:
+            - {name: config, mountPath: /etc/zot}
+            # Ephemeral: storage is thrown away with the cluster.
+            - {name: data, mountPath: /var/lib/registry}
           readinessProbe:
             httpGet: {path: /v2/, port: 5000}
             initialDelaySeconds: 2
+      volumes:
+        - {name: config, configMap: {name: e2e-registry-config}}
+        - {name: data, emptyDir: {}}
 ---
 apiVersion: v1
 kind: Service

@@ -1,0 +1,119 @@
+{{- if .Values.registry.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "kube-oci-composer.fullname" . }}-registry
+  labels:
+    {{- include "kube-oci-composer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: registry
+spec:
+  selector:
+    {{- include "kube-oci-composer.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: registry
+  ports:
+    - name: registry
+      port: 5000
+      targetPort: registry
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kube-oci-composer.fullname" . }}-registry
+  labels:
+    {{- include "kube-oci-composer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: registry
+spec:
+  # One. Storage is a single volume, so a second replica would serve a different set of images
+  # depending on which one a request reached -- the same defect the embedded endpoint had
+  # (ADR 0021). Scaling this out means running a registry that supports it, not raising this number.
+  replicas: 1
+  strategy:
+    # The volume is ReadWriteOnce, so a rolling update would deadlock: the new pod cannot mount
+    # until the old one lets go.
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "kube-oci-composer.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: registry
+  template:
+    metadata:
+      annotations:
+        # A config change has to restart the pod; zot reads its config once at startup.
+        checksum/config: {{ include (print $.Template.BasePath "/registry-config.yaml") . | sha256sum }}
+      labels:
+        {{- include "kube-oci-composer.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: registry
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: registry
+          image: {{ .Values.registry.image | quote }}
+          args: ["serve", "/etc/zot/config.json"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          ports:
+            - name: registry
+              containerPort: 5000
+          volumeMounts:
+            - {name: config, mountPath: /etc/zot}
+            - {name: data, mountPath: /var/lib/registry}
+            {{- if .Values.registry.auth.secretName }}
+            - {name: auth, mountPath: /etc/zot/auth, readOnly: true}
+            {{- end }}
+          readinessProbe:
+            httpGet: {path: /v2/, port: registry}
+            initialDelaySeconds: 2
+          livenessProbe:
+            httpGet: {path: /v2/, port: registry}
+            initialDelaySeconds: 10
+          resources:
+            {{- toYaml .Values.registry.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "kube-oci-composer.fullname" . }}-registry
+        {{- if .Values.registry.auth.secretName }}
+        - name: auth
+          secret:
+            secretName: {{ .Values.registry.auth.secretName }}
+        {{- end }}
+        - name: data
+        {{- if .Values.registry.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "kube-oci-composer.fullname" . }}-registry
+        {{- else }}
+          # emptyDir means every restart loses every image. Tolerable for a demo; for ImageBuild it
+          # means losing content that cannot be rebuilt, which is why persistence defaults ON.
+          emptyDir: {}
+        {{- end }}
+{{- if .Values.registry.persistence.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "kube-oci-composer.fullname" . }}-registry
+  labels:
+    {{- include "kube-oci-composer.labels" . | nindent 4 }}
+    app.kubernetes.io/component: registry
+  annotations:
+    # Kept when the release is uninstalled. For ImageBuild these bytes are the only copy, and a
+    # `helm uninstall` typed in the wrong terminal is not a good enough reason to lose them.
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with .Values.registry.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.registry.persistence.size | quote }}
+{{- end }}
+{{- end }}
