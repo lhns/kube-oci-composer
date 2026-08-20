@@ -25,6 +25,7 @@ spec:
       type: string
     - jsonPath: .status.conditions[?(@.type=="Ready")].message
       name: Status
+      priority: 1
       type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
@@ -202,6 +203,7 @@ spec:
                   multi-node builder. A platform the builder cannot produce fails the build rather than being
                   silently dropped.
                 items:
+                  maxLength: 64
                   pattern: ^[a-z0-9]+/[a-z0-9]+(/[a-z0-9]+)?$
                   type: string
                 maxItems: 16
@@ -214,6 +216,18 @@ spec:
                   Required in this alpha: the build runs in a Job, which cannot reach the controller's
                   loopback-only serving endpoint. See ADR 0025.
                 properties:
+                  history:
+                    description: |-
+                      History is how many past builds to retain, overriding the controller's default. Identical
+                      to Publish's.
+
+                      It matters MORE here than there, not less: a composition can rebuild any artifact from its
+                      spec, so retention is a convenience. A build cannot (ADR 0025), so retention is how much of
+                      the only copy is kept. That this knob existed only on the kind where it matters least was an
+                      oversight rather than a decision.
+                    format: int32
+                    minimum: 1
+                    type: integer
                   immutable:
                     default: true
                     description: |-
@@ -221,6 +235,16 @@ spec:
                       so the field cannot mean different things depending on where it sits — and an external
                       registry is where a silently remeaned tag does the most damage.
                     type: boolean
+                  ref:
+                    description: |-
+                      Ref behaves exactly as on Publish: a reference whose TAG is appended to Tags, so a
+                      kustomize images transformer or a Helm value can retag without editing this list.
+
+                      Absent until now, which meant the spec-hash tag pattern documented for ImageComposition
+                      could not be used from ImageBuild at all — the one place a generator most wants it, since a
+                      build's tag is the only thing identifying which inputs produced it.
+                    maxLength: 512
+                    type: string
                   repository:
                     description: Repository is the fully qualified target, e.g. "ghcr.io/example/artifact".
                     type: string

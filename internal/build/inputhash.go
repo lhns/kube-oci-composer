@@ -44,8 +44,13 @@ type Inputs struct {
 	// The Dockerfile's own content needs no separate hashing: it lives inside the context tarball,
 	// which is content-addressed, so a change to it moves this. That is why the hash can be
 	// computed without fetching anything.
-	ContextDigest  string
-	ContextSubpath string
+	ContextDigest string
+	// ContextRevision is what the artifact digest DESCRIBES — "v0.6.8@sha1:b739efb5". Recorded so
+	// a built image can be traced back to a revision without pulling it apart, which is the gap
+	// ADR 0026's incident was diagnosed through. Not hashed: the digest already identifies the
+	// content, and hashing both would rebuild on a repack that changed nothing.
+	ContextRevision string
+	ContextSubpath  string
 
 	Dockerfile string
 	Target     string

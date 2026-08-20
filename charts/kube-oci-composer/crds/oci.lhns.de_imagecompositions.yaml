@@ -447,7 +447,7 @@ spec:
                   history:
                     description: |-
                       History is how many past builds to keep before garbage collection reclaims their blobs.
-                      Defaults to the controller's --gc-keep-builds.
+                      Defaults to the controller's --keep-builds.
 
                       Old builds are worth keeping for three independent reasons: reverting a commit must find
                       the old reference still pullable; a pod pinned to one that gets rescheduled must be able
@@ -527,6 +527,18 @@ spec:
                   Push publishes to an external registry instead. Use it when the artifact must outlive the
                   cluster, be consumed from outside it, or carry registry-native attestations.
                 properties:
+                  history:
+                    description: |-
+                      History is how many past builds to retain, overriding the controller's default. Identical
+                      to Publish's.
+
+                      It matters MORE here than there, not less: a composition can rebuild any artifact from its
+                      spec, so retention is a convenience. A build cannot (ADR 0025), so retention is how much of
+                      the only copy is kept. That this knob existed only on the kind where it matters least was an
+                      oversight rather than a decision.
+                    format: int32
+                    minimum: 1
+                    type: integer
                   immutable:
                     default: true
                     description: |-
@@ -534,6 +546,16 @@ spec:
                       so the field cannot mean different things depending on where it sits — and an external
                       registry is where a silently remeaned tag does the most damage.
                     type: boolean
+                  ref:
+                    description: |-
+                      Ref behaves exactly as on Publish: a reference whose TAG is appended to Tags, so a
+                      kustomize images transformer or a Helm value can retag without editing this list.
+
+                      Absent until now, which meant the spec-hash tag pattern documented for ImageComposition
+                      could not be used from ImageBuild at all — the one place a generator most wants it, since a
+                      build's tag is the only thing identifying which inputs produced it.
+                    maxLength: 512
+                    type: string
                   repository:
                     description: Repository is the fully qualified target, e.g. "ghcr.io/example/artifact".
                     type: string
@@ -760,6 +782,8 @@ spec:
                 format: int64
                 type: integer
             type: object
+        required:
+        - spec
         type: object
     served: true
     storage: true

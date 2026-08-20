@@ -13,6 +13,8 @@ package reconciler
 import (
 	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -146,4 +148,59 @@ func RecordHistory(history []ociv1alpha1.BuildRecord, record *ociv1alpha1.BuildR
 		out = append(out, h)
 	}
 	return out
+}
+
+// tagPattern is the CRD's own constraint on a tag, applied here too because a tag arriving via
+// a ref never passed through that validation.
+//
+// Shared by both kinds: publish.ref and push.ref mean the same thing, and a second copy is how the
+// two would stop meaning the same thing.
+var tagPattern = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9._-]*$`)
+
+// tagFromRef extracts the tag from a full image reference, and NOTHING else — the host and
+// repository are the caller's business, not this field's.
+//
+// Deliberately hand-parsed rather than handed to name.ParseReference, which would default a bare
+// "my-artifact" to "index.docker.io/library/my-artifact:latest". Inventing a `latest` out of an
+// untemplated placeholder is exactly the wrong answer: it would publish a moving tag nobody asked
+// for. No tag in, no tag out.
+func TagFromRef(ref string) (string, error) {
+	if ref == "" {
+		return "", nil
+	}
+	if strings.ContainsRune(ref, '@') {
+		return "", Terminal("the ref %q carries a digest; it must name a tag, since the digest is an output rather than an input", ref)
+	}
+	// A colon before the last slash is a port, not a tag: "registry:5000/repo".
+	colon := strings.LastIndexByte(ref, ':')
+	if colon <= strings.LastIndexByte(ref, '/') {
+		return "", nil
+	}
+	tag := ref[colon+1:]
+	if !tagPattern.MatchString(tag) {
+		return "", Terminal("the ref %q has an invalid tag %q", ref, tag)
+	}
+	return tag, nil
+}
+
+// effectiveTags is the explicit list plus whatever ref carries, in order and without duplicates.
+func EffectiveTags(tags []string, ref string) ([]string, error) {
+	fromRef, err := TagFromRef(ref)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]string, 0, len(tags)+1)
+	seen := make(map[string]struct{}, len(tags)+1)
+	for _, t := range append(append([]string(nil), tags...), fromRef) {
+		if t == "" {
+			continue
+		}
+		if _, dup := seen[t]; dup {
+			continue
+		}
+		seen[t] = struct{}{}
+		out = append(out, t)
+	}
+	return out, nil
 }

@@ -11,6 +11,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
+	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 )
 
 // Turning an ImageBuild into a Job.
@@ -376,11 +377,15 @@ func pushNames(obj *ociv1alpha1.ImageBuild) string {
 		return ""
 	}
 	repo := obj.Spec.Push.Repository
-	if len(obj.Spec.Push.Tags) == 0 {
+	// EffectiveTags folds in whatever push.ref carries, so a generator that retags through a
+	// kustomize images transformer reaches the build the same way it reaches a composition. An
+	// invalid ref is caught during resolution, before a Job exists, so it cannot arrive here.
+	tags, err := recon.EffectiveTags(obj.Spec.Push.GetTags(), obj.Spec.Push.GetRef())
+	if err != nil || len(tags) == 0 {
 		return repo
 	}
-	names := make([]string, 0, len(obj.Spec.Push.Tags))
-	for _, tag := range obj.Spec.Push.Tags {
+	names := make([]string, 0, len(tags))
+	for _, tag := range tags {
 		names = append(names, repo+":"+tag)
 	}
 	return strings.Join(names, ",")

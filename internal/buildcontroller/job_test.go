@@ -224,7 +224,7 @@ func TestSecretsAreMountedNotInlined(t *testing.T) {
 	obj := sampleBuild()
 	obj.Spec.Secrets = []ociv1alpha1.BuildSecret{{
 		ID:        "npmrc",
-		SecretRef: ociv1alpha1.LocalObjectReference{Name: "npm-creds"},
+		SecretRef: &ociv1alpha1.LocalObjectReference{Name: "npm-creds"},
 	}}
 
 	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig())

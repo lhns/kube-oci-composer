@@ -361,7 +361,7 @@
           "description": "Publish serves the artifact from the controller's own read-only OCI endpoint. The default\nmode, needing no registry and no credentials.",
           "properties": {
             "history": {
-              "description": "History is how many past builds to keep before garbage collection reclaims their blobs.\nDefaults to the controller's --gc-keep-builds.\n\nOld builds are worth keeping for three independent reasons: reverting a commit must find\nthe old reference still pullable; a pod pinned to one that gets rescheduled must be able\nto pull it again; and with spec-hash tags a rollback names a tag from an earlier build,\nwhich only resolves while that build is retained. Layers are shared between builds, so a\ngenerous value costs far less than the count suggests. See ADR 0011.",
+              "description": "History is how many past builds to keep before garbage collection reclaims their blobs.\nDefaults to the controller's --keep-builds.\n\nOld builds are worth keeping for three independent reasons: reverting a commit must find\nthe old reference still pullable; a pod pinned to one that gets rescheduled must be able\nto pull it again; and with spec-hash tags a rollback names a tag from an earlier build,\nwhich only resolves while that build is retained. Layers are shared between builds, so a\ngenerous value costs far less than the count suggests. See ADR 0011.",
               "format": "int32",
               "minimum": 1,
               "type": "integer"
@@ -399,10 +399,21 @@
         "push": {
           "description": "Push publishes to an external registry instead. Use it when the artifact must outlive the\ncluster, be consumed from outside it, or carry registry-native attestations.",
           "properties": {
+            "history": {
+              "description": "History is how many past builds to retain, overriding the controller's default. Identical\nto Publish's.\n\nIt matters MORE here than there, not less: a composition can rebuild any artifact from its\nspec, so retention is a convenience. A build cannot (ADR 0025), so retention is how much of\nthe only copy is kept. That this knob existed only on the kind where it matters least was an\noversight rather than a decision.",
+              "format": "int32",
+              "minimum": 1,
+              "type": "integer"
+            },
             "immutable": {
               "default": true,
               "description": "Immutable behaves exactly as on Publish, including the default of true. Identical on both\nso the field cannot mean different things depending on where it sits — and an external\nregistry is where a silently remeaned tag does the most damage.",
               "type": "boolean"
+            },
+            "ref": {
+              "description": "Ref behaves exactly as on Publish: a reference whose TAG is appended to Tags, so a\nkustomize images transformer or a Helm value can retag without editing this list.\n\nAbsent until now, which meant the spec-hash tag pattern documented for ImageComposition\ncould not be used from ImageBuild at all — the one place a generator most wants it, since a\nbuild's tag is the only thing identifying which inputs produced it.",
+              "maxLength": 512,
+              "type": "string"
             },
             "repository": {
               "description": "Repository is the fully qualified target, e.g. \"ghcr.io/example/artifact\".",
@@ -629,5 +640,8 @@
       "type": "object"
     }
   },
+  "required": [
+    "spec"
+  ],
   "type": "object"
 }
