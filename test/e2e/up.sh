@@ -54,8 +54,12 @@ BUILDER_IMG="${BUILDER_IMG:-ghcr.io/lhns/kube-oci-builder:e2e}"
 # insecure automatically.
 E2E_REGISTRY="kube-oci-composer-registry.oci-composer.svc.cluster.local:5000"
 
+# BOTH images, before the single install that references them. imagePullPolicy is Never in the e2e,
+# so an image that is not loaded is ErrImageNeverPull rather than a pull attempt.
 make docker-build IMG="$IMG"
+make docker-build-builder BUILDER_IMG="$BUILDER_IMG"
 kind load docker-image "$IMG" --name "$CLUSTER"
+kind load docker-image "$BUILDER_IMG" --name "$CLUSTER"
 
 # CRDs are NOT applied here any more: the chart installs them from templates/ (ADR 0033), and Helm
 # refuses to adopt a CRD it did not create. Letting the chart do it also means the e2e exercises
