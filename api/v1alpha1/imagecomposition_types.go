@@ -491,6 +491,10 @@ type ImageCompositionStatus struct {
 	LastHandledReconcileAt string `json:"lastHandledReconcileAt,omitempty"`
 }
 
+// The keep annotation is emitted into the CRD itself so the chart can install it verbatim.
+// Deleting a CRD deletes every object of that kind, and Helm removing one on an uninstall or a
+// toggle flip is not a risk worth taking for a resource that costs nothing when unused.
+// +kubebuilder:metadata:annotations="helm.sh/resource-policy=keep"
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=imgcomp

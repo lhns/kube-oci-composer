@@ -6,6 +6,33 @@ may change between minor versions.
 ## [Unreleased]
 
 ### Added
+- **One chart, one namespace, three toggleable components.** `kube-oci-builder` is folded into
+  `kube-oci-composer` as `imageBuild.enabled`, alongside `imageComposition.enabled` and
+  `registry.enabled` -- all on by default, so one install gives a working, entirely local system.
+
+  The runtime separation is unchanged: two Deployments, two ServiceAccounts, two ClusterRoles, and
+  the composer's role still cannot create a single object. **`imageBuild.enabled=false` removes the
+  RBAC, not just the controller**, so the toggle is a real security control rather than one that
+  looks like one. See ADR 0033.
+
+- **A bundled registry, enabled by default, with generated credentials.** zot, its htpasswd, and the
+  `dockerconfigjson` both controllers push with -- all rendered by the chart from one password that
+  is reused on upgrade rather than rotated. Anonymous read, authenticated write, enforced by the
+  registry itself.
+
+- **A default registry: `push.repository` is now optional.** Objects that name no repository publish
+  to `<default-registry>/<namespace>/<name>`, configured once by the operator instead of pasted into
+  every spec. On `ImageBuild`, `push` itself is optional too.
+
+  Namespace-qualified deliberately: one registry is shared cluster-wide, so a bare object name would
+  collide the moment two namespaces both contain an `app` -- silently, and read by the tag policy as
+  a legitimate conflict.
+
+  **The operator's credential is used ONLY for objects that named no repository.** An object naming
+  its own registry authenticates with its own `secretRef` or not at all. Otherwise anyone able to
+  create an `ImageComposition` could point it at a host they control and be handed the operator's
+  registry password. See ADR 0034.
+
 - **The retention guarantee: images a live object still references are never reclaimed** (ADR 0031),
   and a `retention` refresher on both controllers that enforces it.
 
@@ -85,6 +112,16 @@ may change between minor versions.
   recorded with the reason the destination makes it meaningless. Verified to fail on drift.
 
 ### Changed
+- **BREAKING: `charts/kube-oci-builder` is removed.** Upgrading from two releases:
+
+  ```console
+  helm uninstall kube-oci-builder --namespace oci-builder
+  helm upgrade kube-oci-composer oci://ghcr.io/lhns/charts/kube-oci-composer     --namespace oci-composer --set imageBuild.enabled=true
+  ```
+
+  The `ImageBuild` CRD survives the uninstall (`resource-policy: keep`), and your objects with it.
+  Values move from `builder.*` to `imageBuild.*`.
+
 - **`--gc-keep-builds` is renamed `--keep-builds`**, which is what the builder already called it. The
   `gc-` prefix was misleading: the flag caps `status.history`, and collection merely honours that cap.
   The old name keeps working as a deprecated alias, so a values file written against the previous
@@ -96,6 +133,20 @@ may change between minor versions.
   `RevisionMatches` moved to `shared_types.go`, where both kinds' shared API surface lives.
 
 ### Fixed
+- **Every Service in the chart selected every pod in the release.** All pods carried only the chart's
+  two selector labels, so the registry pod was already backing the composer's Service -- a pull
+  routed to the wrong container, from a Service reporting itself healthy. Harmless while the registry
+  was off by default; shipping it on would have made it everyone's default. Each workload now carries
+  a component label and each Service selects on it.
+
+  Found while writing the guard, along with a second one: the composer's own pod template was missing
+  the label its Service selected on, so it would have had no endpoints at all.
+
+- **CRDs are installed from `templates/` rather than `crds/`,** so `helm upgrade` applies CRD changes.
+  Helm installs `crds/` once and never touches it again, which is why the `DockerBuild` ->
+  `ImageBuild` rename needed CRD surgery by hand. Both carry `helm.sh/resource-policy: keep`:
+  deleting a CRD deletes every object of that kind.
+
 - **A missing build cache failed the build.** BuildKit configures its registry cache importer eagerly
   and treats a reference it cannot resolve as fatal rather than as a warning, so `--import-cache`
   broke every *first* build against a registry that answers a missing manifest strictly. It is now

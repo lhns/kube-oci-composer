@@ -71,11 +71,11 @@ manifests: controller-gen ## Regenerate CRDs, RBAC and deepcopy functions.
 		output:rbac:artifacts:config=config/rbac-builder
 
 .PHONY: chart-crds
-chart-crds: manifests ## Copy generated CRDs into their charts.
-# One CRD per chart, deliberately: shipping ImageBuild's CRD with the composer would mean
-# installing the composer implies the builder's API exists (ADR 0004).
-	cp config/crd/bases/oci.lhns.de_imagecompositions.yaml charts/kube-oci-composer/crds/
-	cp config/crd/bases/oci.lhns.de_imagebuilds.yaml charts/kube-oci-builder/crds/
+chart-crds: manifests ## Copy generated CRDs into the chart.
+# Into files/crds/, which templates/crds.yaml emits verbatim -- NOT into crds/, which Helm installs
+# once and then never upgrades. One chart now, so both kinds land in the same place (ADR F).
+	cp config/crd/bases/oci.lhns.de_imagecompositions.yaml charts/kube-oci-composer/files/crds/
+	cp config/crd/bases/oci.lhns.de_imagebuilds.yaml charts/kube-oci-composer/files/crds/
 
 .PHONY: schemas
 schemas: manifests ## Publish JSON schemas for kubeconform.
@@ -140,8 +140,6 @@ uninstall-builder: ## Remove the builder's CRD from the current cluster.
 chart-lint: ## Lint and render the charts.
 	helm lint charts/kube-oci-composer
 	helm template kube-oci-composer charts/kube-oci-composer >/dev/null
-	helm lint charts/kube-oci-builder
-	helm template kube-oci-builder charts/kube-oci-builder >/dev/null
 
 .PHONY: chart-push
 chart-push: ## Package and push the chart as an OCI artifact.

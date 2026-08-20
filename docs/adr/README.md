@@ -53,6 +53,8 @@ question waiting for evidence.
 | [0030](0030-a-real-registry-serves-both-kinds.md) | A real registry serves both kinds, and zot is the one we ship | Accepted, amends 0006 |
 | [0031](0031-the-retention-guarantee.md) | Live objects' images are never reclaimed, by anything | Accepted, sharpens 0011 |
 | [0032](0032-the-embedded-registrys-future.md) | The embedded registry stays, and stops being the default | Accepted, revisits 0012 |
+| [0033](0033-one-chart-one-namespace.md) | One chart, one namespace, toggleable components | Accepted, reverses 0004's packaging |
+| [0034](0034-a-default-registry.md) | A default registry, and whose credential is used | Accepted, amends 0030 and 0031 |
 
 ## Format
 

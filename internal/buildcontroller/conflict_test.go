@@ -287,7 +287,7 @@ func mustUpdate(t *testing.T, r *ImageBuildReconciler, obj *ociv1alpha1.ImageBui
 func TestAMissingCacheIsNotImported(t *testing.T) {
 	obj := buildOf(t, nil)
 
-	absent := strings.Join(buildctlArgs(obj, sampleConfig(), false), " ")
+	absent := strings.Join(buildctlArgs(obj, sampleConfig(), sampleRepo, false), " ")
 	if strings.Contains(absent, "--import-cache") {
 		t.Error("a cache that does not exist yet is still imported; BuildKit fails the build " +
 			"rather than warning, so this is every first build broken")
@@ -297,7 +297,7 @@ func TestAMissingCacheIsNotImported(t *testing.T) {
 			"no build would be cached again")
 	}
 
-	present := strings.Join(buildctlArgs(obj, sampleConfig(), true), " ")
+	present := strings.Join(buildctlArgs(obj, sampleConfig(), sampleRepo, true), " ")
 	if !strings.Contains(present, "--import-cache") {
 		t.Error("a cache that does exist is not imported, so caching never takes effect")
 	}
@@ -310,7 +310,7 @@ func TestAMissingCacheIsNotImported(t *testing.T) {
 // contradicted it. The composer already writes OCI manifests, so this also stops the two kinds
 // putting different media types into one registry.
 func TestBuildsPushOCIMediaTypes(t *testing.T) {
-	argv := strings.Join(buildctlArgs(buildOf(t, nil), sampleConfig(), true), " ")
+	argv := strings.Join(buildctlArgs(buildOf(t, nil), sampleConfig(), sampleRepo, true), " ")
 
 	if !strings.Contains(argv, "oci-mediatypes=true") {
 		t.Error("the image exporter does not request OCI media types; an OCI-native registry " +

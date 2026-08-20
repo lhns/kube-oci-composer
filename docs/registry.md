@@ -1,10 +1,57 @@
-# Running a registry for kube-oci-composer
+# The registry
 
-Both kinds can publish to a registry you run, and for `ImageBuild` that is the only option. This is
-what the operator owns when they do.
+Both kinds publish to a registry. **The chart installs one by default** — zot, with credentials it
+generates — so a default install is a complete local system with nothing external to configure.
 
-If you only compose artifacts and serve them from the built-in endpoint, none of this applies —
-see [ADR 0032](adr/0032-the-embedded-registrys-future.md) for why that path is still supported.
+This page is what the operator owns: the one setting that is not automatic, the configuration that
+is easy to get silently wrong, and what happens if you bring your own registry instead.
+
+## The one thing that is not automatic
+
+`registry.host`. Everything else has a working default.
+
+The controllers reach the registry over cluster DNS and need no configuration. **Workloads do not.**
+containerd resolves image references with the *node's* resolver, which does not see cluster DNS, so
+a Pod cannot pull from a `.svc.cluster.local` name however healthy the Service is — the image
+publishes successfully and then fails with `ErrImagePull`.
+
+So `registry.host` is a name your nodes resolve, and it is what `status.artifact.ref` reports. Two
+ways to make it resolve:
+
+**An ingress**, if you already run one with a certificate.
+
+**A NodePort plus a containerd drop-in**, which needs neither:
+
+```yaml
+registry:
+  host: oci.internal
+  service:
+    type: NodePort
+    nodePort: 30500
+```
+
+```toml
+# /etc/containerd/certs.d/oci.internal/hosts.toml, on every node
+[host."http://<node-address>:30500"]
+  capabilities = ["pull", "resolve"]
+```
+
+The chart warns at install time when `registry.host` is unset, because the failure otherwise shows up
+as a pull error against a Service that looks perfectly healthy.
+
+## Bringing your own
+
+```yaml
+registry:
+  enabled: false          # installs no zot at all
+defaultRegistry:
+  host: ghcr.io/me
+  existingPushSecret: my-creds
+```
+
+Objects that name no repository then publish to `ghcr.io/me/<namespace>/<name>`, using that Secret.
+Everything below about retention still applies — it is a property of the registry you run, not of
+the one we bundle.
 
 ## What the registry has to do
 
@@ -46,7 +93,10 @@ If you shorten the window, shorten the interval with it.
 
 ## A zot configuration that works
 
-Verified against zot `v2.1.20` by `test/e2e/`. Adjust the window; keep the shape.
+**This is what the chart renders**, reproduced here because it is what you would need if you ran zot
+yourself, and because four details in it are easy to get silently wrong. Verified against zot
+`v2.1.20` by `test/e2e/`; the chart's copy is checked at build time by
+`hack/check-bundled-registry.py`.
 
 ```json
 {
@@ -134,6 +184,6 @@ other, which is exactly what you want to be able to do while diagnosing a missin
 
 ## If you would rather not run one
 
-Compose-only deployments can use the built-in endpoint and skip all of this
-([ADR 0032](adr/0032-the-embedded-registrys-future.md)). If you run `ImageBuild`, you cannot: the
-build Job executes in another pod and has no route to the controller's loopback-only write path.
+`registry.enabled=false` with `defaultRegistry.host` — see *Bringing your own* above. What you cannot
+do is publish nowhere: both kinds upload to a registry, and for `ImageBuild` the Job executes in
+another pod with no route back to the controller at all.

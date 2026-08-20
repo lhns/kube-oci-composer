@@ -48,6 +48,11 @@ type ImageCompositionReconciler struct {
 	// Server is the built-in endpoint used when spec.push is unset.
 	Server *serve.Server
 
+	// Default is where objects publish when they name no repository of their own. Configured once
+	// by the operator; see recon.DefaultRegistry for why its credential is namespaced to the
+	// controller rather than to the object.
+	Default recon.DefaultRegistry
+
 	// Fetcher retrieves layer content from its origin.
 	Fetcher *oci.Fetcher
 
@@ -594,6 +599,9 @@ type target struct {
 	onConflict ociv1alpha1.TagConflictPolicy
 	// insecure allows plaintext HTTP, true only for the loopback endpoint.
 	insecure bool
+	// usesDefault marks a target the OBJECT did not choose, which is the only case where the
+	// operator's own credential may be used. See recon.DefaultRegistry.CredentialFor.
+	usesDefault bool
 }
 
 // resolve picks the publication target: an external registry when push is set, otherwise the
@@ -608,10 +616,30 @@ func (r *ImageCompositionReconciler) target(obj *ociv1alpha1.ImageComposition) (
 		}, nil
 	}
 	if r.Server == nil {
-		// Operator-level misconfiguration, not a spec error. Giving the operator a serving
-		// endpoint means restarting it with different flags — which changes nothing about this
+		// No serving endpoint. Publish to the operator's default registry, which is what a chart
+		// install configures and what makes a default deployment publish somewhere real without
+		// anyone editing a spec.
+		if r.Default.Configured() {
+			tags, err := recon.EffectiveTags(obj.Spec.Publish.GetTags(), obj.Spec.Publish.GetRef())
+			if err != nil {
+				return target{}, err
+			}
+			repo := r.Default.RepositoryFor(obj.Namespace, publishName(obj))
+			return target{
+				writeRepo:   repo,
+				pullRepo:    repo,
+				tags:        tags,
+				onConflict:  obj.Spec.Publish.ResolveConflictPolicy(),
+				usesDefault: true,
+			}, nil
+		}
+
+		// Operator-level misconfiguration, not a spec error. Configuring a registry means
+		// restarting the controller with different flags — which changes nothing about this
 		// object, so stalling would leave every composition wedged after the fix. It waits.
-		return target{}, recon.Pending("spec.push is unset and no serving endpoint is configured yet")
+		return target{}, recon.Pending(
+			"this object names no repository, and neither a default registry nor a serving " +
+				"endpoint is configured yet")
 	}
 	tags, err := recon.EffectiveTags(obj.Spec.Publish.GetTags(), obj.Spec.Publish.GetRef())
 	if err != nil {
@@ -664,13 +692,19 @@ func publishName(obj *ociv1alpha1.ImageComposition) string {
 func (r *ImageCompositionReconciler) remoteOptions(ctx context.Context, obj *ociv1alpha1.ImageComposition) ([]remote.Option, error) {
 	opts := []remote.Option{remote.WithContext(ctx)}
 
-	p := obj.Spec.Push
-	if p == nil || p.SecretRef == nil {
+	var ownRef string
+	if p := obj.Spec.Push; p != nil && p.SecretRef != nil {
+		ownRef = p.SecretRef.Name
+	}
+	// usesDefault is what separates "the operator chose this registry" from "the tenant did", and
+	// the operator's credential is only ever sent to the former.
+	name, namespace := r.Default.CredentialFor(obj.Namespace, ownRef, obj.Spec.Push == nil)
+	if name == "" {
 		return append(opts, remote.WithAuth(authn.Anonymous)), nil
 	}
 
 	var secret corev1.Secret
-	key := types.NamespacedName{Namespace: obj.Namespace, Name: p.SecretRef.Name}
+	key := types.NamespacedName{Namespace: namespace, Name: name}
 	if err := r.Get(ctx, key, &secret); err != nil {
 		if apierrors.IsNotFound(err) {
 			// See pullOptions: waits rather than stalls, for the same reason.

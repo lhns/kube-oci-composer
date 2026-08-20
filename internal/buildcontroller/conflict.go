@@ -33,6 +33,11 @@ func (r *ImageBuildReconciler) checkTagConflict(
 	ctx context.Context, obj *ociv1alpha1.ImageBuild,
 ) (stop bool, conflict *ociv1alpha1.TagConflictStatus, err error) {
 	p := obj.Spec.Push
+	repo := r.repositoryFor(obj)
+	if repo == "" {
+		return false, nil, recon.Pending(
+			"this build names no push.repository, and no default registry is configured")
+	}
 	policy := p.ResolveConflictPolicy()
 	if policy == ociv1alpha1.ConflictOverwrite {
 		// Nothing to ask the registry. Skipping the round trip also means the permissive policy
@@ -54,11 +59,11 @@ func (r *ImageBuildReconciler) checkTagConflict(
 		return false, nil, err
 	}
 	var refOpts []name.Option
-	if insecureHost(p.Repository, r.JobConfig.InsecureRegistries) {
+	if insecureHost(repo, r.JobConfig.InsecureRegistries) {
 		refOpts = append(refOpts, name.Insecure)
 	}
 
-	published, err := recon.ResolvePublished(p.Repository, tags, obj.Status.Artifact, refOpts, opts)
+	published, err := recon.ResolvePublished(repo, tags, obj.Status.Artifact, refOpts, opts)
 	if err != nil {
 		return false, nil, err
 	}
@@ -112,13 +117,19 @@ func (r *ImageBuildReconciler) remoteOptions(
 ) ([]remote.Option, error) {
 	opts := []remote.Option{remote.WithContext(ctx)}
 
-	p := obj.Spec.Push
-	if p.SecretRef == nil {
+	var ownRef string
+	if p := obj.Spec.Push; p != nil && p.SecretRef != nil {
+		ownRef = p.SecretRef.Name
+	}
+	// The operator's credential is used only for a repository the OBJECT did not choose. See
+	// recon.DefaultRegistry.CredentialFor.
+	name, namespace := r.Default.CredentialFor(obj.Namespace, ownRef, usesDefaultRepository(obj))
+	if name == "" {
 		return append(opts, remote.WithAuth(authn.Anonymous)), nil
 	}
 
 	var secret corev1.Secret
-	key := types.NamespacedName{Namespace: obj.Namespace, Name: p.SecretRef.Name}
+	key := types.NamespacedName{Namespace: namespace, Name: name}
 	if err := r.Get(ctx, key, &secret); err != nil {
 		if apierrors.IsNotFound(err) {
 			// Waits rather than stalls: the Secret may be on its way from SOPS or a Kustomization
@@ -145,7 +156,7 @@ func (r *ImageBuildReconciler) remoteOptions(
 // unreadable secret: none of them are reasons to fail a build over a cache, and the worst outcome
 // of a wrong "no" is that this build repopulates a cache that was already there.
 func (r *ImageBuildReconciler) cacheAvailable(ctx context.Context, obj *ociv1alpha1.ImageBuild) bool {
-	cacheRef := cacheRefFor(obj)
+	cacheRef := cacheRefFor(obj, r.repositoryFor(obj))
 	if cacheRef == "" {
 		return false
 	}
@@ -165,4 +176,26 @@ func (r *ImageBuildReconciler) cacheAvailable(ctx context.Context, obj *ociv1alp
 	}
 	_, err = remote.Head(ref, opts...)
 	return err == nil
+}
+
+// usesDefaultRepository reports whether this build publishes to the operator's default registry
+// rather than to one its own spec named.
+func usesDefaultRepository(obj *ociv1alpha1.ImageBuild) bool {
+	return obj.Spec.Push == nil || obj.Spec.Push.Repository == ""
+}
+
+// repositoryFor is the ONE place that resolves where a build publishes.
+//
+// Everything that needs the repository goes through here -- the push target, the tag-conflict
+// check, the build cache reference, the retention refresh. Resolving the default in some of those
+// and not others would push to one place and then keep a different one alive, which is the kind of
+// mismatch that only shows up a retention window later.
+func (r *ImageBuildReconciler) repositoryFor(obj *ociv1alpha1.ImageBuild) string {
+	if !usesDefaultRepository(obj) {
+		return obj.Spec.Push.Repository
+	}
+	if !r.Default.Configured() {
+		return ""
+	}
+	return r.Default.RepositoryFor(obj.Namespace, obj.Name)
 }

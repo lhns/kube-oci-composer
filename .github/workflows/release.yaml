@@ -167,11 +167,6 @@ jobs:
             --app-version "${{ steps.version.outputs.version }}" \
             --destination bin/
           helm push bin/kube-oci-composer-*.tgz oci://ghcr.io/lhns/charts
-          helm package charts/kube-oci-builder \
-            --version "${{ steps.version.outputs.version }}" \
-            --app-version "${{ steps.version.outputs.version }}" \
-            --destination bin/
-          helm push bin/kube-oci-builder-*.tgz oci://ghcr.io/lhns/charts
 
       - name: Publish the release manifests
         run: |

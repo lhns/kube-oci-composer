@@ -154,7 +154,7 @@ rm -rf "$staging"
 
 // buildctlArgs assembles the buildctl invocation. Split out because it is the part that decides
 // what gets built, and the only part the argv tests read.
-func buildctlArgs(obj *ociv1alpha1.ImageBuild, cfg JobConfig, cacheAvailable bool) []string {
+func buildctlArgs(obj *ociv1alpha1.ImageBuild, cfg JobConfig, repo string, cacheAvailable bool) []string {
 	spec := obj.Spec
 	args := []string{
 		"build",
@@ -197,12 +197,12 @@ func buildctlArgs(obj *ociv1alpha1.ImageBuild, cfg JobConfig, cacheAvailable boo
 	// registry is the kind of divergence the rest of this work has been removing. The Docker types
 	// were never chosen here; they were BuildKit's default and nothing had contradicted it.
 	args = append(args, "--output",
-		"type=image,name="+pushNames(obj)+",push=true,rewrite-timestamp=true,oci-mediatypes=true"+
-			insecureAttr(obj.Spec.Push, cfg.InsecureRegistries))
+		"type=image,name="+pushNames(obj, repo)+",push=true,rewrite-timestamp=true,oci-mediatypes=true"+
+			insecureAttr(repo, cfg.InsecureRegistries))
 	args = append(args, "--opt", "build-arg:SOURCE_DATE_EPOCH="+cfg.SourceDateEpoch)
 
-	if cacheRef := cacheRefFor(obj); cacheRef != "" {
-		insecure := insecureAttr(obj.Spec.Push, cfg.InsecureRegistries)
+	if cacheRef := cacheRefFor(obj, repo); cacheRef != "" {
+		insecure := insecureAttr(repo, cfg.InsecureRegistries)
 		// Import ONLY when the cache reference actually resolves. BuildKit configures the registry
 		// cache importer eagerly, and a reference it cannot resolve is a fatal error rather than a
 		// warning -- so passing this unconditionally fails every build whose cache does not exist
@@ -233,8 +233,8 @@ func buildctlArgs(obj *ociv1alpha1.ImageBuild, cfg JobConfig, cacheAvailable boo
 //
 // Matched on host rather than applied globally, so naming one internal registry does not quietly
 // downgrade every other push the same controller makes.
-func insecureAttr(push *ociv1alpha1.Push, insecure []string) string {
-	if push == nil || !insecureHost(push.Repository, insecure) {
+func insecureAttr(repository string, insecure []string) string {
+	if repository == "" || !insecureHost(repository, insecure) {
 		return ""
 	}
 	return ",registry.insecure=true"
@@ -294,10 +294,10 @@ func buildVolumes(spec ociv1alpha1.ImageBuildSpec) ([]corev1.Volume, []corev1.Vo
 
 // buildJob renders the Job for one build.
 func buildJob(obj *ociv1alpha1.ImageBuild, inputHash, contextURL string, cfg JobConfig,
-	cacheAvailable bool) *batchv1.Job {
+	repo string, cacheAvailable bool) *batchv1.Job {
 
 	spec := obj.Spec
-	args := buildctlArgs(obj, cfg, cacheAvailable)
+	args := buildctlArgs(obj, cfg, repo, cacheAvailable)
 	volumes, mounts := buildVolumes(spec)
 	hasPushSecret := spec.Push != nil && spec.Push.SecretRef != nil
 
@@ -407,11 +407,10 @@ func automount(serviceAccount string) *bool {
 }
 
 // pushNames renders the comma-separated image names the exporter pushes to.
-func pushNames(obj *ociv1alpha1.ImageBuild) string {
-	if obj.Spec.Push == nil {
+func pushNames(obj *ociv1alpha1.ImageBuild, repo string) string {
+	if repo == "" {
 		return ""
 	}
-	repo := obj.Spec.Push.Repository
 	// EffectiveTags folds in whatever push.ref carries, so a generator that retags through a
 	// kustomize images transformer reaches the build the same way it reaches a composition. An
 	// invalid ref is caught during resolution, before a Job exists, so it cannot arrive here.
@@ -429,7 +428,7 @@ func pushNames(obj *ociv1alpha1.ImageBuild) string {
 // cacheRefFor returns where this object's build cache lives, or "" when caching is disabled.
 //
 // Always per-object; nothing shares one. See the doc on BuildCache.Ref for why.
-func cacheRefFor(obj *ociv1alpha1.ImageBuild) string {
+func cacheRefFor(obj *ociv1alpha1.ImageBuild, repo string) string {
 	cache := obj.Spec.Cache
 	if cache != nil && cache.Mode == "Disabled" {
 		return ""
@@ -437,8 +436,8 @@ func cacheRefFor(obj *ociv1alpha1.ImageBuild) string {
 	if cache != nil && cache.Ref != "" {
 		return cache.Ref
 	}
-	if obj.Spec.Push == nil {
+	if repo == "" {
 		return ""
 	}
-	return fmt.Sprintf("%s-buildcache-%s-%s", obj.Spec.Push.Repository, obj.Namespace, obj.Name)
+	return fmt.Sprintf("%s-buildcache-%s-%s", repo, obj.Namespace, obj.Name)
 }

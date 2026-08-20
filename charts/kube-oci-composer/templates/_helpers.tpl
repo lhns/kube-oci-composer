@@ -45,3 +45,114 @@ disagree.
 {{- define "kube-oci-composer.port" -}}
 {{- regexReplaceAll "^.*:" . "" -}}
 {{- end -}}
+
+{{/*
+Selector labels for ONE component of this chart.
+
+Three workloads now share a release -- the composer, the builder and the registry -- and
+`selectorLabels` alone does not tell them apart. Without this, every Service in the chart selects
+every pod in the release: the registry pod was backing the composer's Service purely because it
+carried the same two labels.
+
+Callers pass (dict "ctx" . "component" "composer"). The component name is part of the SELECTOR, so
+it cannot be changed on a live release without recreating the Deployment -- selectors are immutable.
+*/}}
+{{- define "kube-oci-composer.componentSelectorLabels" -}}
+{{ include "kube-oci-composer.selectorLabels" .ctx }}
+app.kubernetes.io/component: {{ .component }}
+{{- end -}}
+
+{{- define "kube-oci-composer.componentLabels" -}}
+{{ include "kube-oci-composer.labels" .ctx }}
+app.kubernetes.io/component: {{ .component }}
+{{- end -}}
+
+{{/*
+The builder's names. A separate ServiceAccount and a separate Role, in the same namespace: merging
+the charts must not merge the PERMISSIONS. The builder's role can create Jobs -- that is, run
+arbitrary containers -- and the composer's cannot create a single object. See ADR 0025.
+*/}}
+{{- define "kube-oci-composer.builderFullname" -}}
+{{- printf "%s-builder" (include "kube-oci-composer.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "kube-oci-composer.builderServiceAccountName" -}}
+{{- if .Values.serviceAccount.create -}}
+{{- default (include "kube-oci-composer.builderFullname" .) .Values.imageBuild.serviceAccountName -}}
+{{- else -}}
+{{- default "default" .Values.imageBuild.serviceAccountName -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+The registry's names, and the host the controllers push to.
+
+defaultRegistry.host wins when set -- that is the bring-your-own case. Otherwise it is the bundled
+zot's in-cluster Service DNS, which is what the CONTROLLERS use. Workloads pulling need a
+node-resolvable name instead (registry.host); containerd resolves image references with the node's
+resolver, which cannot see cluster DNS.
+*/}}
+{{- define "kube-oci-composer.registryFullname" -}}
+{{- printf "%s-registry" (include "kube-oci-composer.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "kube-oci-composer.defaultRegistry" -}}
+{{- if .Values.defaultRegistry.host -}}
+{{- .Values.defaultRegistry.host -}}
+{{- else if .Values.registry.enabled -}}
+{{- printf "%s.%s.svc.cluster.local:%d" (include "kube-oci-composer.registryFullname" .) .Release.Namespace (int .Values.registry.service.port) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+The Secret holding the push credential both controllers read from their own namespace.
+*/}}
+{{- define "kube-oci-composer.pushSecretName" -}}
+{{- if .Values.defaultRegistry.existingPushSecret -}}
+{{- .Values.defaultRegistry.existingPushSecret -}}
+{{- else if .Values.registry.enabled -}}
+{{- printf "%s-push" (include "kube-oci-composer.registryFullname" .) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+The generated registry password, stable across upgrades.
+
+Reuses the value already in the cluster when there is one, so `helm upgrade` does not roll a new
+password and lock the controllers out of every image they have published. `lookup` returns nothing
+during `helm template` and `--dry-run`, which is why the generated branch has to be deterministic
+enough to render -- it is only ever WRITTEN on a real install.
+*/}}
+{{- define "kube-oci-composer.registryPassword" -}}
+{{- if .Values.registry.auth.password -}}
+{{- .Values.registry.auth.password -}}
+{{- else -}}
+{{- $name := printf "%s-push" (include "kube-oci-composer.registryFullname" .) -}}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $name -}}
+{{- if and $existing $existing.data (index $existing.data "password") -}}
+{{- index $existing.data "password" | b64dec -}}
+{{- else -}}
+{{- randAlphaNum 32 -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Hosts the controllers may reach over plain HTTP.
+
+The bundled registry is added automatically. It serves HTTP inside the cluster -- there is no
+certificate for a .svc.cluster.local name and terminating TLS for one would mean managing a CA -- so
+without this every push to it fails in the TLS handshake, on a default install, with an error that
+points at the registry rather than at the missing flag.
+
+Matched on host, so naming it does not downgrade any other registry the same controller talks to.
+*/}}
+{{- define "kube-oci-composer.insecureRegistries" -}}
+{{- $hosts := list -}}
+{{- with .Values.operator.insecureRegistry }}{{- $hosts = concat $hosts (splitList "," .) -}}{{- end -}}
+{{- if and .Values.registry.enabled (not .Values.defaultRegistry.host) -}}
+{{- $hosts = append $hosts (include "kube-oci-composer.defaultRegistry" .) -}}
+{{- end -}}
+{{- with .Values.defaultRegistry.insecure }}{{- $hosts = concat $hosts (splitList "," .) -}}{{- end -}}
+{{- join "," (compact $hosts) -}}
+{{- end -}}

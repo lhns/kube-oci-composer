@@ -208,14 +208,32 @@ artifacts have been rebuilt, rather than answering 404 and putting workloads int
 
 ## Install
 
+One chart, one namespace, three components — the composer, the builder, and a registry for them to
+publish into. All on by default, so this is a complete, entirely local system:
+
 ```console
-helm install kube-oci-composer oci://ghcr.io/lhns/charts/kube-oci-composer \
-  --namespace oci-composer --create-namespace \
-  --set operator.servingHost=oci.example.com
+helm install kube-oci-composer oci://ghcr.io/lhns/charts/kube-oci-composer   --namespace oci-composer --create-namespace   --set registry.host=oci.example.com
 ```
 
-`operator.servingHost` is required unless every `ImageComposition` sets `spec.push`: it is what
-`status.artifact.ref` is built from, so it must match how the Service is exposed.
+**`registry.host` is the name your NODES resolve to the bundled registry**, and it is what
+`status.artifact.ref` is built from. Controllers push over cluster DNS and need nothing; a Pod
+pulling is a different matter, because containerd resolves image references with the node's resolver
+and cannot see `.svc.cluster.local`. Expose the registry with an ingress, or a NodePort plus a
+`certs.d` drop-in — [docs/registry.md](docs/registry.md) has both.
+
+Turn pieces off as needed:
+
+```console
+  --set imageBuild.enabled=false     # no Dockerfile builds, and no Job-creating RBAC
+  --set registry.enabled=false       # bring your own registry:
+  --set defaultRegistry.host=ghcr.io/me
+  --set defaultRegistry.existingPushSecret=my-creds
+```
+
+**`imageBuild.enabled` deserves a moment.** Its controller creates Jobs, which is the ability to run
+arbitrary containers in that namespace — the reason it used to be a separate chart you opted into.
+Turning it off removes the controller *and* its RBAC, so the capability is gone rather than unused.
+See [ADR 0033](docs/adr/0033-one-chart-one-namespace.md).
 
 ## Status
 
@@ -243,12 +261,8 @@ component you install on purpose, never a layer verb, so `kind: ImageComposition
 exactly which guarantee you have. [ADR 0025](docs/adr/0025-dockerfile-builds-as-a-second-kind.md)
 records what that costs, and is candid that the case for it is not yet proven.
 
-```console
-# Installing the composer does NOT install this. Its role can create Jobs — that is, run
-# arbitrary containers — which is exactly why it is a separate thing you opt into.
-helm install kube-oci-builder oci://ghcr.io/lhns/charts/kube-oci-builder \
-  --namespace oci-builder --create-namespace
-```
+It ships in the same chart, enabled by default, and its controller can create Jobs — that is, run
+arbitrary containers. `--set imageBuild.enabled=false` removes it and its RBAC together.
 
 ```yaml
 apiVersion: oci.lhns.de/v1alpha1
@@ -258,7 +272,10 @@ spec:
   context: {kind: GitRepository, name: app-src}   # digest resolved by source-controller
   dockerfile: Dockerfile
   platforms: [linux/amd64]
-  push: {repository: ghcr.io/me/app, tags: [v1]}
+  # push is optional: omitted, this publishes to the operator's registry as
+  # <default-registry>/<namespace>/app. Name a repository to publish elsewhere, and
+  # supply your own secretRef with it — the operator's credential is never sent to a
+  # registry an object chose for itself (ADR 0034).
 ```
 
 Every `FROM` must be pinned by digest, and the build runs rootless in its own Job under a service

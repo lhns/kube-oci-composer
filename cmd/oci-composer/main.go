@@ -25,6 +25,7 @@ import (
 	"github.com/lhns/kube-oci-composer/internal/cache"
 	"github.com/lhns/kube-oci-composer/internal/controller"
 	gcpkg "github.com/lhns/kube-oci-composer/internal/gc"
+	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 	"github.com/lhns/kube-oci-composer/internal/retention"
 	"github.com/lhns/kube-oci-composer/internal/serve"
 	"github.com/lhns/kube-oci-composer/internal/store"
@@ -89,6 +90,8 @@ func main() {
 		gcGrace               time.Duration
 		refreshInterval       time.Duration
 		insecureRegs          string
+		defaultRegistry       string
+		defaultPushSecret     string
 		keepBuilds            int
 		gcKeepBuilds          int
 		gcDryRun              bool
@@ -147,6 +150,19 @@ func main() {
 			"guarantee, not either number, and the default assumes a window of 30 days. Refreshing "+
 			"only reads: it needs no write or delete permission and can destroy nothing. See "+
 			"ADR 0031.")
+	flag.StringVar(&defaultRegistry, "default-registry", "",
+		"Registry to publish to when an object names no repository of its own, as "+
+			"\"registry.example:5000\" or \"registry.example:5000/prefix\". Objects then publish "+
+			"to <default-registry>/<namespace>/<name>.\n"+
+			"Namespace-qualified deliberately: one registry is shared by the whole cluster, so a "+
+			"bare object name would collide the moment two namespaces both have an \"app\".")
+	flag.StringVar(&defaultPushSecret, "default-push-secret", "",
+		"dockerconfigjson Secret authenticating pushes to --default-registry. Read from THIS "+
+			"controller's namespace (POD_NAMESPACE), not the object's: it is the operator's "+
+			"credential, not a tenant's.\n"+
+			"Used ONLY for objects that named no repository. An object that chooses its own "+
+			"registry authenticates with its own secretRef or not at all -- otherwise anyone able "+
+			"to create an object could point it at a host they control and be handed this password.")
 	flag.StringVar(&insecureRegs, "insecure-registry", "",
 		"Comma-separated registry hosts that may be reached over plain HTTP. Matched on host, so "+
 			"naming one internal registry does not downgrade any other request.")
@@ -313,6 +329,17 @@ func main() {
 		setupLog.Info("standby replay enabled; non-leader replicas will serve pulls")
 	}
 
+	defaults := recon.DefaultRegistry{
+		Host:       defaultRegistry,
+		SecretName: defaultPushSecret,
+		Namespace:  os.Getenv("POD_NAMESPACE"),
+	}
+	if defaults.SecretName != "" && defaults.Namespace == "" {
+		setupLog.Error(nil, "POD_NAMESPACE is unset, so the default push credential cannot be "+
+			"read; set it from the downward API")
+		os.Exit(1)
+	}
+
 	if err := (&controller.ImageCompositionReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
@@ -325,6 +352,7 @@ func main() {
 		Recorder:     mgr.GetEventRecorderFor("imagecomposition-controller"),
 		Server:       server,
 		Readiness:    readiness,
+		Default:      defaults,
 		Cache:        layerCache,
 		HistoryLimit: keepBuilds,
 	}).SetupWithManager(mgr); err != nil {
@@ -363,6 +391,7 @@ func main() {
 			//nolint:staticcheck // SA1019: the new events API has no Event method; same as above.
 			Recorder:           mgr.GetEventRecorderFor("retention"),
 			InsecureRegistries: splitList(insecureRegs),
+			Default:            defaults,
 		}
 		if err := refresher.SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to set up retention refresh")

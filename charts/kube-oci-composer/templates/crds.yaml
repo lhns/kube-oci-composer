@@ -1,0 +1,24 @@
+{{- if .Values.crds.install }}
+{{- /*
+CRDs live in templates/, not in the chart's crds/ directory, and that is a deliberate change.
+
+Helm NEVER upgrades anything in crds/ -- it installs those once and then leaves them alone forever.
+This project changes its CRDs often enough for that to hurt: the DockerBuild -> ImageBuild rename
+needed CRD surgery by hand, and every field added since would have too. Templated CRDs are patched
+by `helm upgrade` like everything else.
+
+Emitted VERBATIM. An earlier version parsed each CRD to inject the keep annotation, and Helm's
+fromYaml/toYaml reflowed every long description in the schema -- harmless, but a schema is the last
+thing to round-trip through a formatter to add one label. The annotation now comes from a
+kubebuilder marker on the Go type, so the generated file is already exactly what should be applied.
+
+Both are installed whatever the component toggles say, and both carry helm.sh/resource-policy: keep.
+Deleting a CRD deletes every object of that kind, so a toggle that could do that by accident -- or
+an uninstall typed in the wrong terminal -- is not a toggle worth having. An unused API costs
+nothing; an evaporated ImageBuild costs content that cannot be rebuilt (ADR 0025).
+*/}}
+{{- range $path, $_ := .Files.Glob "files/crds/*.yaml" }}
+---
+{{ $.Files.Get $path }}
+{{- end }}
+{{- end }}

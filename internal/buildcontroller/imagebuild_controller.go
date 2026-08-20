@@ -39,6 +39,10 @@ type ImageBuildReconciler struct {
 	client.Client
 	JobConfig JobConfig
 
+	// Default is the operator's registry and credential, used by builds that name no repository of
+	// their own. See recon.DefaultRegistry.
+	Default recon.DefaultRegistry
+
 	// Recorder surfaces failures as Events. A build failure's detail lives in the pod's logs,
 	// which vanish with the pod, so the Event is often the only durable trace of why.
 	Recorder record.EventRecorder
@@ -227,7 +231,7 @@ func (r *ImageBuildReconciler) resolveInputs(ctx context.Context, obj *ociv1alph
 		Target:           spec.Target,
 		Network:          spec.Network,
 		CacheMode:        cacheMode,
-		CacheRef:         cacheRefFor(obj),
+		CacheRef:         cacheRefFor(obj, r.repositoryFor(obj)),
 		SourceDateEpoch:  r.JobConfig.SourceDateEpoch,
 		Platforms:        spec.Platforms,
 		Args:             args,
@@ -266,7 +270,7 @@ func (r *ImageBuildReconciler) startBuild(ctx context.Context, obj *ociv1alpha1.
 		return fmt.Errorf("%w", err)
 	}
 
-	job := buildJob(obj, inputHash, contextURL, r.JobConfig, r.cacheAvailable(ctx, obj))
+	job := buildJob(obj, inputHash, contextURL, r.JobConfig, r.repositoryFor(obj), r.cacheAvailable(ctx, obj))
 	if err := ctrl.SetControllerReference(obj, job, r.Scheme()); err != nil {
 		return fmt.Errorf("setting owner: %w", err)
 	}
@@ -387,7 +391,7 @@ func podBuildDigest(p corev1.Pod) string {
 
 // recordSuccess writes the artifact and rotates history.
 func (r *ImageBuildReconciler) recordSuccess(obj *ociv1alpha1.ImageBuild, inputs build.Inputs, inputHash, digest string) {
-	repo := obj.Spec.Push.Repository
+	repo := r.repositoryFor(obj)
 	// Same list the Job was told to push, so status cannot describe a different set of tags than
 	// the build actually wrote.
 	effective, err := recon.EffectiveTags(obj.Spec.Push.GetTags(), obj.Spec.Push.GetRef())

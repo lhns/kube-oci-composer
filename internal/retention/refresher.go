@@ -169,6 +169,9 @@ type Refresher struct {
 	// by deletion, so an Event is not decoration.
 	Recorder record.EventRecorder
 
+	// Default is the operator's registry and credential. See recon.DefaultRegistry.
+	Default recon.DefaultRegistry
+
 	// InsecureRegistries are hosts that may be reached over plain HTTP, matched on host exactly as
 	// the builder matches them, so a host that can be pushed to can also be refreshed.
 	InsecureRegistries []string
@@ -287,14 +290,31 @@ func (r *Refresher) refreshObject(ctx context.Context, target Target, out *Resul
 	obj := target.Object
 	namespace, objName := obj.GetNamespace(), obj.GetName()
 	push := target.Push
-	refs := refsOf(push, target.Artifact, target.History)
+	// Resolved the same way the publish path resolves it, so an object using the default registry
+	// is refreshed rather than silently skipped -- which would look like nothing at all until its
+	// images expired.
+	repo := ""
+	switch {
+	case push != nil && push.Repository != "":
+		repo = push.Repository
+	case r.Default.Configured():
+		repo = r.Default.RepositoryFor(namespace, objName)
+	}
 
-	if push == nil {
-		// Served from the embedded endpoint, whose content this controller owns outright: there is
-		// no external registry to convince of anything.
+	if repo == "" {
+		// Nothing external to convince: served from the embedded endpoint, whose content this
+		// controller owns outright.
+		//
+		// Keyed on the resolved REPOSITORY, not on push being nil. An object with no push block
+		// still publishes -- to the operator's default registry -- and skipping those would stop
+		// refreshing exactly the objects a default install creates, silently, with the symptom
+		// arriving one retention window later. That is condition 2's failure wearing a different
+		// hat.
 		out.Unsupported++
 		return
 	}
+
+	refs := refsOf(repo, target.Artifact, target.History)
 	if len(refs) == 0 {
 		return
 	}
@@ -308,7 +328,7 @@ func (r *Refresher) refreshObject(ctx context.Context, target Target, out *Resul
 		return
 	}
 	var refOpts []name.Option
-	if insecureHost(push.Repository, r.InsecureRegistries) {
+	if insecureHost(repo, r.InsecureRegistries) {
 		refOpts = append(refOpts, name.Insecure)
 	}
 
@@ -393,13 +413,13 @@ func (r *Refresher) clearFailure(namespace, objName string) {
 //
 // Sourced from status.history plus status.artifact, because history is the retention record and the
 // current artifact may not be in it yet.
-func refsOf(push *ociv1alpha1.Push, artifact *ociv1alpha1.ArtifactStatus,
+func refsOf(repository string, artifact *ociv1alpha1.ArtifactStatus,
 	history []ociv1alpha1.BuildRecord) []string {
 
-	if push == nil || push.Repository == "" {
+	repo := repository
+	if repo == "" {
 		return nil
 	}
-	repo := push.Repository
 
 	seen := map[string]struct{}{}
 	var refs []string
@@ -458,12 +478,21 @@ func qualify(repo, tag string) string {
 // what to put in that Secret.
 func (r *Refresher) remoteOptions(ctx context.Context, namespace string, push *ociv1alpha1.Push) ([]remote.Option, error) {
 	opts := []remote.Option{remote.WithContext(ctx)}
-	if push.SecretRef == nil {
+
+	var ownRef string
+	if push != nil && push.SecretRef != nil {
+		ownRef = push.SecretRef.Name
+	}
+	// Same rule as the publish path: the operator's credential only ever reaches the operator's own
+	// registry. Refreshing reads, so the blast radius is smaller -- but a credential sent to a host
+	// a tenant chose is exfiltrated whether the request that carries it reads or writes.
+	name, ns := r.Default.CredentialFor(namespace, ownRef, push == nil || push.Repository == "")
+	if name == "" {
 		return append(opts, remote.WithAuth(authn.Anonymous)), nil
 	}
 
 	var secret corev1.Secret
-	key := types.NamespacedName{Namespace: namespace, Name: push.SecretRef.Name}
+	key := types.NamespacedName{Namespace: ns, Name: name}
 	if err := r.Get(ctx, key, &secret); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, fmt.Errorf("secret %s not found", key)

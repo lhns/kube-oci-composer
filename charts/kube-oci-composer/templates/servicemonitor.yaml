@@ -1,3 +1,4 @@
+{{- if .Values.imageComposition.enabled }}
 {{- if .Values.metrics.serviceMonitor.enabled }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
@@ -12,8 +13,9 @@ metadata:
 spec:
   selector:
     matchLabels:
-      {{- include "kube-oci-composer.selectorLabels" . | nindent 6 }}
+      {{- include "kube-oci-composer.componentSelectorLabels" (dict "ctx" . "component" "composer") | nindent 6 }}
   endpoints:
     - port: metrics
       interval: {{ .Values.metrics.serviceMonitor.interval }}
+{{- end }}
 {{- end }}

@@ -160,8 +160,78 @@ operator:
 # convenience -- artifacts rebuild from their specs. For ImageBuild the registry is a SYSTEM OF
 # RECORD, because a rebuild may not reproduce the digest, so losing this volume loses those images.
 # See docs/registry.md.
+# Custom resource definitions.
+#
+# Installed from templates/ rather than crds/, so `helm upgrade` actually applies CRD changes --
+# Helm installs crds/ once and never touches it again. Both CRDs are annotated
+# helm.sh/resource-policy: keep, so nothing here can delete one: deleting a CRD deletes every object
+# of that kind.
+#
+# Set false when something else owns them (a GitOps CRD sync, or a cluster where CRDs are applied by
+# an administrator).
+crds:
+  install: true
+
+# Which components this release runs. All on by default: one install gives a working, entirely
+# local system -- a composer, a builder and a registry for them to publish into.
+#
+# imageBuild is the one worth a second thought. Its controller creates Jobs, which is the ability to
+# run arbitrary containers in this namespace; that is why it used to be a separate chart you opted
+# into (ADR 0025). Turning it off here removes its Deployment AND its RBAC, so the capability is
+# genuinely gone rather than merely unused.
+imageComposition:
+  enabled: true
+
+imageBuild:
+  enabled: true
+  replicaCount: 1
+
+  image:
+    repository: ghcr.io/lhns/kube-oci-builder
+    # Defaults to the chart's appVersion.
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  # Both images are part of every build's input hash, so a floating tag would let an upgraded
+  # builder change output without changing the hash. The chart refuses to render an unpinned one.
+  buildkitImage: "moby/buildkit:v0.17.2-rootless@sha256:5b45405a38c579692f6fcd47ceef2002fe4fa61bb04ef0c2c644cf74cbbd57b8"
+  dockerfileFrontend: "docker/dockerfile:1.12.1@sha256:93bfd3b68c109427185cd78b4779fc82b484b0b7618e36d0f104d4d801e66d25"
+
+  # Its own bind addresses: this is a second pod in the same namespace, not the composer.
+  metricsBindAddress: ":8080"
+  healthProbeBindAddress: ":8081"
+
+  sourceDateEpoch: "0"
+  insecureRegistry: ""
+  keepBuilds: 10
+  leaderElect: true
+  serviceAccountName: ""
+
+  retention:
+    refreshInterval: 1h
+
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {memory: 512Mi}
+
+# Where objects publish when they do not name a repository themselves.
+#
+# Empty and registry.enabled -- the default -- means the bundled registry, addressed by its
+# in-cluster Service DNS. Set `host` to publish into a registry you already run, and pair it with
+# `existingPushSecret`; then set registry.enabled=false and nothing zot-related is installed.
+#
+# The credential named here is read from the CONTROLLER's namespace, and is used ONLY for objects
+# that did not name their own repository. An object naming its own target uses its own secretRef or
+# nothing -- the operator's credential is never sent to a registry a tenant chose.
+defaultRegistry:
+  host: ""
+  existingPushSecret: ""
+  # Extra hosts reachable over plain HTTP, comma separated. The bundled registry is added
+  # automatically; this is for a BYO registry without TLS.
+  insecure: ""
+
 registry:
-  enabled: false
+  enabled: true
 
   # Pinned by digest, like every other image this project consumes.
   image: ghcr.io/project-zot/zot:v2.1.20@sha256:542e25be4d32e7879c0cfad93492a93c81b1e059cbd2d30d485d4bd567318234
@@ -182,18 +252,40 @@ registry:
     # Log what would be reclaimed and reclaim nothing. Useful when first tuning the window.
     dryRun: false
 
-  # Anonymous read, authenticated write -- enforced by the registry itself, with no proxy in front.
+  # Anonymous read, authenticated WRITE, enforced by the registry itself with no proxy in front.
   #
-  # Leave secretName empty and the registry accepts writes from anything that can reach the Service;
-  # acceptable only when a NetworkPolicy is doing that job instead. To enable auth, create an
-  # htpasswd Secret and give the controllers a dockerconfigjson Secret with the same credentials via
-  # spec.push.secretRef:
+  # Reads are open in the cluster, exactly as the embedded serving endpoint's were: a kubelet pulls
+  # without credentials, so anything else breaks image pulls. Restricting who may pull is a
+  # NetworkPolicy question, not this registry's.
   #
-  #   htpasswd -bBn composer "$PASSWORD" > htpasswd
-  #   kubectl create secret generic registry-htpasswd --from-file=htpasswd
+  # The password is GENERATED at install and reused on upgrade. Nothing to create by hand: the chart
+  # writes both halves -- the htpasswd zot authenticates against, and the dockerconfigjson both
+  # controllers push with.
   auth:
-    secretName: ""
+    enabled: true
     username: composer
+    # Pin the password instead of generating one. Needed if you manage Secrets out of band, or if
+    # your GitOps tool refuses to leave chart-generated state in the cluster.
+    password: ""
+
+  # How the registry is reached.
+  #
+  # The CONTROLLERS always use in-cluster DNS, which needs nothing here. This is about WORKLOADS:
+  # containerd resolves image references with the node's resolver, which cannot see cluster DNS, so
+  # a Pod cannot pull from a .svc.cluster.local name however healthy the Service is.
+  #
+  # NodePort plus a containerd certs.d drop-in mapping `host` to that port is the arrangement that
+  # works without an ingress controller or a certificate. See docs/registry.md.
+  service:
+    type: ClusterIP
+    port: 5000
+    nodePort: ""
+
+  # The hostname workloads pull from, and what status.artifact.ref reports.
+  #
+  # Leave empty and references name the in-cluster Service -- correct for the controllers, and NOT
+  # pullable by a kubelet. Set it to whatever name your nodes resolve to this registry.
+  host: ""
 
   persistence:
     # ON by default, unlike most optional components here, and for one reason: an ImageBuild's output

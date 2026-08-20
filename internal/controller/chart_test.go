@@ -114,8 +114,11 @@ func TestChartFlagsMatchTheBinary(t *testing.T) {
 	)
 
 	known := knownFlags(t, "../../cmd/oci-composer")
+
+	// Scoped to the COMPOSER's container. One chart renders both controllers, so scanning the whole
+	// document would check the builder's flags against the composer's binary.
 	var seen int
-	for _, line := range strings.Split(out, "\n") {
+	for _, line := range strings.Split(containerArgs(t, out, "test-release-kube-oci-composer"), "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "- --") {
 			continue
@@ -363,4 +366,165 @@ func TestChartAllowsSharedStorageWithAVolume(t *testing.T) {
 		"--set", "operator.s3.endpoint=https://s3.test",
 		"--set", "operator.s3.bucket=blobs",
 		"--set", "operator.servingHost=oci.test")
+}
+
+// TestEachServiceSelectsOnlyItsOwnComponent — one chart now deploys three workloads into one
+// namespace, and this is the bug that shipped when the registry was added.
+//
+// Every pod carried the chart's two selector labels and nothing else, so the composer's Service
+// selected the registry pod as well: a pull routed to the wrong container, from a Service that
+// reports itself perfectly healthy. Harmless while the registry was off by default; shipping it on
+// would have made it everyone's default.
+func TestEachServiceSelectsOnlyItsOwnComponent(t *testing.T) {
+	out := render(t)
+
+	pods := podLabelsByWorkload(t, out)
+	if len(pods) < 2 {
+		t.Fatalf("expected several workloads, found %d; the assertion proves nothing", len(pods))
+	}
+
+	for svc, selector := range serviceSelectors(t, out) {
+		var matched []string
+		for workload, labels := range pods {
+			if selects(selector, labels) {
+				matched = append(matched, workload)
+			}
+		}
+		if len(matched) != 1 {
+			t.Errorf("Service %s selects %v. A selector that matches more than one workload sends "+
+				"traffic to whichever pod answers first, and looks healthy while doing it.",
+				svc, matched)
+		}
+	}
+}
+
+// TestBothControllersAreWiredToTheDefaultRegistry — the point of bundling one. If either controller
+// misses the flags, objects that name no repository sit Pending forever with a message about
+// configuration rather than about themselves.
+func TestBothControllersAreWiredToTheDefaultRegistry(t *testing.T) {
+	out := render(t)
+
+	for _, deployment := range []string{
+		"test-release-kube-oci-composer",
+		"test-release-kube-oci-composer-builder",
+	} {
+		args := containerArgs(t, out, deployment)
+		for _, want := range []string{"--default-registry=", "--default-push-secret=", "--insecure-registry="} {
+			if !strings.Contains(args, want) {
+				t.Errorf("%s does not render %s; objects using the default registry would not "+
+					"publish\nargs:\n%s", deployment, want, args)
+			}
+		}
+	}
+}
+
+// TestTheGeneratedCredentialMatchesTheRegistrysHtpasswd — two Secrets rendered from one password.
+// If they drift, every push is rejected by a registry the chart itself installed.
+func TestTheGeneratedCredentialMatchesTheRegistrysHtpasswd(t *testing.T) {
+	out := render(t)
+
+	push := documentNamed(t, out, "Secret", "test-release-kube-oci-composer-registry-push")
+	htpasswd := documentNamed(t, out, "Secret", "test-release-kube-oci-composer-registry-htpasswd")
+
+	user := "composer"
+	if !strings.Contains(htpasswd, user+":$2a$") {
+		t.Errorf("the htpasswd entry is not a bcrypt hash for %q:\n%s", user, htpasswd)
+	}
+	if !strings.Contains(push, `\"username\":\"`+user+`\"`) && !strings.Contains(push, `"username":"`+user+`"`) {
+		t.Errorf("the push credential is not for %q:\n%s", user, push)
+	}
+	// The registry must actually require it, or the generated credential is decoration and the
+	// write path is open to anything that can reach the Service.
+	config := documentNamed(t, out, "ConfigMap", "test-release-kube-oci-composer-registry")
+	for _, want := range []string{"htpasswd", "anonymousPolicy", `"read"`} {
+		if !strings.Contains(config, want) {
+			t.Errorf("the registry config does not mention %s; anonymous-read/authenticated-write "+
+				"is not actually configured", want)
+		}
+	}
+}
+
+// podLabelsByWorkload returns each Deployment's pod-template labels, keyed by workload name.
+func podLabelsByWorkload(t *testing.T, rendered string) map[string]map[string]string {
+	t.Helper()
+
+	out := map[string]map[string]string{}
+	for _, doc := range strings.Split(rendered, "\n---\n") {
+		var d struct {
+			Kind     string `json:"kind"`
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+			Spec struct {
+				Template struct {
+					Metadata struct {
+						Labels map[string]string `json:"labels"`
+					} `json:"metadata"`
+				} `json:"template"`
+			} `json:"spec"`
+		}
+		if err := yaml.Unmarshal([]byte(doc), &d); err != nil || d.Kind != "Deployment" {
+			continue
+		}
+		out[d.Metadata.Name] = d.Spec.Template.Metadata.Labels
+	}
+	return out
+}
+
+// serviceSelectors returns each Service's selector, keyed by Service name.
+func serviceSelectors(t *testing.T, rendered string) map[string]map[string]string {
+	t.Helper()
+
+	out := map[string]map[string]string{}
+	for _, doc := range strings.Split(rendered, "\n---\n") {
+		var d struct {
+			Kind     string `json:"kind"`
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+			Spec struct {
+				Selector map[string]string `json:"selector"`
+			} `json:"spec"`
+		}
+		if err := yaml.Unmarshal([]byte(doc), &d); err != nil || d.Kind != "Service" {
+			continue
+		}
+		if len(d.Spec.Selector) > 0 {
+			out[d.Metadata.Name] = d.Spec.Selector
+		}
+	}
+	return out
+}
+
+// selects reports whether a Service selector matches a set of pod labels, by Kubernetes' rule: every
+// selector entry must be present and equal.
+func selects(selector, labels map[string]string) bool {
+	for k, v := range selector {
+		if labels[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// documentNamed returns the single rendered document of a kind and name.
+func documentNamed(t *testing.T, rendered, kind, name string) string {
+	t.Helper()
+
+	for _, doc := range strings.Split(rendered, "\n---\n") {
+		var d struct {
+			Kind     string `json:"kind"`
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+		}
+		if err := yaml.Unmarshal([]byte(doc), &d); err != nil {
+			continue
+		}
+		if d.Kind == kind && d.Metadata.Name == name {
+			return doc
+		}
+	}
+	t.Fatalf("no %s named %s in the rendered output", kind, name)
+	return ""
 }
