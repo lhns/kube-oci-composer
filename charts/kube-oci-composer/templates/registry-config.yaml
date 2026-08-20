@@ -35,7 +35,7 @@ data:
           "dryRun": {{ .Values.registry.retention.dryRun }},
           "policies": [
             {
-              "repositories": ["**"],
+              "repositories": {{ toJson .Values.registry.retention.repositories }},
               "deleteUntagged": true,
               "keepTags": [
                 { "patterns": [".*"], "pulledWithin": {{ .Values.registry.retention.window | quote }} }

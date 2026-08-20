@@ -92,6 +92,13 @@ zot's in-cluster Service DNS, which is what the CONTROLLERS use. Workloads pulli
 node-resolvable name instead (registry.host); containerd resolves image references with the node's
 resolver, which cannot see cluster DNS.
 */}}
+{{- /*
+ONE host string, used for both the push and the reference recorded in status.
+It has to be one string: the controller writes to it and a workload pulls the same reference back.
+registry.host wins when set, so status.artifact.ref names something a node can resolve; unset, it
+falls back to the Service DNS, which works for the controllers and NOT for pulls -- which is why the
+chart warns about it at install time.
+*/}}
 {{- define "kube-oci-composer.registryFullname" -}}
 {{- printf "%s-registry" (include "kube-oci-composer.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
@@ -99,6 +106,8 @@ resolver, which cannot see cluster DNS.
 {{- define "kube-oci-composer.defaultRegistry" -}}
 {{- if .Values.defaultRegistry.host -}}
 {{- .Values.defaultRegistry.host -}}
+{{- else if and .Values.registry.enabled .Values.registry.host -}}
+{{- .Values.registry.host -}}
 {{- else if .Values.registry.enabled -}}
 {{- printf "%s.%s.svc.cluster.local:%d" (include "kube-oci-composer.registryFullname" .) .Release.Namespace (int .Values.registry.service.port) -}}
 {{- end -}}
@@ -150,7 +159,14 @@ Matched on host, so naming it does not downgrade any other registry the same con
 {{- define "kube-oci-composer.insecureRegistries" -}}
 {{- $hosts := list -}}
 {{- with .Values.operator.insecureRegistry }}{{- $hosts = concat $hosts (splitList "," .) -}}{{- end -}}
-{{- if and .Values.registry.enabled (not .Values.defaultRegistry.host) -}}
+{{- /*
+ONLY the in-cluster Service name is added automatically. That one is always plain HTTP -- there is
+no certificate for a .svc.cluster.local name and no way to get one.
+registry.host is deliberately NOT added: it may well be an ingress terminating TLS, and marking it
+insecure would force plain HTTP and break the very deployment that took the trouble to set it up.
+A plain-HTTP registry.host (a NodePort, say) opts in through defaultRegistry.insecure.
+*/}}
+{{- if and .Values.registry.enabled (not .Values.defaultRegistry.host) (not .Values.registry.host) -}}
 {{- $hosts = append $hosts (include "kube-oci-composer.defaultRegistry" .) -}}
 {{- end -}}
 {{- with .Values.defaultRegistry.insecure }}{{- $hosts = concat $hosts (splitList "," .) -}}{{- end -}}

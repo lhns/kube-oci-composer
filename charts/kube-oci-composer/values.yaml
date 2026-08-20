@@ -226,8 +226,13 @@ imageBuild:
 defaultRegistry:
   host: ""
   existingPushSecret: ""
-  # Extra hosts reachable over plain HTTP, comma separated. The bundled registry is added
-  # automatically; this is for a BYO registry without TLS.
+  # Extra hosts reachable over plain HTTP, comma separated.
+  #
+  # The bundled registry's in-cluster Service name is added automatically -- it is always plain HTTP.
+  # `registry.host` is NOT, because it may be an ingress terminating TLS and forcing HTTP would break
+  # it. Set this when registry.host is plain HTTP, which a NodePort is:
+  #
+  #   defaultRegistry.insecure: oci.internal:5000
   insecure: ""
 
 registry:
@@ -239,6 +244,13 @@ registry:
   # Retention. The controllers keep live images alive by re-pulling them; this is the other half of
   # that bargain, and the two have to be set together.
   retention:
+    # Which repositories the policy governs. Everything, by default.
+    #
+    # A repository matching no policy is never collected, which is a useful escape hatch: scope this
+    # and anything outside it is kept forever. That is how the e2e compresses the window to seconds
+    # without collecting the images its other tests are using.
+    repositories: ["**"]
+
     # How long an image survives without being pulled.
     #
     # MUST stay much longer than operator.retention.refreshInterval. The RATIO is the guarantee, not

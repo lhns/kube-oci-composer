@@ -43,40 +43,61 @@ for node in $(kind get nodes --name "$CLUSTER"); do
 EOF
 done
 
+BUILDER_IMG="${BUILDER_IMG:-ghcr.io/lhns/kube-oci-builder:e2e}"
+
+# The registry builds publish to, addressed by its own in-cluster Service.
+#
+# Deliberately NOT $SERVING_HOST: that name is already mapped by the containerd drop-in to the
+# composer's NodePort, so sharing it would route registry pulls to the serving endpoint. Nothing in
+# the suite pulls a BUILT image with a Pod -- the assertions curl the registry from inside the
+# cluster -- so the Service name is all that is needed, and it is plain HTTP, which the chart marks
+# insecure automatically.
+E2E_REGISTRY="kube-oci-composer-registry.oci-composer.svc.cluster.local:5000"
+
 make docker-build IMG="$IMG"
 kind load docker-image "$IMG" --name "$CLUSTER"
 
 kubectl apply -f config/crd/bases
 
+# ONE chart, all three components (ADR 0033). The registry it installs is the one everything
+# publishes to -- no hand-rolled fixture registry any more, so the e2e exercises the deployment an
+# operator actually gets.
+#
+# The retention policy is compressed to a 30s window against a 5s refresh -- a margin of 6, where a
+# deployment runs 30 days against 1h for 720. It is SCOPED to keepalive-* repositories, because a
+# repository matching no policy is never collected: that keeps every other test's images safe from a
+# window measured in seconds while the retention tests still get to watch something expire.
 helm upgrade --install kube-oci-composer charts/kube-oci-composer \
   --namespace oci-composer --create-namespace \
   --set image.repository="${IMG%:*}" \
   --set image.tag="${IMG##*:}" \
   --set image.pullPolicy=Never \
+  --set imageBuild.image.repository="${BUILDER_IMG%:*}" \
+  --set imageBuild.image.tag="${BUILDER_IMG##*:}" \
+  --set imageBuild.image.pullPolicy=Never \
   --set operator.servingHost="$SERVING_HOST" \
   --set service.type=NodePort \
   --set service.nodePort="$NODE_PORT" \
+  --set registry.host="$E2E_REGISTRY" \
+  --set defaultRegistry.insecure="$E2E_REGISTRY" \
+  --set 'registry.retention.repositories={keepalive-*,keepalive-**}' \
+  --set registry.retention.window=30s \
+  --set registry.retention.gcInterval=10s \
+  --set registry.retention.gcDelay=1s \
+  --set registry.logLevel=debug \
+  --set operator.retention.refreshInterval=5s \
+  --set imageBuild.retention.refreshInterval=5s \
   --wait --timeout 5m
 
 kubectl -n oci-composer rollout status deploy/kube-oci-composer --timeout=5m
 
-# --- ImageBuild ------------------------------------------------------------------------------
+# --- ImageBuild fixtures ----------------------------------------------------------------------
 #
-# The builder is a SECOND component with its own chart and RBAC (ADR 0004), so it is installed
-# separately here exactly as an operator would install it.
-#
-# Its prerequisites are the interesting part. A build pushes to a registry, so one runs in the
-# cluster; it is plain HTTP, so the builder is told to allow that host and only that host. And the
-# build context comes from a Flux source, which this cluster does not run -- so a minimal
-# GitRepository CRD stands in and the harness publishes status.artifact itself, pointing at a
-# tarball served from a ConfigMap. That tests this controller's reading of the contract rather than
-# testing Flux.
-
-BUILDER_IMG="${BUILDER_IMG:-ghcr.io/lhns/kube-oci-builder:e2e}"
-E2E_REGISTRY="e2e-registry.${BUILD_NS}.svc.cluster.local:5000"
-
-make docker-build-builder BUILDER_IMG="$BUILDER_IMG"
-kind load docker-image "$BUILDER_IMG" --name "$CLUSTER"
+# The controller is already installed above -- one chart, all components (ADR 0033). What is left is
+# what a build NEEDS: a build context from a Flux source, which this cluster does not run. A minimal
+# GitRepository CRD stands in and the harness publishes status.artifact itself, pointing at a tarball
+# served from a ConfigMap, so this tests the controller's reading of the contract rather than testing
+# Flux.
 
 kubectl apply -f config/crd/bases/oci.lhns.de_imagebuilds.yaml
 kubectl apply -f "$HERE/../crds/gitrepository.yaml"
@@ -98,7 +119,6 @@ kubectl -n "$BUILD_NS" create configmap e2e-context \
   --from-file=context.tar.gz="$WORK/context.tar.gz" \
   --dry-run=client -o yaml | kubectl apply -f -
 
-kubectl -n "$BUILD_NS" apply -f "$HERE/manifests/registry.yaml"
 kubectl -n "$BUILD_NS" apply -f "$HERE/manifests/context-server.yaml"
 kubectl -n "$BUILD_NS" rollout status deploy/e2e-registry --timeout=3m
 kubectl -n "$BUILD_NS" rollout status deploy/e2e-context --timeout=3m
@@ -122,17 +142,4 @@ status:
     revision: main@sha1:e2e
 EOF
 
-# refreshInterval is 5s against the registry's 30s window (manifests/registry.yaml), a margin of 6
-# where a deployment runs 1h against 30 days for 720. The RATIO is what is reproduced here, not
-# the numbers: the retention tests need the controller to visibly keep something alive inside a
-# test run, and to visibly stop once the object naming it is gone.
-helm upgrade --install kube-oci-builder charts/kube-oci-builder \
-  --namespace oci-builder --create-namespace \
-  --set image.repository="${BUILDER_IMG%:*}" \
-  --set image.tag="${BUILDER_IMG##*:}" \
-  --set image.pullPolicy=Never \
-  --set builder.insecureRegistry="$E2E_REGISTRY" \
-  --set builder.retention.refreshInterval=5s \
-  --wait --timeout 5m
 
-kubectl -n oci-builder rollout status deploy/kube-oci-builder --timeout=5m

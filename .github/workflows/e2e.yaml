@@ -91,7 +91,7 @@ jobs:
           echo "===== controller logs (previous container) ====="
           kubectl -n oci-composer logs deploy/kube-oci-composer --previous --tail=100 || true
           echo "===== builder ====="
-          kubectl -n oci-builder logs deploy/kube-oci-builder --tail=300 || true
+          kubectl -n oci-composer logs deploy/kube-oci-composer-builder --tail=300 || true
           echo "===== imagebuilds ====="
           kubectl -n oci-builder-e2e get imagebuilds -o yaml || true
           echo "===== build jobs and pods ====="
