@@ -18,10 +18,12 @@ import (
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -152,6 +154,18 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeader,
 		LeaderElectionID:       "oci-builder.lhns.de",
+		Client: client.Options{
+			Cache: &client.CacheOptions{
+				// Secrets are read by name and read rarely. Caching them would mean WATCHING every
+				// Secret in the cluster -- which this controller's RBAC deliberately does not allow
+				// (get, not list or watch), so the cache would not merely be wasteful, it would fail
+				// to start. Reads go straight to the API server instead.
+				//
+				// The composer has always had this. The builder did not, and only got away with it
+				// because nothing here read a Secret until the default push credential existed.
+				DisableFor: []client.Object{&corev1.Secret{}},
+			},
+		},
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start the manager")
