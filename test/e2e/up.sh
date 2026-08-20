@@ -96,6 +96,7 @@ helm upgrade --install kube-oci-composer charts/kube-oci-composer \
   --wait --timeout 5m
 
 kubectl -n oci-composer rollout status deploy/kube-oci-composer --timeout=5m
+kubectl -n oci-composer rollout status deploy/kube-oci-composer-builder --timeout=5m
 
 # --- ImageBuild fixtures ----------------------------------------------------------------------
 #
@@ -125,7 +126,8 @@ kubectl -n "$BUILD_NS" create configmap e2e-context \
   --dry-run=client -o yaml | kubectl apply -f -
 
 kubectl -n "$BUILD_NS" apply -f "$HERE/manifests/context-server.yaml"
-kubectl -n "$BUILD_NS" rollout status deploy/e2e-registry --timeout=3m
+# The registry is part of the release now, so `helm --wait` above already waited for it.
+kubectl -n oci-composer rollout status deploy/kube-oci-composer-registry --timeout=3m
 kubectl -n "$BUILD_NS" rollout status deploy/e2e-context --timeout=3m
 
 # The source's published artifact. Nothing verifies this digest -- a real source-controller is what
