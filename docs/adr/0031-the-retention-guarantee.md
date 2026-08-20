@@ -123,9 +123,18 @@ Each of these can silently defeat the guarantee, and silence is the failure mode
    is untested and there is no reason to find out: the saving is a few KB on the one request the
    whole guarantee depends on.
 
-   **Both references must be pulled, not just one.** Pulling only the digest keeps the CONTENT alive
-   and lets the TAG be collected — `keepUntagged` and `keepTags` are separate rules — so the refresh
-   keeps alive exactly what it asks for and nothing else.
+   **Both references are pulled, and the honest reason is safety rather than measured necessity.**
+   An earlier draft of this record claimed that pulling only the digest lets the tag be collected,
+   because `keepUntagged` and `keepTags` are separate rules. That claim is **withdrawn**: it was
+   drawn from a run whose fixture zot could not track at all, which is the same defect that produced
+   every other wrong answer above. Later evidence points the other way — a tag survived while only
+   its digest was being refreshed, which is what one would expect if recency is recorded per
+   manifest.
+
+   Neither reading is relied upon. The refresh asks for every reference it wants kept, because the
+   cost is one small request per reference and the alternative is depending on which answer is right.
+   That this correction is here at all is the point: a claim salvaged from a run that was later shown
+   to be broken is not evidence, even when it sounds reasonable and nothing contradicts it yet.
 
 2. **Refresh is driven by `status.history`, never by a successful reconcile.** An object Stalled on
    a spec error must keep refreshing what it already published; those images may be running right

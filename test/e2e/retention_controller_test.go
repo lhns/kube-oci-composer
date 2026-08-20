@@ -76,13 +76,27 @@ func TestTwoObjectsSharingADigestKeepItAliveIndependently(t *testing.T) {
 			"(ADR 0025), so this is a skip rather than a failure.", digestA, digestB)
 	}
 
-	// One object goes away. Its tag stops being refreshed; the digest does not, because the other
-	// object still names it.
-	mustKubectl(t, "-n", buildNamespace, "delete", "imagebuild", "keepalive-shared-a")
+	// A control in its OWN repository, with its object deleted immediately, so nothing anywhere
+	// refreshes it. Waiting for THIS to be collected is what proves collection actually ran during
+	// the test — without which the assertions below would hold simply because nothing had been
+	// collected yet.
+	//
+	// The obvious control was tag `a` itself, and it was wrong. Tag `a` survives: object B keeps
+	// pulling the shared DIGEST, and zot appears to track pull recency per manifest, so protecting
+	// the manifest protects every tag pointing at it. Using it as the control asserted a property
+	// nobody had established and failed for a reason that had nothing to do with this test's claim.
+	control := keepaliveRepo("shared-control")
+	pushTinyImage(t, control)
 
-	// Waiting for tag `a` to be collected is what proves time actually passed for this repository —
-	// otherwise the assertions below would hold simply because nothing had been collected yet.
-	eventuallyUntagged(t, repo, "a", 240)
+	// One object goes away. The other still names the digest.
+	mustKubectl(t, "-n", buildNamespace, "delete", "imagebuild", "keepalive-shared-a")
+	eventuallyUntagged(t, control, "v1", 240)
+
+	// Recorded rather than asserted, because it is the question that was got wrong: whether a tag
+	// outlives its object when something else keeps the underlying manifest alive. Asserting either
+	// answer would pin down a registry behaviour this project does not depend on.
+	t.Logf("after deleting the object owning tag `a`, with the digest still refreshed by another "+
+		"object: tags now %s", tagsList(t, repo))
 
 	if !manifestExistsByDigest(t, repo, digestA) {
 		t.Fatalf("%s@%s was collected after ONE of the two objects referencing it was deleted. "+

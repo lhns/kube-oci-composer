@@ -53,10 +53,17 @@ func TestPullingAnImageKeepsItFromExpiring(t *testing.T) {
 	// then reports on kubectl rather than on zot, and an earlier version of this file did exactly
 	// that.
 	//
-	// BOTH references are pulled, and that is a measured requirement rather than belt-and-braces.
-	// Pulling only the digest kept the content alive and let the TAG be collected: zot governs the
-	// two by different rules (keepUntagged versus keepTags), so a refresh keeps alive precisely what
-	// it asks for and nothing else. This is the shape the real refresh has to have.
+	// BOTH references are pulled, and the honest reason is that it is unambiguously safe rather than
+	// that it is known to be necessary.
+	//
+	// An earlier run concluded that pulling only the digest let the TAG be collected, and that
+	// conclusion is withdrawn: it was drawn while the fixture was a hand-built manifest zot could
+	// not track at all, which is the same defect that produced every other wrong answer here. Later
+	// evidence points the other way — a tag survived while only its digest was being refreshed, which
+	// is what one would expect if recency is tracked per manifest.
+	//
+	// So the refresh asks for everything it wants kept, because the cost is one small request and
+	// the alternative is depending on which of those two readings is right.
 	refreshBothFor(t, refreshed, "v1", keptDigest, 90)
 
 	// THE GUARANTEE: content named by a live object is still there.
