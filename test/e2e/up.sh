@@ -88,7 +88,7 @@ helm upgrade --install kube-oci-composer charts/kube-oci-composer \
   --set defaultRegistry.insecure="$E2E_REGISTRY" \
   --set 'registry.retention.repositories={keepalive-*,keepalive-**}' \
   --set registry.retention.window=30s \
-  --set registry.retention.gcInterval=10s \
+  --set registry.retention.gcInterval=5s \
   --set registry.retention.gcDelay=1s \
   --set registry.logLevel=debug \
   --set operator.retention.refreshInterval=5s \

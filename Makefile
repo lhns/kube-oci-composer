@@ -154,10 +154,14 @@ e2e-up: ## Create the kind cluster used by the e2e tests.
 
 .PHONY: e2e-test
 e2e-test: ## Run the e2e tests against the current cluster.
-# 25m rather than 15. The retention tests have to WAIT -- for a registry to collect something, and
-# then for it not to collect something else -- and a wait cannot be made faster without shrinking
-# the margin that makes the assertion meaningful.
-	go test ./test/e2e/... -tags=e2e -timeout 25m -count=1 -v
+# 40m. The retention tests have to WAIT -- for a registry to collect something, and then for it not
+# to collect something else -- and a wait cannot be made faster without shrinking the margin that
+# makes the assertion meaningful.
+#
+# The negative controls dominate: zot walks repositories on a rotation, so how long one takes to be
+# collected grows with how many repositories the registry holds, and it now holds everything the
+# suite produces. See collectionDeadline in test/e2e/retention_test.go.
+	go test ./test/e2e/... -tags=e2e -timeout 40m -count=1 -v
 
 .PHONY: e2e-down
 e2e-down: ## Delete the kind cluster.
