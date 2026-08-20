@@ -324,3 +324,28 @@ func TestBothKindsRecordAKeptTagInStatus(t *testing.T) {
 		}
 	}
 }
+
+// TestNeitherBinaryCachesSecrets — both controllers read Secrets by name and neither has RBAC to
+// list or watch them.
+//
+// A controller-runtime cached client WATCHES the type it is asked to Get, so a cached Secret read
+// does not merely waste memory holding every Secret in the cluster: it fails outright against RBAC
+// that grants only get, and it fails at the reflector rather than at the call, which surfaces as a
+// controller that starts, reports healthy, and never reconciles.
+//
+// The composer disabled this from the start; the builder did not, and got away with it only because
+// nothing in it read a Secret until the default push credential existed. Then every build failed
+// with `secrets is forbidden`, and the message named the reflector rather than the read.
+func TestNeitherBinaryCachesSecrets(t *testing.T) {
+	for _, main := range []string{"../../cmd/oci-composer/main.go", "../../cmd/oci-builder/main.go"} {
+		body, err := os.ReadFile(main)
+		if err != nil {
+			t.Fatalf("reading %s: %v", main, err)
+		}
+		if !strings.Contains(string(body), "DisableFor: []client.Object{&corev1.Secret{}}") {
+			t.Errorf("%s does not disable the Secret cache. Its RBAC grants get and not list, so "+
+				"the cache cannot start -- and the controller will look healthy while reconciling "+
+				"nothing.", filepath.Base(filepath.Dir(main)))
+		}
+	}
+}

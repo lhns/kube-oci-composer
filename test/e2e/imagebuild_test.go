@@ -25,7 +25,11 @@ import (
 // pointing somewhere the fixtures are not.
 const (
 	buildNamespace = "oci-builder-e2e"
-	buildRegistry  = "e2e-registry." + buildNamespace + ".svc.cluster.local:5000"
+	// The registry the chart installs, addressed by its in-cluster Service. Same name up.sh passes
+	// as registry.host, so a reference the controller writes is the one a node resolves.
+	buildRegistry = "kube-oci-composer-registry.oci-composer.svc.cluster.local:5000"
+	// Where the chart puts everything now: one release, one namespace (ADR 0033).
+	operatorNamespace = "oci-composer"
 )
 
 // buildTimeout is longer than the composer's `timeout` because a cold build pulls a base image and
@@ -46,7 +50,7 @@ func buildEventually(t *testing.T, what string, fn func() error) {
 		time.Sleep(interval)
 	}
 
-	ctrl, _ := kubectl(t, "-n", "oci-builder", "logs", "deploy/kube-oci-builder", "--tail=120")
+	ctrl, _ := kubectl(t, "-n", operatorNamespace, "logs", "deploy/kube-oci-composer-builder", "--tail=120")
 	jobs, _ := kubectl(t, "-n", buildNamespace, "get", "jobs,pods", "-o", "wide")
 	pods, _ := kubectl(t, "-n", buildNamespace, "logs", "-l", "job-name", "--tail=120", "--all-containers")
 	obj, _ := kubectl(t, "-n", buildNamespace, "get", "imagebuild", "-o", "yaml")

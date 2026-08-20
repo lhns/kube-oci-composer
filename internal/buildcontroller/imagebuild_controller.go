@@ -39,6 +39,10 @@ type ImageBuildReconciler struct {
 	client.Client
 	JobConfig JobConfig
 
+	// Default is the operator's registry and credential, used by builds that name no repository of
+	// their own. See recon.DefaultRegistry.
+	Default recon.DefaultRegistry
+
 	// Recorder surfaces failures as Events. A build failure's detail lives in the pod's logs,
 	// which vanish with the pod, so the Event is often the only durable trace of why.
 	Recorder record.EventRecorder
@@ -58,7 +62,15 @@ type ImageBuildReconciler struct {
 // Secrets are read for their resourceVersion only, so a rotation moves the input hash and
 // rebuilds. The VALUE is never read here — it is projected straight into the build pod — which is
 // why this is get and not list or watch, matching the composer's reasoning about blast radius.
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get
+// create and update are for ONE thing: a short-lived copy of the operator's registry credential in
+// the namespace a build runs in, because a pod can only mount Secrets from its own namespace and the
+// build must run beside the tenant's own build secrets and code. The copy is owned by the ImageBuild
+// and goes with it.
+//
+// This is a real widening and it is not narrowable by RBAC: `create` cannot be restricted to a name.
+// So this controller can create a Secret in any namespace, and update ones it names. What it still
+// cannot do is LIST or WATCH them -- it can only touch Secrets whose names it already knows.
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;update
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=gitrepositories;ocirepositories;buckets,verbs=get;list;watch
 
@@ -227,7 +239,7 @@ func (r *ImageBuildReconciler) resolveInputs(ctx context.Context, obj *ociv1alph
 		Target:           spec.Target,
 		Network:          spec.Network,
 		CacheMode:        cacheMode,
-		CacheRef:         cacheRefFor(obj),
+		CacheRef:         cacheRefFor(obj, r.repositoryFor(obj)),
 		SourceDateEpoch:  r.JobConfig.SourceDateEpoch,
 		Platforms:        spec.Platforms,
 		Args:             args,
@@ -266,7 +278,15 @@ func (r *ImageBuildReconciler) startBuild(ctx context.Context, obj *ociv1alpha1.
 		return fmt.Errorf("%w", err)
 	}
 
-	job := buildJob(obj, inputHash, contextURL, r.JobConfig, r.cacheAvailable(ctx, obj))
+	// The credential exists before the pod that mounts it. Both names come from jobName, so there is
+	// one source of truth for what this build is called.
+	pushSecret, err := r.pushSecretFor(ctx, obj, jobName(obj, inputHash))
+	if err != nil {
+		return err
+	}
+
+	job := buildJob(obj, inputHash, contextURL, r.JobConfig, r.repositoryFor(obj), pushSecret,
+		r.cacheAvailable(ctx, obj))
 	if err := ctrl.SetControllerReference(obj, job, r.Scheme()); err != nil {
 		return fmt.Errorf("setting owner: %w", err)
 	}
@@ -387,7 +407,7 @@ func podBuildDigest(p corev1.Pod) string {
 
 // recordSuccess writes the artifact and rotates history.
 func (r *ImageBuildReconciler) recordSuccess(obj *ociv1alpha1.ImageBuild, inputs build.Inputs, inputHash, digest string) {
-	repo := obj.Spec.Push.Repository
+	repo := r.repositoryFor(obj)
 	// Same list the Job was told to push, so status cannot describe a different set of tags than
 	// the build actually wrote.
 	effective, err := recon.EffectiveTags(obj.Spec.Push.GetTags(), obj.Spec.Push.GetRef())

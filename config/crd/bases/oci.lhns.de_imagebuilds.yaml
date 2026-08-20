@@ -4,6 +4,7 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.19.0
+    helm.sh/resource-policy: keep
   name: imagebuilds.oci.lhns.de
 spec:
   group: oci.lhns.de
@@ -33,8 +34,12 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: ImageBuild builds an OCI image from a Dockerfile and a content-addressed
-          context.
+        description: |-
+          ImageBuild builds an OCI image from a Dockerfile and a content-addressed context.
+
+          The keep annotation is emitted into the CRD itself so the chart can install it verbatim.
+          Deleting a CRD deletes every object of that kind, and Helm removing one on an uninstall or a
+          toggle flip is not a risk worth taking for a resource that costs nothing when unused.
         properties:
           apiVersion:
             description: |-
@@ -213,8 +218,10 @@ spec:
                 description: |-
                   Push publishes the built image to an external registry.
 
-                  Required in this alpha: the build runs in a Job, which cannot reach the controller's
-                  loopback-only serving endpoint. See ADR 0025.
+                  Optional. A build always publishes to a registry -- the Job runs in another pod and cannot
+                  reach the controller's loopback-only serving endpoint (ADR 0025) -- but WHICH registry can
+                  come from the operator's default rather than from here. Omit it entirely and the build
+                  publishes to <default registry>/<namespace>/<name>.
                 properties:
                   history:
                     description: |-
@@ -267,7 +274,17 @@ spec:
                     maxLength: 512
                     type: string
                   repository:
-                    description: Repository is the fully qualified target, e.g. "ghcr.io/example/artifact".
+                    description: |-
+                      Repository is the fully qualified target, e.g. "ghcr.io/example/artifact".
+
+                      Optional. Omitted, the object publishes to the operator's default registry under
+                      <namespace>/<name> -- which is what a default chart install configures, so nothing here has
+                      to name a host at all.
+
+                      Naming one has a second effect worth knowing: the operator's own registry credential is used
+                      ONLY for the default target. An object that chooses its own repository authenticates with its
+                      own secretRef, or not at all. Otherwise anyone able to create one of these objects could
+                      point it at a host they control and have the controller hand over the operator's password.
                     type: string
                   secretRef:
                     description: SecretRef names a docker-registry Secret holding
@@ -288,8 +305,6 @@ spec:
                       type: string
                     maxItems: 32
                     type: array
-                required:
-                - repository
                 type: object
                 x-kubernetes-validations:
                 - message: 'immutable and onConflict contradict each other: immutable
@@ -424,7 +439,6 @@ spec:
             required:
             - context
             - platforms
-            - push
             type: object
           status:
             description: ImageBuildStatus is the observed state.

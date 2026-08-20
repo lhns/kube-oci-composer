@@ -4,6 +4,7 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.19.0
+    helm.sh/resource-policy: keep
   name: imagecompositions.oci.lhns.de
 spec:
   group: oci.lhns.de
@@ -609,7 +610,17 @@ spec:
                     maxLength: 512
                     type: string
                   repository:
-                    description: Repository is the fully qualified target, e.g. "ghcr.io/example/artifact".
+                    description: |-
+                      Repository is the fully qualified target, e.g. "ghcr.io/example/artifact".
+
+                      Optional. Omitted, the object publishes to the operator's default registry under
+                      <namespace>/<name> -- which is what a default chart install configures, so nothing here has
+                      to name a host at all.
+
+                      Naming one has a second effect worth knowing: the operator's own registry credential is used
+                      ONLY for the default target. An object that chooses its own repository authenticates with its
+                      own secretRef, or not at all. Otherwise anyone able to create one of these objects could
+                      point it at a host they control and have the controller hand over the operator's password.
                     type: string
                   secretRef:
                     description: SecretRef names a docker-registry Secret holding
@@ -630,8 +641,6 @@ spec:
                       type: string
                     maxItems: 32
                     type: array
-                required:
-                - repository
                 type: object
                 x-kubernetes-validations:
                 - message: 'immutable and onConflict contradict each other: immutable

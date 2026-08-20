@@ -17,12 +17,15 @@ import (
 // RBAC one, config/rbac-builder/role.yaml is output nothing reads, and the chart's hand-written
 // rules can diverge from the kubebuilder markers with nothing noticing.
 
-const builderChartDir = "../../charts/kube-oci-builder"
+// One chart now (ADR F). The builder is a component of it, so these render the composer chart and
+// look at the builder's objects inside the result -- which is also what makes the toggle testable:
+// with imageBuild.enabled=false there must be no Job-creating role at all.
+const builderChartDir = "../../charts/kube-oci-composer"
 
 // pinned values the builder chart refuses to render without.
 var builderRenderArgs = []string{
-	"--set", "builder.buildkitImage=moby/buildkit:v1@sha256:" + strings.Repeat("a", 64),
-	"--set", "builder.dockerfileFrontend=docker/dockerfile:1@sha256:" + strings.Repeat("b", 64),
+	"--set", "imageBuild.buildkitImage=moby/buildkit:v1@sha256:" + strings.Repeat("a", 64),
+	"--set", "imageBuild.dockerfileFrontend=docker/dockerfile:1@sha256:" + strings.Repeat("b", 64),
 }
 
 func renderBuilder(t *testing.T, args ...string) string {
@@ -53,7 +56,7 @@ func TestBuilderChartRBACMatchesTheGeneratedRole(t *testing.T) {
 		t.Fatalf("reading generated role: %v", err)
 	}
 
-	chart := clusterRoleFromRender(t, renderBuilder(t), "test-release-kube-oci-builder")
+	chart := clusterRoleFromRender(t, renderBuilder(t), "test-release-kube-oci-composer-builder")
 
 	// Leader election lives in a namespaced Role in the chart, as it does for the composer.
 	want := ruleSet(rulesExcluding(generated, "coordination.k8s.io"))
@@ -75,7 +78,7 @@ func TestBuilderChartRBACMatchesTheGeneratedRole(t *testing.T) {
 // rotation rebuilds, and projects its value into the build pod. Neither needs list or watch, and
 // granting them would put every Secret in the cluster behind a controller that runs user code.
 func TestBuilderChartNeverGrantsSecretListOrWatch(t *testing.T) {
-	chart := clusterRoleFromRender(t, renderBuilder(t), "test-release-kube-oci-builder")
+	chart := clusterRoleFromRender(t, renderBuilder(t), "test-release-kube-oci-composer-builder")
 
 	for _, rule := range chart.Rules {
 		if !containsString(rule.APIGroups, "") || !containsString(rule.Resources, "secrets") {
@@ -95,11 +98,14 @@ func TestBuilderChartFlagsMatchTheBinary(t *testing.T) {
 	// Rendered WITH the optional flags set, or the guard silently skips them: insecureRegistry is
 	// wrapped in a `with` block, so the newest flag on the chart would be the one flag a typo could
 	// hide in.
-	out := renderBuilder(t, "--set", "builder.insecureRegistry=registry.internal:5000")
+	out := renderBuilder(t, "--set", "imageBuild.insecureRegistry=registry.internal:5000")
 	known := knownFlags(t, "../../cmd/oci-builder")
 
+	// Scoped to the BUILDER's container. One chart renders both controllers now, so scanning the
+	// whole document would check the composer's flags against the builder's binary and report every
+	// one of them as unknown -- a failure that says nothing about the thing under test.
 	var seen int
-	for _, line := range strings.Split(out, "\n") {
+	for _, line := range strings.Split(containerArgs(t, out, "test-release-kube-oci-composer-builder"), "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "- --") {
 			continue
@@ -130,7 +136,7 @@ func TestBuilderChartRefusesUnpinnedBuilderImages(t *testing.T) {
 			args := append([]string{
 				"template", "test-release", builderChartDir, "--namespace", "oci-builder",
 			}, builderRenderArgs...)
-			args = append(args, "--set", "builder."+field+"=some/image:latest")
+			args = append(args, "--set", "imageBuild."+field+"=some/image:latest")
 
 			out, err := exec.Command("helm", args...).CombinedOutput()
 			if err == nil {
@@ -153,4 +159,45 @@ func TestBuilderChartShipsRealDigests(t *testing.T) {
 	if strings.Contains(string(raw), "sha256:"+strings.Repeat("0", 64)) {
 		t.Error("values.yaml pins a placeholder all-zero digest; builds would fail to pull")
 	}
+}
+
+// containerArgs returns just the args of the named Deployment's first container, as rendered lines.
+//
+// The chart deploys three workloads into one namespace now, so "what does this chart render" stopped
+// being a question with one answer.
+func containerArgs(t *testing.T, rendered, deployment string) string {
+	t.Helper()
+
+	var out []string
+	inDoc, inArgs := false, false
+	for _, line := range strings.Split(rendered, "\n") {
+		if strings.HasPrefix(line, "---") {
+			inDoc, inArgs = false, false
+			continue
+		}
+		if !inDoc {
+			// EXACT match on the trimmed line. "name: x-composer" is a prefix of
+			// "name: x-composer-builder", so a Contains here silently pulls in the other
+			// controller's container and checks its flags against the wrong binary.
+			if strings.TrimSpace(line) == "name: "+deployment {
+				inDoc = true
+			}
+			continue
+		}
+		if strings.HasSuffix(strings.TrimSpace(line), "args:") {
+			inArgs = true
+			continue
+		}
+		if inArgs {
+			if trimmed := strings.TrimSpace(line); strings.HasPrefix(trimmed, "- ") {
+				out = append(out, trimmed)
+				continue
+			}
+			inArgs = false
+		}
+	}
+	if len(out) == 0 {
+		t.Fatalf("no args found for %s; the assertion would prove nothing", deployment)
+	}
+	return strings.Join(out, "\n")
 }

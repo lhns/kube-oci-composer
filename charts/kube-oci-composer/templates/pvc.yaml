@@ -1,3 +1,4 @@
+{{- if .Values.imageComposition.enabled }}
 {{- if .Values.persistence.enabled }}
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -15,4 +16,5 @@ spec:
   resources:
     requests:
       storage: {{ .Values.persistence.size }}
+{{- end }}
 {{- end }}

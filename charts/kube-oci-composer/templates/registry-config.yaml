@@ -21,8 +21,7 @@ kind: ConfigMap
 metadata:
   name: {{ include "kube-oci-composer.fullname" . }}-registry
   labels:
-    {{- include "kube-oci-composer.labels" . | nindent 4 }}
-    app.kubernetes.io/component: registry
+    {{- include "kube-oci-composer.componentLabels" (dict "ctx" . "component" "registry") | nindent 4 }}
 data:
   config.json: |
     {
@@ -36,7 +35,7 @@ data:
           "dryRun": {{ .Values.registry.retention.dryRun }},
           "policies": [
             {
-              "repositories": ["**"],
+              "repositories": {{ toJson .Values.registry.retention.repositories }},
               "deleteUntagged": true,
               "keepTags": [
                 { "patterns": [".*"], "pulledWithin": {{ .Values.registry.retention.window | quote }} }
@@ -49,8 +48,13 @@ data:
       "http": {
         "address": "0.0.0.0",
         "port": "5000"
-        {{- if .Values.registry.auth.secretName }},
+        {{- if .Values.registry.auth.enabled }},
         "auth": { "htpasswd": { "path": "/etc/zot/auth/htpasswd" } },
+        {{- /*
+          Anonymous READ, authenticated WRITE, enforced by the registry itself with no proxy in
+          front. Reads are open in the cluster exactly as the embedded serving endpoint's were --
+          a kubelet pulls without credentials, so anything else breaks image pulls.
+        */}}
         "accessControl": {
           "repositories": {
             "**": {

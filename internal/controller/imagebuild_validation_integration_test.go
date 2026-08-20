@@ -90,14 +90,30 @@ func TestIntegrationImageBuildPlatformsAreRequired(t *testing.T) {
 	}
 }
 
-// TestIntegrationImageBuildPushIsRequired — the alpha has no serve mode, because a Job in another
-// pod cannot write to the controller's loopback-only endpoint. The schema says so rather than the
-// controller discovering it at build time.
-func TestIntegrationImageBuildPushIsRequired(t *testing.T) {
+// TestIntegrationImageBuildPushIsOptional — it was required, and is not any more.
+//
+// A build still always publishes to a registry: the Job runs in another pod and cannot reach the
+// controller's loopback-only endpoint (ADR 0025). What changed is that WHICH registry can come from
+// the operator's default instead of from every object, so a default install needs no spec to name a
+// host at all.
+//
+// The schema therefore has to accept an ImageBuild with no push block. Whether one is REACHABLE is a
+// runtime question the controller answers with Pending, because the answer depends on the
+// controller's flags rather than on the object -- and stalling on operator configuration would wedge
+// every build until someone edited specs that were never wrong.
+func TestIntegrationImageBuildPushIsOptional(t *testing.T) {
 	spec := validBuildSpec()
 	spec.Push = nil
-	if err := applyBuild(t, "no-push", spec); err == nil {
-		t.Fatal("an ImageBuild without push was accepted")
+	if err := applyBuild(t, "no-push", spec); err != nil {
+		t.Fatalf("an ImageBuild without push was refused: %v", err)
+	}
+
+	// And with a push block that names no repository, which is how an object opts into the default
+	// registry while still setting tags or a conflict policy.
+	spec = validBuildSpec()
+	spec.Push = &ociv1alpha1.Push{Tags: []string{"v1"}}
+	if err := applyBuild(t, "no-repository", spec); err != nil {
+		t.Fatalf("an ImageBuild with push but no repository was refused: %v", err)
 	}
 }
 

@@ -1,3 +1,4 @@
+{{- if .Values.imageComposition.enabled }}
 {{- if and (not .Values.operator.servingHost) (eq .Values.operator.storage.backend "s3") }}
 {{- fail "operator.storage.backend=s3 only affects the serving endpoint, which needs operator.servingHost" }}
 {{- end }}
@@ -23,7 +24,7 @@ metadata:
   name: {{ include "kube-oci-composer.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "kube-oci-composer.labels" . | nindent 4 }}
+    {{- include "kube-oci-composer.componentLabels" (dict "ctx" . "component" "composer") | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
   # Recreate, not RollingUpdate. With a node-local blob store on a ReadWriteOnce volume, two pods
@@ -33,11 +34,11 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      {{- include "kube-oci-composer.selectorLabels" . | nindent 6 }}
+      {{- include "kube-oci-composer.componentSelectorLabels" (dict "ctx" . "component" "composer") | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "kube-oci-composer.labels" . | nindent 8 }}
+        {{- include "kube-oci-composer.componentLabels" (dict "ctx" . "component" "composer") | nindent 8 }}
       {{- with .Values.podAnnotations }}
       annotations:
         {{- toYaml . | nindent 8 }}
@@ -91,7 +92,13 @@ spec:
             - --gc-grace={{ .Values.operator.gc.grace }}
             - --keep-builds={{ .Values.operator.gc.keepBuilds }}
             - --retention-refresh-interval={{ .Values.operator.retention.refreshInterval }}
-            {{- with .Values.operator.insecureRegistry }}
+            {{- with (include "kube-oci-composer.defaultRegistry" .) }}
+            - --default-registry={{ . }}
+            {{- end }}
+            {{- with (include "kube-oci-composer.pushSecretName" .) }}
+            - --default-push-secret={{ . }}
+            {{- end }}
+            {{- with (include "kube-oci-composer.insecureRegistries" .) }}
             - --insecure-registry={{ . }}
             {{- end }}
             {{- if .Values.operator.gc.dryRun }}
@@ -112,6 +119,13 @@ spec:
                   name: {{ .Values.operator.s3.existingSecret }}
                   key: AWS_SECRET_ACCESS_KEY
           {{- end }}
+          env:
+            # The default push credential is read from the CONTROLLER's namespace, not the
+            # object's: it belongs to the operator, not to a tenant. See ADR H.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
           ports:
             - name: oci
               containerPort: {{ include "kube-oci-composer.port" .Values.operator.servingBindAddress }}
@@ -176,3 +190,4 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+{{- end }}

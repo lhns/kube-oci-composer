@@ -1,30 +1,66 @@
 kube-oci-composer {{ .Chart.AppVersion }} installed into {{ .Release.Namespace }}.
 
-{{ if not .Values.operator.servingHost -}}
-WARNING: operator.servingHost is not set.
+Components: {{ if .Values.imageComposition.enabled }}ImageComposition{{ end }}{{ if .Values.imageBuild.enabled }}, ImageBuild{{ end }}{{ if .Values.registry.enabled }}, registry{{ end }}
 
-Only ImageCompositions with spec.push will reconcile. Anything relying on the built-in serving
-endpoint will report a terminal error, because there is no host to build status.artifact.ref from.
-{{- else -}}
-Artifacts will be served as:
+{{- if .Values.imageBuild.enabled }}
 
-    {{ .Values.operator.servingHost }}/<publish.name>:<publish.tag>
+NOTE: ImageBuild is enabled, so this release includes a controller that creates Jobs -- the ability
+to run arbitrary containers in this namespace. That is what building from a Dockerfile requires.
+Set imageBuild.enabled=false to remove the controller AND its RBAC.
+{{- end }}
+
+{{- with (include "kube-oci-composer.defaultRegistry" .) }}
+
+Objects that name no repository publish to:
+
+    {{ . }}/<namespace>/<name>
+
+{{- end }}
+
+{{- if and .Values.registry.enabled (not .Values.registry.host) }}
+
+WARNING: registry.host is not set, so published references name the in-cluster Service.
+
+The controllers can push and refresh over cluster DNS, but a POD CANNOT PULL from that name:
+containerd resolves image references with the node's resolver, which does not see cluster DNS.
+Images will publish successfully and then fail to pull with ErrImagePull.
+
+Set registry.host to a name your nodes resolve, and point it at this registry -- an ingress, or
+registry.service.type=NodePort plus a containerd drop-in on each node:
+
+    /etc/containerd/certs.d/<registry.host>/hosts.toml
+    [host."http://<node>:<nodePort>"]
+      capabilities = ["pull", "resolve"]
+
+See docs/registry.md.
+{{- end }}
 
 REFERENCE A DIGEST, NEVER THE TAG. The tag moves; a workload pinned to it plus
-pullPolicy: IfNotPresent will silently keep stale bytes. Each build also publishes an immutable
-<tag>-<digest[:12]> that is safe to pin by hand, or let Flux image-automation write the digest
-into git. See docs/adr/0010.
-{{- end }}
+pullPolicy: IfNotPresent will silently keep stale bytes. See docs/adr/0010.
 
 Check on it with:
 
     kubectl get imagecomposition -A
-
-{{ if not .Values.operator.s3.endpoint -}}
-The layer cache is local to this pod, so a restart or a reschedule re-fetches every layer from
-upstream before the endpoint can serve anything. Set operator.s3.endpoint to keep it across both.
+{{- if .Values.imageBuild.enabled }}
+    kubectl get imagebuild -A
 {{- end }}
-{{ if eq (int .Values.operator.gc.keepBuilds) 0 -}}
+
+{{- if and .Values.registry.enabled (not .Values.registry.persistence.enabled) }}
+
+WARNING: registry.persistence is off, so the registry stores images in an emptyDir.
+
+Every restart loses every image. For ImageComposition that is recoverable -- artifacts rebuild from
+their specs -- but an ImageBuild's output cannot be reproduced (ADR 0025), so those are gone.
+{{- end }}
+
+{{- if and .Values.imageComposition.enabled (not .Values.operator.s3.endpoint) }}
+
+The layer cache is local to this pod, so a restart or a reschedule re-fetches every layer from
+upstream. Set operator.s3.endpoint to keep it across both.
+{{- end }}
+
+{{- if eq (int .Values.operator.gc.keepBuilds) 0 }}
+
 gc.keepBuilds is 0, which will be clamped to 1. Only the newest build stays pullable, so reverting
 a commit or rescheduling a pod pinned to an older digest will fail.
 {{- end }}

@@ -51,7 +51,7 @@ func TestALiveObjectKeepsItsImagesAlive(t *testing.T) {
 	// Without this the assertions above are satisfied by a registry that never collects anything,
 	// which is indistinguishable from a guarantee that works.
 	mustKubectl(t, "-n", buildNamespace, "delete", "imagebuild", "keepalive-live")
-	eventuallyUntagged(t, repo, "v1", 240)
+	eventuallyUntagged(t, repo, "v1", collectionDeadline)
 }
 
 // Two objects publishing the same digest need no coordination: both refresh it, and it survives
@@ -90,7 +90,7 @@ func TestTwoObjectsSharingADigestKeepItAliveIndependently(t *testing.T) {
 
 	// One object goes away. The other still names the digest.
 	mustKubectl(t, "-n", buildNamespace, "delete", "imagebuild", "keepalive-shared-a")
-	eventuallyUntagged(t, control, "v1", 240)
+	eventuallyUntagged(t, control, "v1", collectionDeadline)
 
 	// Recorded rather than asserted, because it is the question that was got wrong: whether a tag
 	// outlives its object when something else keeps the underlying manifest alive. Asserting either

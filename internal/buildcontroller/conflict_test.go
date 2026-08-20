@@ -7,7 +7,11 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
@@ -287,7 +291,7 @@ func mustUpdate(t *testing.T, r *ImageBuildReconciler, obj *ociv1alpha1.ImageBui
 func TestAMissingCacheIsNotImported(t *testing.T) {
 	obj := buildOf(t, nil)
 
-	absent := strings.Join(buildctlArgs(obj, sampleConfig(), false), " ")
+	absent := strings.Join(buildctlArgs(obj, sampleConfig(), sampleRepo, false), " ")
 	if strings.Contains(absent, "--import-cache") {
 		t.Error("a cache that does not exist yet is still imported; BuildKit fails the build " +
 			"rather than warning, so this is every first build broken")
@@ -297,7 +301,7 @@ func TestAMissingCacheIsNotImported(t *testing.T) {
 			"no build would be cached again")
 	}
 
-	present := strings.Join(buildctlArgs(obj, sampleConfig(), true), " ")
+	present := strings.Join(buildctlArgs(obj, sampleConfig(), sampleRepo, true), " ")
 	if !strings.Contains(present, "--import-cache") {
 		t.Error("a cache that does exist is not imported, so caching never takes effect")
 	}
@@ -310,7 +314,7 @@ func TestAMissingCacheIsNotImported(t *testing.T) {
 // contradicted it. The composer already writes OCI manifests, so this also stops the two kinds
 // putting different media types into one registry.
 func TestBuildsPushOCIMediaTypes(t *testing.T) {
-	argv := strings.Join(buildctlArgs(buildOf(t, nil), sampleConfig(), true), " ")
+	argv := strings.Join(buildctlArgs(buildOf(t, nil), sampleConfig(), sampleRepo, true), " ")
 
 	if !strings.Contains(argv, "oci-mediatypes=true") {
 		t.Error("the image exporter does not request OCI media types; an OCI-native registry " +
@@ -319,5 +323,96 @@ func TestBuildsPushOCIMediaTypes(t *testing.T) {
 	if !strings.Contains(argv, "image-manifest=true") {
 		t.Error("the cache exporter does not render the cache as an ordinary image manifest; " +
 			"BuildKit's default cache format carries a config a conformant registry need not accept")
+	}
+}
+
+// The build pod cannot mount the operator's credential directly: a pod only mounts Secrets from its
+// own namespace, and the build runs in the OBJECT's namespace because that is where its build
+// secrets and its code live.
+//
+// So the controller copies it, and the copy's lifetime is the point. Owned by the ImageBuild and
+// named after the Job, it is garbage-collected when the object goes rather than left behind as a
+// permanent per-namespace copy of the operator's registry password.
+func TestTheOperatorCredentialIsCopiedForTheBuildAndOwnedByIt(t *testing.T) {
+	reg := tagRegistry(t, nil)
+	obj := buildOf(t, func(b *ociv1alpha1.ImageBuild) { b.Spec.Push.Tags = []string{"v1"} })
+
+	r := harness(t, pinnedFrom, obj)
+	obj.Spec.Push.Repository = pushingTo(t, r, reg)
+	mustUpdate(t, r, obj)
+
+	host := strings.TrimPrefix(reg.URL, "http://")
+	r.Default = recon.DefaultRegistry{Host: host, SecretName: "operator-push", Namespace: "oci-composer"}
+	mustCreate(t, r, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "operator-push", Namespace: "oci-composer"},
+		Type:       corev1.SecretTypeDockerConfigJson,
+		Data:       map[string][]byte{corev1.DockerConfigJsonKey: []byte(`{"auths":{}}`)},
+	})
+
+	name, err := r.pushSecretFor(context.Background(), obj, "build-abc")
+	if err != nil {
+		t.Fatalf("resolving the push secret: %v", err)
+	}
+	if name != "build-abc-push" {
+		t.Fatalf("secret name = %q, want one derived from the Job's", name)
+	}
+
+	var copied corev1.Secret
+	key := types.NamespacedName{Namespace: obj.Namespace, Name: name}
+	if err := r.Get(context.Background(), key, &copied); err != nil {
+		t.Fatalf("the copy was not created: %v", err)
+	}
+	if copied.Namespace != obj.Namespace {
+		t.Errorf("the copy is in %q, but a pod can only mount Secrets from its own namespace",
+			copied.Namespace)
+	}
+
+	// The ownership is what bounds the exposure. Without it this is a permanent copy of the
+	// operator's registry credential in a tenant namespace.
+	owners := copied.GetOwnerReferences()
+	if len(owners) != 1 || owners[0].Kind != "ImageBuild" || owners[0].Name != obj.Name {
+		t.Fatalf("owner references = %+v, want the ImageBuild; without one the credential outlives "+
+			"the build that needed it", owners)
+	}
+	if owners[0].Controller == nil || !*owners[0].Controller {
+		t.Error("the owner reference is not a controller reference, so garbage collection will not " +
+			"remove the copy")
+	}
+}
+
+// A build publishing somewhere the operator's credential has no business going gets nothing, and the
+// controller must not leave a copy of that credential lying in the namespace either.
+func TestNoCredentialIsCopiedForARegistryTheObjectChose(t *testing.T) {
+	reg := tagRegistry(t, nil)
+	obj := buildOf(t, func(b *ociv1alpha1.ImageBuild) {
+		b.Spec.Push.Repository = "attacker.example/x"
+	})
+	r := harness(t, pinnedFrom, obj)
+	r.Default = recon.DefaultRegistry{
+		Host:       strings.TrimPrefix(reg.URL, "http://"),
+		SecretName: "operator-push",
+		Namespace:  "oci-composer",
+	}
+
+	name, err := r.pushSecretFor(context.Background(), obj, "build-abc")
+	if err != nil {
+		t.Fatalf("resolving the push secret: %v", err)
+	}
+	if name != "" {
+		t.Fatalf("secret %q offered for a registry the object chose", name)
+	}
+
+	var copied corev1.Secret
+	key := types.NamespacedName{Namespace: obj.Namespace, Name: "build-abc-push"}
+	if err := r.Get(context.Background(), key, &copied); err == nil {
+		t.Error("the operator's credential was copied into the namespace anyway; a build pod there " +
+			"could read it and push to the operator's registry")
+	}
+}
+
+func mustCreate(t *testing.T, r *ImageBuildReconciler, obj client.Object) {
+	t.Helper()
+	if err := r.Create(context.Background(), obj); err != nil {
+		t.Fatalf("creating %T: %v", obj, err)
 	}
 }

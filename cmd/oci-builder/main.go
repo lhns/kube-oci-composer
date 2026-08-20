@@ -18,16 +18,19 @@ import (
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 	"github.com/lhns/kube-oci-composer/internal/buildcontroller"
+	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 	"github.com/lhns/kube-oci-composer/internal/retention"
 )
 
@@ -61,16 +64,18 @@ func splitList(s string) []string {
 
 func main() {
 	var (
-		metricsAddr     string
-		probeAddr       string
-		enableLeader    bool
-		builderImage    string
-		frontendImage   string
-		sourceDateEpoch string
-		insecureRegs    string
-		refreshInterval time.Duration
-		historyLimit    int
-		showVersion     bool
+		metricsAddr       string
+		probeAddr         string
+		enableLeader      bool
+		builderImage      string
+		frontendImage     string
+		sourceDateEpoch   string
+		insecureRegs      string
+		refreshInterval   time.Duration
+		defaultRegistry   string
+		defaultPushSecret string
+		historyLimit      int
+		showVersion       bool
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "Address the metric endpoint binds to.")
@@ -89,6 +94,19 @@ func main() {
 			"registry's retention window -- the ratio is the guarantee, not either number. It matters "+
 			"more here than on the composer: a build cannot be reproduced from its spec, so a reclaimed "+
 			"image is gone rather than rebuildable. See ADR 0031.")
+	flag.StringVar(&defaultRegistry, "default-registry", "",
+		"Registry to publish to when an object names no repository of its own, as "+
+			"\"registry.example:5000\" or \"registry.example:5000/prefix\". Objects then publish "+
+			"to <default-registry>/<namespace>/<name>.\n"+
+			"Namespace-qualified deliberately: one registry is shared by the whole cluster, so a "+
+			"bare object name would collide the moment two namespaces both have an \"app\".")
+	flag.StringVar(&defaultPushSecret, "default-push-secret", "",
+		"dockerconfigjson Secret authenticating pushes to --default-registry. Read from THIS "+
+			"controller's namespace (POD_NAMESPACE), not the object's: it is the operator's "+
+			"credential, not a tenant's.\n"+
+			"Used ONLY for objects that named no repository. An object that chooses its own "+
+			"registry authenticates with its own secretRef or not at all -- otherwise anyone able "+
+			"to create an object could point it at a host they control and be handed this password.")
 	flag.StringVar(&insecureRegs, "insecure-registry", "",
 		"Comma-separated registry hosts to push to over plain HTTP. Opt-in per host, for an "+
 			"internal or air-gapped registry without TLS.")
@@ -136,14 +154,38 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeader,
 		LeaderElectionID:       "oci-builder.lhns.de",
+		Client: client.Options{
+			Cache: &client.CacheOptions{
+				// Secrets are read by name and read rarely. Caching them would mean WATCHING every
+				// Secret in the cluster -- which this controller's RBAC deliberately does not allow
+				// (get, not list or watch), so the cache would not merely be wasteful, it would fail
+				// to start. Reads go straight to the API server instead.
+				//
+				// The composer has always had this. The builder did not, and only got away with it
+				// because nothing here read a Secret until the default push credential existed.
+				DisableFor: []client.Object{&corev1.Secret{}},
+			},
+		},
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start the manager")
 		os.Exit(1)
 	}
 
+	defaults := recon.DefaultRegistry{
+		Host:       defaultRegistry,
+		SecretName: defaultPushSecret,
+		Namespace:  os.Getenv("POD_NAMESPACE"),
+	}
+	if defaults.SecretName != "" && defaults.Namespace == "" {
+		setupLog.Error(nil, "POD_NAMESPACE is unset, so the default push credential cannot be "+
+			"read; set it from the downward API")
+		os.Exit(1)
+	}
+
 	if err := (&buildcontroller.ImageBuildReconciler{
-		Client: mgr.GetClient(),
+		Client:  mgr.GetClient(),
+		Default: defaults,
 		//nolint:staticcheck // SA1019: the new events API has no Event method; see the composer.
 		Recorder: mgr.GetEventRecorderFor("imagebuild-controller"),
 		JobConfig: buildcontroller.JobConfig{
@@ -170,6 +212,7 @@ func main() {
 			//nolint:staticcheck // SA1019: the new events API has no Event method; same as above.
 			Recorder:           mgr.GetEventRecorderFor("retention"),
 			InsecureRegistries: splitList(insecureRegs),
+			Default:            defaults,
 		}
 		if err := refresher.SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to set up retention refresh")

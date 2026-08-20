@@ -27,6 +27,17 @@ import (
 // catches them drifting apart.
 const retentionWindow = "30s"
 
+// collectionDeadline is how long a negative control waits for something to actually be collected.
+//
+// Far longer than the 30s window, and deliberately so. zot walks repositories on a rotation, so the
+// gap between visits to any ONE repository is not bounded by gcInterval -- it grows with the number
+// of repositories in the registry, and the bundled registry now holds every image the whole suite
+// produces, build caches included. TestExpiryIsNotPrompt records the same thing from the other side.
+//
+// This is a deadline for "did it happen at all", not a measurement of when. Raising it costs nothing
+// when collection is prompt, because the poll returns as soon as the tag goes.
+const collectionDeadline = 420
+
 // keepaliveRepo scopes these tests to the repository prefix the retention policy applies to, so
 // nothing else in the suite can be collected out from under it.
 func keepaliveRepo(name string) string { return "keepalive-" + name }
@@ -92,7 +103,7 @@ func TestPullingAnImageKeepsItFromExpiring(t *testing.T) {
 	// loop and passed — but a separate test that pushed an image and waited the same 90s saw its tag
 	// still present, which is the same scenario with the opposite result. That is what a marginal
 	// assertion looks like from the outside: green, and one slow runner away from red.
-	eventuallyUntagged(t, abandoned, "v1", 240)
+	eventuallyUntagged(t, abandoned, "v1", collectionDeadline)
 }
 
 // eventuallyUntagged waits for a tag to be collected, and fails loudly if it never is.
@@ -209,7 +220,7 @@ func sleepInCluster(t *testing.T, seconds int) {
 // the answer the whole time.
 func registryLogs(t *testing.T) string {
 	t.Helper()
-	out, err := kubectl(t, "-n", buildNamespace, "logs", "deploy/e2e-registry", "--tail=120")
+	out, err := kubectl(t, "-n", operatorNamespace, "logs", "deploy/kube-oci-composer-registry", "--tail=120")
 	if err != nil {
 		return "\n\n(registry logs unavailable: " + err.Error() + ")"
 	}

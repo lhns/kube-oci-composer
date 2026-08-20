@@ -114,10 +114,12 @@ type ImageBuildSpec struct {
 
 	// Push publishes the built image to an external registry.
 	//
-	// Required in this alpha: the build runs in a Job, which cannot reach the controller's
-	// loopback-only serving endpoint. See ADR 0025.
-	// +required
-	Push *Push `json:"push"`
+	// Optional. A build always publishes to a registry -- the Job runs in another pod and cannot
+	// reach the controller's loopback-only serving endpoint (ADR 0025) -- but WHICH registry can
+	// come from the operator's default rather than from here. Omit it entirely and the build
+	// publishes to <default registry>/<namespace>/<name>.
+	// +optional
+	Push *Push `json:"push,omitempty"`
 }
 
 // BuildArg is one Dockerfile ARG value.
@@ -252,6 +254,10 @@ type ImageBuildStatus struct {
 
 // ImageBuild builds an OCI image from a Dockerfile and a content-addressed context.
 //
+// The keep annotation is emitted into the CRD itself so the chart can install it verbatim.
+// Deleting a CRD deletes every object of that kind, and Helm removing one on an uninstall or a
+// toggle flip is not a risk worth taking for a resource that costs nothing when unused.
+// +kubebuilder:metadata:annotations="helm.sh/resource-policy=keep"
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=ibuild

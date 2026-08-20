@@ -1,3 +1,4 @@
+{{- if .Values.imageComposition.enabled }}
 {{/*
 Generated from the kubebuilder markers in internal/controller. chart_rbac_test.go asserts these
 rules match what controller-gen produces, so the chart cannot silently grant more or less than the
@@ -84,3 +85,4 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "kube-oci-composer.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -2,26 +2,30 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "kube-oci-composer.fullname" . }}-registry
+  name: {{ include "kube-oci-composer.registryFullname" . }}
   labels:
-    {{- include "kube-oci-composer.labels" . | nindent 4 }}
-    app.kubernetes.io/component: registry
+    {{- include "kube-oci-composer.componentLabels" (dict "ctx" . "component" "registry") | nindent 4 }}
 spec:
   selector:
-    {{- include "kube-oci-composer.selectorLabels" . | nindent 4 }}
-    app.kubernetes.io/component: registry
+    {{- include "kube-oci-composer.componentSelectorLabels" (dict "ctx" . "component" "registry") | nindent 4 }}
+  type: {{ .Values.registry.service.type }}
   ports:
     - name: registry
-      port: 5000
+      port: {{ .Values.registry.service.port }}
       targetPort: registry
+      {{- if and (eq .Values.registry.service.type "NodePort") .Values.registry.service.nodePort }}
+      # A NodePort is what makes the registry reachable by the KUBELET, which resolves image
+      # references with the node's resolver and cannot see cluster DNS. Pair it with a containerd
+      # certs.d drop-in mapping registry.host to this port. See docs/registry.md.
+      nodePort: {{ .Values.registry.service.nodePort }}
+      {{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "kube-oci-composer.fullname" . }}-registry
+  name: {{ include "kube-oci-composer.registryFullname" . }}
   labels:
-    {{- include "kube-oci-composer.labels" . | nindent 4 }}
-    app.kubernetes.io/component: registry
+    {{- include "kube-oci-composer.componentLabels" (dict "ctx" . "component" "registry") | nindent 4 }}
 spec:
   # One. Storage is a single volume, so a second replica would serve a different set of images
   # depending on which one a request reached -- the same defect the embedded endpoint had
@@ -33,16 +37,14 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      {{- include "kube-oci-composer.selectorLabels" . | nindent 6 }}
-      app.kubernetes.io/component: registry
+      {{- include "kube-oci-composer.componentSelectorLabels" (dict "ctx" . "component" "registry") | nindent 6 }}
   template:
     metadata:
       annotations:
         # A config change has to restart the pod; zot reads its config once at startup.
         checksum/config: {{ include (print $.Template.BasePath "/registry-config.yaml") . | sha256sum }}
       labels:
-        {{- include "kube-oci-composer.selectorLabels" . | nindent 8 }}
-        app.kubernetes.io/component: registry
+        {{- include "kube-oci-composer.componentSelectorLabels" (dict "ctx" . "component" "registry") | nindent 8 }}
     spec:
       securityContext:
         runAsNonRoot: true
@@ -65,7 +67,7 @@ spec:
           volumeMounts:
             - {name: config, mountPath: /etc/zot}
             - {name: data, mountPath: /var/lib/registry}
-            {{- if .Values.registry.auth.secretName }}
+            {{- if .Values.registry.auth.enabled }}
             - {name: auth, mountPath: /etc/zot/auth, readOnly: true}
             {{- end }}
           readinessProbe:
@@ -79,16 +81,16 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: {{ include "kube-oci-composer.fullname" . }}-registry
-        {{- if .Values.registry.auth.secretName }}
+            name: {{ include "kube-oci-composer.registryFullname" . }}
+        {{- if .Values.registry.auth.enabled }}
         - name: auth
           secret:
-            secretName: {{ .Values.registry.auth.secretName }}
+            secretName: {{ include "kube-oci-composer.registryFullname" . }}-htpasswd
         {{- end }}
         - name: data
         {{- if .Values.registry.persistence.enabled }}
           persistentVolumeClaim:
-            claimName: {{ include "kube-oci-composer.fullname" . }}-registry
+            claimName: {{ include "kube-oci-composer.registryFullname" . }}
         {{- else }}
           # emptyDir means every restart loses every image. Tolerable for a demo; for ImageBuild it
           # means losing content that cannot be rebuilt, which is why persistence defaults ON.
@@ -99,10 +101,9 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: {{ include "kube-oci-composer.fullname" . }}-registry
+  name: {{ include "kube-oci-composer.registryFullname" . }}
   labels:
-    {{- include "kube-oci-composer.labels" . | nindent 4 }}
-    app.kubernetes.io/component: registry
+    {{- include "kube-oci-composer.componentLabels" (dict "ctx" . "component" "registry") | nindent 4 }}
   annotations:
     # Kept when the release is uninstalled. For ImageBuild these bytes are the only copy, and a
     # `helm uninstall` typed in the wrong terminal is not a good enough reason to lose them.

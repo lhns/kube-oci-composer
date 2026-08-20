@@ -327,8 +327,17 @@ type BuildRecord struct {
 // serving endpoint instead.
 type Push struct {
 	// Repository is the fully qualified target, e.g. "ghcr.io/example/artifact".
-	// +required
-	Repository string `json:"repository"`
+	//
+	// Optional. Omitted, the object publishes to the operator's default registry under
+	// <namespace>/<name> -- which is what a default chart install configures, so nothing here has
+	// to name a host at all.
+	//
+	// Naming one has a second effect worth knowing: the operator's own registry credential is used
+	// ONLY for the default target. An object that chooses its own repository authenticates with its
+	// own secretRef, or not at all. Otherwise anyone able to create one of these objects could
+	// point it at a host they control and have the controller hand over the operator's password.
+	// +optional
+	Repository string `json:"repository,omitempty"`
 
 	// Tags are the tags to push, as described on Publish.Tags. Empty pushes by digest only.
 	// +kubebuilder:validation:MaxItems=32

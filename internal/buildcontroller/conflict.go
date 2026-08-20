@@ -11,6 +11,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
@@ -33,6 +35,11 @@ func (r *ImageBuildReconciler) checkTagConflict(
 	ctx context.Context, obj *ociv1alpha1.ImageBuild,
 ) (stop bool, conflict *ociv1alpha1.TagConflictStatus, err error) {
 	p := obj.Spec.Push
+	repo := r.repositoryFor(obj)
+	if repo == "" {
+		return false, nil, recon.Pending(
+			"this build names no push.repository, and no default registry is configured")
+	}
 	policy := p.ResolveConflictPolicy()
 	if policy == ociv1alpha1.ConflictOverwrite {
 		// Nothing to ask the registry. Skipping the round trip also means the permissive policy
@@ -54,11 +61,11 @@ func (r *ImageBuildReconciler) checkTagConflict(
 		return false, nil, err
 	}
 	var refOpts []name.Option
-	if insecureHost(p.Repository, r.JobConfig.InsecureRegistries) {
+	if insecureHost(repo, r.JobConfig.InsecureRegistries) {
 		refOpts = append(refOpts, name.Insecure)
 	}
 
-	published, err := recon.ResolvePublished(p.Repository, tags, obj.Status.Artifact, refOpts, opts)
+	published, err := recon.ResolvePublished(repo, tags, obj.Status.Artifact, refOpts, opts)
 	if err != nil {
 		return false, nil, err
 	}
@@ -112,13 +119,19 @@ func (r *ImageBuildReconciler) remoteOptions(
 ) ([]remote.Option, error) {
 	opts := []remote.Option{remote.WithContext(ctx)}
 
-	p := obj.Spec.Push
-	if p.SecretRef == nil {
+	var ownRef string
+	if p := obj.Spec.Push; p != nil && p.SecretRef != nil {
+		ownRef = p.SecretRef.Name
+	}
+	// The operator's credential goes to the operator's registry and nowhere else, whether or not
+	// this object named the path itself. See recon.DefaultRegistry.CredentialFor.
+	name, namespace := r.Default.CredentialFor(obj.Namespace, ownRef, r.repositoryFor(obj))
+	if name == "" {
 		return append(opts, remote.WithAuth(authn.Anonymous)), nil
 	}
 
 	var secret corev1.Secret
-	key := types.NamespacedName{Namespace: obj.Namespace, Name: p.SecretRef.Name}
+	key := types.NamespacedName{Namespace: namespace, Name: name}
 	if err := r.Get(ctx, key, &secret); err != nil {
 		if apierrors.IsNotFound(err) {
 			// Waits rather than stalls: the Secret may be on its way from SOPS or a Kustomization
@@ -145,7 +158,7 @@ func (r *ImageBuildReconciler) remoteOptions(
 // unreadable secret: none of them are reasons to fail a build over a cache, and the worst outcome
 // of a wrong "no" is that this build repopulates a cache that was already there.
 func (r *ImageBuildReconciler) cacheAvailable(ctx context.Context, obj *ociv1alpha1.ImageBuild) bool {
-	cacheRef := cacheRefFor(obj)
+	cacheRef := cacheRefFor(obj, r.repositoryFor(obj))
 	if cacheRef == "" {
 		return false
 	}
@@ -165,4 +178,101 @@ func (r *ImageBuildReconciler) cacheAvailable(ctx context.Context, obj *ociv1alp
 	}
 	_, err = remote.Head(ref, opts...)
 	return err == nil
+}
+
+// usesDefaultRepository reports whether this build publishes to the operator's default registry
+// rather than to one its own spec named.
+func usesDefaultRepository(obj *ociv1alpha1.ImageBuild) bool {
+	return obj.Spec.Push == nil || obj.Spec.Push.Repository == ""
+}
+
+// repositoryFor is the ONE place that resolves where a build publishes.
+//
+// Everything that needs the repository goes through here -- the push target, the tag-conflict
+// check, the build cache reference, the retention refresh. Resolving the default in some of those
+// and not others would push to one place and then keep a different one alive, which is the kind of
+// mismatch that only shows up a retention window later.
+func (r *ImageBuildReconciler) repositoryFor(obj *ociv1alpha1.ImageBuild) string {
+	if !usesDefaultRepository(obj) {
+		return obj.Spec.Push.Repository
+	}
+	if !r.Default.Configured() {
+		return ""
+	}
+	return r.Default.RepositoryFor(obj.Namespace, obj.Name)
+}
+
+// pushSecretFor returns the name of the Secret the build pod mounts as its registry credential,
+// creating a short-lived copy of the operator's when the object has none of its own.
+//
+// A pod can only mount Secrets from its own namespace, and the build must run in the object's
+// namespace: it mounts that namespace's build secrets and executes that namespace's code. So the
+// operator's credential, which lives in the CONTROLLER's namespace, cannot be mounted directly.
+//
+// The copy is owned by the ImageBuild and named after the Job, so it is garbage-collected when the
+// object goes and is replaced rather than accumulated when the inputs change. That bounds the
+// exposure to roughly the length of a build instead of forever, which is the whole reason it is a
+// copy and not a permanent per-namespace Secret.
+//
+// It does NOT eliminate the exposure, and pretending otherwise would be worse than not doing it:
+// while a build runs, anyone who can read Secrets in that namespace can read the operator's registry
+// credential. What makes that tolerable is that the namespace can already push arbitrary content to
+// that registry through an ImageBuild -- the credential lets it do directly what it could already do
+// indirectly.
+func (r *ImageBuildReconciler) pushSecretFor(
+	ctx context.Context, obj *ociv1alpha1.ImageBuild, jobName string,
+) (string, error) {
+	if p := obj.Spec.Push; p != nil && p.SecretRef != nil {
+		return p.SecretRef.Name, nil
+	}
+
+	repo := r.repositoryFor(obj)
+	if r.Default.SecretName == "" || !r.Default.Owns(repo) {
+		// Either there is no operator credential, or this build publishes somewhere the operator's
+		// credential has no business going. Push anonymously; the registry decides.
+		return "", nil
+	}
+
+	var source corev1.Secret
+	key := types.NamespacedName{Namespace: r.Default.Namespace, Name: r.Default.SecretName}
+	if err := r.Get(ctx, key, &source); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", recon.Pending("default push secret %s not found yet", key)
+		}
+		return "", fmt.Errorf("reading default push secret %s: %w", key, err)
+	}
+
+	copied := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jobName + "-push",
+			Namespace: obj.Namespace,
+			Labels:    map[string]string{"app.kubernetes.io/managed-by": "kube-oci-builder"},
+			Annotations: map[string]string{
+				"oci.lhns.de/description": "Short-lived copy of the operator's registry credential, " +
+					"mounted by this build's Job. Deleted with the build.",
+			},
+		},
+		Type: source.Type,
+		Data: source.Data,
+	}
+	if err := ctrl.SetControllerReference(obj, copied, r.Scheme()); err != nil {
+		return "", fmt.Errorf("setting owner on the push credential: %w", err)
+	}
+
+	if err := r.Create(ctx, copied); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return "", fmt.Errorf("creating the push credential: %w", err)
+		}
+		// Already there from an earlier attempt at this same build. Update it, so a rotated
+		// operator password reaches the build rather than the build failing on a stale one.
+		existing := &corev1.Secret{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(copied), existing); err != nil {
+			return "", fmt.Errorf("reading the existing push credential: %w", err)
+		}
+		existing.Data = source.Data
+		if err := r.Update(ctx, existing); err != nil {
+			return "", fmt.Errorf("refreshing the push credential: %w", err)
+		}
+	}
+	return copied.Name, nil
 }
