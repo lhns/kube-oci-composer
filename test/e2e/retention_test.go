@@ -259,7 +259,21 @@ func pushTinyImage(t *testing.T, repository string) string {
 		}
 		return nil
 	})
-	return buildStatus(t, name).Artifact.Digest
+	digest := buildStatus(t, name).Artifact.Digest
+
+	// The object is deleted the moment it has published, and this is not tidying up.
+	//
+	// The controller now refreshes every live ImageBuild, which is the whole point of
+	// retention_controller_test.go — and it would silently destroy every assertion in THIS file. The
+	// negative controls here wait for something to be collected; a live object would keep it alive
+	// forever, so they would hang until their deadline and then report that the registry collects
+	// nothing, which is the exact false conclusion this file exists to rule out.
+	//
+	// So the two files divide the question cleanly. This one measures the REGISTRY with no
+	// controller involvement: the images here are orphans, and only what the test pulls keeps them
+	// alive. The other measures the CONTROLLER, and touches the registry not at all.
+	mustKubectl(t, "-n", buildNamespace, "delete", "imagebuild", name)
+	return digest
 }
 
 // manifestExists fetches a manifest with GET, which is what a real pull is.

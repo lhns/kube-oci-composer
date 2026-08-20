@@ -122,12 +122,17 @@ status:
     revision: main@sha1:e2e
 EOF
 
+# refreshInterval is 5s against the registry's 30s window (manifests/registry.yaml), a margin of 6
+# where a deployment runs 1h against 30 days for 720. The RATIO is what is reproduced here, not
+# the numbers: the retention tests need the controller to visibly keep something alive inside a
+# test run, and to visibly stop once the object naming it is gone.
 helm upgrade --install kube-oci-builder charts/kube-oci-builder \
   --namespace oci-builder --create-namespace \
   --set image.repository="${BUILDER_IMG%:*}" \
   --set image.tag="${BUILDER_IMG##*:}" \
   --set image.pullPolicy=Never \
   --set builder.insecureRegistry="$E2E_REGISTRY" \
+  --set builder.retention.refreshInterval=5s \
   --wait --timeout 5m
 
 kubectl -n oci-builder rollout status deploy/kube-oci-builder --timeout=5m
