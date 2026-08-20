@@ -28,10 +28,11 @@ may change between minor versions.
   collide the moment two namespaces both contain an `app` -- silently, and read by the tag policy as
   a legitimate conflict.
 
-  **The operator's credential is used ONLY for objects that named no repository.** An object naming
-  its own registry authenticates with its own `secretRef` or not at all. Otherwise anyone able to
-  create an `ImageComposition` could point it at a host they control and be handed the operator's
-  registry password. See ADR 0034.
+  **The operator's credential is sent to the operator's registry and nowhere else**, keyed on the
+  HOST. An object may name its own path inside that registry and still authenticate; an object naming
+  a different host uses its own `secretRef` or nothing. Otherwise anyone able to create an
+  `ImageComposition` could point it at a host they control and be handed the operator's registry
+  password. See ADR 0034.
 
 - **The retention guarantee: images a live object still references are never reclaimed** (ADR 0031),
   and a `retention` refresher on both controllers that enforces it.

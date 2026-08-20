@@ -121,9 +121,9 @@ func (r *ImageBuildReconciler) remoteOptions(
 	if p := obj.Spec.Push; p != nil && p.SecretRef != nil {
 		ownRef = p.SecretRef.Name
 	}
-	// The operator's credential is used only for a repository the OBJECT did not choose. See
-	// recon.DefaultRegistry.CredentialFor.
-	name, namespace := r.Default.CredentialFor(obj.Namespace, ownRef, usesDefaultRepository(obj))
+	// The operator's credential goes to the operator's registry and nowhere else, whether or not
+	// this object named the path itself. See recon.DefaultRegistry.CredentialFor.
+	name, namespace := r.Default.CredentialFor(obj.Namespace, ownRef, r.repositoryFor(obj))
 	if name == "" {
 		return append(opts, remote.WithAuth(authn.Anonymous)), nil
 	}

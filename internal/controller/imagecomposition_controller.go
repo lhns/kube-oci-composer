@@ -696,9 +696,13 @@ func (r *ImageCompositionReconciler) remoteOptions(ctx context.Context, obj *oci
 	if p := obj.Spec.Push; p != nil && p.SecretRef != nil {
 		ownRef = p.SecretRef.Name
 	}
-	// usesDefault is what separates "the operator chose this registry" from "the tenant did", and
-	// the operator's credential is only ever sent to the former.
-	name, namespace := r.Default.CredentialFor(obj.Namespace, ownRef, obj.Spec.Push == nil)
+	// The operator's credential goes to the operator's registry and nowhere else. Resolved through
+	// target() so the host compared is the one actually pushed to.
+	tgt, err := r.target(obj)
+	if err != nil {
+		return nil, err
+	}
+	name, namespace := r.Default.CredentialFor(obj.Namespace, ownRef, tgt.writeRepo)
 	if name == "" {
 		return append(opts, remote.WithAuth(authn.Anonymous)), nil
 	}

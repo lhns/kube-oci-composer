@@ -21,40 +21,52 @@ func TestTheOperatorCredentialNeverReachesATenantChosenRegistry(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		name        string
-		ownSecret   string
-		usesDefault bool
-		wantName    string
-		wantNS      string
+		name      string
+		ownSecret string
+		target    string
+		wantName  string
+		wantNS    string
 	}{
 		{
-			name:        "the object chose its own registry: no credential at all",
-			usesDefault: false,
-			wantName:    "", wantNS: "",
+			// The case that matters: a host the tenant picked.
+			name:     "a registry the tenant chose gets nothing",
+			target:   "attacker.example/x",
+			wantName: "", wantNS: "",
 		},
 		{
-			name:        "the object chose its own registry AND its own secret",
-			ownSecret:   "tenant-creds",
-			usesDefault: false,
-			wantName:    "tenant-creds", wantNS: "team-a",
+			name:      "a registry the tenant chose uses the tenant's own secret",
+			ownSecret: "tenant-creds",
+			target:    "attacker.example/x",
+			wantName:  "tenant-creds", wantNS: "team-a",
 		},
 		{
-			name:        "the operator chose the registry: the operator's credential",
-			usesDefault: true,
-			wantName:    "operator-push", wantNS: "oci-composer",
+			name:     "the operator's registry, path chosen by the operator",
+			target:   "registry.internal:5000/team-a/app",
+			wantName: "operator-push", wantNS: "oci-composer",
 		},
 		{
-			// An explicit secretRef wins even on the default target: the object asked for a
-			// specific credential, and silently substituting a more privileged one is worse than
-			// honouring what was written.
-			name:        "an explicit secret wins over the operator's",
-			ownSecret:   "tenant-creds",
-			usesDefault: true,
-			wantName:    "tenant-creds", wantNS: "team-a",
+			// The ordinary case the first version of this rule got WRONG. Naming a path inside the
+			// operator's own registry is not choosing a different registry, and denying the
+			// credential here forces the operator to hand their password to every tenant.
+			name:     "the operator's registry, path chosen by the object",
+			target:   "registry.internal:5000/somewhere/else",
+			wantName: "operator-push", wantNS: "oci-composer",
+		},
+		{
+			name:      "an explicit secret wins even on the operator's registry",
+			ownSecret: "tenant-creds",
+			target:    "registry.internal:5000/team-a/app",
+			wantName:  "tenant-creds", wantNS: "team-a",
+		},
+		{
+			// A host that merely starts with the operator's is a different host.
+			name:     "a lookalike host gets nothing",
+			target:   "registry.internal:5000.attacker.example/x",
+			wantName: "", wantNS: "",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			name, ns := d.CredentialFor("team-a", tc.ownSecret, tc.usesDefault)
+			name, ns := d.CredentialFor("team-a", tc.ownSecret, tc.target)
 			if name != tc.wantName || ns != tc.wantNS {
 				t.Errorf("CredentialFor = (%q, %q), want (%q, %q)", name, ns, tc.wantName, tc.wantNS)
 			}
@@ -69,7 +81,7 @@ func TestTheOperatorCredentialNeverReachesATenantChosenRegistry(t *testing.T) {
 func TestTheDefaultCredentialComesFromTheControllersNamespace(t *testing.T) {
 	d := DefaultRegistry{Host: "r:5000", SecretName: "operator-push", Namespace: "oci-composer"}
 
-	_, ns := d.CredentialFor("some-tenant", "", true)
+	_, ns := d.CredentialFor("some-tenant", "", "r:5000/some-tenant/app")
 	if ns != "oci-composer" {
 		t.Errorf("namespace = %q, want the controller's own; a tenant namespace here means a "+
 			"tenant can supply the credential the controller pushes with", ns)
@@ -107,7 +119,7 @@ func TestAnUnconfiguredDefaultIsNotUsable(t *testing.T) {
 	if d.Configured() {
 		t.Error("an empty DefaultRegistry reports itself configured")
 	}
-	name, _ := d.CredentialFor("team-a", "", true)
+	name, _ := d.CredentialFor("team-a", "", "anything/at/all")
 	if name != "" {
 		t.Errorf("credential %q offered with no registry configured", name)
 	}

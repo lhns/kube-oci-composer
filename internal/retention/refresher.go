@@ -321,7 +321,7 @@ func (r *Refresher) refreshObject(ctx context.Context, target Target, out *Resul
 	out.Objects++
 	out.References += len(refs)
 
-	opts, err := r.remoteOptions(ctx, namespace, push)
+	opts, err := r.remoteOptions(ctx, namespace, repo, push)
 	if err != nil {
 		out.Failed += len(refs)
 		r.noteFailure(ctx, obj, namespace, objName, fmt.Sprintf("registry credentials: %v", err))
@@ -476,7 +476,7 @@ func qualify(repo, tag string) string {
 // The same Secret the object already uses to publish. This package never needs more authority than
 // reading, so a credential scoped to pull is enough for it — which is worth knowing when deciding
 // what to put in that Secret.
-func (r *Refresher) remoteOptions(ctx context.Context, namespace string, push *ociv1alpha1.Push) ([]remote.Option, error) {
+func (r *Refresher) remoteOptions(ctx context.Context, namespace, repository string, push *ociv1alpha1.Push) ([]remote.Option, error) {
 	opts := []remote.Option{remote.WithContext(ctx)}
 
 	var ownRef string
@@ -486,7 +486,7 @@ func (r *Refresher) remoteOptions(ctx context.Context, namespace string, push *o
 	// Same rule as the publish path: the operator's credential only ever reaches the operator's own
 	// registry. Refreshing reads, so the blast radius is smaller -- but a credential sent to a host
 	// a tenant chose is exfiltrated whether the request that carries it reads or writes.
-	name, ns := r.Default.CredentialFor(namespace, ownRef, push == nil || push.Repository == "")
+	name, ns := r.Default.CredentialFor(namespace, ownRef, repository)
 	if name == "" {
 		return append(opts, remote.WithAuth(authn.Anonymous)), nil
 	}

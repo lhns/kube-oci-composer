@@ -44,13 +44,14 @@ than as two unrelated objects landing on one name.
 The default credential is a `dockerconfigjson` Secret read from **the controller's own namespace**,
 not the object's. It belongs to the operator who installed the chart.
 
-> **The operator's credential is used only when the object did not choose where its content goes.**
+> **The operator's credential is sent to the operator's registry, and nowhere else.**
 
-An object naming its own `repository` authenticates with its own `secretRef`, or anonymously. Never
-with the operator's.
+Keyed on the registry **host**. An object may name its own path inside that registry and still be
+authenticated — that is the ordinary case. An object naming a *different host* gets its own
+`secretRef` or nothing.
 
-Without that rule the feature is a credential-exfiltration primitive. Anyone able to create an
-`ImageComposition` — which is a namespaced, ordinary permission — writes:
+Without the rule the feature is a credential-exfiltration primitive. Anyone able to create an
+`ImageComposition` — a namespaced, ordinary permission — writes:
 
 ```yaml
 spec:
@@ -62,12 +63,19 @@ and the controller connects to a host the tenant chose and presents the operator
 password. Nothing about the request looks wrong: it is a well-formed push to a well-formed
 reference, and it succeeds.
 
-This is why the rule lives in one function, `DefaultRegistry.CredentialFor`, used by all three call
-sites that authenticate — publishing, the tag-conflict pre-check, and the retention refresh. Three
-independent implementations of a rule like this is three chances to get it wrong, and the third one
-(refreshing) only *reads*, which is exactly the kind of reasoning that leads to an exception being
-carved out. A credential sent to a host a tenant chose is exfiltrated whether the request that
-carries it reads or writes.
+**The first version of this rule keyed on the wrong thing**, and it is worth recording because the
+mistake was the safer-sounding option. It asked "did the object name a repository at all?" and
+withheld the credential whenever it had — which also withheld it from every object wanting a
+specific path in *the operator's own registry*. The e2e caught it as a `401` on every build.
+
+Leaving it would have been worse than the bug it prevented. The workaround for a denied push to the
+operator's own registry is for the operator to hand their registry password to every tenant that
+needs a custom path — trading a narrow, deliberate use of the credential for its wholesale
+distribution.
+
+A path prefix inside the host is **not** treated as a boundary. Anyone who can reach the registry can
+reach every path in it, so enforcing prefixes here would imply a guarantee the registry does not
+make.
 
 ### Reaching the registry
 
@@ -93,9 +101,11 @@ appears as `ErrImagePull` against a Service that is perfectly healthy.
 that names no repository when no default is configured waits. Stalling would need a generation change
 to recover from, and the fix is a controller flag — nothing about the object is wrong.
 
-**The security rule is one `usesDefault` boolean away from being wrong**, and it is not obviously
-load-bearing when read. It is covered by a test that fails with the condition removed, and named
-here so that a future reader deleting it as a redundant check has to argue with a record first.
+**The security rule is one comparison away from being wrong in either direction**, and it is not
+obviously load-bearing when read: too strict and every push to the operator's own registry fails,
+too loose and the password goes to whatever host a tenant names. It is covered by a test that fails
+with the comparison removed, and named here so that a future reader deleting it as redundant has to
+argue with a record first.
 
 **An explicit `secretRef` wins even on the default target.** The object asked for a specific
 credential; substituting a more privileged one because it happens to be available is worse than
