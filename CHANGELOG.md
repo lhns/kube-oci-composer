@@ -24,21 +24,6 @@ may change between minor versions.
   `Overwrite`), so existing charts need no edit. Setting both to contradictory values is refused at
   admission; setting both to values that agree is fine. See ADR 0029.
 
-### Fixed
-- **`push.immutable` did nothing on `ImageBuild`.** It was in the CRD from the day that kind
-  shipped, defaulted to `true`, and nothing in the build controller read it -- BuildKit pushed over
-  whatever the tag held. Anyone who set it, or who simply accepted the default, believed a tag could
-  not be silently remeaned, and it could.
-
-  The check now runs **before the Job is created**, which is the whole substance of the fix: BuildKit
-  pushes from inside the Job, so a conflict noticed afterwards is a conflict that has already
-  happened.
-
-  **This changes behaviour on upgrade.** An `ImageBuild` whose tags already hold content it did not
-  publish now goes `Stalled` instead of quietly overwriting. If that is deliberate, set
-  `onConflict: Overwrite`; if the content is already correct, `onConflict: Keep`.
-
-### Added
 - **`push.history` and `push.ref` on `ImageBuild`**, closing the two gaps that mattered most in the
   drift between `publish` and `push`.
 
@@ -75,6 +60,20 @@ may change between minor versions.
   `buildSecret.secretRef` is a pointer like every other `secretRef`, and the status printcolumn
   carries `priority=1` on both so `kubectl get` renders them alike. `SourceRefSource` and
   `RevisionMatches` moved to `shared_types.go`, where both kinds' shared API surface lives.
+
+### Fixed
+- **`push.immutable` did nothing on `ImageBuild`.** It was in the CRD from the day that kind
+  shipped, defaulted to `true`, and nothing in the build controller read it -- BuildKit pushed over
+  whatever the tag held. Anyone who set it, or who simply accepted the default, believed a tag could
+  not be silently remeaned, and it could.
+
+  The check now runs **before the Job is created**, which is the whole substance of the fix: BuildKit
+  pushes from inside the Job, so a conflict noticed afterwards is a conflict that has already
+  happened.
+
+  **This changes behaviour on upgrade.** An `ImageBuild` whose tags already hold content it did not
+  publish now goes `Stalled` instead of quietly overwriting. If that is deliberate, set
+  `onConflict: Overwrite`; if the content is already correct, `onConflict: Keep`.
 
 ### Added
 - **Tests for the class of mistake that produced most of this release's bugs**: an assertion written
