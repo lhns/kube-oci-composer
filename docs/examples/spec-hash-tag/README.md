@@ -53,35 +53,48 @@ helm template demo docs/examples/spec-hash-tag/
 **1. Do not hash `.Values`.** Hash the *rendered* partial. A template change can alter the spec
 without altering values — a new field, a changed default, a conditional — and hashing values would
 miss it, republishing different content under an unchanged tag. That is the precise hazard
-`immutable` exists to catch, so you would be relying on the guard instead of being correct.
+`onConflict: Fail` exists to catch, so you would be relying on the guard instead of being correct.
 
 **2. Do not put `publish` in the hashed partial.** Where an artifact goes is not part of what it
 is, and `publish.tags` is derived from the hash, so including it would be circular. Verified in
 the example: changing `repository` or `history` leaves the tag alone, while changing a layer's
 digest moves it.
 
-## Why `immutable` matters here
+## Why `onConflict` matters here
 
-`publish.immutable` defaults to true and should stay that way. A spec-hash tag can only ever mean
-one thing — change the spec and the tag changes with it — so if the controller ever finds that tag
-resolving to different content, something is genuinely wrong: an unpinned input, or two specs
-colliding. Failing loudly is right.
+`publish.onConflict` defaults to `Fail` and should usually stay that way. A spec-hash tag can only
+ever mean one thing — change the spec and the tag changes with it — so if the controller ever finds
+that tag resolving to different content, something is genuinely wrong: an unpinned input, or two
+specs colliding. Failing loudly is right.
 
 It is also what makes `pullPolicy: IfNotPresent` correct on a *tag*. A cached copy cannot be stale
-if the tag identifies content. Turn immutability off and that stops being true.
+if the tag identifies content. Set `onConflict: Overwrite` and that stops being true.
 
 Republishing identical content under the same tag is always a no-op, so a steady reconcile loop
 never trips the guard. Only a real change of meaning does.
+
+**`onConflict: Keep` is worth knowing about here**, because this is the pattern it was added for.
+With a spec-hash tag, a tag that already exists usually means the content is already published and
+correct — a redeploy of an unchanged chart, or a second cluster pointing at the same registry. `Keep`
+leaves it alone, publishes nothing, and reports Ready, recording the divergence in `status.conflict`
+so it is visible rather than assumed.
+
+Prefer `Fail` while you are still establishing that your hash covers everything it should. `Keep`
+silences exactly the signal that tells you it does not.
+
+`immutable` is the deprecated spelling of the same setting: `true` is `Fail`, `false` is
+`Overwrite`, and there was no way to spell `Keep`. It is still honoured, so existing charts keep
+working, but new specs should use `onConflict`. See ADR 0029.
 
 ## When this does not work
 
 **Inputs that are not pinned in the spec.** `sourceRef` resolves a Flux revision at reconcile time
 and `configMap` reads live content — both can change while the spec, and therefore the tag, does
-not. With `immutable: true` that surfaces as a terminal error rather than silent divergence, which
-is the right failure but should be expected rather than discovered. Options:
+not. Under `onConflict: Fail` that surfaces as a terminal error rather than silent divergence,
+which is the right failure but should be expected rather than discovered. Options:
 
 - fold the input into the hash where you can — a ConfigMap rendered by the same chart is easy;
-- or set `immutable: false` and treat the tag as a pointer, referencing the digest instead;
+- or set `onConflict: Overwrite` and treat the tag as a pointer, referencing the digest instead;
 - or pin the input properly with `fetch` + `digest`.
 
 **A rollback older than `publish.history`.** Rolling back a commit names an earlier spec-hash tag,

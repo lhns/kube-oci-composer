@@ -480,6 +480,11 @@ type ImageCompositionStatus struct {
 	// +optional
 	History []BuildRecord `json:"history,omitempty"`
 
+	// Conflict records content this object produced and did not publish, because onConflict: Keep
+	// left an existing tag in place. Cleared as soon as a reconcile publishes cleanly.
+	// +optional
+	Conflict *TagConflictStatus `json:"conflict,omitempty"`
+
 	// LastHandledReconcileAt echoes the reconcile.fluxcd.io/requestedAt annotation, so
 	// `flux reconcile` works out of the box.
 	// +optional

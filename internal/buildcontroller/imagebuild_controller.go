@@ -133,6 +133,16 @@ func (r *ImageBuildReconciler) reconcile(ctx context.Context, obj *ociv1alpha1.I
 		return ctrl.Result{}, err
 	}
 	if job == nil {
+		// Before anything executes. A Job that has started cannot be un-pushed, so a conflict
+		// noticed afterwards is a conflict that has already happened.
+		stop, conflict, err := r.checkTagConflict(ctx, obj)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if stop {
+			r.recordKept(obj, conflict)
+			return ctrl.Result{RequeueAfter: recon.Interval(obj.Spec.Interval)}, nil
+		}
 		if err := r.startBuild(ctx, obj, inputs, inputHash, contextURL); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -401,6 +411,9 @@ func (r *ImageBuildReconciler) recordSuccess(obj *ociv1alpha1.ImageBuild, inputs
 		Tags:     tags,
 	}
 	obj.Status.InputHash = inputHash
+	// A build that published is a divergence resolved, so the record must go. Leaving it would make
+	// the field a permanent scar on an object that is now correct.
+	obj.Status.Conflict = nil
 	obj.Status.BuildRef = nil
 	obj.Status.Failures = 0
 	if obj.Status.LastAttempt != nil {
@@ -472,6 +485,11 @@ func (r *ImageBuildReconciler) applyOutcome(obj *ociv1alpha1.ImageBuild, err err
 }
 
 func readyMessage(obj *ociv1alpha1.ImageBuild) string {
+	// A kept tag comes first: it is the case where the object is Ready and yet did NOT do what its
+	// spec asks for, so an operator reading one line has to see it here rather than go looking.
+	if c := obj.Status.Conflict; c != nil {
+		return fmt.Sprintf("kept %s at %s; no build was run (onConflict: Keep)", c.Tag, c.Existing)
+	}
 	if obj.Status.Artifact == nil {
 		return "reconciled"
 	}
@@ -569,4 +587,25 @@ func (r *ImageBuildReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&ociv1alpha1.ImageBuild{}).
 		Owns(&batchv1.Job{}).
 		Complete(r)
+}
+
+// recordKept notes a build that was not run because onConflict: Keep left an existing tag alone.
+//
+// Conditions are deliberately NOT set here. applyOutcome owns every condition on this kind, and
+// readyMessage renders this case; setting them in both places would make the message depend on call
+// order, which is how the Ready condition ends up disagreeing with itself.
+//
+// The outcome is Ready, not Stalled. With a spec-hash tag an existing tag means these inputs have
+// already been built and published, so nothing is wrong -- and stalling would need a generation
+// change to recover from, which changing the upstream Dockerfile does not produce.
+//
+// status.artifact is deliberately NOT synthesised from what the tag holds. On this kind the digest
+// alone does not say which inputs produced it, so claiming it as this object's artifact would
+// assert something unverifiable. status.conflict says exactly what is known: the tag exists, and
+// this is what it points at.
+func (r *ImageBuildReconciler) recordKept(obj *ociv1alpha1.ImageBuild, c *ociv1alpha1.TagConflictStatus) {
+	obj.Status.Conflict = c
+	obj.Status.Failures = 0
+	recon.Event(r.Recorder, obj, corev1.EventTypeNormal, ociv1alpha1.ReasonSucceeded,
+		fmt.Sprintf("Kept %s at %s; no build was run (onConflict: Keep)", c.Tag, c.Existing))
 }

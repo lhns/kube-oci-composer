@@ -458,16 +458,21 @@ spec:
                     minimum: 1
                     type: integer
                   immutable:
-                    default: true
                     description: |-
-                      Immutable refuses to move a tag that already resolves to different content, failing the
-                      build instead of changing what the tag means. Defaults to TRUE, because silently
-                      remeaning a tag is what leaves nodes running different bytes under one name.
+                      Immutable is DEPRECATED; use OnConflict. true means Fail, false means Overwrite, and there
+                      was no way to spell Keep at all.
 
-                      Republishing IDENTICAL content is always a no-op regardless of this field, so a steady
-                      reconcile loop never trips it — only a real change of meaning does.
+                      Honoured when OnConflict is unset, so objects written before the enum existed keep behaving
+                      as they did. Setting both to values that CONTRADICT each other is refused; setting both to
+                      values that agree is allowed, because every object stored before this release already has
+                      `immutable: true` materialised under it and would otherwise be unable to adopt the new field
+                      without a separate edit.
 
-                      Set false for a deliberately moving pointer, e.g. tags: [main] repointed at every build.
+                      Its schema default was REMOVED with this change. Keeping it would materialise `immutable`
+                      under every new object, which makes an explicit setting indistinguishable from a defaulted
+                      one and so leaves no rule able to catch a contradiction. Removing it changes nothing for
+                      stored objects, whose value is already written, and nothing for new ones, which resolve to
+                      Fail either way.
 
                       A pointer because the zero value is meaningful: a plain bool with omitempty would drop an
                       explicit `false` on the wire and let the default quietly win.
@@ -476,6 +481,25 @@ spec:
                     description: |-
                       Name is the repository path the artifact is served under, e.g. "kafka-tiered-storage"
                       results in <serving-host>/kafka-tiered-storage.
+                    type: string
+                  onConflict:
+                    description: |-
+                      OnConflict decides what happens when a tag already resolves to different content: Fail
+                      (refuse and stall), Overwrite (move the tag), or Keep (leave it, drop this build, stay
+                      Ready). Defaults to Fail.
+
+                      Republishing IDENTICAL content is a no-op regardless of this field, so a steady reconcile
+                      loop never reaches it -- only a real change of meaning does.
+
+                      Deliberately carries NO schema default, unlike the `immutable` field it replaces. Structural
+                      defaults are applied when an object is read back from storage, so defaulting this would
+                      rewrite every existing `immutable: false` object into a refusing one the moment the CRD was
+                      upgraded -- a silent reversal of a setting its author chose on purpose. The effective default
+                      lives in ResolveConflictPolicy instead, where it can consult `immutable` first.
+                    enum:
+                    - Fail
+                    - Overwrite
+                    - Keep
                     type: string
                   ref:
                     description: |-
@@ -522,6 +546,13 @@ spec:
                 required:
                 - name
                 type: object
+                x-kubernetes-validations:
+                - message: 'immutable and onConflict contradict each other: immutable
+                    true means onConflict Fail, immutable false means onConflict Overwrite.
+                    immutable is deprecated; prefer setting onConflict alone.'
+                  rule: '!(has(self.immutable) && has(self.onConflict)) || (self.immutable
+                    && self.onConflict == ''Fail'') || (!self.immutable && self.onConflict
+                    == ''Overwrite'')'
               push:
                 description: |-
                   Push publishes to an external registry instead. Use it when the artifact must outlive the
@@ -540,12 +571,33 @@ spec:
                     minimum: 1
                     type: integer
                   immutable:
-                    default: true
                     description: |-
-                      Immutable behaves exactly as on Publish, including the default of true. Identical on both
-                      so the field cannot mean different things depending on where it sits — and an external
-                      registry is where a silently remeaned tag does the most damage.
+                      Immutable is DEPRECATED on this side too; use OnConflict. Identical to Publish's in every
+                      respect, so the field cannot mean different things depending on where it sits.
+
+                      It was also INERT here until the release that added OnConflict: nothing in the build
+                      controller read it, and BuildKit pushed over whatever the tag held. The CRD advertised a
+                      guarantee that did not exist.
                     type: boolean
+                  onConflict:
+                    description: |-
+                      OnConflict decides what happens when a tag already resolves to different content: Fail
+                      (refuse and stall), Overwrite (move the tag), or Keep (leave it, drop this build, stay
+                      Ready). Defaults to Fail.
+
+                      Republishing IDENTICAL content is a no-op regardless of this field, so a steady reconcile
+                      loop never reaches it -- only a real change of meaning does.
+
+                      Deliberately carries NO schema default, unlike the `immutable` field it replaces. Structural
+                      defaults are applied when an object is read back from storage, so defaulting this would
+                      rewrite every existing `immutable: false` object into a refusing one the moment the CRD was
+                      upgraded -- a silent reversal of a setting its author chose on purpose. The effective default
+                      lives in ResolveConflictPolicy instead, where it can consult `immutable` first.
+                    enum:
+                    - Fail
+                    - Overwrite
+                    - Keep
+                    type: string
                   ref:
                     description: |-
                       Ref behaves exactly as on Publish: a reference whose TAG is appended to Tags, so a
@@ -581,6 +633,13 @@ spec:
                 required:
                 - repository
                 type: object
+                x-kubernetes-validations:
+                - message: 'immutable and onConflict contradict each other: immutable
+                    true means onConflict Fail, immutable false means onConflict Overwrite.
+                    immutable is deprecated; prefer setting onConflict alone.'
+                  rule: '!(has(self.immutable) && has(self.onConflict)) || (self.immutable
+                    && self.onConflict == ''Fail'') || (!self.immutable && self.onConflict
+                    == ''Overwrite'')'
               suspend:
                 default: false
                 description: Suspend halts reconciliation without deleting anything
@@ -684,6 +743,29 @@ spec:
                   - type
                   type: object
                 type: array
+              conflict:
+                description: |-
+                  Conflict records content this object produced and did not publish, because onConflict: Keep
+                  left an existing tag in place. Cleared as soon as a reconcile publishes cleanly.
+                properties:
+                  dropped:
+                    description: |-
+                      Dropped is the digest this spec produced and discarded. On a composition it is a pure
+                      function of the spec, so it can be reproduced at will; on a build it cannot, and the content
+                      is gone.
+                    type: string
+                  existing:
+                    description: Existing is the digest the tag resolves to -- what
+                      consumers actually get.
+                    type: string
+                  observedAt:
+                    description: ObservedAt is when the divergence was last seen.
+                    format: date-time
+                    type: string
+                  tag:
+                    description: Tag that was left alone.
+                    type: string
+                type: object
               history:
                 description: |-
                   History records past builds, newest first, capped at the retention count. It is the live

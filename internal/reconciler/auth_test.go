@@ -1,4 +1,4 @@
-package controller
+package reconciler
 
 import (
 	"encoding/base64"
@@ -39,7 +39,7 @@ func resolve(t *testing.T, kc authn.Keychain, ref string) authn.AuthConfig {
 
 // TestKeychainReadsUsernamePassword — the plain shape.
 func TestKeychainReadsUsernamePassword(t *testing.T) {
-	kc, err := keychainFromSecret(dockerSecret(t,
+	kc, err := KeychainFromSecret(dockerSecret(t,
 		`{"auths":{"ghcr.io":{"username":"u","password":"p"}}}`))
 	if err != nil {
 		t.Fatalf("building keychain: %v", err)
@@ -55,7 +55,7 @@ func TestKeychainReadsUsernamePassword(t *testing.T) {
 // the secret.
 func TestKeychainDecodesAuthField(t *testing.T) {
 	enc := base64.StdEncoding.EncodeToString([]byte("u:p"))
-	kc, err := keychainFromSecret(dockerSecret(t,
+	kc, err := KeychainFromSecret(dockerSecret(t,
 		fmt.Sprintf(`{"auths":{"ghcr.io":{"auth":%q}}}`, enc)))
 	if err != nil {
 		t.Fatalf("building keychain: %v", err)
@@ -70,7 +70,7 @@ func TestKeychainDecodesAuthField(t *testing.T) {
 // comparison would silently fail to find a credential that is plainly there, and the resulting
 // 401 would look like a wrong password rather than a lookup miss.
 func TestKeychainNormalisesHosts(t *testing.T) {
-	kc, err := keychainFromSecret(dockerSecret(t,
+	kc, err := KeychainFromSecret(dockerSecret(t,
 		`{"auths":{"https://registry.example.com/v1/":{"username":"u","password":"p"}}}`))
 	if err != nil {
 		t.Fatalf("building keychain: %v", err)
@@ -84,7 +84,7 @@ func TestKeychainNormalisesHosts(t *testing.T) {
 // TestKeychainFallsBackToAnonymous — an unrelated host must not be a hard failure, or a public
 // base image would stop working the moment a push secret is attached.
 func TestKeychainFallsBackToAnonymous(t *testing.T) {
-	kc, err := keychainFromSecret(dockerSecret(t,
+	kc, err := KeychainFromSecret(dockerSecret(t,
 		`{"auths":{"ghcr.io":{"username":"u","password":"p"}}}`))
 	if err != nil {
 		t.Fatalf("building keychain: %v", err)
@@ -111,7 +111,7 @@ func TestKeychainRejectsBadSecrets(t *testing.T) {
 	}
 	for name, secret := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, err := keychainFromSecret(secret); err == nil {
+			if _, err := KeychainFromSecret(secret); err == nil {
 				t.Fatal("expected an error")
 			}
 		})

@@ -194,8 +194,18 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		o.Status.Artifact = result.Artifact
 		o.Status.InputHash = result.InputHash
 		o.Status.History = recon.RecordHistory(o.Status.History, result.Record, r.historyLimit(o))
+		// Assigned unconditionally, including to nil: a divergence that has been resolved must stop
+		// being reported, or the field becomes a permanent scar on an object that is now correct.
+		o.Status.Conflict = result.Conflict
+		msg := fmt.Sprintf("Published %s", result.Artifact.Ref)
+		if c := result.Conflict; c != nil {
+			// Ready, but the message says what was kept and what was dropped. A conflict an
+			// operator has to go looking for is one they will not find.
+			msg = fmt.Sprintf("Kept %s at %s; dropped %s (onConflict: Keep)",
+				c.Tag, c.Existing, c.Dropped)
+		}
 		recon.SetCondition(o, ociv1alpha1.ReadyCondition, metav1.ConditionTrue,
-			ociv1alpha1.ReasonSucceeded, fmt.Sprintf("Published %s", result.Artifact.Ref))
+			ociv1alpha1.ReasonSucceeded, msg)
 		recon.RemoveCondition(o, ociv1alpha1.ReconcilingCondition)
 		recon.RemoveCondition(o, ociv1alpha1.StalledCondition)
 	}); err != nil {
@@ -211,6 +221,9 @@ type buildResult struct {
 	Artifact *ociv1alpha1.ArtifactStatus
 	// InputHash is the hash of everything that determined the output.
 	InputHash string
+	// Conflict is set when onConflict: Keep left an existing tag in place and dropped what this
+	// reconcile produced. Copied into status so the divergence is visible rather than inferred.
+	Conflict *ociv1alpha1.TagConflictStatus
 	// Record describes a NEW build, and is nil when the reconcile converged without publishing.
 	// Garbage collection reads status.history, so appending on a no-op would grow the retention
 	// list with duplicates and evict genuinely distinct builds.
@@ -293,65 +306,6 @@ func sourceRecords(inputs []oci.LayerInput) []ociv1alpha1.SourceRecord {
 	return out
 }
 
-// publishedState is what the registry currently holds for this target: what each tag resolves
-// to, and whether the digest recorded in status is still present.
-//
-// Gathered in one place because two separate decisions depend on it — whether there is anything
-// to do, and whether doing it would remean a tag — and both must agree about what is out there.
-type publishedState struct {
-	// tags maps tag -> the digest it resolves to. Absent means the tag does not exist.
-	tags map[string]string
-	// wanted is how many tags were asked for, so a missing one is distinguishable from a
-	// wrong one.
-	wanted int
-	// digest is the recorded digest, present iff it still resolves.
-	digest string
-}
-
-// matches reports whether the given digest is fully published: present by digest, and every
-// requested tag already pointing at it. With no tags that is just "the content is there".
-func (p publishedState) matches(digest string) bool {
-	if digest == "" || p.digest != digest {
-		return false
-	}
-	for _, cur := range p.tags {
-		if cur != digest {
-			return false
-		}
-	}
-	return len(p.tags) == p.wanted
-}
-
-func (r *ImageCompositionReconciler) resolvePublished(
-	tgt target, prev *ociv1alpha1.ArtifactStatus, refOpts []name.Option, opts []remote.Option,
-) (publishedState, error) {
-	state := publishedState{tags: make(map[string]string, len(tgt.tags)), wanted: len(tgt.tags)}
-
-	for _, tag := range tgt.tags {
-		ref, err := name.ParseReference(fmt.Sprintf("%s:%s", tgt.writeRepo, tag), refOpts...)
-		if err != nil {
-			return publishedState{}, recon.Terminal("invalid reference %s:%s: %v", tgt.writeRepo, tag, err)
-		}
-		// A HEAD failure is not an error: the usual cause is that the tag does not exist yet.
-		if desc, err := remote.Head(ref, opts...); err == nil {
-			state.tags[tag] = desc.Digest.String()
-		}
-	}
-
-	// The digest has to be checked separately rather than inferred from the tags, because a
-	// build with no tags has nothing else to go on — and because a tag resolving correctly does
-	// not prove the digest reference itself survived a storage wipe.
-	if prev != nil && prev.Digest != "" {
-		ref, err := name.ParseReference(fmt.Sprintf("%s@%s", tgt.writeRepo, prev.Digest), refOpts...)
-		if err == nil {
-			if _, err := remote.Head(ref, opts...); err == nil {
-				state.digest = prev.Digest
-			}
-		}
-	}
-	return state, nil
-}
-
 // tagSuffix renders tags for an event message, and nothing at all when there are none.
 func tagSuffix(tags []string) string {
 	if len(tags) == 0 {
@@ -431,7 +385,7 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	// What each tag currently resolves to, plus whether the previously recorded digest is still
 	// present at all. A HEAD failure is not an error: the ordinary cause is that the reference
 	// does not exist yet, or that the serving store was emptied by a restart.
-	published, err := r.resolvePublished(tgt, obj.Status.Artifact, refOpts, opts)
+	published, err := recon.ResolvePublished(tgt.writeRepo, tgt.tags, obj.Status.Artifact, refOpts, opts)
 	if err != nil {
 		return buildResult{}, err
 	}
@@ -442,7 +396,7 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	// learned by downloading every layer and assembling them, every hour, forever.
 	if prev := obj.Status.Artifact; prev != nil &&
 		obj.Status.InputHash == inputHash &&
-		published.matches(prev.Digest) {
+		published.Matches(prev.Digest) {
 		return buildResult{Artifact: prev.DeepCopy(), InputHash: inputHash}, nil
 	}
 
@@ -508,20 +462,45 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	// This runs BEFORE the immutability guard, and the order is load-bearing: republishing the
 	// same content under the same tag has to stay a no-op, or a steady reconcile loop would fail
 	// every time round with immutable tags.
-	if published.matches(digest.String()) {
+	if published.Matches(digest.String()) {
 		return buildResult{Artifact: artifactStatus(tgt, digest), InputHash: inputHash}, nil
 	}
 
-	if tgt.immutable {
-		// Refuse to change what a tag means. Terminal, because that is the failure mode which
-		// leaves nodes running different bytes under one name, and no amount of retrying fixes
-		// it. Checked before anything is written, so a partial rename cannot happen.
-		for _, tag := range tgt.tags {
-			if cur, ok := published.tags[tag]; ok && cur != digest.String() {
+	// Checked before anything is written, so a partial rename cannot happen.
+	if tag, cur := published.Conflicts(tgt.tags, digest.String()); tag != "" {
+		switch tgt.onConflict {
+		case ociv1alpha1.ConflictFail:
+			// Refuse to change what a tag means. Terminal, because that is the failure mode which
+			// leaves nodes running different bytes under one name, and no amount of retrying fixes
+			// it.
+			return buildResult{}, recon.Terminal(
+				"tag %s already resolves to %s but this spec produces %s; change the tag, or set "+
+					"onConflict: Overwrite if it is meant to move", tag, cur, digest)
+		case ociv1alpha1.ConflictKeep:
+			// Leave the tag alone and publish nothing. Ready, because with a spec-hash tag an
+			// existing tag means the content is already published and correct.
+			//
+			// status.artifact reports the EXISTING digest, not the one just produced: it must
+			// describe what a consumer actually pulls, and under Keep that is the content that was
+			// already there. The digest this spec produced is recorded separately, because
+			// otherwise the object would read healthy while nothing said the two had diverged --
+			// precisely the shape of the incident behind ADR 0026.
+			existing, err := v1.NewHash(cur)
+			if err != nil {
 				return buildResult{}, recon.Terminal(
-					"tag %s already resolves to %s but this spec produces %s; change the tag, or set immutable: false if it is meant to move",
-					tag, cur, digest)
+					"tag %s resolves to %q, which is not a digest: %v", tag, cur, err)
 			}
+			now := metav1.Now()
+			return buildResult{
+				Artifact:  artifactStatus(tgt, existing),
+				InputHash: inputHash,
+				Conflict: &ociv1alpha1.TagConflictStatus{
+					Tag:        tag,
+					Existing:   cur,
+					Dropped:    digest.String(),
+					ObservedAt: &now,
+				},
+			}, nil
 		}
 	}
 
@@ -611,8 +590,8 @@ type target struct {
 	pullRepo string
 	// tags are the tags to publish under, in order. Empty means publish by digest alone.
 	tags []string
-	// immutable refuses to remean an existing tag rather than moving it.
-	immutable bool
+	// onConflict decides what happens to a tag that already means something else.
+	onConflict ociv1alpha1.TagConflictPolicy
 	// insecure allows plaintext HTTP, true only for the loopback endpoint.
 	insecure bool
 }
@@ -622,10 +601,10 @@ type target struct {
 func (r *ImageCompositionReconciler) target(obj *ociv1alpha1.ImageComposition) (target, error) {
 	if p := obj.Spec.Push; p != nil {
 		return target{
-			writeRepo: p.Repository,
-			pullRepo:  p.Repository,
-			tags:      p.Tags,
-			immutable: p.TagsAreImmutable(),
+			writeRepo:  p.Repository,
+			pullRepo:   p.Repository,
+			tags:       p.Tags,
+			onConflict: p.ResolveConflictPolicy(),
 		}, nil
 	}
 	if r.Server == nil {
@@ -640,11 +619,11 @@ func (r *ImageCompositionReconciler) target(obj *ociv1alpha1.ImageComposition) (
 	}
 	path := publishName(obj)
 	return target{
-		writeRepo: fmt.Sprintf("127.0.0.1%s/%s", r.Server.Addr, path),
-		pullRepo:  fmt.Sprintf("%s/%s", r.Server.Host, path),
-		tags:      tags,
-		immutable: obj.Spec.Publish.TagsAreImmutable(),
-		insecure:  true,
+		writeRepo:  fmt.Sprintf("127.0.0.1%s/%s", r.Server.Addr, path),
+		pullRepo:   fmt.Sprintf("%s/%s", r.Server.Host, path),
+		tags:       tags,
+		onConflict: obj.Spec.Publish.ResolveConflictPolicy(),
+		insecure:   true,
 	}, nil
 }
 
@@ -700,7 +679,7 @@ func (r *ImageCompositionReconciler) remoteOptions(ctx context.Context, obj *oci
 		return nil, fmt.Errorf("reading secret %s: %w", key, err)
 	}
 
-	kc, err := keychainFromSecret(&secret)
+	kc, err := recon.KeychainFromSecret(&secret)
 	if err != nil {
 		return nil, recon.Pending("secret %s is unusable: %v", key, err)
 	}

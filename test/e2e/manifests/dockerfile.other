@@ -1,0 +1,6 @@
+# Same base, different content, so a build of this and a build of manifests/dockerfile produce two
+# distinct digests under one tag. That is what a tag conflict needs: without a genuine difference
+# the Overwrite case would pass whether or not the tag moved.
+FROM busybox:1.37@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0
+
+RUN mkdir -p /opt/built && echo e2e-was-here-differently > /opt/built/marker

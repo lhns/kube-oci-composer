@@ -210,16 +210,25 @@ func buildctlArgs(obj *ociv1alpha1.ImageBuild, cfg JobConfig) []string {
 // Matched on host rather than applied globally, so naming one internal registry does not quietly
 // downgrade every other push the same controller makes.
 func insecureAttr(push *ociv1alpha1.Push, insecure []string) string {
-	if push == nil {
+	if push == nil || !insecureHost(push.Repository, insecure) {
 		return ""
 	}
-	host, _, _ := strings.Cut(push.Repository, "/")
+	return ",registry.insecure=true"
+}
+
+// insecureHost reports whether a repository's host is on the operator's allow-list for plain HTTP.
+//
+// Shared with the controller's own registry reads, so a host it can push to insecurely is one it
+// can also HEAD insecurely. Diverging would leave onConflict unenforceable against exactly the
+// registries an e2e or air-gapped setup runs.
+func insecureHost(repository string, insecure []string) bool {
+	host, _, _ := strings.Cut(repository, "/")
 	for _, h := range insecure {
 		if h == host {
-			return ",registry.insecure=true"
+			return true
 		}
 	}
-	return ""
+	return false
 }
 
 // buildVolumes returns the pod's volumes and the build container's mounts.

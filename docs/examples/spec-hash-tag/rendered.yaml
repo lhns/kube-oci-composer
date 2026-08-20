@@ -30,7 +30,7 @@ spec:
             #
             # IfNotPresent is correct here for the same reason it is correct with a digest: this
             # tag identifies content, so a cached copy cannot be stale. That only holds because
-            # immutable is on — without it the tag could be remeaned and this would keep old bytes.
+            # onConflict defaults to Fail — without it the tag could be remeaned and this would keep old bytes.
             reference: oci.example.com/kafka-tiered-storage:sc63f2fb1bc59a097
             pullPolicy: IfNotPresent
 ---
@@ -58,5 +58,5 @@ spec:
     # if this tag ever resolved to different content, the spec that produced it would have had to
     # change, and then the tag would have changed too. So a conflict here means something is
     # wrong — an unpinned input, or two specs colliding — and failing loudly is correct.
-    # immutable: true
+    # onConflict: Fail
     history: 10

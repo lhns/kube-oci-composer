@@ -15,5 +15,5 @@ spec:
     # if this tag ever resolved to different content, the spec that produced it would have had to
     # change, and then the tag would have changed too. So a conflict here means something is
     # wrong — an unpinned input, or two specs colliding — and failing loudly is correct.
-    # immutable: true
+    # onConflict: Fail
     history: {{ .Values.history }}

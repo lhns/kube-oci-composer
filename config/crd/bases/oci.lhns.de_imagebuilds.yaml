@@ -229,12 +229,33 @@ spec:
                     minimum: 1
                     type: integer
                   immutable:
-                    default: true
                     description: |-
-                      Immutable behaves exactly as on Publish, including the default of true. Identical on both
-                      so the field cannot mean different things depending on where it sits — and an external
-                      registry is where a silently remeaned tag does the most damage.
+                      Immutable is DEPRECATED on this side too; use OnConflict. Identical to Publish's in every
+                      respect, so the field cannot mean different things depending on where it sits.
+
+                      It was also INERT here until the release that added OnConflict: nothing in the build
+                      controller read it, and BuildKit pushed over whatever the tag held. The CRD advertised a
+                      guarantee that did not exist.
                     type: boolean
+                  onConflict:
+                    description: |-
+                      OnConflict decides what happens when a tag already resolves to different content: Fail
+                      (refuse and stall), Overwrite (move the tag), or Keep (leave it, drop this build, stay
+                      Ready). Defaults to Fail.
+
+                      Republishing IDENTICAL content is a no-op regardless of this field, so a steady reconcile
+                      loop never reaches it -- only a real change of meaning does.
+
+                      Deliberately carries NO schema default, unlike the `immutable` field it replaces. Structural
+                      defaults are applied when an object is read back from storage, so defaulting this would
+                      rewrite every existing `immutable: false` object into a refusing one the moment the CRD was
+                      upgraded -- a silent reversal of a setting its author chose on purpose. The effective default
+                      lives in ResolveConflictPolicy instead, where it can consult `immutable` first.
+                    enum:
+                    - Fail
+                    - Overwrite
+                    - Keep
+                    type: string
                   ref:
                     description: |-
                       Ref behaves exactly as on Publish: a reference whose TAG is appended to Tags, so a
@@ -270,6 +291,13 @@ spec:
                 required:
                 - repository
                 type: object
+                x-kubernetes-validations:
+                - message: 'immutable and onConflict contradict each other: immutable
+                    true means onConflict Fail, immutable false means onConflict Overwrite.
+                    immutable is deprecated; prefer setting onConflict alone.'
+                  rule: '!(has(self.immutable) && has(self.onConflict)) || (self.immutable
+                    && self.onConflict == ''Fail'') || (!self.immutable && self.onConflict
+                    == ''Overwrite'')'
               resources:
                 description: |-
                   Resources for the build pod. The namespace's ResourceQuota and LimitRange apply on top,
@@ -500,6 +528,29 @@ spec:
                   - type
                   type: object
                 type: array
+              conflict:
+                description: |-
+                  Conflict records content this object produced and did not publish, because onConflict: Keep
+                  left an existing tag in place. Cleared as soon as a reconcile publishes cleanly.
+                properties:
+                  dropped:
+                    description: |-
+                      Dropped is the digest this spec produced and discarded. On a composition it is a pure
+                      function of the spec, so it can be reproduced at will; on a build it cannot, and the content
+                      is gone.
+                    type: string
+                  existing:
+                    description: Existing is the digest the tag resolves to -- what
+                      consumers actually get.
+                    type: string
+                  observedAt:
+                    description: ObservedAt is when the divergence was last seen.
+                    format: date-time
+                    type: string
+                  tag:
+                    description: Tag that was left alone.
+                    type: string
+                type: object
               failures:
                 description: |-
                   Failures counts consecutive failed attempts, so backoff can be capped and the object can stop

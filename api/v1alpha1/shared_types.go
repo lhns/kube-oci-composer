@@ -68,6 +68,7 @@ type LocalObjectReference struct {
 	Name string `json:"name"`
 }
 
+// +kubebuilder:validation:XValidation:rule="!(has(self.immutable) && has(self.onConflict)) || (self.immutable && self.onConflict == 'Fail') || (!self.immutable && self.onConflict == 'Overwrite')",message="immutable and onConflict contradict each other: immutable true means onConflict Fail, immutable false means onConflict Overwrite. immutable is deprecated; prefer setting onConflict alone."
 // Publish describes where the artifact is made available when no external registry is used.
 //
 // This is the DEFAULT mode and it requires no registry, no credentials and no node
@@ -120,20 +121,40 @@ type Publish struct {
 	// +optional
 	Ref string `json:"ref,omitempty"`
 
-	// Immutable refuses to move a tag that already resolves to different content, failing the
-	// build instead of changing what the tag means. Defaults to TRUE, because silently
-	// remeaning a tag is what leaves nodes running different bytes under one name.
+	// Immutable is DEPRECATED; use OnConflict. true means Fail, false means Overwrite, and there
+	// was no way to spell Keep at all.
 	//
-	// Republishing IDENTICAL content is always a no-op regardless of this field, so a steady
-	// reconcile loop never trips it — only a real change of meaning does.
+	// Honoured when OnConflict is unset, so objects written before the enum existed keep behaving
+	// as they did. Setting both to values that CONTRADICT each other is refused; setting both to
+	// values that agree is allowed, because every object stored before this release already has
+	// `immutable: true` materialised under it and would otherwise be unable to adopt the new field
+	// without a separate edit.
 	//
-	// Set false for a deliberately moving pointer, e.g. tags: [main] repointed at every build.
+	// Its schema default was REMOVED with this change. Keeping it would materialise `immutable`
+	// under every new object, which makes an explicit setting indistinguishable from a defaulted
+	// one and so leaves no rule able to catch a contradiction. Removing it changes nothing for
+	// stored objects, whose value is already written, and nothing for new ones, which resolve to
+	// Fail either way.
 	//
 	// A pointer because the zero value is meaningful: a plain bool with omitempty would drop an
 	// explicit `false` on the wire and let the default quietly win.
-	// +kubebuilder:default=true
 	// +optional
 	Immutable *bool `json:"immutable,omitempty"`
+
+	// OnConflict decides what happens when a tag already resolves to different content: Fail
+	// (refuse and stall), Overwrite (move the tag), or Keep (leave it, drop this build, stay
+	// Ready). Defaults to Fail.
+	//
+	// Republishing IDENTICAL content is a no-op regardless of this field, so a steady reconcile
+	// loop never reaches it -- only a real change of meaning does.
+	//
+	// Deliberately carries NO schema default, unlike the `immutable` field it replaces. Structural
+	// defaults are applied when an object is read back from storage, so defaulting this would
+	// rewrite every existing `immutable: false` object into a refusing one the moment the CRD was
+	// upgraded -- a silent reversal of a setting its author chose on purpose. The effective default
+	// lives in ResolveConflictPolicy instead, where it can consult `immutable` first.
+	// +optional
+	OnConflict TagConflictPolicy `json:"onConflict,omitempty"`
 
 	// History is how many past builds to keep before garbage collection reclaims their blobs.
 	// Defaults to the controller's --keep-builds.
@@ -166,18 +187,42 @@ func (p *Publish) GetRef() string {
 	return p.Ref
 }
 
-// TagsAreImmutable resolves the optional Immutable field, which defaults to true.
+// ResolveConflictPolicy returns the effective policy for a tag that already resolves to something
+// else, reconciling the new three-valued field with the deprecated two-valued one.
 //
-// The API server applies that default, so nil should only be seen for objects written before
-// the field existed or for structs built directly in tests. Defaulting to the safe answer here
-// too means neither case can quietly end up with unprotected tags.
-func (p *Publish) TagsAreImmutable() bool {
-	return p == nil || p.Immutable == nil || *p.Immutable
+// Precedence is onConflict, then immutable, then Fail. That order is what makes the upgrade
+// non-breaking in both directions: an object written before onConflict existed still has its
+// `immutable` honoured, and an object that sets onConflict is not second-guessed by an `immutable`
+// the API server materialised under it years earlier. A spec setting both to contradictory values
+// is refused by CEL before it is ever stored, so this never has to arbitrate a real disagreement.
+//
+// Nil is Fail rather than Overwrite: a struct built in a test, or a spec with no publish block at
+// all, must not end up with unprotected tags by omission.
+func (p *Publish) ResolveConflictPolicy() TagConflictPolicy {
+	if p == nil {
+		return ConflictFail
+	}
+	return resolveConflict(p.OnConflict, p.Immutable)
 }
 
-// TagsAreImmutable is the Push equivalent, deliberately identical to Publish's.
-func (p *Push) TagsAreImmutable() bool {
-	return p == nil || p.Immutable == nil || *p.Immutable
+// ResolveConflictPolicy is the Push equivalent, deliberately identical to Publish's. Both kinds
+// answer this question the same way, so an operator moving between them does not have to learn a
+// second set of semantics.
+func (p *Push) ResolveConflictPolicy() TagConflictPolicy {
+	if p == nil {
+		return ConflictFail
+	}
+	return resolveConflict(p.OnConflict, p.Immutable)
+}
+
+func resolveConflict(explicit TagConflictPolicy, deprecated *bool) TagConflictPolicy {
+	if explicit != "" {
+		return explicit
+	}
+	if deprecated != nil && !*deprecated {
+		return ConflictOverwrite
+	}
+	return ConflictFail
 }
 
 // GetTags and GetRef are the Push equivalents, deliberately identical to Publish's. Both kinds
@@ -273,6 +318,7 @@ type BuildRecord struct {
 	Time *metav1.Time `json:"time,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="!(has(self.immutable) && has(self.onConflict)) || (self.immutable && self.onConflict == 'Fail') || (!self.immutable && self.onConflict == 'Overwrite')",message="immutable and onConflict contradict each other: immutable true means onConflict Fail, immutable false means onConflict Overwrite. immutable is deprecated; prefer setting onConflict alone."
 // Push describes an external registry to publish to. Optional: omit it to use the built-in
 // serving endpoint instead.
 type Push struct {
@@ -312,12 +358,85 @@ type Push struct {
 	// +optional
 	History *int32 `json:"history,omitempty"`
 
-	// Immutable behaves exactly as on Publish, including the default of true. Identical on both
-	// so the field cannot mean different things depending on where it sits — and an external
-	// registry is where a silently remeaned tag does the most damage.
-	// +kubebuilder:default=true
+	// Immutable is DEPRECATED on this side too; use OnConflict. Identical to Publish's in every
+	// respect, so the field cannot mean different things depending on where it sits.
+	//
+	// It was also INERT here until the release that added OnConflict: nothing in the build
+	// controller read it, and BuildKit pushed over whatever the tag held. The CRD advertised a
+	// guarantee that did not exist.
 	// +optional
 	Immutable *bool `json:"immutable,omitempty"`
+
+	// OnConflict decides what happens when a tag already resolves to different content: Fail
+	// (refuse and stall), Overwrite (move the tag), or Keep (leave it, drop this build, stay
+	// Ready). Defaults to Fail.
+	//
+	// Republishing IDENTICAL content is a no-op regardless of this field, so a steady reconcile
+	// loop never reaches it -- only a real change of meaning does.
+	//
+	// Deliberately carries NO schema default, unlike the `immutable` field it replaces. Structural
+	// defaults are applied when an object is read back from storage, so defaulting this would
+	// rewrite every existing `immutable: false` object into a refusing one the moment the CRD was
+	// upgraded -- a silent reversal of a setting its author chose on purpose. The effective default
+	// lives in ResolveConflictPolicy instead, where it can consult `immutable` first.
+	// +optional
+	OnConflict TagConflictPolicy `json:"onConflict,omitempty"`
+}
+
+// TagConflictPolicy decides what happens when a tag already resolves to content other than what
+// this spec produces.
+//
+// The two-valued `immutable` it replaces could only refuse or overwrite. Neither is right for the
+// pattern this project actually recommends -- a tag derived from a hash of the spec -- where a tag
+// that already exists means the content is ALREADY PUBLISHED and correct. Refusing stalls the
+// object over a non-problem; overwriting rewrites bytes that were already right, and on the build
+// side, where the output is not a function of the spec, replaces good content with a different
+// build of the same inputs.
+// +kubebuilder:validation:Enum=Fail;Overwrite;Keep
+type TagConflictPolicy string
+
+const (
+	// ConflictFail refuses to change what a tag means, and stalls. The default, because silently
+	// remeaning a tag is what leaves nodes running different bytes under one name.
+	ConflictFail TagConflictPolicy = "Fail"
+	// ConflictOverwrite moves the tag. For a deliberately moving pointer, e.g. tags: [main].
+	ConflictOverwrite TagConflictPolicy = "Overwrite"
+	// ConflictKeep leaves the existing tag alone, drops what this reconcile produced, and reports
+	// Ready. The digest that was dropped is recorded in status, because otherwise status.artifact
+	// stops describing what the spec produces while the object reads healthy -- which is the exact
+	// shape of the incident behind ADR 0026.
+	ConflictKeep TagConflictPolicy = "Keep"
+)
+
+// TagConflictStatus records content this object produced and did NOT publish, because
+// onConflict: Keep left an existing tag in place.
+//
+// This exists so that Keep cannot become a silent divergence. Without it, status.artifact would go
+// on describing content that is not what the current spec produces, while the object reads Ready
+// and nothing anywhere says the two disagree. That is exactly the shape of the incident behind
+// ADR 0026, where a served layer and the version it claimed to be had drifted apart and no field
+// could adjudicate.
+//
+// Cleared as soon as a reconcile publishes without conflict, so it always describes the CURRENT
+// divergence rather than accumulating history.
+type TagConflictStatus struct {
+	// Tag that was left alone.
+	// +optional
+	Tag string `json:"tag,omitempty"`
+
+	// Existing is the digest the tag resolves to -- what consumers actually get.
+	// +optional
+	Existing string `json:"existing,omitempty"`
+
+	// Dropped is the digest this spec produced and discarded. On a composition it is a pure
+	// function of the spec, so it can be reproduced at will; on a build it cannot, and the content
+	// is gone.
+	// +optional
+	Dropped string `json:"dropped,omitempty"`
+
+	// ObservedAt is when the divergence was last seen.
+	// +optional
+	ObservedAt *metav1.Time `json:"observedAt,omitempty"`
 }
 
 // ArtifactStatus records what was produced. Deliberately identical in shape across every kind

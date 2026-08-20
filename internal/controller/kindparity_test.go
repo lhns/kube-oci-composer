@@ -111,6 +111,11 @@ func TestNeitherKindKeepsItsOwnCopyOfTheSharedHelpers(t *testing.T) {
 		"setCondition": true, "removeCondition": true, "truncate": true,
 		"terminal": true, "pending": true, "isTerminal": true, "isPending": true,
 		"recordHistory": true, "interval": true,
+		// Added with the tag-conflict policy: both kinds now ask a registry what a tag holds, and
+		// both read credentials out of a dockerconfigjson Secret. Two answers to "which host does
+		// this credential cover" is the same class of drift as two `event` helpers.
+		"publishedState": true, "resolvePublished": true, "keychainFromSecret": true,
+		"normaliseHost": true,
 	}
 
 	fset := token.NewFileSet()
@@ -263,4 +268,59 @@ func jsonName(tag string) string {
 	}
 	name, _, _ := strings.Cut(rest[:j], ",")
 	return name
+}
+
+// TestBothKindsHonourOnConflict — the policy is the same field with the same three values on both
+// kinds, and it must not be enforced on only one.
+//
+// It already was enforced on only one, for the whole life of the ImageBuild kind: `push.immutable`
+// sat in that CRD, defaulted to true, and nothing in internal/buildcontroller read it. An operator
+// who set it believed a tag could not be silently remeaned, and it could (ADR 0029). Structural,
+// because the behavioural half is covered per-kind — what this catches is the enforcement being
+// deleted from one side while the field stays in the schema.
+func TestBothKindsHonourOnConflict(t *testing.T) {
+	want := map[string]string{
+		"imagecomposition_controller.go": "the composer, which checks before writing any tag",
+		"conflict.go":                    "the builder, which checks before the Job is created",
+	}
+	for file, body := range controllerSources(t) {
+		base := filepath.Base(file)
+		what, ok := want[base]
+		if !ok {
+			continue
+		}
+		if !strings.Contains(body, "ResolveConflictPolicy()") {
+			t.Errorf("%s never resolves the conflict policy: %s", base, what)
+		}
+		for _, v := range []string{"ConflictFail", "ConflictKeep"} {
+			if !strings.Contains(body, v) {
+				t.Errorf("%s does not handle %s; a value in the enum that one kind ignores is a "+
+					"guarantee its CRD advertises and does not provide", base, v)
+			}
+		}
+		delete(want, base)
+	}
+	for base, what := range want {
+		t.Errorf("%s was not read at all (%s); if it moved, point this test at the new file "+
+			"rather than dropping the assertion", base, what)
+	}
+}
+
+// TestBothKindsRecordAKeptTagInStatus — Keep is the one outcome where an object is Ready while NOT
+// having published what its spec produces. Without a record in status that is a silent divergence,
+// which is the ADR 0026 failure shape exactly.
+func TestBothKindsRecordAKeptTagInStatus(t *testing.T) {
+	found := map[string]bool{}
+	for file, body := range controllerSources(t) {
+		if strings.Contains(body, "TagConflictStatus{") {
+			found[packageOf(file)] = true
+		}
+	}
+	for _, pkg := range []string{"controller", "buildcontroller"} {
+		if !found[pkg] {
+			t.Errorf("%s never constructs a TagConflictStatus: under onConflict: Keep it would "+
+				"report Ready while publishing something other than what its spec produces, and "+
+				"nothing would say so", pkg)
+		}
+	}
 }

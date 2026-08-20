@@ -86,15 +86,17 @@ The boundaries that matter:
 gzip metadata (`internal/oci/assemble.go`, `internal/oci/extract.go`).
 
 Security consequence: **content cannot change without the spec changing**, so review of the spec is
-review of the artifact. `publish.immutable: true` (the default) refuses to move a tag that already
+review of the artifact. `publish.onConflict: Fail` (the default) refuses to move a tag that already
 resolves to different bytes — which is what caught a real incident where a tag was published holding
 a previous revision's content ([ADR 0026](adr/0026-a-source-artifact-can-lag-its-own-spec.md)).
 
 For `ImageBuild` the invariant is weaker by construction: the output is an *observation*, not a
 function of the spec ([ADR 0025](adr/0025-dockerfile-builds-as-a-second-kind.md)). Rebuilds do
 reproduce for builds whose steps are themselves deterministic ([ADR 0027](adr/0027-what-rootless-buildkit-actually-needs.md)),
-but a `RUN` that installs packages or reads the clock can still differ. The immutable-tag guard is
-therefore load-bearing rather than decorative for this kind.
+but a `RUN` that installs packages or reads the clock can still differ. The tag-conflict guard is
+therefore load-bearing rather than decorative for this kind — and it did not exist on this kind at
+all until [ADR 0029](adr/0029-three-valued-tag-conflict-policy.md): the field was in the CRD and
+nothing read it, so every build overwrote whatever its tags held.
 
 ## S — Spoofing
 
@@ -119,7 +121,7 @@ behaviour.
 | # | Threat | Status | Evidence |
 |---|---|---|---|
 | T1 | Layer content changes without the spec changing | **Mitigated, with one opt-in** | `fetch` carries a declared digest. For `sourceRef`: an artifact that predates its own source's spec is refused (`internal/source/flux.go`, ADR 0026), and `sourceRef.revision` pins the revision a layer expects. The pin is what covers a **branch or semver range**, which moves with no generation bump for the staleness check to see — but it is optional, so a spec that omits it still consumes whatever the source publishes. |
-| T2 | A published tag is repointed at different content | **Mitigated by default** | `publish.immutable: true` refuses to move a tag resolving to a different digest. Note the inherent limit: it cannot validate a tag's **first** publish, because there is nothing to compare against. |
+| T2 | A published tag is repointed at different content | **Mitigated by default** | `onConflict: Fail` (the default on both kinds) refuses to move a tag resolving to a different digest, and on `ImageBuild` the check runs *before* the Job, since a push from inside it cannot be undone. Two inherent limits: it cannot validate a tag's **first** publish, because there is nothing to compare against; and `onConflict: Overwrite` disables it by design. |
 | T3 | A malicious archive escapes the target directory on unpack | **Mitigated** | Traversal is refused rather than sanitised (`internal/oci/extract.go`): any entry whose cleaned path is `..` or starts with `../` is an error. Zip entries normalise `\` to `/` **before** the check (`internal/oci/zip.go`). |
 | T4 | A build tampers with another build's cache | **Mitigated** | The cache ref is per-object, derived from namespace and name (`cacheRefFor`). A shared cache would be a channel between whoever can write Dockerfiles. |
 | T5 | The controller is upgraded to assemble differently, silently | **Mitigated by discipline, not by mechanism** | `AssemblyVersion` is in the input hash so a change rebuilds everything — but it is a constant a human must remember to bump. It has been missed before. |
@@ -198,7 +200,8 @@ sandboxing runtime such as Kata or gVisor.** That is a cluster decision this pro
 ## Sequence: publishing a composition
 
 The security-relevant ordering is that everything is resolved and hashed from the API server
-*before* any bytes move, and that the immutable check happens before any tag is written.
+*before* any bytes move, and that the tag-conflict check happens before any tag is written — and, on
+`ImageBuild`, before the build Job exists at all.
 
 ```mermaid
 sequenceDiagram
@@ -290,7 +293,8 @@ These are not mitigations. They are things assumed true, and each one is somebod
 2. **The serve endpoint is not exposed with its write path reachable** (S1), and network policy —
    not this code — restricts who can pull (I5).
 3. **The registry is durable.** For `ImageBuild`, losing the store or status can mean a rebuild
-   producing a digest that conflicts with an already-published immutable tag (ADR 0025).
+   producing a digest that conflicts with an already-published tag under `onConflict: Fail`
+   (ADR 0025).
 4. **Nodes running builds are acceptable to share.** See E1.
 5. **The cluster enforces `ResourceQuota`** where builds could otherwise exhaust nodes (D4).
 

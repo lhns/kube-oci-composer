@@ -91,6 +91,7 @@ trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/src-e2e"
 cp "$HERE/manifests/dockerfile" "$WORK/src-e2e/Dockerfile"
 cp "$HERE/manifests/dockerfile.unpinned" "$WORK/src-e2e/Dockerfile.unpinned"
+cp "$HERE/manifests/dockerfile.other" "$WORK/src-e2e/Dockerfile.other"
 tar -czf "$WORK/context.tar.gz" -C "$WORK" src-e2e
 
 kubectl -n "$BUILD_NS" create configmap e2e-context \
