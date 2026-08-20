@@ -40,17 +40,6 @@ may change between minor versions.
   here, because an `ImageBuild`'s output cannot be reproduced from its spec and an `emptyDir` would
   turn every restart into permanent loss.
 
-### Fixed
-- **A missing build cache failed the build.** BuildKit configures its registry cache importer eagerly
-  and treats a reference it cannot resolve as fatal rather than as a warning, so `--import-cache`
-  broke every *first* build against a registry that answers a missing manifest strictly. It is now
-  passed only when the cache actually resolves; export stays unconditional.
-
-- **Builds pushed Docker media types**, which an OCI-native registry may refuse with
-  `415 Unsupported Media Type` — after the image was built and the layers pushed. They now push OCI
-  types explicitly, which also stops the two kinds putting different media types into one registry.
-
-### Added
 - **`onConflict` on both kinds**, replacing the two-valued `immutable` with `Fail` (refuse and
   stall, the default), `Overwrite` (move the tag) and `Keep` (leave it, publish nothing, report
   Ready).
@@ -107,6 +96,15 @@ may change between minor versions.
   `RevisionMatches` moved to `shared_types.go`, where both kinds' shared API surface lives.
 
 ### Fixed
+- **A missing build cache failed the build.** BuildKit configures its registry cache importer eagerly
+  and treats a reference it cannot resolve as fatal rather than as a warning, so `--import-cache`
+  broke every *first* build against a registry that answers a missing manifest strictly. It is now
+  passed only when the cache actually resolves; export stays unconditional.
+
+- **Builds pushed Docker media types**, which an OCI-native registry may refuse with
+  `415 Unsupported Media Type` — after the image was built and the layers pushed. They now push OCI
+  types explicitly, which also stops the two kinds putting different media types into one registry.
+
 - **`push.immutable` did nothing on `ImageBuild`.** It was in the CRD from the day that kind
   shipped, defaulted to `true`, and nothing in the build controller read it -- BuildKit pushed over
   whatever the tag held. Anyone who set it, or who simply accepted the default, believed a tag could
