@@ -77,6 +77,39 @@ A path prefix inside the host is **not** treated as a boundary. Anyone who can r
 reach every path in it, so enforcing prefixes here would imply a guarantee the registry does not
 make.
 
+### The build Job cannot mount the operator's credential
+
+`ImageComposition` publishes from the controller process, so it reads the operator's Secret directly.
+`ImageBuild` does not: BuildKit pushes from inside a Job, and **a pod can only mount Secrets from its
+own namespace**.
+
+The Job runs in the object's namespace, and moving it is not an option:
+
+- it mounts that namespace's build secrets (`spec.secrets[].secretRef`)
+- it **executes arbitrary code** from the tenant's Dockerfile, which is the entire reason
+  [0025](0025-dockerfile-builds-as-a-second-kind.md) made the builder a separate component. Running
+  it in the operator's namespace would put that code beside the operator's registry credential and
+  both controllers' ServiceAccount tokens
+- owner references cannot cross namespaces, so deleting an `ImageBuild` would stop collecting its Job
+
+**So the controller copies the credential, and the copy lives exactly as long as the build.** It is
+owned by the `ImageBuild` and named after the Job, so it is garbage-collected with the object and
+replaced rather than accumulated when the inputs change.
+
+This does not eliminate the exposure and should not be described as if it did: while a build runs,
+anyone who can read Secrets in that namespace can read the operator's registry credential. What makes
+it tolerable is that such a namespace **can already push arbitrary content to that registry through
+an `ImageBuild`** — the credential lets it do directly what it could already do indirectly. What the
+copy buys is time-bounding: a build's duration instead of forever.
+
+**The RBAC cost is real and is not narrowable.** The builder gains `create` and `update` on Secrets,
+and `create` cannot be restricted to a name by RBAC — so it can create a Secret in any namespace. It
+still cannot `list` or `watch` them, so it can only touch Secrets whose names it already knows.
+
+An operator who finds that trade unacceptable has two exits: give each `ImageBuild` its own
+`secretRef`, or turn the bundled registry's authentication off and rely on a NetworkPolicy, which is
+the posture the embedded serving endpoint had.
+
 ### Reaching the registry
 
 The chart generates the password, writes the htpasswd zot authenticates against and the

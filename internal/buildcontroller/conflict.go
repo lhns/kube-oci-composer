@@ -11,6 +11,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
@@ -198,4 +200,79 @@ func (r *ImageBuildReconciler) repositoryFor(obj *ociv1alpha1.ImageBuild) string
 		return ""
 	}
 	return r.Default.RepositoryFor(obj.Namespace, obj.Name)
+}
+
+// pushSecretFor returns the name of the Secret the build pod mounts as its registry credential,
+// creating a short-lived copy of the operator's when the object has none of its own.
+//
+// A pod can only mount Secrets from its own namespace, and the build must run in the object's
+// namespace: it mounts that namespace's build secrets and executes that namespace's code. So the
+// operator's credential, which lives in the CONTROLLER's namespace, cannot be mounted directly.
+//
+// The copy is owned by the ImageBuild and named after the Job, so it is garbage-collected when the
+// object goes and is replaced rather than accumulated when the inputs change. That bounds the
+// exposure to roughly the length of a build instead of forever, which is the whole reason it is a
+// copy and not a permanent per-namespace Secret.
+//
+// It does NOT eliminate the exposure, and pretending otherwise would be worse than not doing it:
+// while a build runs, anyone who can read Secrets in that namespace can read the operator's registry
+// credential. What makes that tolerable is that the namespace can already push arbitrary content to
+// that registry through an ImageBuild -- the credential lets it do directly what it could already do
+// indirectly.
+func (r *ImageBuildReconciler) pushSecretFor(
+	ctx context.Context, obj *ociv1alpha1.ImageBuild, jobName string,
+) (string, error) {
+	if p := obj.Spec.Push; p != nil && p.SecretRef != nil {
+		return p.SecretRef.Name, nil
+	}
+
+	repo := r.repositoryFor(obj)
+	if r.Default.SecretName == "" || !r.Default.Owns(repo) {
+		// Either there is no operator credential, or this build publishes somewhere the operator's
+		// credential has no business going. Push anonymously; the registry decides.
+		return "", nil
+	}
+
+	var source corev1.Secret
+	key := types.NamespacedName{Namespace: r.Default.Namespace, Name: r.Default.SecretName}
+	if err := r.Get(ctx, key, &source); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", recon.Pending("default push secret %s not found yet", key)
+		}
+		return "", fmt.Errorf("reading default push secret %s: %w", key, err)
+	}
+
+	copied := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jobName + "-push",
+			Namespace: obj.Namespace,
+			Labels:    map[string]string{"app.kubernetes.io/managed-by": "kube-oci-builder"},
+			Annotations: map[string]string{
+				"oci.lhns.de/description": "Short-lived copy of the operator's registry credential, " +
+					"mounted by this build's Job. Deleted with the build.",
+			},
+		},
+		Type: source.Type,
+		Data: source.Data,
+	}
+	if err := ctrl.SetControllerReference(obj, copied, r.Scheme()); err != nil {
+		return "", fmt.Errorf("setting owner on the push credential: %w", err)
+	}
+
+	if err := r.Create(ctx, copied); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return "", fmt.Errorf("creating the push credential: %w", err)
+		}
+		// Already there from an earlier attempt at this same build. Update it, so a rotated
+		// operator password reaches the build rather than the build failing on a stale one.
+		existing := &corev1.Secret{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(copied), existing); err != nil {
+			return "", fmt.Errorf("reading the existing push credential: %w", err)
+		}
+		existing.Data = source.Data
+		if err := r.Update(ctx, existing); err != nil {
+			return "", fmt.Errorf("refreshing the push credential: %w", err)
+		}
+	}
+	return copied.Name, nil
 }

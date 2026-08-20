@@ -24,11 +24,16 @@ rules:
   - apiGroups: [""]
     resources: [pods]
     verbs: [get, list, watch]
-  # get, not list or watch: Secrets are read for their resourceVersion so a rotation rebuilds, and
-  # their values are projected straight into the build pod without passing through this process.
+  # get, create and update -- but NOT list or watch, which is the part that matters. This controller
+  # can only touch Secrets whose names it already knows; it cannot enumerate a namespace's.
+  #
+  # create and update exist for one thing: a short-lived copy of the operator's registry credential
+  # in the namespace a build runs in. A pod can only mount Secrets from its own namespace, and the
+  # build must run in the object's -- it mounts that namespace's build secrets and runs its code.
+  # The copy is owned by the ImageBuild and goes with it.
   - apiGroups: [""]
     resources: [secrets]
-    verbs: [get]
+    verbs: [get, create, update]
   - apiGroups: [""]
     resources: [events]
     verbs: [create, patch]

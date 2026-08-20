@@ -34,6 +34,13 @@ may change between minor versions.
   `ImageComposition` could point it at a host they control and be handed the operator's registry
   password. See ADR 0034.
 
+  For `ImageBuild`, BuildKit pushes from inside a Job and a pod can only mount Secrets from its own
+  namespace -- so the controller copies the credential into the build's namespace, owned by the
+  `ImageBuild` and named after the Job, so it lives as long as the build and no longer. The builder
+  therefore gains `create` and `update` on Secrets (still never `list` or `watch`). While a build
+  runs, anyone who can read Secrets in that namespace can read the credential -- tolerable only
+  because such a namespace can already push whatever it likes through an `ImageBuild`.
+
 - **The retention guarantee: images a live object still references are never reclaimed** (ADR 0031),
   and a `retention` refresher on both controllers that enforces it.
 

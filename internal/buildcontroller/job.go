@@ -259,7 +259,7 @@ func insecureHost(repository string, insecure []string) bool {
 //
 // Paired through one closure rather than two appends per source: a volume and the mount that names
 // it have to agree, and building them in separate lists is how they stop agreeing.
-func buildVolumes(spec ociv1alpha1.ImageBuildSpec) ([]corev1.Volume, []corev1.VolumeMount) {
+func buildVolumes(spec ociv1alpha1.ImageBuildSpec, pushSecret string) ([]corev1.Volume, []corev1.VolumeMount) {
 	var volumes []corev1.Volume
 	var mounts []corev1.VolumeMount
 
@@ -274,10 +274,15 @@ func buildVolumes(spec ociv1alpha1.ImageBuildSpec) ([]corev1.Volume, []corev1.Vo
 
 	// Push credentials are projected into the build pod rather than read by the controller, which
 	// keeps registry tokens out of the controller's memory entirely for the push path.
-	if spec.Push != nil && spec.Push.SecretRef != nil {
+	//
+	// The NAME is resolved by the controller: either the object's own secretRef, or a short-lived
+	// copy of the operator's credential that lives exactly as long as this Job. A pod can only mount
+	// Secrets from its own namespace, and the build must run in the object's namespace -- it mounts
+	// that namespace's build secrets and runs that namespace's code.
+	if pushSecret != "" {
 		add(dockerVolume, corev1.VolumeSource{
 			Secret: &corev1.SecretVolumeSource{
-				SecretName: spec.Push.SecretRef.Name,
+				SecretName: pushSecret,
 				Items:      []corev1.KeyToPath{{Key: corev1.DockerConfigJsonKey, Path: "config.json"}},
 			},
 		}, dockerPath, true)
@@ -294,12 +299,12 @@ func buildVolumes(spec ociv1alpha1.ImageBuildSpec) ([]corev1.Volume, []corev1.Vo
 
 // buildJob renders the Job for one build.
 func buildJob(obj *ociv1alpha1.ImageBuild, inputHash, contextURL string, cfg JobConfig,
-	repo string, cacheAvailable bool) *batchv1.Job {
+	repo, pushSecret string, cacheAvailable bool) *batchv1.Job {
 
 	spec := obj.Spec
 	args := buildctlArgs(obj, cfg, repo, cacheAvailable)
-	volumes, mounts := buildVolumes(spec)
-	hasPushSecret := spec.Push != nil && spec.Push.SecretRef != nil
+	volumes, mounts := buildVolumes(spec, pushSecret)
+	hasPushSecret := pushSecret != ""
 
 	env := []corev1.EnvVar{
 		{Name: "BUILDKITD_FLAGS", Value: "--oci-worker-no-process-sandbox"},

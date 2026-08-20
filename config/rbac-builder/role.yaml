@@ -24,7 +24,9 @@ rules:
   resources:
   - secrets
   verbs:
+  - create
   - get
+  - update
 - apiGroups:
   - batch
   resources:
