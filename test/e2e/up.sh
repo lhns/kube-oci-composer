@@ -57,7 +57,9 @@ E2E_REGISTRY="kube-oci-composer-registry.oci-composer.svc.cluster.local:5000"
 make docker-build IMG="$IMG"
 kind load docker-image "$IMG" --name "$CLUSTER"
 
-kubectl apply -f config/crd/bases
+# CRDs are NOT applied here any more: the chart installs them from templates/ (ADR 0033), and Helm
+# refuses to adopt a CRD it did not create. Letting the chart do it also means the e2e exercises
+# that path rather than working around it.
 
 # ONE chart, all three components (ADR 0033). The registry it installs is the one everything
 # publishes to -- no hand-rolled fixture registry any more, so the e2e exercises the deployment an
@@ -99,7 +101,6 @@ kubectl -n oci-composer rollout status deploy/kube-oci-composer --timeout=5m
 # served from a ConfigMap, so this tests the controller's reading of the contract rather than testing
 # Flux.
 
-kubectl apply -f config/crd/bases/oci.lhns.de_imagebuilds.yaml
 kubectl apply -f "$HERE/../crds/gitrepository.yaml"
 
 kubectl create namespace "$BUILD_NS" --dry-run=client -o yaml | kubectl apply -f -

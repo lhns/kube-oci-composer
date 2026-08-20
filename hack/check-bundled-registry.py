@@ -15,7 +15,10 @@ import yaml
 
 
 def config_from(stream):
-    for doc in yaml.safe_load_all(stream):
+    # Read stdin to EOF before parsing. Returning early leaves the writer with a closed pipe, and
+    # `helm template ... | this` then dies of SIGPIPE -- exit 141, under `set -o pipefail`, after
+    # this script has already printed OK. The failure looks like the check failing when it passed.
+    for doc in yaml.safe_load_all(stream.read()):
         if not doc or doc.get("kind") != "ConfigMap":
             continue
         if doc["metadata"]["name"].endswith("-registry"):

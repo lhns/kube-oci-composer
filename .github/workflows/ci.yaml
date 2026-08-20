@@ -127,8 +127,9 @@ jobs:
         run: |
           set -euo pipefail
           pip install --quiet pyyaml
+          helm template t charts/kube-oci-composer --set imageBuild.enabled=false > /dev/null
           helm template t charts/kube-oci-composer --set registry.enabled=true > /dev/null
-          helm template t charts/kube-oci-composer --set registry.enabled=true             --set registry.auth.secretName=htpw > /dev/null
+          helm template t charts/kube-oci-composer --set registry.enabled=true             --set registry.auth.password=fixed-for-render > /dev/null
           helm template t charts/kube-oci-composer --set registry.enabled=true             --set registry.persistence.enabled=false > /dev/null
           helm template t charts/kube-oci-composer --set registry.enabled=true             | python3 hack/check-bundled-registry.py
 
