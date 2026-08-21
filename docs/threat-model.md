@@ -191,8 +191,30 @@ reinstated. But builds share the node's kernel, and a kernel vulnerability reach
 unconfined seccomp profile is the realistic escape path.
 
 Kubernetes user namespaces (`hostUsers: false`) would remove the need for escalation entirely and
-map the container's root to an unprivileged host uid. ADR 0027 records that as the destination; it
-did not run on the CI cluster and is not shipped.
+map the container's root to an unprivileged host uid. ADR 0027 records that as the destination.
+
+**Re-measured on 2026-08-21, on Kubernetes 1.36**, by a probe in the e2e suite
+(`test/e2e/usernamespaces_test.go`) rather than by argument. The result, and it is more specific
+than "it did not run":
+
+- The **API server accepts** `hostUsers: false`. The feature gate is on; that half has moved since
+  ADR 0027 was written.
+- The **sandbox fails to start**, repeatably:
+
+  ```
+  FailedCreatePodSandBox: runc create failed: error during container init:
+    error mounting "sysfs" to rootfs at "/sys": operation not permitted
+  ```
+
+**That is a property of the test environment, not a verdict on the feature.** The e2e runs on kind,
+which is Kubernetes inside a Docker container, and a user namespace nested inside that container
+cannot mount `sysfs`. A real node very possibly can. So this measurement rules out *shipping it on
+the strength of CI*, and rules nothing else out.
+
+The probe stays in the suite and reports on every run, so the day this starts working it says so
+instead of waiting to be remembered. It skips rather than fails when unsupported — but fails loudly
+if `hostUsers: false` is ever accepted and silently **ignored**, which would look like mitigation
+and be none.
 
 **If builds are hostile rather than merely untrusted, run them on dedicated nodes, or behind a
 sandboxing runtime such as Kata or gVisor.** That is a cluster decision this project cannot make.
@@ -307,7 +329,7 @@ These are not mitigations. They are things assumed true, and each one is somebod
 | Provenance lives only in status, not in the artifact | R1 | OCI annotations would survive the object; config labels would change the digest |
 | `sourceRef.revision` is opt-in | T1 | Deliberate (ADR 0026), and now enforceable cluster-wide with `--require-pinned-sources`. Off by default: a spec that omits it still consumes whatever the source publishes |
 | The `AssemblyVersion` bump is manual | T5 | The silent case is caught by a golden-digest test; what stays manual is deciding the change is intended and bumping the constant |
-| Build pods share the node kernel with seccomp unconfined | E1 | User namespaces are the destination (ADR 0027) |
+| Build pods share the node kernel with seccomp unconfined | E1 | User namespaces are the destination (ADR 0027). Measured on 1.36: the API server accepts `hostUsers: false` and the sandbox fails to start under kind, which is a nested-container limitation rather than a verdict. An e2e probe re-measures every run |
 | Retention depends on two numbers | D7 | **Closed for the bundled registry**: one chart renders both, so it refuses a margin below 24x and refuses refreshing disabled while a window is set. Still open for a registry you supply -- nothing here can read its policy |
 
 ## Reviewing this document

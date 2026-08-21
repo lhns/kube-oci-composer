@@ -163,6 +163,13 @@ may change between minor versions.
   recorded with the reason the destination makes it meaningless. Verified to fail on drift.
 
 ### Fixed
+- **E1 is measured rather than cited.** An e2e probe runs a pod with `hostUsers: false` and reports
+  what the cluster actually does. On Kubernetes 1.36 the API server **accepts** the field -- that
+  half has moved since ADR 0027 -- and the sandbox then fails to start, because a user namespace
+  nested inside kind's own container cannot mount `sysfs`. That rules out shipping it on the
+  strength of CI and rules nothing else out; a real node may well manage it. The probe reports on
+  every run, and fails loudly if `hostUsers` is ever accepted and silently ignored.
+
 - **The composer could not push to a plain-HTTP registry at all.** Removing the serving endpoint
   removed the only plaintext push path it had -- pushes were previously either loopback, always
   HTTP, or to a real registry over HTTPS, so there was no third case and the controller never read
