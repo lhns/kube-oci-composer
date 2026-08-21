@@ -194,7 +194,7 @@ defaultRegistry:
   # `registry.host` is NOT, because it may be an ingress terminating TLS and forcing HTTP would break
   # it. Set this when registry.host is plain HTTP, which a NodePort is:
   #
-  #   defaultRegistry.insecure: oci.internal:5000
+  #   defaultRegistry.insecure: oci-composer.internal:5000
   insecure: ""
 
 registry:
@@ -249,23 +249,54 @@ registry:
     # one half and you supply the other, because nothing would agree on the password.
     existingHtpasswdSecret: ""
 
+  # The cluster's DNS domain. Used to address the registry Service internally, and later as a
+  # certificate SAN. Change it only if your cluster does not use cluster.local.
+  clusterDomain: cluster.local
+
+  # HOW WORKLOADS REACH THE REGISTRY. There is no default, and the chart refuses to install until
+  # this is set -- see the long note in templates/_publish.tpl for why.
+  #
+  # The short version: the CONTROLLERS always use the in-cluster Service and need nothing here.
+  # This is entirely about the kubelet, which resolves image references with the NODE's resolver
+  # and cannot see cluster DNS. Getting it wrong does not fail at install time on its own; it
+  # publishes successfully and then fails every pull with ErrImagePull, days later, somewhere else.
+  publish:
+    #   ingress       -- an Ingress is rendered; `host` is its hostname
+    #   nodePort      -- the Service is a NodePort; `host` is a name your NODES resolve to it,
+    #                    which needs a containerd certs.d drop-in per node (docs/registry.md)
+    #   external      -- you run the registry; set registry.enabled=false and defaultRegistry.host
+    #   internalOnly  -- nothing outside the cluster pulls these images. A deliberate choice, not
+    #                    a default: useful when another system copies them onward.
+    mode: ""
+
+  # Rendered when publish.mode=ingress. The hostname comes from registry.host, with any port
+  # stripped -- an Ingress rule host is a hostname, not a registry reference.
+  #
+  # TLS terminates HERE, at the ingress, which is where almost everyone's certificate already is.
+  # That is what makes this the only mode needing nothing on the nodes: containerd pulls over HTTPS
+  # with a certificate it already trusts, so no certs.d drop-in and no CA distribution.
+  ingress:
+    className: ""
+    annotations: {}
+    tls:
+      enabled: true
+      # Leave empty when your ingress controller has a default certificate, or when cert-manager
+      # writes one from an annotation above. A name here that nothing creates is worse than none.
+      secretName: ""
+
   # How the registry is reached.
   #
-  # The CONTROLLERS always use in-cluster DNS, which needs nothing here. This is about WORKLOADS:
-  # containerd resolves image references with the node's resolver, which cannot see cluster DNS, so
-  # a Pod cannot pull from a .svc.cluster.local name however healthy the Service is.
-  #
-  # NodePort plus a containerd certs.d drop-in mapping `host` to that port is the arrangement that
-  # works without an ingress controller or a certificate. See docs/registry.md.
+  # The CONTROLLERS always use in-cluster DNS, which needs nothing here.
   service:
     type: ClusterIP
     port: 5000
     nodePort: ""
 
-  # The hostname workloads pull from, and what status.artifact.ref reports.
+  # The hostname WORKLOADS pull from, and the only thing status.artifact.ref reports.
   #
-  # Leave empty and references name the in-cluster Service -- correct for the controllers, and NOT
-  # pullable by a kubelet. Set it to whatever name your nodes resolve to this registry.
+  # It is not what the controllers connect to -- they always use the in-cluster Service -- so this
+  # name never has to resolve inside the cluster, and setting it can no longer break publishing.
+  # Required by every publish.mode except internalOnly.
   host: ""
 
   persistence:

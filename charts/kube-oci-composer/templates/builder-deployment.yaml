@@ -50,6 +50,9 @@ spec:
             - --source-date-epoch={{ .Values.imageBuild.sourceDateEpoch }}
             {{- with (include "kube-oci-composer.defaultRegistry" .) }}
             - --default-registry={{ . }}
+            {{- with (include "kube-oci-composer.publicRegistry" $) }}
+            - --public-registry-host={{ . }}
+            {{- end }}
             {{- end }}
             {{- with (include "kube-oci-composer.pushSecretName" .) }}
             - --default-push-secret={{ . }}

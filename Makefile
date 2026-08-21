@@ -142,9 +142,12 @@ uninstall-builder: ## Remove the builder's CRD from the current cluster.
 	kubectl delete --ignore-not-found -f config/crd/bases/oci.lhns.de_imagebuilds.yaml
 
 .PHONY: chart-lint
-chart-lint: ## Lint and render the charts.
-	helm lint charts/kube-oci-composer
-	helm template kube-oci-composer charts/kube-oci-composer >/dev/null
+chart-lint: ## Lint and render the chart.
+# registry.publish.mode has no default -- the chart refuses to install until an operator says how
+# workloads reach the registry (ADR 0037). Lint has to answer it like anyone else; the answer here
+# is the one that asserts nothing about the cluster.
+	helm lint charts/kube-oci-composer --set registry.publish.mode=internalOnly
+	helm template kube-oci-composer charts/kube-oci-composer --set registry.publish.mode=internalOnly >/dev/null
 
 .PHONY: chart-push
 chart-push: ## Package and push the chart as an OCI artifact.

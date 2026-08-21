@@ -43,6 +43,7 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0034](0034-a-default-registry.md) | A default registry, and whose credential is used | Accepted, amends 0030 and 0031 |
 | [0035](0035-a-registry-is-the-only-publication-path.md) | A registry is the only publication path | Accepted, supersedes 0006 and 0032 |
 | [0036](0036-ssrf-on-fetch-urls.md) | SSRF on `fetch` URLs: block the metadata endpoint, make the rest opt-in | Accepted, closes threat I6 |
+| [0037](0037-one-host-cannot-satisfy-two-resolvers.md) | One host cannot satisfy two resolvers | Accepted, amends 0034 |
 
 ## Open questions
 

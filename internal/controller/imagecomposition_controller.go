@@ -579,12 +579,18 @@ func (r *ImageCompositionReconciler) resolveLayer(ctx context.Context, in oci.La
 	return r.Cache.Path(ctx, in.Digest, fetch)
 }
 
-// target is where an artifact is written and how it should be referenced. The two differ in
-// serving mode: the controller writes over loopback but workloads pull via the Service.
+// target is where an artifact is written and how it should be referenced.
+//
+// The two differ because one string cannot satisfy two resolvers: the controller reaches the
+// registry through cluster DNS, and a kubelet reaches it with the node's resolver. They are equal
+// whenever one name genuinely works from both places, which is every external registry and any
+// ingress with real DNS.
 type target struct {
-	// writeRepo is what the controller pushes to.
+	// writeRepo is what the controller pushes to, checks tags against, and refreshes. Everything
+	// that opens a connection uses this one.
 	writeRepo string
-	// pullRepo is what a workload references. Equal to writeRepo in push mode.
+	// pullRepo is what a workload references, and it appears in status.artifact.ref and nowhere
+	// else. The controller never connects to it and may well be unable to resolve it.
 	pullRepo string
 	// tags are the tags to publish under, in order. Empty means publish by digest alone.
 	tags []string
@@ -625,7 +631,7 @@ func (r *ImageCompositionReconciler) target(obj *ociv1alpha1.ImageComposition) (
 	}
 	return target{
 		writeRepo:   repo,
-		pullRepo:    repo,
+		pullRepo:    r.Default.PublicRepository(repo),
 		tags:        tags,
 		onConflict:  p.ResolveConflictPolicy(),
 		usesDefault: usesDefault,

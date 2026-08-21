@@ -22,10 +22,10 @@ import (
 
 const (
 	namespace = "oci-composer-e2e"
-	// The registry every reference names, mapped to its NodePort by a containerd drop-in on each
-	// node. There is no serving endpoint any more (ADR 0035): compositions publish to the registry
-	// like everything else, and this is the name a kubelet resolves.
-	registryHost = "oci.e2e:5000"
+	// The PUBLIC registry name: what a kubelet resolves, via the containerd drop-in on each node,
+	// and what status.artifact.ref reports. The controllers never use it -- they talk to the
+	// registry's in-cluster Service -- which is why this suite needs no CoreDNS entry for it.
+	registryHost = "oci-composer.e2e:5000"
 	timeout      = 5 * time.Minute
 	interval     = 5 * time.Second
 )

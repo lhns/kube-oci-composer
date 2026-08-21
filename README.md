@@ -151,12 +151,12 @@ credential is used is a security boundary, not a convenience: the operator's own
 credential or push anonymously — never the operator's.
 ([ADR 0034](docs/adr/0034-a-default-registry.md)).
 
-**One thing to get right before a workload can pull.** `status.artifact.ref` is one string that two
-different resolvers have to understand: the controllers reach the registry through **cluster DNS**
-to push and refresh, and the kubelet reaches it with the **node's** resolver to pull. So
-`registry.host` must resolve in both places — an ordinary DNS name does; a name only your nodes know
-leaves every object failing with `no such host` before it publishes anything. The chart warns when
-it is unset, because the failure otherwise is a successful publish followed by `ErrImagePull`. See
+**One thing to decide before installing.** The controllers always reach the registry through its
+in-cluster Service and need no configuration. The **kubelet** does — it resolves image references
+with the node's resolver, which cannot see cluster DNS — and how it should reach the registry
+depends on your cluster rather than on this chart. So `registry.publish.mode` has no default and
+the chart refuses to install until you pick one: `ingress` (needs nothing on the nodes), `nodePort`
+(one containerd file per node), `external` (your own registry), or `internalOnly`. See
 [docs/registry.md](docs/registry.md).
 
 **An `ImageBuild`'s output is the only copy.** It is an *observation*, not a function of its spec
