@@ -61,7 +61,7 @@ first.
 
 | # | Question | Status |
 |---|---|---|
-| [0019](0019-pod-reference-protection-revisited.md) | Should garbage collection protect Pod-referenced digests? | Open, reopened |
+| [0019](0019-pod-reference-protection-revisited.md) | Should garbage collection protect Pod-referenced digests? | Open, reopened twice; threat D8 |
 | [0020](0020-is-the-supply-chain-work-worth-building.md) | Is the supply-chain work worth building? | Open |
 
 ## Format
