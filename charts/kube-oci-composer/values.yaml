@@ -178,7 +178,6 @@ imageBuild:
   healthProbeBindAddress: ":8081"
 
   sourceDateEpoch: "0"
-  insecureRegistry: ""
   keepBuilds: 10
   leaderElect: true
   serviceAccountName: ""

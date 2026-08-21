@@ -521,3 +521,105 @@ func documentNamed(t *testing.T, rendered, kind, name string) string {
 	t.Fatalf("no %s named %s in the rendered output", kind, name)
 	return ""
 }
+
+// TestBothControllersAreScrapable.
+//
+// The builder had no metrics Service at all, so its :8080 was unreachable while the composer's was
+// scraped — an asymmetry with no reason behind it, and the kind that survives because nobody
+// notices a metric that was never there. The builder is the component that creates Jobs; its
+// reconcile errors and queue depth are exactly what you want when builds stop happening.
+func TestBothControllersAreScrapable(t *testing.T) {
+	out := render(t)
+
+	byComponent := map[string]bool{}
+	for svc, selector := range serviceSelectors(t, out) {
+		if !strings.HasSuffix(svc, "-metrics") {
+			continue
+		}
+		byComponent[selector["app.kubernetes.io/component"]] = true
+	}
+
+	for _, component := range []string{"composer", "builder"} {
+		if !byComponent[component] {
+			t.Errorf("no metrics Service selects the %s; its metrics are unscrapable", component)
+		}
+	}
+}
+
+// TestATurnedOffComponentExposesNothing — a Service left behind by a disabled component selects no
+// pods and reports itself healthy, which is a worse failure than an absent one.
+func TestATurnedOffComponentExposesNothing(t *testing.T) {
+	for _, tc := range []struct{ toggle, absent string }{
+		{"imageBuild.enabled=false", "builder-metrics"},
+		{"imageComposition.enabled=false", "composer"},
+	} {
+		t.Run(tc.toggle, func(t *testing.T) {
+			out := render(t, "--set", tc.toggle)
+			for svc, selector := range serviceSelectors(t, out) {
+				if selector["app.kubernetes.io/component"] == "composer" &&
+					tc.toggle == "imageComposition.enabled=false" {
+					t.Errorf("Service %s still selects the composer, which is not installed", svc)
+				}
+				if strings.Contains(svc, tc.absent) && tc.absent == "builder-metrics" {
+					t.Errorf("Service %s survived its component being turned off", svc)
+				}
+			}
+		})
+	}
+}
+
+// TestTheServiceMonitorScrapesBothControllersAndNotTheRegistry.
+//
+// The registry's Service carries the same two chart labels as the controllers', so a selector on
+// those alone would have Prometheus scrape /metrics on a registry that serves the OCI API there —
+// a scrape that fails quietly and that nobody investigates, because a ServiceMonitor that exists
+// looks like monitoring that works.
+func TestTheServiceMonitorScrapesBothControllersAndNotTheRegistry(t *testing.T) {
+	out := render(t, "--set", "metrics.serviceMonitor.enabled=true")
+
+	var found bool
+	for _, doc := range strings.Split(out, "\n---") {
+		var sm struct {
+			Kind string `json:"kind"`
+			Spec struct {
+				Selector struct {
+					MatchLabels      map[string]string `json:"matchLabels"`
+					MatchExpressions []struct {
+						Key      string   `json:"key"`
+						Operator string   `json:"operator"`
+						Values   []string `json:"values"`
+					} `json:"matchExpressions"`
+				} `json:"selector"`
+			} `json:"spec"`
+		}
+		if err := yaml.Unmarshal([]byte(doc), &sm); err != nil || sm.Kind != "ServiceMonitor" {
+			continue
+		}
+		found = true
+
+		if _, tooNarrow := sm.Spec.Selector.MatchLabels["app.kubernetes.io/component"]; tooNarrow {
+			t.Error("a single component in matchLabels leaves the other controller unscraped")
+		}
+		if len(sm.Spec.Selector.MatchExpressions) == 0 {
+			t.Fatal("without an expression this selects the registry too, whose :5000 is not metrics")
+		}
+		for _, e := range sm.Spec.Selector.MatchExpressions {
+			if e.Key != "app.kubernetes.io/component" {
+				continue
+			}
+			got := map[string]bool{}
+			for _, v := range e.Values {
+				got[v] = true
+			}
+			if !got["composer"] || !got["builder"] {
+				t.Errorf("both controllers must be scraped, got %v", e.Values)
+			}
+			if got["registry"] {
+				t.Error("the registry serves the OCI API on that port, not metrics")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no ServiceMonitor rendered with metrics.serviceMonitor.enabled=true")
+	}
+}

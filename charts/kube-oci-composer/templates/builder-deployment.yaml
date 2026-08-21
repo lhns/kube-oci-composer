@@ -24,7 +24,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "kube-oci-composer.componentSelectorLabels" (dict "ctx" . "component" "builder") | nindent 8 }}
+        {{- include "kube-oci-composer.componentLabels" (dict "ctx" . "component" "builder") | nindent 8 }}
       {{- with .Values.podAnnotations }}
       annotations:
         {{- toYaml . | nindent 8 }}
