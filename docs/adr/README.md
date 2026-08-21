@@ -45,6 +45,7 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0036](0036-ssrf-on-fetch-urls.md) | SSRF on `fetch` URLs: block the metadata endpoint, make the rest opt-in | Accepted, closes threat I6 |
 | [0037](0037-one-host-cannot-satisfy-two-resolvers.md) | One host cannot satisfy two resolvers | Accepted, amends 0034 |
 | [0038](0038-tls-in-the-cluster.md) | TLS in the cluster, and who has to trust what | Accepted, closes threat I7 |
+| [0039](0039-zot-clustering-is-sharding.md) | zot clustering is sharding, not replication | Accepted, revisits 0030's "no HA" |
 
 ## Open questions
 

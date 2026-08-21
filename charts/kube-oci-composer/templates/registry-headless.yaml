@@ -1,0 +1,29 @@
+{{- if .Values.registry.enabled }}
+{{- /*
+The headless Service that gives each member a stable DNS name.
+
+Rendered unconditionally, because the StatefulSet names it as `serviceName` whether or not
+clustering is on, and a StatefulSet pointing at a Service that does not exist has no stable network
+identity for its pods.
+
+publishNotReadyAddresses is load-bearing for clustering: members have to resolve each other DURING
+startup, before any of them is ready. Without it a cold cluster cannot form -- every member waits
+for peers that DNS refuses to name until they are ready, and none of them ever is.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "kube-oci-composer.registryFullname" . }}-headless
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kube-oci-composer.componentLabels" (dict "ctx" . "component" "registry") | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "kube-oci-composer.componentSelectorLabels" (dict "ctx" . "component" "registry") | nindent 4 }}
+  ports:
+    - name: registry
+      port: {{ .Values.registry.service.port }}
+      targetPort: registry
+{{- end }}

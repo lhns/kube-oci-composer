@@ -12,3 +12,5 @@ inside the include still aborts `helm template`, `helm install` and `helm upgrad
 {{- include "kube-oci-composer.checkRetention" . -}}
 {{- include "kube-oci-composer.checkRegistryAuth" . -}}
 {{- include "kube-oci-composer.checkRegistryCert" . -}}
+{{- include "kube-oci-composer.checkRegistryCluster" . -}}
+{{- include "kube-oci-composer.checkRegistryMigration" . -}}
