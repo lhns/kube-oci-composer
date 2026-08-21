@@ -49,6 +49,15 @@ type ImageCompositionReconciler struct {
 	// controller rather than to the object.
 	Default recon.DefaultRegistry
 
+	// InsecureRegistries are hosts this controller may push to over plain HTTP, matched on host
+	// exactly as the builder and the retention refresher match it (recon.InsecureHost).
+	//
+	// It exists on this controller at all because the loopback serving endpoint is gone (ADR 0035):
+	// pushes used to be either loopback -- always plaintext -- or to a real registry over HTTPS,
+	// so there was no third case. Now the DEFAULT case is a bundled registry reached over a
+	// NodePort or a Service, and neither has a certificate.
+	InsecureRegistries []string
+
 	// RequirePinnedSources refuses any sourceRef that names no revision (threat T1). Off by
 	// default: pinning is deliberately optional per ADR 0026, and this is how an operator opts a
 	// whole cluster out of that.
@@ -370,13 +379,7 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 		return buildResult{}, err
 	}
 
-	// name.Insecure applies ONLY to the loopback serving endpoint. Applying it unconditionally
-	// would silently downgrade pushes to a real registry to plaintext HTTP — the sort of quiet
-	// weakening nobody notices until it matters.
-	var refOpts []name.Option
-	if tgt.insecure {
-		refOpts = append(refOpts, name.Insecure)
-	}
+	refOpts := r.refOptions(tgt.writeRepo)
 
 	// Restore previously published builds before checking convergence, so that after a restart
 	// the references resolve from replayed state rather than looking absent and forcing a
@@ -587,8 +590,6 @@ type target struct {
 	tags []string
 	// onConflict decides what happens to a tag that already means something else.
 	onConflict ociv1alpha1.TagConflictPolicy
-	// insecure allows plaintext HTTP, true only for the loopback endpoint.
-	insecure bool
 	// usesDefault marks a target the OBJECT did not choose, which is the only case where the
 	// operator's own credential may be used. See recon.DefaultRegistry.CredentialFor.
 	usesDefault bool
@@ -629,6 +630,24 @@ func (r *ImageCompositionReconciler) target(obj *ociv1alpha1.ImageComposition) (
 		onConflict:  p.ResolveConflictPolicy(),
 		usesDefault: usesDefault,
 	}, nil
+}
+
+// refOptions decides whether this repository may be reached over plain HTTP.
+//
+// A method rather than three lines inline, because it is the only part of the push path that a
+// unit test can actually check. go-containerregistry treats localhost and 127.0.0.1 as insecure on
+// its own, so a test against an httptest registry succeeds whether or not this controller ever
+// consults --insecure-registry -- which is exactly how the controller shipped with no plain-HTTP
+// push path at all and a green suite. That was found in a cluster, by the e2e, one round after the
+// serving endpoint was removed.
+//
+// Matched on HOST, never on prefix: naming one internal registry must not downgrade requests to a
+// lookalike name that merely starts the same way.
+func (r *ImageCompositionReconciler) refOptions(repository string) []name.Option {
+	if recon.InsecureHost(repository, r.InsecureRegistries) {
+		return []name.Option{name.Insecure}
+	}
+	return nil
 }
 
 // artifactStatus reports the PULL reference, never the loopback one the controller wrote to.

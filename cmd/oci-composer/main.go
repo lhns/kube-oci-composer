@@ -243,6 +243,7 @@ func main() {
 		HistoryLimit:         keepBuilds,
 		Fetcher:              oci.NewFetcherWithGuard(oci.DialGuard{DenyPrivate: fetchDenyPrivate}),
 		RequirePinnedSources: requirePinnedSources,
+		InsecureRegistries:   splitList(insecureRegs),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ImageComposition")
 		os.Exit(1)

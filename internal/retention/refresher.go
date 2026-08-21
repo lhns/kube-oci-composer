@@ -328,7 +328,7 @@ func (r *Refresher) refreshObject(ctx context.Context, target Target, out *Resul
 		return
 	}
 	var refOpts []name.Option
-	if insecureHost(repo, r.InsecureRegistries) {
+	if recon.InsecureHost(repo, r.InsecureRegistries) {
 		refOpts = append(refOpts, name.Insecure)
 	}
 
@@ -515,16 +515,6 @@ func (r *Refresher) SetupWithManager(mgr ctrl.Manager) error {
 //
 // Matched on host rather than applied globally, exactly as the builder matches it, so naming one
 // internal registry does not quietly downgrade every other request this controller makes.
-func insecureHost(repository string, insecure []string) bool {
-	host, _, _ := strings.Cut(repository, "/")
-	for _, h := range insecure {
-		if h == host {
-			return true
-		}
-	}
-	return false
-}
-
 // isNotFound distinguishes "the registry says this is gone" from "the registry did not answer".
 //
 // The difference is the difference between an alarm and a warning: a 404 means the guarantee has

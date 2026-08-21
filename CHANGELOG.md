@@ -162,6 +162,23 @@ may change between minor versions.
   guard reads both and fails on any field present in one and not the other, unless the difference is
   recorded with the reason the destination makes it meaningless. Verified to fail on drift.
 
+### Fixed
+- **The composer could not push to a plain-HTTP registry at all.** Removing the serving endpoint
+  removed the only plaintext push path it had -- pushes were previously either loopback, always
+  HTTP, or to a real registry over HTTPS, so there was no third case and the controller never read
+  `--insecure-registry`. The default case is now a bundled registry on a Service or a NodePort,
+  neither of which has a certificate, so every publish failed with `server gave HTTP response to
+  HTTPS client`.
+
+  The whole unit suite stayed green through it, because go-containerregistry treats localhost and
+  127.0.0.1 as insecure on its own and every unit test's registry is an httptest server on
+  loopback. The e2e found it. The regression test now checks the DECISION rather than the
+  transport, which is the only form of it a unit test can make.
+
+  `insecureHost` also existed in three copies -- composing, building, refreshing -- and is now one
+  function in `internal/reconciler`. Three copies of a security-relevant host comparison is two
+  too many.
+
 ### Changed
 - **BREAKING: the embedded serving endpoint is removed. A registry is the only publication path.**
 

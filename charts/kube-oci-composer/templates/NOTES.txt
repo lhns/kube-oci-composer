@@ -37,6 +37,10 @@ node, and a CoreDNS hosts entry for the cluster side:
     [host."http://<node>:<nodePort>"]
       capabilities = ["pull", "resolve"]
 
+If that registry.host speaks plain HTTP -- a NodePort does -- also set defaultRegistry.insecure to
+it. It is not assumed: registry.host is just as often an ingress terminating TLS, and marking that
+insecure would force plaintext on the deployment that took the trouble to set it up.
+
 See docs/registry.md.
 {{- end }}
 
