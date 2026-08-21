@@ -269,6 +269,30 @@ registry:
     #                    a default: useful when another system copies them onward.
     mode: ""
 
+  # A NetworkPolicy admitting traffic to the registry.
+  #
+  # It is a CONNECTIVITY guarantee, not a security control. Reads are anonymous by design and
+  # writes need the password, so restricting which namespace may connect adds no authority to
+  # either. What it buys is builds that work: a build Job runs in ITS OWN object's namespace and
+  # crosses a namespace boundary to push, and in a default-deny cluster nothing lets it through.
+  #
+  # Two things to know before narrowing it:
+  #
+  #   * The moment any policy selects the registry pod, that pod goes from "everything allowed" to
+  #     "only what is listed". This file therefore has to be complete, not merely correct.
+  #   * Image pulls come from the KUBELET, in the node's network namespace. No pod selector can
+  #     match them. That is what nodeCIDRs is for -- and on a cluster where pods and nodes sit on
+  #     different networks, leaving it empty turns every pull into a timeout that looks exactly
+  #     like a broken registry.
+  networkPolicy:
+    enabled: true
+    # Empty means every namespace, which is the default because a build can land anywhere.
+    # Listing namespaces asserts you know every one a build will ever run in.
+    allowedNamespaces: []
+    # CIDRs the kubelets pull from. Needed when node traffic is not already permitted -- check
+    # before assuming it is; the symptom of getting this wrong is a pull that hangs.
+    nodeCIDRs: []
+
   # Rendered when publish.mode=ingress. The hostname comes from registry.host, with any port
   # stripped -- an Ingress rule host is a hostname, not a registry reference.
   #

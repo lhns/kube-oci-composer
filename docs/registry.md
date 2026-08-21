@@ -213,6 +213,19 @@ network is not a boundary you trust, put TLS in front of the registry and remove
 `defaultRegistry.insecure`, or point `defaultRegistry.host` at a registry that already has a
 certificate. Threat I7.
 
+**A NetworkPolicy ships enabled, and it is a connectivity guarantee rather than a security
+control.** Reads are anonymous by design and writes need the password, so restricting which
+namespace may connect adds no authority to either rule. What it buys is builds that work: a build
+Job runs in its own object's namespace and crosses a namespace boundary to push, and in a
+default-deny cluster nothing lets it through.
+
+Two things before you narrow it. The moment any policy selects the registry pod, that pod goes from
+"everything allowed" to "only what is listed" — so the shipped policy has to be complete, not
+merely correct. And image pulls come from the **kubelet**, in the node's network namespace, which
+no pod selector can ever match; that is what `registry.networkPolicy.nodeCIDRs` is for, and leaving
+it empty on a cluster where pods and nodes are on different networks turns every pull into a
+timeout that looks exactly like a broken registry.
+
 **Anonymous read, authenticated write.** zot enforces this itself; no proxy is needed in front. Only
 the controllers get a write identity — give them a `dockerconfigjson` Secret and point
 `spec.push.secretRef` at it. The refresh path needs no more than *read*.

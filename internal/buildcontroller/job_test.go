@@ -366,3 +366,33 @@ func TestFetchContextUnwrapsTheSourceControllerDirectory(t *testing.T) {
 		})
 	}
 }
+
+// TestBuildPodsAreSelectable covers a gap that only shows up from outside this package.
+//
+// The labels were on the Job and not on its pod template, so build pods carried nothing but the
+// `job-name` and `controller-uid` Kubernetes adds itself. That is enough to find one pod and not
+// enough to describe a class of them — and anything selecting build pods as a class lives in a
+// namespace this chart does not own and was not written by whoever created the build: a
+// NetworkPolicy letting them reach the registry, a quota, an admission rule.
+//
+// Without pod labels the only way to write such a policy was to match every pod in the namespace.
+func TestBuildPodsAreSelectable(t *testing.T) {
+	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo, "", true)
+
+	labels := job.Spec.Template.Labels
+	if labels == nil {
+		t.Fatal("build pods carry no labels; nothing outside this namespace can select them")
+	}
+	if got := labels[ManagedByLabel]; got != "kube-oci-builder" {
+		t.Errorf("%s = %q, want kube-oci-builder", ManagedByLabel, got)
+	}
+	if labels[InputHashLabel] == "" {
+		t.Errorf("%s is empty; a pod cannot be tied back to the build that made it", InputHashLabel)
+	}
+
+	// The Job's own labels must not regress while the pod's are added — the controller finds
+	// existing Jobs by them.
+	if got := job.Labels[ManagedByLabel]; got != "kube-oci-builder" {
+		t.Errorf("the Job lost its own %s label: %q", ManagedByLabel, got)
+	}
+}
