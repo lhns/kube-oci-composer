@@ -169,10 +169,30 @@ jobs:
           helm push bin/kube-oci-composer-*.tgz oci://ghcr.io/lhns/charts
 
       - name: Publish the release manifests
+        # registry.publish.mode has no default: the chart refuses to install until an operator says
+        # how workloads reach the registry (ADR 0037). A flat manifest cannot ask, so it renders the
+        # one mode that asserts nothing about the cluster -- and says so at the top, because an
+        # install.yaml that silently produces images nothing can pull is exactly the failure that
+        # required value exists to prevent.
         run: |
           mkdir -p release
+          cat > release/install.yaml <<'HEADER'
+          # kube-oci-composer -- rendered with registry.publish.mode=internalOnly.
+          #
+          # WORKLOADS CANNOT PULL FROM THIS INSTALL AS RENDERED. internalOnly means exactly that:
+          # the controllers publish to the bundled registry over cluster DNS, which a kubelet
+          # cannot resolve. Everything works except being consumed.
+          #
+          # To make images pullable, install the CHART instead and choose a mode:
+          #
+          #   helm install kube-oci-composer oci://ghcr.io/lhns/charts/kube-oci-composer \
+          #     --set registry.publish.mode=ingress --set registry.host=oci-composer.example.com
+          #
+          # See docs/registry.md for nodePort and external.
+          HEADER
           helm template kube-oci-composer charts/kube-oci-composer \
-            --namespace oci-composer --include-crds > release/install.yaml
+            --namespace oci-composer --include-crds \
+            --set registry.publish.mode=internalOnly >> release/install.yaml
 
       # Release mode only. A dev build has no release notes worth generating and would clutter
       # the release list with one entry per commit; the image and chart are the deliverable.
