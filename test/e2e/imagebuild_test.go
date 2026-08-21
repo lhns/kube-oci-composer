@@ -25,9 +25,12 @@ import (
 // pointing somewhere the fixtures are not.
 const (
 	buildNamespace = "oci-builder-e2e"
-	// The registry the chart installs, addressed by its in-cluster Service. Same name up.sh passes
-	// as registry.host, so a reference the controller writes is the one a node resolves.
-	buildRegistry = "kube-oci-composer-registry.oci-composer.svc.cluster.local:5000"
+	// The SAME host every other reference uses, and it has to be: the operator names exactly one
+	// registry over plain HTTP (--insecure-registry, matched on host), so a build naming the
+	// Service DNS name instead pushed over HTTPS to a registry that speaks HTTP and died with
+	// `server gave HTTP response to HTTPS client`. This constant was a leftover from when the
+	// e2e ran its own fixture registry alongside the chart's.
+	buildRegistry = registryHost
 	// Where the chart puts everything now: one release, one namespace (ADR 0033).
 	operatorNamespace = "oci-composer"
 )

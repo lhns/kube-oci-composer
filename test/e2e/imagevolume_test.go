@@ -122,6 +122,15 @@ metadata:
   namespace: `+namespace+`
 spec:
   interval: 1m
+  # TAGGED, and that is load-bearing rather than decorative: an untagged manifest is unreferenced
+  # as far as a registry is concerned, and zot -- configured here with a compressed GC for the
+  # retention tests -- reclaims it within seconds. The publish then succeeds and the pull that
+  # follows reports "not found", which reads as the composer having published nothing.
+  #
+  # A workload should still reference the DIGEST (ADR 0010). The tag exists to keep the manifest
+  # reachable, not to be pulled.
+  push:
+    tags: [main]
   layers:
     - name: config
       configMap:
