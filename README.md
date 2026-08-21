@@ -151,11 +151,13 @@ credential is used is a security boundary, not a convenience: the operator's own
 credential or push anonymously — never the operator's.
 ([ADR 0034](docs/adr/0034-a-default-registry.md)).
 
-**One thing to get right before a workload can pull.** containerd resolves image references with the
-*node's* resolver, so a `*.svc.cluster.local` name works for the controllers and not for a kubelet.
-Set `registry.host` to a name your nodes resolve and point it at the registry — an ingress, or a
-NodePort plus a containerd drop-in. The chart warns when it is unset, because the failure otherwise
-is a successful publish followed by `ErrImagePull`. See [docs/registry.md](docs/registry.md).
+**One thing to get right before a workload can pull.** `status.artifact.ref` is one string that two
+different resolvers have to understand: the controllers reach the registry through **cluster DNS**
+to push and refresh, and the kubelet reaches it with the **node's** resolver to pull. So
+`registry.host` must resolve in both places — an ordinary DNS name does; a name only your nodes know
+leaves every object failing with `no such host` before it publishes anything. The chart warns when
+it is unset, because the failure otherwise is a successful publish followed by `ErrImagePull`. See
+[docs/registry.md](docs/registry.md).
 
 **An `ImageBuild`'s output is the only copy.** It is an *observation*, not a function of its spec
 ([ADR 0025](docs/adr/0025-dockerfile-builds-as-a-second-kind.md)), so a rebuild may not reproduce

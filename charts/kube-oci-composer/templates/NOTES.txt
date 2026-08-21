@@ -25,8 +25,13 @@ The controllers can push and refresh over cluster DNS, but a POD CANNOT PULL fro
 containerd resolves image references with the node's resolver, which does not see cluster DNS.
 Images will publish successfully and then fail to pull with ErrImagePull.
 
-Set registry.host to a name your nodes resolve, and point it at this registry -- an ingress, or
-registry.service.type=NodePort plus a containerd drop-in on each node:
+Set registry.host to a name that resolves BOTH on your nodes and inside the cluster, and point it
+at this registry. Both matter: the nodes pull with it, and the controllers push and refresh with
+it, and status.artifact.ref carries only one string. A name only the nodes know fails the other
+way -- every object reports "no such host" and publishes nothing.
+
+An ingress does both. Otherwise registry.service.type=NodePort plus a containerd drop-in on each
+node, and a CoreDNS hosts entry for the cluster side:
 
     /etc/containerd/certs.d/<registry.host>/hosts.toml
     [host."http://<node>:<nodePort>"]
