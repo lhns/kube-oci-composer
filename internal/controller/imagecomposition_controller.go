@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -48,6 +49,12 @@ type ImageCompositionReconciler struct {
 	// by the operator; see recon.DefaultRegistry for why its credential is namespaced to the
 	// controller rather than to the object.
 	Default recon.DefaultRegistry
+
+	// Transport, when set, trusts an additional CA on top of the system roots. Applies to EVERY
+	// registry this controller talks to, not only the operator's own -- see recon.Transport for
+	// why scoping it per host would break base-image pulls from the bundled registry, which is the
+	// flagship flow.
+	Transport http.RoundTripper
 
 	// InsecureRegistries are hosts this controller may push to over plain HTTP, matched on host
 	// exactly as the builder and the retention refresher match it (recon.InsecureHost).
@@ -694,6 +701,9 @@ func publishName(obj *ociv1alpha1.ImageComposition) string {
 // never taken from the spec.
 func (r *ImageCompositionReconciler) remoteOptions(ctx context.Context, obj *ociv1alpha1.ImageComposition) ([]remote.Option, error) {
 	opts := []remote.Option{remote.WithContext(ctx)}
+	if r.Transport != nil {
+		opts = append(opts, remote.WithTransport(r.Transport))
+	}
 
 	var ownRef string
 	if p := obj.Spec.Push; p != nil && p.SecretRef != nil {

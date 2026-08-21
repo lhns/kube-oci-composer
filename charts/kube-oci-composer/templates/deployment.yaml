@@ -82,6 +82,9 @@ spec:
             {{- end }}
             {{- with (include "kube-oci-composer.defaultRegistry" .) }}
             - --default-registry={{ . }}
+            {{- if (include "kube-oci-composer.registryCASource" $) }}
+            - --registry-ca-file=/etc/oci-composer/registry-ca/ca.crt
+            {{- end }}
             {{- with (include "kube-oci-composer.publicRegistry" $) }}
             - --public-registry-host={{ . }}
             {{- end }}
@@ -144,7 +147,28 @@ spec:
               mountPath: {{ .Values.operator.storage.cacheDir }}
             - name: tmp
               mountPath: /tmp
+            {{- with (include "kube-oci-composer.registryCASource" $) }}
+            - name: registry-ca
+              mountPath: /etc/oci-composer/registry-ca
+              readOnly: true
+            {{- end }}
       volumes:
+        {{- with (include "kube-oci-composer.registryCASource" $) }}
+        - name: registry-ca
+          {{- $kind := (splitList ":" .) | first }}
+          {{- $name := (splitList ":" .) | last }}
+          {{- if eq $kind "configMap" }}
+          configMap:
+            name: {{ $name }}
+          {{- else }}
+          secret:
+            secretName: {{ $name }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+          {{- end }}
+        {{- end }}
+
         # The layer CACHE, and only that. It used to sit beside a blob store holding served
         # artifacts; that store is gone, and what is left is a cache -- losing it costs a refetch,
         # not a failed pull, which is why emptyDir is a reasonable default and a PVC only buys a

@@ -48,6 +48,17 @@ data:
       "http": {
         "address": "0.0.0.0",
         "port": "5000"
+        {{- if .Values.registry.tls.enabled }},
+        {{- /*
+        http.tls, NOT http.tls.cacert.
+
+        One word apart and opposite meanings. This is the server's own certificate. `cacert` in the
+        same block is zot's CLIENT CA -- setting it demands a client certificate from every caller,
+        including the kubelet, which has none, and every pull in the cluster stops. The inter-member
+        CA used by clustering is a different key again (cluster.tls.cacert).
+        */}}
+        "tls": { "cert": "/etc/zot/tls/tls.crt", "key": "/etc/zot/tls/tls.key" }
+        {{- end }}
         {{- if .Values.registry.auth.enabled }},
         "auth": { "htpasswd": { "path": "/etc/zot/auth/htpasswd" } },
         {{- /*

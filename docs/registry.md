@@ -205,7 +205,46 @@ the controllers publish to.
 This project's own e2e ran into it from the other end -- a composition whose tags were dropped
 became untagged, and the image it had just published was gone before a Pod could pull it.
 
-**The bundled registry terminates no TLS, and that has a cost worth stating.** zot authenticates
+### TLS
+
+`registry.tls.enabled=true` makes zot terminate TLS itself, with the certificate from
+`certManager` (recommended if you run it — renewal is the thing the alternative cannot do),
+`secret` (you supply a `kubernetes.io/tls` Secret), or `selfSigned` (the chart generates a CA and
+distributes it to both controllers and to build Jobs).
+
+It closes threat I7, and it is **off by default** for one specific reason: zot has a single
+listener and cannot serve HTTP and HTTPS at once, so enabling it invalidates the containerd drop-in
+on every node.
+
+```toml
+# before                              # after
+[host."http://<node>:30500"]          [host."https://<node>:30500"]
+  capabilities = ["pull", "resolve"]    capabilities = ["pull", "resolve"]
+                                        ca = "/etc/containerd/certs.d/oci-composer.internal:30500/ca.crt"
+```
+
+The `ca` line is only needed in `selfSigned` mode, and the CA is in the
+`<release>-kube-oci-composer-registry-tls` Secret under `ca.crt`. Terminating at an ingress instead
+avoids all of this — the node talks to the ingress, which already has a certificate it trusts.
+
+**Self-signed certificates do not renew, and the chart refuses to render once one is close to
+expiring.** That is deliberate and it is not merely pedantic: an expired certificate stops the
+retention refresh, and a refresher that stops running is what lets the registry reclaim images your
+workloads are still running — one window later, silently. Rotation is:
+
+```console
+kubectl -n <ns> delete secret <release>-kube-oci-composer-registry-tls
+helm upgrade ...
+kubectl -n <ns> rollout restart deploy    # zot and both controllers read certs once at startup
+```
+
+...and every client has to learn the new CA, nodes included. If that is more than you want to do by
+hand, use `mode: certManager`. One caveat there: cert-manager renews the Secret in place and zot
+keeps serving the old certificate until its pod restarts, because it reads certs once at startup.
+Nothing in the chart can notice — it does not own that Secret — so `renewBefore` is set generously
+and restarting the pod after a renewal is yours.
+
+**Without TLS, the write credential crosses the network in the clear.** zot authenticates
 writes with HTTP Basic, so over plain HTTP the generated password crosses the pod network readable
 by anything positioned to watch it — and that credential is the whole of the "only the controllers
 can push" guarantee. Pulls are anonymous, so only the write path is exposed. If your cluster's

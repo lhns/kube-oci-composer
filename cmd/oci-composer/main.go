@@ -7,6 +7,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -65,6 +66,7 @@ func main() {
 		fetchDenyPrivate     bool
 		requirePinnedSources bool
 		defaultRegistry      string
+		registryCAFile       string
 		publicRegistryHost   string
 		defaultPushSecret    string
 		keepBuilds           int
@@ -111,6 +113,12 @@ func main() {
 			"to <default-registry>/<namespace>/<name>.\n"+
 			"Namespace-qualified deliberately: one registry is shared by the whole cluster, so a "+
 			"bare object name would collide the moment two namespaces both have an \"app\".")
+	flag.StringVar(&registryCAFile, "registry-ca-file", "",
+		"PEM bundle of ADDITIONAL root CAs to trust, on top of the system roots. Needed when the "+
+			"registry serves a certificate signed by a CA the image does not already trust -- the "+
+			"chart's self-signed mode, or a corporate CA. Applies to every registry this controller "+
+			"talks to, including base-image pulls, because a composition layered on a build pulls its "+
+			"base from the same registry it pushes to.")
 	flag.StringVar(&publicRegistryHost, "public-registry-host", "",
 		"What a WORKLOAD should pull from, when that differs from --default-registry. "+
 			"Used ONLY to render status.artifact.ref. One string cannot satisfy two resolvers: this "+
@@ -223,6 +231,21 @@ func main() {
 
 	readiness := &controller.Readiness{Client: mgr.GetClient()}
 
+	// Read once at startup. A CA that rotates on the order of a year does not justify a
+	// stat-and-reload path, and rotation needs a restart anyway -- zot reads its own certificate
+	// once too. Failing here rather than at the first artifact is deliberate: a controller that
+	// cannot trust its registry has nothing useful to do.
+	var registryTransport http.RoundTripper
+	if registryCAFile != "" {
+		var err error
+		registryTransport, err = recon.Transport(registryCAFile)
+		if err != nil {
+			setupLog.Error(err, "unable to build the registry transport", "caFile", registryCAFile)
+			os.Exit(1)
+		}
+		setupLog.Info("trusting an additional registry CA", "caFile", registryCAFile)
+	}
+
 	defaults := recon.DefaultRegistry{
 		Host:       defaultRegistry,
 		PublicHost: publicRegistryHost,
@@ -252,6 +275,7 @@ func main() {
 		Fetcher:              oci.NewFetcherWithGuard(oci.DialGuard{DenyPrivate: fetchDenyPrivate}),
 		RequirePinnedSources: requirePinnedSources,
 		InsecureRegistries:   splitList(insecureRegs),
+		Transport:            registryTransport,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ImageComposition")
 		os.Exit(1)
@@ -266,6 +290,7 @@ func main() {
 			//nolint:staticcheck // SA1019: the new events API has no Event method; same as above.
 			Recorder:           mgr.GetEventRecorderFor("retention"),
 			InsecureRegistries: splitList(insecureRegs),
+			Transport:          registryTransport,
 			Default:            defaults,
 		}
 		if err := refresher.SetupWithManager(mgr); err != nil {

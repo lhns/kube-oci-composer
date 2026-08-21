@@ -70,11 +70,27 @@ spec:
             {{- if .Values.registry.auth.enabled }}
             - {name: auth, mountPath: /etc/zot/auth, readOnly: true}
             {{- end }}
+            {{- if .Values.registry.tls.enabled }}
+            - {name: tls, mountPath: /etc/zot/tls, readOnly: true}
+            {{- end }}
+          {{- /*
+          The scheme has to follow the listener: zot serves one or the other, and an HTTP probe
+          against a TLS port fails every check.
+
+          A self-signed certificate costs nothing here. The kubelet's HTTPS prober sets
+          InsecureSkipVerify and does no hostname verification -- which it has to, since it probes
+          the POD IP and that is in no SAN list. The handshake still has to complete, so a
+          certificate zot could not load still fails the probe, which is the part worth keeping.
+
+          Not downgraded to tcpSocket: that would pass while zot answered 500 on /v2/, and
+          exercising the registry API is the whole value of this probe.
+          */}}
+          {{- $scheme := ternary "HTTPS" "HTTP" .Values.registry.tls.enabled }}
           readinessProbe:
-            httpGet: {path: /v2/, port: registry}
+            httpGet: {path: /v2/, port: registry, scheme: {{ $scheme }}}
             initialDelaySeconds: 2
           livenessProbe:
-            httpGet: {path: /v2/, port: registry}
+            httpGet: {path: /v2/, port: registry, scheme: {{ $scheme }}}
             initialDelaySeconds: 10
           resources:
             {{- toYaml .Values.registry.resources | nindent 12 }}
@@ -82,6 +98,11 @@ spec:
         - name: config
           configMap:
             name: {{ include "kube-oci-composer.registryFullname" . }}
+        {{- if .Values.registry.tls.enabled }}
+        - name: tls
+          secret:
+            secretName: {{ include "kube-oci-composer.registryTLSSecretName" . }}
+        {{- end }}
         {{- if .Values.registry.auth.enabled }}
         - name: auth
           secret:

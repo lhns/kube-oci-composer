@@ -172,6 +172,10 @@ type Refresher struct {
 	// Default is the operator's registry and credential. See recon.DefaultRegistry.
 	Default recon.DefaultRegistry
 
+	// Transport, when set, trusts an additional CA on top of the system roots. Same object the
+	// other controllers use; see recon.Transport.
+	Transport http.RoundTripper
+
 	// InsecureRegistries are hosts that may be reached over plain HTTP, matched on host exactly as
 	// the builder matches them, so a host that can be pushed to can also be refreshed.
 	InsecureRegistries []string
@@ -478,6 +482,9 @@ func qualify(repo, tag string) string {
 // what to put in that Secret.
 func (r *Refresher) remoteOptions(ctx context.Context, namespace, repository string, push *ociv1alpha1.Push) ([]remote.Option, error) {
 	opts := []remote.Option{remote.WithContext(ctx)}
+	if r.Transport != nil {
+		opts = append(opts, remote.WithTransport(r.Transport))
+	}
 
 	var ownRef string
 	if push != nil && push.SecretRef != nil {
