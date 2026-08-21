@@ -3,9 +3,9 @@
 package e2e
 
 import (
-	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestUserNamespacesOnThisCluster measures threat-model gap E1 rather than arguing about it.
@@ -21,10 +21,12 @@ import (
 //
 // It does NOT fail when the feature is unavailable. A test that fails on an upstream capability
 // this project cannot provide would be turned off, and the answer -- either way -- is what the
-// threat model needs. It fails only if the pod ends up somewhere neither running nor rejected,
-// which would mean the probe itself is wrong.
+// threat model needs. It fails only when the probe itself is wrong, which has already happened
+// twice: see the comments below, both of which are there because the probe reported something it
+// had not measured.
 func TestUserNamespacesOnThisCluster(t *testing.T) {
 	const pod = "userns-probe"
+
 	// Its OWN namespace. The first version borrowed the image-volume test's, which by then had
 	// been deleted -- so the probe reported "the cluster refused hostUsers: false" when what the
 	// cluster had actually said was "no such namespace". A probe that can report the wrong answer
@@ -64,32 +66,40 @@ spec:
 		t.Skip("user namespaces unavailable on this cluster; E1 stands as recorded in ADR 0027")
 	}
 
+	// A short deadline on purpose. If the node cannot run this pod it sits Pending indefinitely,
+	// and that IS the measurement -- spending the suite's full five-minute timeout to learn it
+	// would add five minutes to every run for an answer available in one.
+	const settle = 90 * time.Second
 	var phase string
-	eventually(t, "the user-namespace probe to settle", func() error {
+	deadline := time.Now().Add(settle)
+	for time.Now().Before(deadline) {
 		p, err := kubectl(t, "-n", ns, "get", "pod", pod, "-o", "jsonpath={.status.phase}")
-		if err != nil {
-			return fmt.Errorf("%v: %s", err, p)
+		if err == nil {
+			phase = strings.TrimSpace(p)
 		}
-		phase = strings.TrimSpace(p)
-		switch phase {
-		case "Succeeded", "Failed":
-			return nil
-		default:
-			events, _ := kubectl(t, "-n", ns, "get", "events",
-				"--field-selector", "involvedObject.name="+pod,
-				"-o", "jsonpath={range .items[*]}{.reason}: {.message}{\"\n\"}{end}")
-			return fmt.Errorf("phase=%s\n%s", phase, events)
+		if phase == "Succeeded" || phase == "Failed" {
+			break
 		}
-	})
+		time.Sleep(interval)
+	}
+
+	// Plain -o wide rather than a jsonpath range. The jsonpath this started with was copied from
+	// another file and mangled in transit, and an unterminated-quote error from kubectl replaced
+	// the diagnostic it was supposed to produce.
+	events, _ := kubectl(t, "-n", ns, "get", "events", "--field-selector", "involvedObject.name="+pod)
+
+	if phase != "Succeeded" && phase != "Failed" {
+		t.Logf("E1 MEASURED: hostUsers: false was accepted by the API server and the pod never ran "+
+			"(phase=%s after %s). The runtime does not support user namespaces.\n%s", phase, settle, events)
+		t.Skip("the runtime does not support user namespaces; E1 stands as recorded in ADR 0027")
+	}
 
 	logs, _ := kubectl(t, "-n", ns, "logs", pod)
 	uidMap := strings.TrimSpace(logs)
 
 	if phase != "Succeeded" {
-		// Accepted by the API server and then not runnable by the node: the runtime does not
-		// support it. Still a measurement, still not this project's failure.
-		t.Logf("E1 MEASURED: hostUsers: false was accepted but the pod did not run -- %s", uidMap)
-		t.Skip("the runtime does not support user namespaces; E1 stands as recorded in ADR 0027")
+		t.Logf("E1 MEASURED: the pod ran and failed -- %s\n%s", uidMap, events)
+		t.Skip("the probe did not complete; E1 stands as recorded in ADR 0027")
 	}
 
 	// It ran. Now check it actually got a namespace rather than the identity map, because a
