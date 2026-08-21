@@ -1,7 +1,7 @@
 package controller
 
 import (
-	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -10,65 +10,79 @@ import (
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 )
 
-func check(t *testing.T, r *Readiness) error {
+func pendingOf(t *testing.T, r *Readiness) []string {
 	t.Helper()
-	return r.Check(httptest.NewRequest("GET", "/readyz", nil))
+	pending, err := r.Pending(t.Context())
+	if err != nil {
+		t.Fatalf("listing pending objects: %v", err)
+	}
+	return pending
 }
 
-// TestNotReadyUntilArtifactsAreBuilt is the whole point: the pod must stay out of the Service
-// while the store is still empty, or every pull in that window is a 404 and workloads land in
-// ImagePullBackOff for no reason.
-func TestNotReadyUntilArtifactsAreBuilt(t *testing.T) {
+// TestUnobservedObjectsAreReportedPending — the completeness question retention depends on.
+//
+// This used to gate the readiness probe, keeping the pod out of the Service until the served store
+// was warm. There is no store now (ADR 0035); what survives is the same fact serving a different
+// purpose, because refreshing on a partial view under-protects whatever is missing from it.
+func TestUnobservedObjectsAreReportedPending(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("warming", urlLayer("core", url, digest, "/core"))
-	r, _ := servingReconciler(t, obj)
+	r, _ := registryReconciler(t, obj)
 	r.Readiness = &Readiness{Client: r.Client}
 
-	err := check(t, r.Readiness)
-	if err == nil {
-		t.Fatal("reported ready before anything was built")
+	pending := pendingOf(t, r.Readiness)
+	if len(pending) == 0 {
+		t.Fatal("an object this process has never reconciled was not reported pending")
 	}
-	if !strings.Contains(err.Error(), "default/warming") {
-		t.Fatalf("error should name the pending object, got: %v", err)
+	if !slices.Contains(pending, "default/warming") {
+		t.Fatalf("pending %v should name the unobserved object", pending)
 	}
 
 	if _, err := reconcileOnce(t, r, obj); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if err := check(t, r.Readiness); err != nil {
-		t.Fatalf("still not ready after building: %v", err)
+	if pending := pendingOf(t, r.Readiness); len(pending) != 0 {
+		t.Fatalf("pending %v after reconciling every object", pending)
 	}
 }
 
-// TestStalledObjectDoesNotBlockReadiness — one bad digest must not hold the endpoint out of the
-// Service for every unrelated artifact. Readiness covers the startup window; conditions report
-// health.
-func TestStalledObjectDoesNotBlockReadiness(t *testing.T) {
+// TestStalledObjectIsNotPending — pending means UNOBSERVED, not unhealthy.
+//
+// An object that reconciled and failed has been seen; the refresher knows what it published and can
+// keep it alive. Treating it as pending would stop refreshing everything else in the cluster because
+// one object has a bad digest.
+func TestStalledObjectIsNotPending(t *testing.T) {
 	url, _ := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("broken", urlLayer("core", url, "sha256:"+strings.Repeat("0", 64), "/core"))
-	r, _ := servingReconciler(t, obj)
+	r, _ := registryReconciler(t, obj)
 	r.Readiness = &Readiness{Client: r.Client}
 
 	if _, err := reconcileOnce(t, r, obj); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if err := check(t, r.Readiness); err != nil {
-		t.Fatalf("a permanently stalled object blocked readiness: %v", err)
+	if pending := pendingOf(t, r.Readiness); len(pending) != 0 {
+		t.Fatalf("a stalled object was reported pending %v, which would stop the refresher "+
+			"running at all", pending)
 	}
 }
 
-// TestPushModeDoesNotGateReadiness — an artifact published to an external registry is served by
-// that registry whether this pod is up or not, so it has no business holding readiness back.
-func TestPushModeDoesNotGateReadiness(t *testing.T) {
+// TestEveryUnobservedObjectCounts — there is no exemption for objects with spec.push.
+//
+// There used to be: a push-mode object was not served from here, so it could not hold the readiness
+// probe back. Every object publishes to a registry now, so that exemption would match everything and
+// Pending would always return empty -- which the retention refresher reads as "the view is complete"
+// while having observed nothing. It would refresh nothing, report success, and images would start
+// disappearing one retention window later.
+func TestEveryUnobservedObjectCounts(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("external", urlLayer("core", url, digest, "/core"))
-	obj.Spec.Publish = nil
 	obj.Spec.Push = &ociv1alpha1.Push{Repository: "registry.example.com/external", Tags: []string{"v1"}}
-	r, _ := servingReconciler(t, obj)
+	r, _ := registryReconciler(t, obj)
 	r.Readiness = &Readiness{Client: r.Client}
 
-	if err := check(t, r.Readiness); err != nil {
-		t.Fatalf("a push-mode object gated readiness: %v", err)
+	if pending := pendingOf(t, r.Readiness); !slices.Contains(pending, "default/external") {
+		t.Fatalf("pending %v omits an unobserved object because it names its own repository; "+
+			"the refresher would treat an empty view as a complete one", pending)
 	}
 }
 

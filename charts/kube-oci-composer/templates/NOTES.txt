@@ -59,8 +59,8 @@ The layer cache is local to this pod, so a restart or a reschedule re-fetches ev
 upstream. Set operator.s3.endpoint to keep it across both.
 {{- end }}
 
-{{- if eq (int .Values.operator.gc.keepBuilds) 0 }}
+{{- if eq (int .Values.operator.keepBuilds) 0 }}
 
-gc.keepBuilds is 0, which will be clamped to 1. Only the newest build stays pullable, so reverting
+operator.keepBuilds is 0, which will be clamped to 1. Only the newest build stays pullable, so reverting
 a commit or rescheduling a pod pinned to an older digest will fail.
 {{- end }}

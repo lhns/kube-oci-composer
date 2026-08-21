@@ -29,7 +29,7 @@ func TestRestartRebuildsFromCacheNotUpstream(t *testing.T) {
 
 	remote := store.NewMemory()
 
-	warm, _ := servingReconciler(t, obj)
+	warm, _ := registryReconciler(t, obj)
 	withCache(t, warm, remote)
 	first := build(t, warm, obj, "first build")
 
@@ -39,7 +39,7 @@ func TestRestartRebuildsFromCacheNotUpstream(t *testing.T) {
 
 	// A new reconciler with an empty serving store and an empty local cache dir, sharing only the
 	// remote tier — i.e. the pod came back on another node.
-	restarted, _ := servingReconciler(t, obj)
+	restarted, _ := registryReconciler(t, obj)
 	restarted.Client = warm.Client
 	withCache(t, restarted, remote)
 	origin.fail.Store(true)
@@ -62,7 +62,7 @@ func TestLayerSharedBetweenCompositionsIsFetchedOnce(t *testing.T) {
 	a := composition("consumer-a", urlLayer("core", shared.url, shared.digest, "/core"))
 	b := composition("consumer-b", urlLayer("core", shared.url, shared.digest, "/plugins"))
 
-	r, _ := servingReconciler(t, a, b)
+	r, _ := registryReconciler(t, a, b)
 	withCache(t, r, store.NewMemory())
 
 	artA := build(t, r, a, "build a")
@@ -83,7 +83,7 @@ func TestBuildStillWorksWithoutACache(t *testing.T) {
 	origin := newCountingOrigin(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("no-cache", urlLayer("core", origin.url, origin.digest, "/core"))
 
-	r, _ := servingReconciler(t, obj)
+	r, _ := registryReconciler(t, obj)
 	if r.Cache != nil {
 		t.Fatal("expected no cache by default")
 	}
@@ -103,11 +103,11 @@ func TestCachedInputProducesTheSameDigest(t *testing.T) {
 	origin := newCountingOrigin(t, map[string]string{"lib/a.jar": "aaa", "README": "hello"})
 
 	uncached := composition("uncached", urlLayer("core", origin.url, origin.digest, "/core"))
-	r1, _ := servingReconciler(t, uncached)
+	r1, _ := registryReconciler(t, uncached)
 	fresh := build(t, r1, uncached, "uncached build")
 
 	cached := composition("cached", urlLayer("core", origin.url, origin.digest, "/core"))
-	r2, _ := servingReconciler(t, cached)
+	r2, _ := registryReconciler(t, cached)
 	withCache(t, r2, store.NewMemory())
 	build(t, r2, cached, "warm the cache")
 

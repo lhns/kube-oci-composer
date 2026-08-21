@@ -1,23 +1,17 @@
 {{- if .Values.imageComposition.enabled }}
-{{- if and (not .Values.operator.servingHost) (eq .Values.operator.storage.backend "s3") }}
-{{- fail "operator.storage.backend=s3 only affects the serving endpoint, which needs operator.servingHost" }}
-{{- end }}
-{{- if and (eq .Values.operator.storage.backend "s3") (not .Values.operator.s3.endpoint) }}
-{{- fail "operator.storage.backend=s3 requires operator.s3.endpoint" }}
-{{- end }}
 {{- if and .Values.operator.s3.presignBlobs (not .Values.operator.s3.endpoint) }}
 {{- fail "operator.s3.presignBlobs requires operator.s3.endpoint" }}
 {{- end }}
 {{- if and .Values.operator.s3.endpoint (not .Values.operator.s3.bucket) }}
 {{- fail "operator.s3.endpoint requires operator.s3.bucket" }}
 {{- end }}
-{{- $shared := or .Values.operator.storage.shared (eq .Values.operator.storage.backend "s3") }}
-{{- if and (gt (int .Values.replicaCount) 1) .Values.operator.storage.shared (ne .Values.operator.storage.backend "s3") (not .Values.persistence.enabled) }}
-{{- fail "operator.storage.shared=true asserts every replica reaches the SAME blobs, but persistence.enabled=false gives each pod its own emptyDir. Each replica would then restore nothing, report ready anyway, join the Service and 404 every pull that reaches it. Set persistence.enabled=true with an RWX storageClass, or use the s3 backend, or drop to replicaCount=1." }}
-{{- end }}
-{{- if and (gt (int .Values.replicaCount) 1) (not $shared) }}
-{{- fail "replicaCount > 1 without shared storage gives you a standby that serves nothing: the blob store would be node-local, so only the leader can answer pulls, and the standby stays out of the Service by never reporting ready. Set operator.storage.shared=true (an RWX volume), or use the s3 backend which is shared by construction." }}
-{{- end }}
+{{- /*
+The shared-storage guards are gone with the serving endpoint. They existed because a second replica
+without shared blobs would join the Service and 404 every pull that reached it -- there is no Service
+and no blob store now, and what remains is a layer CACHE, which is per-pod by design and costs a
+refetch rather than a failed pull. Multiple replicas are ordinary; only publishing and status writes
+are leader-scoped.
+*/}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -65,17 +59,7 @@ spec:
             {{- end }}
             - --metrics-bind-address={{ .Values.operator.metricsBindAddress }}
             - --health-probe-bind-address={{ .Values.operator.healthProbeBindAddress }}
-            - --serving-bind-address={{ .Values.operator.servingBindAddress }}
-            {{- with .Values.operator.servingHost }}
-            - --serving-host={{ . }}
-            {{- end }}
-            - --storage-backend={{ .Values.operator.storage.backend }}
-            - --storage-dir={{ .Values.operator.storage.dir }}
             - --cache-dir={{ .Values.operator.storage.cacheDir }}
-            {{- if .Values.operator.storage.shared }}
-            - --shared-storage
-            - --standby-replay-interval={{ .Values.operator.storage.standbyReplayInterval }}
-            {{- end }}
             {{- with .Values.operator.s3.endpoint }}
             - --s3-endpoint={{ . }}
             - --s3-bucket={{ $.Values.operator.s3.bucket }}
@@ -88,9 +72,7 @@ spec:
             - --s3-presign-blobs
             {{- end }}
             {{- end }}
-            - --gc-interval={{ .Values.operator.gc.interval }}
-            - --gc-grace={{ .Values.operator.gc.grace }}
-            - --keep-builds={{ .Values.operator.gc.keepBuilds }}
+            - --keep-builds={{ .Values.operator.keepBuilds }}
             - --retention-refresh-interval={{ .Values.operator.retention.refreshInterval }}
             {{- with (include "kube-oci-composer.defaultRegistry" .) }}
             - --default-registry={{ . }}
@@ -100,9 +82,6 @@ spec:
             {{- end }}
             {{- with (include "kube-oci-composer.insecureRegistries" .) }}
             - --insecure-registry={{ . }}
-            {{- end }}
-            {{- if .Values.operator.gc.dryRun }}
-            - --gc-dry-run
             {{- end }}
           {{- if .Values.operator.s3.existingSecret }}
           env:
@@ -127,9 +106,6 @@ spec:
                 fieldRef:
                   fieldPath: metadata.namespace
           ports:
-            - name: oci
-              containerPort: {{ include "kube-oci-composer.port" .Values.operator.servingBindAddress }}
-              protocol: TCP
             - name: metrics
               containerPort: {{ include "kube-oci-composer.port" .Values.operator.metricsBindAddress }}
               protocol: TCP
@@ -155,25 +131,22 @@ spec:
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           volumeMounts:
-            - name: storage
-              mountPath: {{ .Values.operator.storage.dir }}
             - name: cache
               mountPath: {{ .Values.operator.storage.cacheDir }}
             - name: tmp
               mountPath: /tmp
       volumes:
-        # emptyDir is the correct default. Neither directory is a system of record: composition is
-        # deterministic, so anything lost is rebuilt from the spec. A PVC only buys a faster
-        # restart, and object storage does it better without the single-writer constraint.
-        - name: storage
+        # The layer CACHE, and only that. It used to sit beside a blob store holding served
+        # artifacts; that store is gone, and what is left is a cache -- losing it costs a refetch,
+        # not a failed pull, which is why emptyDir is a reasonable default and a PVC only buys a
+        # faster restart.
+        - name: cache
           {{- if .Values.persistence.enabled }}
           persistentVolumeClaim:
             claimName: {{ include "kube-oci-composer.fullname" . }}-storage
           {{- else }}
           emptyDir: {}
           {{- end }}
-        - name: cache
-          emptyDir: {}
         # Assembly writes layer tarballs to a temp directory, so /tmp must be writable even though
         # the root filesystem is not.
         - name: tmp

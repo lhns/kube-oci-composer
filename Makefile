@@ -97,9 +97,14 @@ build: ## Build both manager binaries.
 	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o bin/manager ./cmd/oci-composer
 	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o bin/builder ./cmd/oci-builder
 
+DEFAULT_REGISTRY ?= localhost:5000
+
 .PHONY: run
 run: manifests ## Run the controller against the current kubecontext.
-	go run ./cmd/oci-composer --serving-host=localhost:5000
+	# DEFAULT_REGISTRY is where objects that name no repository publish. Point it at a registry you
+	# can actually reach from here -- `docker run -p 5000:5000 ghcr.io/project-zot/zot-linux-amd64`
+	# is enough -- because with no default and no push.repository, objects stay Pending.
+	go run ./cmd/oci-composer --default-registry=$(DEFAULT_REGISTRY)
 
 .PHONY: docker-build
 docker-build: ## Build the composer image.

@@ -25,8 +25,9 @@ spec:
         digest: sha256:9a4c…
         unpack: tar.gz
       to: /s3
-  publish:
-    name: kafka-tiered-storage
+  push:
+    # No repository: publishes to the bundled registry as <registry>/<namespace>/<name>.
+    # Set `repository:` to publish anywhere else.
     tags: [s1a2b3c4d5e6f7890]
 ```
 
@@ -50,7 +51,7 @@ and something has to keep it right. **The answer here is to let whatever templat
 {{- $spec := include "kafka.icspec" . }}      {{/* base + layers + config ONLY */}}
 {{- $tag  := printf "s%s" (sha256sum $spec | trunc 16) }}
 
-# ImageComposition   publish: {name: kafka-tiered-storage, tags: [{{ $tag }}]}
+# ImageComposition   push: {tags: [{{ $tag }}]}
 # Deployment         image:   oci.example.com/kafka-tiered-storage:{{ $tag }}
 ```
 
@@ -63,17 +64,17 @@ digest-pinned inputs, so a hash of those inputs identifies the output as precise
 does. A spec-hash tag cannot change meaning without the spec changing — which is what makes
 referencing a tag acceptable here, and `pullPolicy: IfNotPresent` correct alongside it.
 
-**`publish.onConflict` defaults to `Fail`** and enforces exactly that: the controller will not move
+**`push.onConflict` defaults to `Fail`** and enforces exactly that: the controller will not move
 a tag to different content, it fails the build instead. Republishing identical content is always a
 no-op, so a steady reconcile loop never trips it. Two other answers are available — `Overwrite` for
 a deliberately moving pointer such as `main`, and `Keep` to leave an existing tag alone and publish
 nothing, which is usually what you want with a spec-hash tag. The same field, with the same three
-values, exists on `ImageBuild`'s `push`. See [ADR 0029](docs/adr/0029-three-valued-tag-conflict-policy.md).
+values, means the same thing on `ImageBuild`. See [ADR 0029](docs/adr/0029-three-valued-tag-conflict-policy.md).
 
-**`publish.tags` is optional.** Omit it and the artifact is published by digest alone, which is all
+**`push.tags` is optional.** Omit it and the artifact is published by digest alone, which is all
 a workload pinned by Flux image-automation needs.
 
-**Not templating with Helm?** `publish.ref` takes a full image reference and uses its *tag*,
+**Not templating with Helm?** `push.ref` takes a full image reference and uses its *tag*,
 ignoring the host and repository. Anything that already rewrites image references can then set it —
 kustomize's `images` transformer reaches `spec.volumes[].image.reference` natively and a CRD field
 with a `configurations:` fieldSpec, so a single entry retags the artifact and the workload that
@@ -81,7 +82,7 @@ consumes it together:
 
 ```yaml
 images:
-  - name: my-artifact                       # matches publish.ref AND the workload's reference
+  - name: my-artifact                       # matches push.ref AND the workload's reference
     newName: registry.example/my-artifact
     newTag: s1a2b3c4d5e6f7890
 ```
@@ -132,37 +133,38 @@ package needing three others means three more entries, pinned by hand. Nothing h
 `postinst`, and a package whose files only work afterwards will not work
 ([ADR 0022](docs/adr/0022-distro-packages-as-layer-sources.md)).
 
-## Two shapes, and which one you are in
+## Where the images go
 
-`spec.push` is optional, and the choice is more consequential than it looks.
+**Both kinds publish to a registry, and that is the only way an artifact becomes pullable.** The
+chart installs one by default — zot, with credentials it generates itself — so this is not a
+prerequisite you have to satisfy before installing anything.
 
-**Serving — `spec.push` omitted.** The controller serves the artifact from its own read-only OCI
-endpoint. Nothing else to install, no registry credentials anywhere; an ordinary Service behind your
-existing ingress and certificate is enough for containerd to pull over HTTPS, with **no node
-configuration** — no `hosts.toml`, no DaemonSet, no containerd socket.
+An object that names no repository publishes to the bundled registry as:
 
-Determinism is what makes this cheap: nothing here is a system of record, because any lost artifact
-can be rebuilt from its spec. Run **one replica** — the endpoint is active/standby, not scale-out.
+```
+<registry>/<namespace>/<name>
+```
 
-**Registry — `spec.push` set.** Both kinds publish to a registry you run. This is the recommended
-shape once you are **building images** rather than only composing them, and it is required for
-`ImageBuild`, whose Job runs in another pod and cannot reach the controller's loopback-only endpoint.
+Set `push.repository` to publish somewhere else, with `push.secretRef` for its credentials. Whose
+credential is used is a security boundary, not a convenience: the operator's own credential is used
+**only** for the registry the operator owns. Name your own repository and you supply your own
+credential or push anonymously — never the operator's.
+([ADR 0034](docs/adr/0034-a-default-registry.md)).
 
-Which you want follows from one question: *can what you publish be reproduced from its spec?*
+**One thing to get right before a workload can pull.** containerd resolves image references with the
+*node's* resolver, so a `*.svc.cluster.local` name works for the controllers and not for a kubelet.
+Set `registry.host` to a name your nodes resolve and point it at the registry — an ingress, or a
+NodePort plus a containerd drop-in. The chart warns when it is unset, because the failure otherwise
+is a successful publish followed by `ErrImagePull`. See [docs/registry.md](docs/registry.md).
 
-|  | Serving | Registry |
-|---|---|---|
-| `ImageComposition` | supported, simplest | supported |
-| `ImageBuild` | not available | **required** |
-| System of record | no — rebuildable | **yes, for builds** |
-| You back up | nothing | the registry's storage |
+**An `ImageBuild`'s output is the only copy.** It is an *observation*, not a function of its spec
+([ADR 0025](docs/adr/0025-dockerfile-builds-as-a-second-kind.md)), so a rebuild may not reproduce
+the digest — which makes the registry's storage the thing you back up. A composition is
+rebuildable from its spec, so losing it costs a rebuild rather than data.
 
-An `ImageBuild`'s output is an *observation*, not a function of its spec
-([ADR 0025](docs/adr/0025-dockerfile-builds-as-a-second-kind.md)), so a rebuild may not reproduce the
-digest. The registry holding it is the only copy.
-
-See [ADR 0006](docs/adr/0006-push-is-optional.md) and
-[ADR 0030](docs/adr/0030-a-real-registry-serves-both-kinds.md).
+Earlier versions could also serve artifacts from the controller itself. That is gone; see
+[ADR 0035](docs/adr/0035-a-registry-is-the-only-publication-path.md) for why, and `CHANGELOG.md` for
+the migration.
 
 ### Keeping published images from being deleted
 
@@ -189,22 +191,16 @@ be running right now. Sustained failure raises a `RetentionDegraded` event, beca
 **Reconciling is nearly free.** `status.inputHash` summarises everything that determines the
 output, so a reconcile that changes nothing costs one `HEAD` — no fetch, no assembly.
 
-**Old builds are retained, but not forever.** `--keep-builds` (default 10, overridable per
-object via `spec.publish.history`) decides how many past builds stay pullable. Garbage collection
-refuses to run at all while any `ImageComposition` has not been reconciled, honours a grace
-period, and logs every deletion. See [ADR 0011](docs/adr/0011-content-tags-expire.md).
+**Old builds are retained, but not forever.** `--keep-builds` (default 10, overridable per object
+via `spec.push.history`) decides how many past builds stay tagged. Expiry is the registry's job now;
+what the controllers guarantee is that images a live object still references are refreshed and so
+never reclaimed. See [ADR 0011](docs/adr/0011-content-tags-expire.md) and
+[ADR 0031](docs/adr/0031-the-retention-guarantee.md).
 
-**Run one replica.** The serving endpoint is leader-election scoped and its blob store is
-node-local unless S3-backed. A standby neither reconciles nor listens, and stays out of the
-Service because it never reports ready — active/standby, not scale-out.
-
-**Storage is pluggable.** Disk by default; point `--s3-endpoint` at object storage to keep the
-layer cache across restarts and reschedules. Credentials come from `AWS_ACCESS_KEY_ID` and
-`AWS_SECRET_ACCESS_KEY`, never from flags. See [ADR 0014](docs/adr/0014-pluggable-storage.md).
-
-**Readiness means the store is warm.** After a restart the pod stays out of the Service until its
-artifacts have been rebuilt, rather than answering 404 and putting workloads into
-`ImagePullBackOff`.
+**The layer cache is pluggable.** Disk by default; point `--s3-endpoint` at object storage to keep
+it across restarts and reschedules. Credentials come from `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY`, never from flags. This is *input* caching — it makes reconciles cheap and
+holds nothing anyone pulls. See [ADR 0014](docs/adr/0014-pluggable-storage.md).
 
 ## Install
 
@@ -242,9 +238,9 @@ See [ADR 0033](docs/adr/0033-one-chart-one-namespace.md).
 Implemented: base images with layer reuse and config inheritance; `fetch`, `configMap`,
 `sourceRef`, `image` and `remove` layer verbs; unpacking `tar`, `tar.gz`, `tar.xz`, `tar.zst`,
 `tar.bz2`, `zip`, `deb` and single-file `gz`; ownership, modes and archive subpaths; the full OCI config
-surface; the built-in serving endpoint; external push with `secretRef`; the input-hash
-short-circuit; a two-tier layer cache with optional S3; manifest persistence across restarts;
-multi-architecture output; and garbage collection.
+surface; publication to a bundled or external registry with `secretRef`; the input-hash
+short-circuit; a two-tier layer cache with optional S3; multi-architecture output; and a retention
+refresher that keeps live objects' images from being reclaimed.
 
 Not implemented: SBOM, provenance and signing ([ADR 0008](docs/adr/0008-supply-chain.md) is Proposed, not
 built — and signing is theatre until something verifies it at admission).
@@ -255,7 +251,7 @@ provenance is exact, and nothing privileged runs. See
 [ADR 0016](docs/adr/0016-the-scope-line-is-determinism.md).
 
 A **separate** kind that does run one, `ImageBuild`, is in alpha — separate binary, separate
-chart, separate RBAC, and a deliberately weaker promise: its idempotence is a hash of its inputs
+ServiceAccount, separate RBAC, and a deliberately weaker promise: its idempotence is a hash of its inputs
 recorded in status, not `output = f(spec)`, and it is not bit-reproducible. It is a second
 component you install on purpose, never a layer verb, so `kind: ImageComposition` keeps telling you
 exactly which guarantee you have. [ADR 0025](docs/adr/0025-dockerfile-builds-as-a-second-kind.md)

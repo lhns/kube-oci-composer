@@ -1,18 +1,11 @@
 package controller
 
 import (
-	"context"
-	"errors"
 	"fmt"
 
-	"github.com/go-logr/logr"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
-
-	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
-	"github.com/lhns/kube-oci-composer/internal/serve"
-	"github.com/lhns/kube-oci-composer/internal/store"
 )
 
 // builtArtifact is what a build produced: either one image manifest, or an index over one child
@@ -90,76 +83,4 @@ func (a builtArtifact) childDigests() ([]string, error) {
 		out = append(out, desc.Digest.String())
 	}
 	return out, nil
-}
-
-// restoreChildren republishes the child manifests of a multi-platform build before its index.
-//
-// Returns false when a child could not be restored, which the caller treats as "skip this build".
-// Publishing the index anyway would produce the worst available outcome: a reference that resolves,
-// passes a HEAD, and reports as published, while every pull following its descriptors 404s.
-//
-// A single-platform build has no children and returns true immediately, so both replay paths can
-// call this unconditionally.
-func restoreChildren(ctx context.Context, srv *serve.Server, logger logr.Logger,
-	repoPath string, h ociv1alpha1.BuildRecord) bool {
-	for _, child := range h.Manifests {
-		if srv.HasManifest(ctx, repoPath, child) {
-			continue
-		}
-		raw, err := srv.LoadManifest(ctx, child)
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				// Published before children were persisted, or already reclaimed. Either way the
-				// index cannot be served, so say so once rather than restoring a broken one.
-				logger.Info("skipping an index whose child manifest is not stored",
-					"index", h.Digest, "child", child)
-			} else {
-				logger.Error(err, "could not read a stored child manifest",
-					"index", h.Digest, "child", child)
-			}
-			return false
-		}
-		if err := srv.PutManifest(ctx, repoPath, child, raw); err != nil {
-			logger.Error(err, "could not restore a child manifest",
-				"index", h.Digest, "child", child)
-			return false
-		}
-	}
-	return true
-}
-
-// saveManifests persists the artifact so it can be replayed after a restart.
-//
-// For an index this stores the CHILDREN as well as the index itself. Storing only the index would
-// restore a manifest whose children are absent from the registry, which does not fail at restore
-// time — it fails much later, as a pull that 404s on a reference the status says is published.
-func (a builtArtifact) saveManifests(ctx context.Context, save func(context.Context, string, []byte) error) error {
-	if a.idx != nil {
-		children, err := a.children()
-		if err != nil {
-			return err
-		}
-		for _, child := range children {
-			d, err := child.Digest()
-			if err != nil {
-				return fmt.Errorf("child digest: %w", err)
-			}
-			raw, err := child.RawManifest()
-			if err != nil {
-				return fmt.Errorf("child manifest: %w", err)
-			}
-			if err := save(ctx, d.String(), raw); err != nil {
-				return fmt.Errorf("saving child %s: %w", d, err)
-			}
-		}
-	}
-	d, err := a.Digest()
-	if err != nil {
-		return err
-	}
-	raw, err := a.RawManifest()
-	if err != nil {
-		return err
-	}
-	return save(ctx, d.String(), raw)
 }

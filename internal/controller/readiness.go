@@ -3,9 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -15,18 +13,15 @@ import (
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 )
 
-// Readiness gates the pod's readiness probe on the served blob store being warm.
+// Readiness tracks which objects this process has reconciled.
 //
-// The serving endpoint has no durable state: after a restart it is empty, and it is refilled by
-// the reconcile that controller-runtime fires for every object once the cache syncs. Without
-// this gate the pod would join the Service immediately and answer 404 to every pull in the
-// meantime, putting workloads into ImagePullBackOff for no reason. Failing readiness instead
-// keeps the pod out of Endpoints until there is something to serve.
+// It used to gate the pod's readiness probe on the served blob store being warm, so the pod stayed
+// out of the Service until it had something to serve. There is no store and no Service now
+// (ADR 0035), so that role is gone and readyz is a bare ping.
 //
-// It also makes multiple replicas behave sensibly. The endpoint runs under leader election, so a
-// standby replica neither reconciles nor listens; because it never observes anything it never
-// reports ready, and therefore never receives traffic. Active/standby falls out of the same
-// mechanism rather than needing a second one.
+// What remains is the completeness question, which retention needs: an object this process has not
+// observed contributes nothing to the live set, and refreshing on a partial view under-protects the
+// objects missing from it -- invisibly, with the symptom arriving one retention window later.
 type Readiness struct {
 	// Client lists the objects that must be accounted for. The manager's cached client is
 	// correct here: before the cache syncs the list call fails or blocks, and "not synced" is
@@ -85,11 +80,12 @@ func (r *Readiness) Pending(ctx context.Context) ([]string, error) {
 	var pending []string
 	for i := range list.Items {
 		obj := &list.Items[i]
-		// Objects that push to an external registry are not served from here, so they cannot
-		// hold readiness back — the registry serves them whether this pod is up or not.
-		if obj.Spec.Push != nil {
-			continue
-		}
+		// No push-mode exemption any more, and its removal is load-bearing rather than tidying.
+		// It existed because an object pushing to an external registry was not served from here, so
+		// it could not hold READINESS back. Every object publishes to a registry now, so keeping it
+		// would have made Pending return nothing, always -- and the retention refresher would read
+		// an empty list as "the view is complete" while having observed nothing at all. Exactly the
+		// under-refresh ADR 0031 calls out, arriving as missing images a window later.
 		if !obj.DeletionTimestamp.IsZero() {
 			continue
 		}
@@ -100,24 +96,4 @@ func (r *Readiness) Pending(ctx context.Context) ([]string, error) {
 	}
 	sort.Strings(pending)
 	return pending, nil
-}
-
-// Check is a healthz.Checker reporting whether every locally served artifact has been built.
-func (r *Readiness) Check(req *http.Request) error {
-	timeout := r.Timeout
-	if timeout <= 0 {
-		timeout = 5 * time.Second
-	}
-	ctx, cancel := context.WithTimeout(req.Context(), timeout)
-	defer cancel()
-
-	pending, err := r.Pending(ctx)
-	if err != nil {
-		return err
-	}
-	if len(pending) > 0 {
-		return fmt.Errorf("blob store is still warming up; %d artifact(s) not built yet: %s",
-			len(pending), strings.Join(pending, ", "))
-	}
-	return nil
 }

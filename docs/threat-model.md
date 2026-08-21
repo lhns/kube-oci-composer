@@ -24,14 +24,12 @@ graph TB
         SRC["Flux source<br/>GitRepository / OCIRepository / Bucket"]
     end
 
-    subgraph composerNS["oci-composer namespace"]
+    subgraph releaseNS["release namespace (one chart, ADR 0033)"]
         COMP["kube-oci-composer<br/>distroless, non-root, read-only rootfs"]
-        STORE[("Blob store<br/>PVC or emptyDir")]
-        SERVE["Registry endpoint<br/>plain HTTP, no auth"]
-    end
-
-    subgraph builderNS["oci-builder namespace"]
         BUILD["kube-oci-builder<br/>distroless, non-root"]
+        ZOT["Bundled registry (zot)<br/>anonymous read, authenticated write"]
+        STORE[("Registry storage<br/>PVC or emptyDir")]
+        CACHE[("Layer cache<br/>disk or S3 — inputs only")]
     end
 
     subgraph node["Node (shared kernel)"]
@@ -39,7 +37,7 @@ graph TB
     end
 
     EXT["External origins<br/>HTTP URLs, upstream registries"]
-    REG["Target registry<br/>anonymous read, authenticated write<br/>expires what is not pulled"]
+    REG["Target registry<br/>the bundled zot by default, or one you supply<br/>anonymous read, authenticated write<br/>expires what is not pulled"]
     CONSUMER["Workloads pulling images"]
 
     IC -->|watch| COMP
@@ -47,11 +45,11 @@ graph TB
     SRC -->|get artifact| COMP
     SEC -->|get| COMP
     COMP -->|fetch by digest| EXT
-    COMP --> STORE
-    STORE --> SERVE
+    COMP --> CACHE
+    ZOT --> STORE
+    ZOT -.->|"the default target, in-cluster"| REG
     COMP -->|push| REG
     COMP -->|"refresh: pull only,<br/>renews the retention lease"| REG
-    SERVE -->|pull| CONSUMER
     REG -->|pull| CONSUMER
 
     DB -->|watch| BUILD
@@ -68,7 +66,7 @@ graph TB
     classDef neutral fill:#0d47a1,stroke:#90caf9,color:#ffffff
     class COMP,BUILD trusted
     class JOB,EXT hostile
-    class IC,DB,CM,SEC,SRC,STORE,SERVE,REG,CONSUMER neutral
+    class IC,DB,CM,SEC,SRC,STORE,CACHE,ZOT,REG,CONSUMER neutral
 ```
 
 The boundaries that matter:
@@ -78,7 +76,7 @@ The boundaries that matter:
 | **Tenant → controller** | A spec is written by anyone with `create` on the CRD | Spec fields become URLs fetched, images pulled, and Jobs run |
 | **Origin → controller** | Fetched tarballs, pulled base images | Attacker-controlled bytes parsed in-process |
 | **Controller → build pod** | A Job running BuildKit | The pod executes arbitrary code from a git repository |
-| **Store → consumer** | The serve endpoint | Unauthenticated, plain HTTP |
+| **Registry → consumer** | A pull, by any client that can reach the registry | Anonymous by default, so reachability is the access control (I5) |
 | **Namespace → namespace** | `sourceRef.namespace` | The one place a tenant reaches outside its own namespace |
 
 ## The core invariant, and what it buys
@@ -104,15 +102,14 @@ nothing read it, so every build overwrote whatever its tags held.
 
 | # | Threat | Status | Evidence |
 |---|---|---|---|
-| S1 | A client impersonates the controller and **writes** to the serve endpoint | **Mitigated** | `loopbackWritesOnly` (`internal/serve/writepath.go`) refuses `PUT`/`POST`/`PATCH`/`DELETE` unless the TCP peer is loopback, which means this process. Enforced in the handler rather than left to the deployment. **This row previously read "partially mitigated — depends on deployment", and that was wrong**: the bind address defaults to every interface, the chart exposes it as a Service, the Ingress routes `/v2/` including `PUT`, and there was no authentication — a test confirmed an arbitrary pod's `PUT` returned **201 Created**. ADR 0025:87-90 rested on the same false premise when it said a build Job could not write here. |
+| S1 | A client impersonates the controller and **writes** published images | **Mitigated by the registry** | The serve endpoint this row was written about no longer exists (ADR 0035). The bundled zot enforces `anonymousPolicy: [read]` and requires the generated credential for `create`/`update`, so an arbitrary pod cannot write. That is a stronger guarantee than the one it replaces, and it is enforced by a component with its own test suite rather than by a handler in this repo. **The history is worth keeping**: this row once read "partially mitigated — depends on deployment", which was wrong, and then "mitigated" via a loopback guard added only after a test confirmed an arbitrary pod's `PUT` returned **201 Created**. ADR 0025:87-90 rested on the same false premise. |
 | S2 | A registry impersonates the origin of a base image or layer | **Mitigated** | Base images and image layers are pulled by digest only — `name.NewDigest` fails on a tag (`internal/source/image.go`), and the CRD pattern requires `@sha256:`. Fetched layers are verified against the declared digest (`internal/oci/fetch.go`). |
 | S3 | A build pushes to a registry impersonating the intended one over plain HTTP | **Mitigated, opt-in per host** | `--insecure-registry` is a list of hosts, matched on the push target's host rather than applied globally (`insecureAttr`, `internal/buildcontroller/job.go`). Naming one internal registry does not downgrade every other push. |
 
-**I5 is now the sharpest item in this section.** Writes are closed, but reads remain anonymous by
-design, and the endpoint is HTTP-only — `ListenAndServe`, no TLS anywhere in `internal/serve` — with
-the chart's TLS story being an Ingress terminating in front, routing only `/v2/`. In a multi-tenant
-cluster a NetworkPolicy is the only thing separating one namespace's artifacts from another's
-readers.
+**Reads remain anonymous by design** — a kubelet pulls without credentials — but that is now a zot
+policy an operator can change, rather than a property of code here that could not be changed at all.
+In a multi-tenant cluster a NetworkPolicy is still what separates one namespace's artifacts from
+another's readers.
 
 The lesson worth keeping from S1: the guarantee had been *written down* in a package comment for a
 long time without ever being *implemented*, and nothing tested it. A claim about behaviour is not
@@ -149,13 +146,12 @@ the answer exists only while the object does.
 | I2 | Secret values leak through build args | **Mitigated** | Secrets are projected via BuildKit's secret mount, never as `--opt build-arg`. Build args *are* hashed, so anything placed there is world-readable by design. |
 | I3 | The controller holds credentials it does not need | **Mitigated** | Both roles grant `get` on secrets — never `list` or `watch` — and a chart drift guard fails the build if that ever changes (`TestBuilderChartNeverGrantsSecretListOrWatch`). Push credentials for builds are projected straight into the build pod and never read by the controller. |
 | I4 | A tenant reads another namespace's source content | **Mitigated** | A `sourceRef` naming any namespace but the object's own is refused with a terminal error (`internal/controller/resolve.go`), and `ImageBuild.spec.context` the same. It had to be fixed controller-side rather than in CEL: a CRD validation rule cannot read `metadata.namespace`. Both controllers still hold cluster-wide `get;list;watch` on Flux sources, so this rule is the whole of the boundary — which is why it is asserted by tests on both kinds. Secrets and ConfigMaps were never exposed this way; both always resolved against `obj.Namespace`. |
-| I5 | Anyone on the network pulls any served image | **NOT mitigated by this code** | The serve endpoint has no authentication. Any client that can reach the Service or NodePort can pull every artifact the composer serves, across all namespaces. |
+| I5 | Anyone on the network pulls any published image | **Deliberate default, now configurable** | The bundled registry allows anonymous reads, because a kubelet pulls without credentials. Any client that can reach the registry pulls every artifact in it, across all namespaces. What changed with ADR 0035 is that this is zot's `anonymousPolicy`, so an operator who wants authenticated pulls can have them and put imagePullSecrets on the workloads — where before, `internal/serve` had no authentication to enable. |
 | I6 | An SSRF via a `fetch` URL reaches cluster-internal services | **NOT mitigated** | `fetch.url` is used to build a request directly (`internal/oci/fetch.go`); there is no allow-list or private-range block. The response must match a declared digest to become a layer, which limits *exfiltration* — but the request itself is still made from the controller's network position. |
 
-I5 is now the sharpest item in this section, and it is deliberate: the endpoint has no
-authentication, and restricting who can reach it is the deployment's job. Note what that means in a
-multi-tenant cluster — a NetworkPolicy is the only thing separating one namespace's artifacts from
-another's readers.
+I5 is deliberate rather than overlooked, and it is the shape almost every in-cluster registry
+ships in. Note what it means in a multi-tenant cluster: with the default policy, a NetworkPolicy is
+the only thing separating one namespace's artifacts from another's readers.
 
 ## D — Denial of service
 
@@ -294,7 +290,7 @@ These are not mitigations. They are things assumed true, and each one is somebod
 
 1. **`create` on `ImageComposition` / `ImageBuild` is a privilege.** A `ImageBuild` runs code, and
    both read every source in their own namespace. Grant them like you grant Pod creation.
-2. **The serve endpoint is not exposed with its write path reachable** (S1), and network policy —
+2. **The registry's write path is reachable only with its credential** (S1), and network policy —
    not this code — restricts who can pull (I5).
 3. **The registry is durable.** For `ImageBuild`, losing the store or status can mean a rebuild
    producing a digest that conflicts with an already-published tag under `onConflict: Fail`
@@ -306,7 +302,7 @@ These are not mitigations. They are things assumed true, and each one is somebod
 
 | Gap | Threat | Note |
 |---|---|---|
-| Serve endpoint serves reads anonymously over plaintext | I5 | Deliberate; a kubelet must pull without credentials. Restricting *who* may pull is a NetworkPolicy question. The largest remaining item |
+| The registry serves reads anonymously | I5 | Deliberate; a kubelet must pull without credentials. Now a zot policy rather than an unconditional property of this code, so it is changeable. Restricting *who* may pull is a NetworkPolicy question |
 | No SSRF controls on `fetch.url` | I6 | Digest verification limits exfiltration, not reachability. Considered and declined |
 | Provenance lives only in status, not in the artifact | R1 | OCI annotations would survive the object; config labels would change the digest |
 | `sourceRef.revision` is opt-in | T1 | A spec that omits it still consumes whatever the source publishes |

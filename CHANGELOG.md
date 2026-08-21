@@ -120,6 +120,57 @@ may change between minor versions.
   recorded with the reason the destination makes it meaningless. Verified to fail on drift.
 
 ### Changed
+- **BREAKING: the embedded serving endpoint is removed. A registry is the only publication path.**
+
+  `spec.publish` no longer exists. `spec.push` is the only publication block, and it does what
+  `publish` did -- the two were the same operation to two destinations, and there is one destination
+  left. Migration is field-for-field:
+
+  ```yaml
+  # before                              # after
+  publish:                              push:
+    name: kafka-tiered-storage            repository: oci.example.com/default/kafka-tiered-storage
+    tags: [v1]                            tags: [v1]
+    onConflict: Keep                      onConflict: Keep
+    history: 5                            history: 5
+  ```
+
+  ...or drop `repository` entirely and let it publish to `<default-registry>/<namespace>/<name>`,
+  which is what the bundled registry is for.
+
+  **Do this before upgrading, and check.** The chart now upgrades its CRDs with the release, so
+  `helm upgrade` installs a schema with no `publish` field. An object still carrying one is rejected
+  loudly at that point -- which is the good outcome. The bad one is upgrading the controller without
+  the CRD: an object with `publish` and no `push` then publishes *nowhere*, reports no error worth
+  noticing, and its images stop being refreshed. Find them first:
+
+  ```console
+  kubectl get imagecomposition -A -o json | jq -r '.items[] | select(.spec.publish) | "\(.metadata.namespace)/\(.metadata.name)"'
+  ```
+
+  Everything already published stays where it is; nothing is deleted or re-tagged.
+
+  **If you were running without a registry, you now need one, and the chart installs it.**
+  `registry.enabled` is on by default. What you lose is the one thing the embedded endpoint was
+  genuinely better at: it needed no node configuration at all. A registry reached over a NodePort
+  needs a `hosts.toml` drop-in per node, because containerd resolves image references with the
+  node's resolver. Front it with an ingress and a real certificate and that goes away. See
+  `docs/registry.md`.
+
+  Removed with it: `internal/serve`, the served blob/manifest store, replay, active/standby and
+  `internal/gc`. Flags gone: `--serving-host`, `--serving-bind-address`, `--shared-storage`,
+  `--standby-replay-interval`, `--gc-interval`, `--gc-grace`, `--gc-dry-run`. Chart values gone:
+  `operator.servingHost`, `ingress.*`, and the OCI `Service` -- `registry.host` is now what
+  `status.artifact.ref` reports.
+
+  The layer **cache** is untouched: `--cache-dir` and the S3 settings are input caching and have
+  nothing to do with serving.
+
+  This also means multi-replica is no longer a storage question, readiness no longer waits for a
+  warm store, and the four defect classes that lived in the serving stack -- per-replica tag
+  divergence, a Ready-but-empty replica, `416` on resumed pulls, and an unauthenticated write path
+  -- are gone with the code. See ADR 0035, which supersedes ADR 0006 and ADR 0032.
+
 - **BREAKING: `charts/kube-oci-builder` is removed.** Upgrading from two releases:
 
   ```console

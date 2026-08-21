@@ -14,10 +14,11 @@ IMG="${IMG:-ghcr.io/lhns/kube-oci-composer:e2e}"
 # is also where the build Jobs appear.
 BUILD_NS="${BUILD_NS:-oci-builder-e2e}"
 
-# The registry host baked into every composed reference, and the NodePort the node actually
-# reaches it on. They differ on purpose: the host is what appears in image references and resolves
-# nowhere; the port is where containerd is told to go. Same split as the real deployment.
-SERVING_HOST="${SERVING_HOST:-kube-oci-composer.oci-composer.svc.cluster.local:5000}"
+# The registry host baked into every published reference, and the NodePort the node actually reaches
+# it on. They differ on purpose: the host is what appears in image references and resolves nowhere on
+# its own; the port is where containerd is told to go. Same split as a real deployment, where the
+# host is a name your DNS knows and the drop-in points it at the registry.
+REGISTRY_HOST="${REGISTRY_HOST:-oci.e2e:5000}"
 NODE_PORT="${NODE_PORT:-30500}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,8 +35,8 @@ fi
 # Written after the node exists rather than baked in: certs.d is read per-pull, so no containerd
 # restart is needed. Only `config_path` (in kind-config.yaml) has to be set at startup.
 for node in $(kind get nodes --name "$CLUSTER"); do
-  docker exec "$node" mkdir -p "/etc/containerd/certs.d/${SERVING_HOST}"
-  docker exec -i "$node" tee "/etc/containerd/certs.d/${SERVING_HOST}/hosts.toml" >/dev/null <<EOF
+  docker exec "$node" mkdir -p "/etc/containerd/certs.d/${REGISTRY_HOST}"
+  docker exec -i "$node" tee "/etc/containerd/certs.d/${REGISTRY_HOST}/hosts.toml" >/dev/null <<EOF
 # Plain HTTP: this is a NodePort on the node itself, and containerd defaults to HTTPS for any
 # host:port, so without the scheme here the pull dies in the TLS handshake.
 [host."http://localhost:${NODE_PORT}"]
@@ -45,14 +46,10 @@ done
 
 BUILDER_IMG="${BUILDER_IMG:-ghcr.io/lhns/kube-oci-builder:e2e}"
 
-# The registry builds publish to, addressed by its own in-cluster Service.
-#
-# Deliberately NOT $SERVING_HOST: that name is already mapped by the containerd drop-in to the
-# composer's NodePort, so sharing it would route registry pulls to the serving endpoint. Nothing in
-# the suite pulls a BUILT image with a Pod -- the assertions curl the registry from inside the
-# cluster -- so the Service name is all that is needed, and it is plain HTTP, which the chart marks
-# insecure automatically.
-E2E_REGISTRY="kube-oci-composer-registry.oci-composer.svc.cluster.local:5000"
+# Everything publishes here now: compositions and builds alike (ADR 0035). The drop-in above points
+# this name at the registry's NodePort, so a Pod can actually pull what gets published -- which is
+# what the image-volume tests exercise.
+E2E_REGISTRY="$REGISTRY_HOST"
 
 # BOTH images, before the single install that references them. imagePullPolicy is Never in the e2e,
 # so an image that is not loaded is ErrImageNeverPull rather than a pull attempt.
@@ -81,9 +78,8 @@ helm upgrade --install kube-oci-composer charts/kube-oci-composer \
   --set imageBuild.image.repository="${BUILDER_IMG%:*}" \
   --set imageBuild.image.tag="${BUILDER_IMG##*:}" \
   --set imageBuild.image.pullPolicy=Never \
-  --set operator.servingHost="$SERVING_HOST" \
-  --set service.type=NodePort \
-  --set service.nodePort="$NODE_PORT" \
+  --set registry.service.type=NodePort \
+  --set registry.service.nodePort="$NODE_PORT" \
   --set registry.host="$E2E_REGISTRY" \
   --set defaultRegistry.insecure="$E2E_REGISTRY" \
   --set 'registry.retention.repositories={keepalive-*,keepalive-**}' \

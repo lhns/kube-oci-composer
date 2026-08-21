@@ -21,10 +21,13 @@ import (
 )
 
 const (
-	namespace   = "oci-composer-e2e"
-	servingHost = "kube-oci-composer.oci-composer.svc.cluster.local:5000"
-	timeout     = 5 * time.Minute
-	interval    = 5 * time.Second
+	namespace = "oci-composer-e2e"
+	// The registry every reference names, mapped to its NodePort by a containerd drop-in on each
+	// node. There is no serving endpoint any more (ADR 0035): compositions publish to the registry
+	// like everything else, and this is the name a kubelet resolves.
+	registryHost = "oci.e2e:5000"
+	timeout      = 5 * time.Minute
+	interval     = 5 * time.Second
 )
 
 func kubectl(t *testing.T, args ...string) (string, error) {
@@ -114,9 +117,6 @@ spec:
       configMap:
         name: plugin-files
       to: /plugins
-  publish:
-    name: e2e-artifact
-    tags: [main]
 `)
 
 	eventually(t, "the ImageComposition to become Ready", func() error {
@@ -133,12 +133,22 @@ spec:
 		return nil
 	})
 
-	digest := strings.TrimSpace(mustKubectl(t, "-n", namespace, "get", "imagecomposition",
-		"e2e-artifact", "-o", "jsonpath={.status.artifact.digest}"))
-	if !strings.HasPrefix(digest, "sha256:") {
-		t.Fatalf("no digest was published: %q", digest)
+	// status.artifact.ref, not a reference reassembled from the digest. It is what the controller
+	// says a consumer should pull, so using it means the test fails if that answer is wrong --
+	// which is the whole contract an image volume depends on.
+	ref := strings.TrimSpace(mustKubectl(t, "-n", namespace, "get", "imagecomposition",
+		"e2e-artifact", "-o", "jsonpath={.status.artifact.ref}"))
+	if ref == "" {
+		t.Fatal("status.artifact.ref is empty; nothing can pull this")
 	}
-	t.Logf("published %s", digest)
+	// A tag alone would let a stale image satisfy this test. ADR 0010: pull the digest.
+	if !strings.Contains(ref, "@sha256:") {
+		t.Fatalf("status.artifact.ref is not digest-pinned: %q", ref)
+	}
+	if !strings.HasPrefix(ref, registryHost+"/") {
+		t.Fatalf("published to %q, not to the default registry %q", ref, registryHost)
+	}
+	t.Logf("published %s", ref)
 
 	// Reference the DIGEST, exactly as a workload should. See ADR 0010.
 	applyStdin(t, `
@@ -182,7 +192,7 @@ spec:
   volumes:
     - name: plugins
       image:
-        reference: `+servingHost+`/e2e-artifact:main@`+digest+`
+        reference: `+ref+`
         pullPolicy: IfNotPresent
 `)
 
@@ -251,15 +261,6 @@ spec:
       configMap:
         name: settings
       to: /config
-  publish:
-    name: rebuild
-    tags: [main]
-    # This test changes a ConfigMap and expects the SAME tag to follow the new content, which is
-    # a moving pointer by definition — so immutability has to be off. It is also the case ADR
-    # 0017 warns about: a configMap layer's content can change while the spec does not, so a
-    # spec-hash tag would not move and, left immutable, the build would fail here rather than
-    # silently republish. That is the intended failure, and opting out is the intended escape.
-    immutable: false
 `)
 
 	digestOf := func() string {
