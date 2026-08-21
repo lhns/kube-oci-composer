@@ -269,6 +269,67 @@ registry:
     #                    a default: useful when another system copies them onward.
     mode: ""
 
+  # SCALE-OUT CLUSTERING. Read the next paragraph before turning it on.
+  #
+  # It is NOT replication. zot shards by repository-name hash and proxies each request to the member
+  # that owns that repository, so N members means each repository lives on exactly one of them: a
+  # member that is down makes roughly 1/N of your repositories unavailable, and zot's own
+  # documentation says the cluster is not self-healing. What this buys is throughput and a proxy
+  # layer that survives a rolling update. It does not buy availability, which is why the value is
+  # called `cluster` and not `ha`.
+  #
+  # It also has hard prerequisites the chart does not install: S3-compatible object storage and a
+  # shared cache driver (redis or dynamodb). BoltDB cannot be shared, so there is no "just add
+  # replicas to the PVC" path, and the chart refuses the combinations that look like one.
+  #
+  # Worth saying plainly: anyone who already runs S3 and redis could equally run a registry of
+  # their own and set publish.mode=external. This exists so the bundled registry is not a FORCED
+  # single point of failure -- not because this chart is the right way to run a registry estate.
+  cluster:
+    enabled: false
+    replicaCount: 3
+    # Exactly 16 characters -- siphash-2-4 takes a 128-bit key. Generated and kept stable if empty.
+    # Changing it reshuffles every repository onto a different member; survivable with shared
+    # storage, but it is a cluster-wide reshuffle, so stability is the default.
+    hashKey: ""
+
+  # Where the registry keeps blobs. `local` is the PVC below; `s3` is required for clustering.
+  storage:
+    driver: local
+    s3:
+      bucket: ""
+      region: ""
+      regionEndpoint: ""
+      rootDirectory: /zot
+      secure: true
+      # Credentials come from the environment (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY) via this
+      # Secret, never from the config file -- a ConfigMap is visible in every `kubectl describe`.
+      existingSecret: ""
+
+  # The metadata cache. `none` is BoltDB on local disk, which cannot be shared between members.
+  #
+  # WARNING, and it is the one most likely to bite: `extensions.search` records the pull timestamps
+  # that the retention policy's `pulledWithin` depends on. In clustered mode that metadata lives
+  # HERE rather than in per-pod BoltDB -- so if redis is not persistent, a redis restart loses every
+  # pull timestamp, every image looks unpulled, and the next GC pass reclaims images your live
+  # objects still reference. That is ADR 0031's failure mode reintroduced by a component this chart
+  # does not manage, on a gcDelay fuse rather than a retention window. Use persistent redis.
+  cache:
+    driver: none
+    redis:
+      url: ""
+      keyprefix: zot
+    dynamodb:
+      region: ""
+      endpoint: ""
+      cacheTablename: ""
+      repoMetaTablename: ""
+      imageMetaTablename: ""
+      repoBlobsInfoTablename: ""
+      apiKeyTablename: ""
+      userDataTablename: ""
+      versionTablename: ""
+
   # TLS on the registry itself.
   #
   # OFF by default, and that is not timidity -- turning it on invalidates the containerd drop-in on

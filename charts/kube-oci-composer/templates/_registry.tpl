@@ -148,3 +148,103 @@ secret:{{ include "kube-oci-composer.registryTLSSecretName" . }}
 {{- end -}}
 {{- end -}}
 {{- end -}}
+
+{{- /*
+Refusals about clustering.
+
+Every one of these is a combination that RENDERS and then does not work, mostly by losing data
+rather than by erroring -- which is why they fail the install instead of warning in NOTES.
+*/}}
+{{- define "kube-oci-composer.checkRegistryCluster" -}}
+{{- $r := .Values.registry -}}
+
+{{- if and $r.enabled $r.cluster.enabled -}}
+
+{{- if ne $r.storage.driver "s3" -}}
+{{- fail "registry.cluster.enabled requires registry.storage.driver=s3. Members share one store, and zot's local driver keeps its metadata in BoltDB, which cannot be shared -- two members on one volume disagree about what exists rather than failing cleanly." -}}
+{{- end -}}
+
+{{- if eq $r.cache.driver "none" -}}
+{{- fail "registry.cluster.enabled requires a shared registry.cache.driver (redis or dynamodb). Without one each member caches separately, so they disagree about which blobs exist, and the disagreement surfaces as intermittent 404s rather than as an error." -}}
+{{- end -}}
+
+{{- if and (eq $r.cache.driver "redis") (ne $r.storage.driver "s3") -}}
+{{- fail "zot supports the redis cache driver for clustering only with S3 storage." -}}
+{{- end -}}
+
+{{- if $r.persistence.enabled -}}
+{{- /*
+Refused rather than silently ignored. The PVC is ReadWriteOnce so a second member cannot mount it
+anyway -- but quietly dropping a volume that holds ImageBuild's only copy (its output cannot be
+rebuilt from its spec, ADR 0025) is the worst available behaviour, so the operator has to say it.
+*/}}
+{{- fail "registry.cluster.enabled needs registry.persistence.enabled=false: the PVC is ReadWriteOnce and a second member cannot mount it. Set it explicitly -- this is not dropped silently, because that PVC may hold the only copy of an ImageBuild's output." -}}
+{{- end -}}
+
+{{- if not $r.tls.enabled -}}
+{{- /*
+Members proxy authenticated requests to each other, so without TLS those internal hops carry the
+Basic header in the clear -- reopening threat I7 on the inside of the thing that closed it.
+*/}}
+{{- fail "registry.cluster.enabled requires registry.tls.enabled=true. Members proxy authenticated requests to each other, so without TLS the registry password crosses the pod network on every proxied write (threat I7)." -}}
+{{- end -}}
+
+{{- if and $r.cluster.hashKey (ne (len $r.cluster.hashKey) 16) -}}
+{{- fail (printf "registry.cluster.hashKey must be exactly 16 characters (siphash-2-4 takes a 128-bit key); got %d. Leave it empty to have one generated and kept stable." (len $r.cluster.hashKey)) -}}
+{{- end -}}
+
+{{- end -}}
+
+{{- /*
+These two apply whether or not clustering is on: an operator may use S3 alone.
+*/}}
+{{- if and $r.enabled (eq $r.storage.driver "s3") (not $r.storage.s3.bucket) -}}
+{{- fail "registry.storage.driver=s3 needs registry.storage.s3.bucket." -}}
+{{- end -}}
+{{- if and $r.enabled (eq $r.cache.driver "redis") (not $r.cache.redis.url) -}}
+{{- fail "registry.cache.driver=redis needs registry.cache.redis.url." -}}
+{{- end -}}
+
+{{- end -}}
+
+{{- /*
+The cluster hash key: generated once, then reused, exactly like the registry password.
+*/}}
+{{- define "kube-oci-composer.registryHashKey" -}}
+{{- if .Values.registry.cluster.hashKey -}}
+{{- .Values.registry.cluster.hashKey -}}
+{{- else -}}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace (printf "%s-cluster" (include "kube-oci-composer.registryFullname" .)) -}}
+{{- if and $existing $existing.data (index $existing.data "hashKey") -}}
+{{- index $existing.data "hashKey" | b64dec -}}
+{{- else -}}
+{{- randAlphaNum 16 -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- /*
+The Deployment -> StatefulSet migration.
+
+Helm will happily create a StatefulSet while the old Deployment's ReplicaSet still owns pods
+matching the same selector, and the two controllers then fight over one pod on a ReadWriteOnce
+volume. The symptom is a registry that flaps, and nothing in the events says why.
+
+Deleting the Deployment leaves the PVC alone -- it has helm.sh/resource-policy: keep and is not
+owned by the Deployment -- so no images are lost.
+*/}}
+{{- define "kube-oci-composer.checkRegistryMigration" -}}
+{{- if .Values.registry.enabled -}}
+{{- $name := include "kube-oci-composer.registryFullname" . -}}
+{{- if lookup "apps/v1" "Deployment" .Release.Namespace $name -}}
+{{- fail (printf `the registry used to be a Deployment and is now a StatefulSet, so the old one has to go first:
+
+  kubectl -n %s delete deployment %s
+  helm upgrade ...
+
+Your images are NOT affected: the PVC is annotated helm.sh/resource-policy: keep and was never owned by the Deployment, so the new pod mounts the same volume.
+
+Without this, Helm creates the StatefulSet while the Deployment's ReplicaSet still owns a pod matching the same selector, and the two fight over one ReadWriteOnce volume.` .Release.Namespace $name) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

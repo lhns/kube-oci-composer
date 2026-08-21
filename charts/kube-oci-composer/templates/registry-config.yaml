@@ -27,7 +27,48 @@ data:
     {
       "distSpecVersion": "1.1.0",
       "storage": {
-        "rootDirectory": "/var/lib/registry",
+        "rootDirectory": {{ ternary .Values.registry.storage.s3.rootDirectory "/var/lib/registry" (eq .Values.registry.storage.driver "s3") | quote }},
+        {{- if eq .Values.registry.storage.driver "s3" }}
+        {{- /*
+        No accesskey/secretkey here. The driver honours the standard AWS environment chain, and the
+        credentials are injected as env from a Secret -- a ConfigMap is visible in every
+        `kubectl describe`, which is the same rule TestChartCredentialsAreNotFlags enforces for the
+        composer's own S3.
+        */}}
+        "storageDriver": {
+          "name": "s3",
+          "rootdirectory": {{ .Values.registry.storage.s3.rootDirectory | quote }},
+          "region": {{ .Values.registry.storage.s3.region | quote }},
+          "bucket": {{ .Values.registry.storage.s3.bucket | quote }},
+          {{- with .Values.registry.storage.s3.regionEndpoint }}
+          "regionendpoint": {{ . | quote }},
+          {{- end }}
+          "secure": {{ .Values.registry.storage.s3.secure }}
+        },
+        {{- end }}
+        {{- if ne .Values.registry.cache.driver "none" }}
+        "remoteCache": true,
+        "cacheDriver": {
+          {{- if eq .Values.registry.cache.driver "redis" }}
+          "name": "redis",
+          "url": {{ .Values.registry.cache.redis.url | quote }},
+          "keyprefix": {{ .Values.registry.cache.redis.keyprefix | quote }}
+          {{- else }}
+          "name": "dynamodb",
+          "region": {{ .Values.registry.cache.dynamodb.region | quote }},
+          {{- with .Values.registry.cache.dynamodb.endpoint }}
+          "endpoint": {{ . | quote }},
+          {{- end }}
+          "cacheTablename": {{ .Values.registry.cache.dynamodb.cacheTablename | quote }},
+          "repoMetaTablename": {{ .Values.registry.cache.dynamodb.repoMetaTablename | quote }},
+          "imageMetaTablename": {{ .Values.registry.cache.dynamodb.imageMetaTablename | quote }},
+          "repoBlobsInfoTablename": {{ .Values.registry.cache.dynamodb.repoBlobsInfoTablename | quote }},
+          "apiKeyTablename": {{ .Values.registry.cache.dynamodb.apiKeyTablename | quote }},
+          "userDataTablename": {{ .Values.registry.cache.dynamodb.userDataTablename | quote }},
+          "versionTablename": {{ .Values.registry.cache.dynamodb.versionTablename | quote }}
+          {{- end }}
+        },
+        {{- end }}
         "gc": true,
         "gcDelay": {{ .Values.registry.retention.gcDelay | quote }},
         "gcInterval": {{ .Values.registry.retention.gcInterval | quote }},
@@ -88,6 +129,31 @@ data:
         fetched -- silently, and in the direction that deletes.
       */}}
       "extensions": { "search": { "enable": true } },
+      {{- if .Values.registry.cluster.enabled }}
+      {{- /*
+      cluster.tls.cacert, NOT http.tls.cacert. One word apart and opposite meanings: this is how
+      members verify each other, while the one in the http block would demand a client certificate
+      from EVERY caller -- including the kubelet, which has none, stopping every pull in the
+      cluster.
+      */}}
+      "cluster": {
+        "members": [
+          {{- $ns := .Release.Namespace }}
+          {{- $sts := include "kube-oci-composer.registryFullname" . }}
+          {{- $domain := .Values.registry.clusterDomain }}
+          {{- range $i := until (int .Values.registry.cluster.replicaCount) }}
+          {{- /*
+          Port 5000 is the CONTAINER port, not registry.service.port. Members address pods directly
+          and the Service is not involved; the two coincide today only because the container port is
+          fixed.
+          */}}
+          {{ if $i }},{{ end }}{{ printf "%s-%d.%s-headless.%s.svc.%s:5000" $sts $i $sts $ns $domain | quote }}
+          {{- end }}
+        ],
+        "hashKey": {{ include "kube-oci-composer.registryHashKey" . | quote }},
+        "tls": { "cacert": "/etc/zot/tls/ca.crt" }
+      },
+      {{- end }}
       "log": { "level": {{ .Values.registry.logLevel | quote }} }
     }
 {{- end }}

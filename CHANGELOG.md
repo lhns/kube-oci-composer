@@ -6,6 +6,23 @@ may change between minor versions.
 ## [Unreleased]
 
 ### Added
+- **zot scale-out clustering, configurable in values — and it shards rather than replicates.**
+  `registry.cluster.enabled=true` runs several members; zot hashes each repository name and exactly
+  one member owns it, so a member that is down makes roughly 1/N of repositories unavailable, and
+  zot's own docs say the cluster is not self-healing. What it buys is throughput and a proxy layer
+  that survives a rolling update. The value is called `cluster`, not `ha`, for that reason.
+
+  Prerequisites the chart wires but does not install: S3-compatible storage, a shared cache driver
+  (**redis** or dynamodb), and TLS. Five combinations are refused rather than rendered, including
+  clustering with the ReadWriteOnce PVC still enabled — refused instead of silently dropped,
+  because that volume may hold the only copy of an `ImageBuild`'s output.
+
+  **Use persistent redis.** `extensions.search` records the pull timestamps retention depends on,
+  and clustering moves that metadata into the cache driver. A redis restart without persistence
+  loses every timestamp, every image looks unpulled, and the next GC reclaims images live objects
+  still reference — ADR 0031's failure mode arriving through a component this chart does not
+  manage. See ADR 0039.
+
 - **TLS on the bundled registry, closing threat I7.** `registry.tls.enabled=true` makes zot
   terminate TLS itself, with the certificate from `certManager`, a Secret you supply, or a
   chart-generated self-signed CA. The CA is distributed to both controllers (`--registry-ca-file`,
@@ -245,6 +262,26 @@ may change between minor versions.
   too many.
 
 ### Changed
+- **BREAKING: the registry is a StatefulSet, not a Deployment.** Delete the old one before
+  upgrading:
+
+  ```console
+  kubectl -n <namespace> delete deployment <release>-kube-oci-composer-registry
+  helm upgrade ...
+  ```
+
+  The chart refuses to render until you do, with that command in the message. **Your images are not
+  affected**: the PVC carries `helm.sh/resource-policy: keep` and was never owned by the Deployment,
+  so the new pod mounts the same volume.
+
+  Unconditional rather than only when clustering is on, deliberately: a kind switch hidden behind
+  `cluster.enabled=true` would have Helm create the StatefulSet while the Deployment's ReplicaSet
+  still owned a pod matching the same selector, and the two would fight over one ReadWriteOnce
+  volume — on the day the operator is changing storage, cache and TLS at once.
+
+  It also removes a wart: a StatefulSet terminates pod-0 before creating its replacement, so the
+  RWO deadlock that forced `strategy: Recreate` no longer exists.
+
 - **BREAKING: `registry.publish.mode` is required, and the default install no longer publishes
   images nothing can pull.**
 

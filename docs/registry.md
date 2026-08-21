@@ -269,6 +269,39 @@ timeout that looks exactly like a broken registry.
 the controllers get a write identity — give them a `dockerconfigjson` Secret and point
 `spec.push.secretRef` at it. The refresh path needs no more than *read*.
 
+## Scaling it out
+
+`registry.cluster.enabled=true` runs several zot members. **It shards, it does not replicate** —
+zot hashes each repository name and exactly one member owns it, so a member that is down makes
+roughly 1/N of your repositories unavailable, and zot's own docs say the cluster is not
+self-healing. What it buys is throughput and a proxy layer that survives a rolling update.
+
+Prerequisites the chart does **not** install, and refuses to render without:
+
+```yaml
+registry:
+  cluster: {enabled: true, replicaCount: 3}
+  storage:
+    driver: s3
+    s3: {bucket: zot, region: eu-central-1, regionEndpoint: https://minio:9000, existingSecret: s3-creds}
+  cache:
+    driver: redis                # or dynamodb
+    redis: {url: redis://redis:6379}
+  persistence: {enabled: false}  # the RWO volume cannot be mounted twice
+  tls: {enabled: true}           # members proxy authenticated writes to each other
+```
+
+**Use persistent Redis, and this is the sharpest thing on the page.** `extensions.search` records
+the pull timestamps the retention policy depends on, and clustering moves that metadata out of each
+pod and into the cache driver. A Redis restart without persistence loses every timestamp, every
+image then looks unpulled, and the next GC pass reclaims images your live objects are still
+running — on a `gcDelay` fuse, not a retention window. That is the same failure the retention
+guarantee exists to prevent, arriving through a component this chart does not manage.
+
+Worth saying plainly: if you already run S3 and Redis, you could equally run a registry of your own
+and set `publish.mode: external`. This exists so the bundled registry is not a *forced* single point
+of failure. See [ADR 0039](adr/0039-zot-clustering-is-sharding.md).
+
 ## What you now own
 
 **Storage and backup.** For `ImageComposition` this is a convenience: everything is rebuildable from

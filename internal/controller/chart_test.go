@@ -336,22 +336,24 @@ func knownFlags(t *testing.T, cmdPath string) map[string]struct{} {
 // and 404 every pull routed to it. There is no Service and no blob store; the volume that remains is
 // a per-pod layer cache, where a second replica costs a refetch rather than a failed pull.
 
-// The same shape must still render once storage is genuinely shared, or the guard is just a ban on
-// running more than one replica.
-func TestChartAllowsSharedStorageWithAVolume(t *testing.T) {
+// TestMoreThanOneComposerReplicaStillRenders.
+//
+// What this asserts is now much smaller than its ancestor did, and that is the point: with no blob
+// store there is nothing for a second replica to disagree about. It reconciles nothing until it
+// wins the lease, and the volume it may or may not have is a layer cache, where a cold start costs
+// a refetch rather than a failed pull.
+//
+// Kept because "extra replicas are harmless" is a claim, and an untested claim about replica counts
+// is how the shared-storage guards came to exist in the first place.
+func TestMoreThanOneComposerReplicaStillRenders(t *testing.T) {
 	render(t,
 		"--set", "replicaCount=2",
-		"--set", "operator.storage.shared=true",
-		"--set", "persistence.enabled=true",
-		"--set", "operator.servingHost=oci.test")
+		"--set", "persistence.enabled=true")
 
-	// s3 is shared by construction, so it needs no volume.
 	render(t,
 		"--set", "replicaCount=2",
-		"--set", "operator.storage.backend=s3",
 		"--set", "operator.s3.endpoint=https://s3.test",
-		"--set", "operator.s3.bucket=blobs",
-		"--set", "operator.servingHost=oci.test")
+		"--set", "operator.s3.bucket=blobs")
 }
 
 // TestEachServiceSelectsOnlyItsOwnComponent — one chart now deploys three workloads into one
@@ -449,7 +451,12 @@ func podLabelsByWorkload(t *testing.T, rendered string) map[string]map[string]st
 				} `json:"template"`
 			} `json:"spec"`
 		}
-		if err := yaml.Unmarshal([]byte(doc), &d); err != nil || d.Kind != "Deployment" {
+		// StatefulSets too: the registry became one so that clustering could not be a kind switch
+		// under an operator's feet (ADR 0039). A helper that looked only at Deployments would have
+		// quietly stopped covering it, and this test would have passed by finding no workload at
+		// all rather than by finding one.
+		if err := yaml.Unmarshal([]byte(doc), &d); err != nil ||
+			(d.Kind != "Deployment" && d.Kind != "StatefulSet") {
 			continue
 		}
 		out[d.Metadata.Name] = d.Spec.Template.Metadata.Labels

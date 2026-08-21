@@ -20,21 +20,38 @@ spec:
       nodePort: {{ .Values.registry.service.nodePort }}
       {{- end }}
 ---
+{{- /*
+A StatefulSet ALWAYS, at one replica when clustering is off.
+
+Not conditional, and that is deliberate. Switching kinds on `cluster.enabled=true` would put a
+landmine under that value: Helm would create a StatefulSet with the same name while the Deployment's
+ReplicaSet still owned pods matching the same selector, and the two controllers would fight -- on
+the day the operator is already changing storage, cache and TLS.
+
+What it also fixes: a StatefulSet's rolling update terminates pod-0 BEFORE creating its
+replacement, so the ReadWriteOnce deadlock that forced `strategy: Recreate` stops existing.
+
+DELIBERATELY NOT volumeClaimTemplates. That would create `data-<sts>-0` and orphan the existing
+PVC -- which for ImageBuild is the system of record, since its output cannot be rebuilt from its
+spec (ADR 0025). It would look exactly like total data loss with the bytes still sitting in a
+volume nobody is looking at. The named PVC stays a plain volume.
+*/}}
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: {{ include "kube-oci-composer.registryFullname" . }}
   labels:
     {{- include "kube-oci-composer.componentLabels" (dict "ctx" . "component" "registry") | nindent 4 }}
 spec:
-  # One. Storage is a single volume, so a second replica would serve a different set of images
-  # depending on which one a request reached -- the same defect the embedded endpoint had
-  # (ADR 0021). Scaling this out means running a registry that supports it, not raising this number.
+  serviceName: {{ include "kube-oci-composer.registryFullname" . }}-headless
+  {{- if .Values.registry.cluster.enabled }}
+  replicas: {{ .Values.registry.cluster.replicaCount }}
+  {{- else }}
+  # One. Without clustering the store is a single volume, so a second replica would serve a
+  # different set of images depending on which one a request reached -- the same defect the
+  # embedded endpoint had (ADR 0021).
   replicas: 1
-  strategy:
-    # The volume is ReadWriteOnce, so a rolling update would deadlock: the new pod cannot mount
-    # until the old one lets go.
-    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "kube-oci-composer.componentSelectorLabels" (dict "ctx" . "component" "registry") | nindent 6 }}
@@ -85,6 +102,17 @@ spec:
           Not downgraded to tcpSocket: that would pass while zot answered 500 on /v2/, and
           exercising the registry API is the whole value of this probe.
           */}}
+          {{- with .Values.registry.storage.s3.existingSecret }}
+          {{- /*
+          Credentials as env, never in the config file. A ConfigMap is visible in every
+          `kubectl describe`, which is the same rule TestChartCredentialsAreNotFlags enforces for
+          the composer's own S3. The distribution driver honours the standard AWS chain, so
+          omitting accesskey/secretkey from the JSON is all that is required.
+          */}}
+          envFrom:
+            - secretRef:
+                name: {{ . }}
+          {{- end }}
           {{- $scheme := ternary "HTTPS" "HTTP" .Values.registry.tls.enabled }}
           readinessProbe:
             httpGet: {path: /v2/, port: registry, scheme: {{ $scheme }}}
