@@ -16,7 +16,7 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0005](0005-go-controller-runtime.md) | Go and controller-runtime | Accepted |
 | [0006](0006-push-is-optional.md) | `push` is optional; a built-in endpoint means no registry is required | **Superseded by [0035](0035-a-registry-is-the-only-publication-path.md)** |
 | [0007](0007-packaging.md) | Packaging: OCI chart and image published to ghcr | Accepted |
-| [0008](0008-supply-chain.md) | Supply chain: referrers for SBOM and signatures; key-based signing, not keyless | Proposed |
+| [0008](0008-supply-chain.md) | Supply chain: referrers for SBOM and signatures; key-based signing, not keyless | Accepted, amended by 0040 |
 | [0009](0009-flux-conventions-without-dependency.md) | Flux conventions without a Flux dependency, and the name | Accepted |
 | [0010](0010-workloads-reference-digests.md) | Workloads reference digests, never tags | Accepted |
 | [0011](0011-content-tags-expire.md) | Content tags expire: mark-and-sweep garbage collection | Accepted, amends 0010 |
@@ -27,6 +27,7 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0016](0016-the-scope-line-is-determinism.md) | The scope line is determinism, not Dockerfile parity | Accepted, supersedes 0004 and part of 0003 |
 | [0017](0017-updating-the-consumed-digest.md) | How a workload's digest reference gets updated | Accepted, amends 0010 |
 | [0018](0018-multi-architecture-output.md) | Multi-architecture output | Accepted, implemented |
+| [0020](0020-is-the-supply-chain-work-worth-building.md) | Is the supply-chain work worth building? | **Closed by [0040](0040-the-supply-chain-work-is-worth-building.md)**, in favour of building it |
 | [0021](0021-active-standby-or-shared-storage.md) | Active/standby, or shared storage for the serving endpoint | Moot since [0035](0035-a-registry-is-the-only-publication-path.md) |
 | [0022](0022-distro-packages-as-layer-sources.md) | Distro packages are a layer source: `unpack: deb` | Accepted |
 | [0023](0023-more-archive-formats.md) | More archive formats: `unpack: zip` and the compressed-tar family | Accepted |
@@ -46,6 +47,7 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0037](0037-one-host-cannot-satisfy-two-resolvers.md) | One host cannot satisfy two resolvers | Accepted, amends 0034 |
 | [0038](0038-tls-in-the-cluster.md) | TLS in the cluster, and who has to trust what | Accepted, closes threat I7 |
 | [0039](0039-zot-clustering-is-sharding.md) | zot clustering is sharding, not replication | Accepted, revisits 0030's "no HA" |
+| [0040](0040-the-supply-chain-work-is-worth-building.md) | The supply-chain work is worth building, and here is what it costs | Accepted, **closes 0020**, amends 0008 |
 
 ## Open questions
 
@@ -65,7 +67,7 @@ first.
 | # | Question | Status |
 |---|---|---|
 | [0019](0019-pod-reference-protection-revisited.md) | Should garbage collection protect Pod-referenced digests? | Open, reopened twice; threat D8 |
-| [0020](0020-is-the-supply-chain-work-worth-building.md) | Is the supply-chain work worth building? | Open |
+
 
 ## Format
 

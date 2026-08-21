@@ -56,6 +56,14 @@ type JobConfig struct {
 	// FrontendImage is the Dockerfile frontend, pinned by digest. BuildKit resolves `# syntax=`
 	// over the network unless told otherwise.
 	FrontendImage string
+	// SBOM and Provenance turn on BuildKit's own attestations.
+	//
+	// These DO belong in the input hash, unlike RegistryCA below: they change what is pushed. The
+	// pleasant consequence is that enabling them re-runs every build once, visibly, rather than
+	// leaving existing objects converged at a digest with no attestations and no record of why.
+	SBOM       bool
+	Provenance bool
+
 	// RegistryCA is a PEM bundle the build must trust, copied into the build's namespace and
 	// merged with the image's own roots. Empty when the registry's certificate is already trusted.
 	//
@@ -211,6 +219,28 @@ func buildctlArgs(obj *ociv1alpha1.ImageBuild, cfg JobConfig, repo string, cache
 		"type=image,name="+pushNames(obj, repo)+",push=true,rewrite-timestamp=true,oci-mediatypes=true"+
 			insecureAttr(repo, cfg.InsecureRegistries))
 	args = append(args, "--opt", "build-arg:SOURCE_DATE_EPOCH="+cfg.SourceDateEpoch)
+
+	// BuildKit's own attestations, for the kind that cannot have exact ones.
+	//
+	// ADR 0008 states the asymmetry: a composition knows every input by digest and can state them,
+	// while a build that runs `apt-get install` can only be scanned. So the composer derives its
+	// SBOM and the builder takes BuildKit's word, in BuildKit's format -- which is SPDX, and is why
+	// the composer emits SPDX too rather than making consumers carry two readers.
+	//
+	// TWO CONSEQUENCES WORTH KNOWING. Attestations attach as extra manifests in an image INDEX, so
+	// a single-platform build's status.artifact.digest becomes an index digest rather than a
+	// manifest digest -- existing pins keep resolving, but anything that assumed the digest named
+	// a manifest now finds an index. And BuildKit's provenance predicate carries wall-clock
+	// timestamps, so the index digest differs on every run of identical inputs: `rewrite-timestamp`
+	// and SOURCE_DATE_EPOCH, whose whole purpose is narrowing the "same inputs, different bytes"
+	// gap, are partly undone at the index level by this feature. No invariant breaks -- ADR 0025
+	// already says a build's output is an observation -- but it is a real trade and it is recorded.
+	if cfg.SBOM {
+		args = append(args, "--opt", "attest:sbom=")
+	}
+	if cfg.Provenance {
+		args = append(args, "--opt", "attest:provenance=mode=min")
+	}
 
 	if cacheRef := cacheRefFor(obj, repo); cacheRef != "" {
 		insecure := insecureAttr(repo, cfg.InsecureRegistries)

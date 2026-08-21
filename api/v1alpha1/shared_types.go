@@ -322,6 +322,31 @@ type TagConflictStatus struct {
 	ObservedAt *metav1.Time `json:"observedAt,omitempty"`
 }
 
+// AttestationStatus records what was attached to an artifact, and to which artifact.
+//
+// It exists to make a converged reconcile cost NOTHING. ADR 0008 says the controller should verify
+// the referrers exist and create only what is missing, which taken literally means a registry
+// round trip per object per interval forever. This record answers the same question from etcd,
+// checked as one more conjunct after the input-hash and published-digest checks a converged
+// reconcile already performs.
+//
+// Trusting a status field about the registry is safe here for a specific reason: the attestations
+// live in the SAME repository, under the SAME retention policy, as an artifact whose presence was
+// just confirmed. A registry that lost the referrers lost the artifact too, so the digest check
+// fails first and everything is re-derived from the registry.
+//
+// Subject is what invalidates it: a new artifact digest means these describe something else.
+type AttestationStatus struct {
+	// Subject is the artifact digest these attestations describe.
+	Subject string `json:"subject,omitempty"`
+	// SBOM is the manifest digest of the SPDX referrer.
+	SBOM string `json:"sbom,omitempty"`
+	// Provenance is the manifest digest of the SLSA referrer.
+	Provenance string `json:"provenance,omitempty"`
+	// Signature is the manifest digest of the cosign signature.
+	Signature string `json:"signature,omitempty"`
+}
+
 // ArtifactStatus records what was produced. Deliberately identical in shape across every kind
 // in this API group so consumers need not care which controller produced it.
 type ArtifactStatus struct {

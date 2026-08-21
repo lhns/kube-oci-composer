@@ -2,7 +2,15 @@
 
 ## Status
 
-**Open.** [ADR 0008](0008-supply-chain.md) designs SBOM, provenance and signing and has been
+**Closed by [0040](0040-the-supply-chain-work-is-worth-building.md)**, in favour of option A.
+
+Two of the three things that held this open were resolved by work done for other reasons:
+[0035](0035-a-registry-is-the-only-publication-path.md) removed the embedded registry, so the
+referrers objection below has no referent and option D collapsed into option A. What remained --
+that signing changes nothing until something verifies it -- is answered by shipping example
+admission policies rather than by argument.
+
+The original question, for the record: [ADR 0008](0008-supply-chain.md) designs SBOM, provenance and signing and has been
 Proposed since it was written. Nothing is implemented. The question is not how to build it — 0008
 answers that — but whether to.
 

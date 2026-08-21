@@ -50,6 +50,15 @@ spec:
             - --source-date-epoch={{ .Values.imageBuild.sourceDateEpoch }}
             {{- with (include "kube-oci-composer.defaultRegistry" .) }}
             - --default-registry={{ . }}
+            {{- if $.Values.imageBuild.supplyChain.sbom }}
+            - --sbom
+            {{- end }}
+            {{- if $.Values.imageBuild.supplyChain.provenance }}
+            - --provenance
+            {{- end }}
+            {{- if $.Values.imageBuild.supplyChain.signing.enabled }}
+            - --signing-key-secret={{ required "signing.existingSecret is required when signing is enabled" $.Values.imageBuild.supplyChain.signing.existingSecret }}
+            {{- end }}
             {{- if (include "kube-oci-composer.registryCASource" $) }}
             - --registry-ca-file=/etc/oci-composer/registry-ca/ca.crt
             {{- end }}

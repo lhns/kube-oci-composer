@@ -78,6 +78,25 @@ operator:
   # builds, so a generous value costs far less than the count suggests.
   keepBuilds: 10
 
+  # SBOM, provenance and signing. All off by default.
+  #
+  # SIGNING IS INERT UNTIL SOMETHING VERIFIES IT. This chart ships no admission policy, so turning
+  # it on changes nothing an attacker experiences until you install Kyverno, policy-controller or
+  # Connaisseur and point it at the public key. Example policies: docs/examples/verify.
+  #
+  # For an ImageComposition the SBOM is DERIVED from the digest-pinned inputs and is exact rather
+  # than scanned -- it says "core-1.1.1.tgz sha256:... unpacked at /core", not "openssl 3.0.11".
+  # For an ImageBuild it comes from BuildKit and is a scan of the result, because only the build
+  # can see what it installed (ADR 0008).
+  supplyChain:
+    sbom: false
+    provenance: false
+    signing:
+      enabled: false
+      # A Secret in the RELEASE namespace, from `cosign generate-key-pair k8s://<ns>/<name>`.
+      # Never nameable by an object: the operator signs, tenants do not choose the key.
+      existingSecret: ""
+
   # Refuse any sourceRef that names no revision (threat T1).
   #
   # Pinning is optional by design -- a composition tracking a branch is a legitimate thing to want
@@ -163,6 +182,20 @@ imageBuild:
   keepBuilds: 10
   leaderElect: true
   serviceAccountName: ""
+
+  # SBOM, provenance and signing for builds. See operator.supplyChain for the caveats -- they all
+  # apply, and the SBOM here is a scan rather than a derivation.
+  #
+  # Enabling either attestation CHANGES THE PUBLISHED DIGEST: BuildKit attaches attestations as
+  # extra manifests in an index, so a single-platform build's artifact becomes an index. Existing
+  # pins keep resolving; anything that assumed the digest named a manifest now finds an index. It
+  # is in the input hash, so it happens once, visibly, when you turn it on.
+  supplyChain:
+    sbom: false
+    provenance: false
+    signing:
+      enabled: false
+      existingSecret: ""
 
   # Refuse an ImageBuild whose spec.context names no revision (threat T1). It matters more here
   # than on the composer: an unpinned context builds whatever the branch is at now, and a build's

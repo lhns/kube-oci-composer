@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
+	"github.com/lhns/kube-oci-composer/internal/attest"
 	"github.com/lhns/kube-oci-composer/internal/cache"
 	"github.com/lhns/kube-oci-composer/internal/oci"
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
@@ -49,6 +50,10 @@ type ImageCompositionReconciler struct {
 	// by the operator; see recon.DefaultRegistry for why its credential is namespaced to the
 	// controller rather than to the object.
 	Default recon.DefaultRegistry
+
+	// Attestor attaches the SBOM, provenance and signature, when any of them is enabled. Nil or
+	// disabled changes nothing about the reconcile.
+	Attestor *attest.Attestor
 
 	// Transport, when set, trusts an additional CA on top of the system roots. Applies to EVERY
 	// registry this controller talks to, not only the operator's own -- see recon.Transport for
@@ -209,6 +214,7 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	if err := r.patchStatus(ctx, &obj, func(o *ociv1alpha1.ImageComposition) {
 		o.Status.Artifact = result.Artifact
+		o.Status.Attestations = result.Attestations
 		o.Status.InputHash = result.InputHash
 		o.Status.History = recon.RecordHistory(o.Status.History, result.Record, r.historyLimit(o))
 		// Assigned unconditionally, including to nil: a divergence that has been resolved must stop
@@ -238,6 +244,9 @@ type buildResult struct {
 	Artifact *ociv1alpha1.ArtifactStatus
 	// InputHash is the hash of everything that determined the output.
 	InputHash string
+	// Attestations records what supply-chain material is attached, so the next reconcile can tell
+	// there is nothing to do without asking the registry.
+	Attestations *ociv1alpha1.AttestationStatus
 	// Conflict is set when onConflict: Keep left an existing tag in place and dropped what this
 	// reconcile produced. Copied into status so the divergence is visible rather than inferred.
 	Conflict *ociv1alpha1.TagConflictStatus
@@ -406,8 +415,14 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	// learned by downloading every layer and assembling them, every hour, forever.
 	if prev := obj.Status.Artifact; prev != nil &&
 		obj.Status.InputHash == inputHash &&
-		published.Matches(prev.Digest) {
-		return buildResult{Artifact: prev.DeepCopy(), InputHash: inputHash}, nil
+		published.Matches(prev.Digest) &&
+		// The third conjunct, added last so an object with attestations disabled evaluates exactly
+		// the expression it evaluated before. Complete() reads only status, so a converged
+		// reconcile still costs zero extra registry requests -- which is the whole point of
+		// recording what was attached rather than asking every hour.
+		r.Attestor.Complete(attestRecord(obj.Status.Attestations), prev.Digest) {
+		return buildResult{Artifact: prev.DeepCopy(), InputHash: inputHash,
+			Attestations: obj.Status.Attestations.DeepCopy()}, nil
 	}
 
 	for i := range inputs {
@@ -473,7 +488,14 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	// same content under the same tag has to stay a no-op, or a steady reconcile loop would fail
 	// every time round with immutable tags.
 	if published.Matches(digest.String()) {
-		return buildResult{Artifact: artifactStatus(tgt, digest), InputHash: inputHash}, nil
+		// Attested here too, and this is the path that matters when the feature is newly enabled:
+		// the bytes are unchanged and nothing needs republishing, but there is no attestation yet.
+		// Without this, turning signing on would do nothing until something else changed.
+		return buildResult{
+			Artifact:     artifactStatus(tgt, digest),
+			InputHash:    inputHash,
+			Attestations: r.attestPublished(ctx, obj, tgt, digest, inputs, baseDigest, refOpts, opts),
+		}, nil
 	}
 
 	// Checked before anything is written, so a partial rename cannot happen.
@@ -542,6 +564,10 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	// For an index this stores the children too — an index alone would replay into a reference
 	// that resolves but cannot be pulled.
 
+	// Supply-chain material AFTER the artifact is addressable, so a failure here cannot leave a
+	// signature describing something that was never published.
+	attestations := r.attestPublished(ctx, obj, tgt, digest, inputs, baseDigest, refOpts, opts)
+
 	recon.Event(r.Recorder, obj, corev1.EventTypeNormal, ociv1alpha1.ReasonSucceeded,
 		fmt.Sprintf("Published %s@%s%s", tgt.pullRepo, digest, tagSuffix(tgt.tags)))
 
@@ -554,9 +580,10 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	}
 
 	return buildResult{
-		Artifact:  artifactStatus(tgt, digest),
-		InputHash: inputHash,
-		Record:    record,
+		Artifact:     artifactStatus(tgt, digest),
+		InputHash:    inputHash,
+		Record:       record,
+		Attestations: attestations,
 	}, nil
 }
 
