@@ -6,6 +6,35 @@ may change between minor versions.
 ## [Unreleased]
 
 ### Added
+- **SBOM, provenance and signing, for both kinds, all off by default (ADR 0040, closing ADR 0020).**
+
+  `operator.supplyChain` and `imageBuild.supplyChain` turn on an SPDX SBOM, SLSA provenance, and a
+  cosign signature. For an `ImageComposition` the SBOM is **derived** from the digest-pinned inputs
+  and is exact rather than scanned; for an `ImageBuild` it comes from BuildKit, because only the
+  build can see what it installed.
+
+  Attestations attach as OCI **referrers**. Signatures use cosign's `sha256-<hex>.sig` **tag**,
+  which amends ADR 0008 for the reason 0008 itself gives: the verifiers that exist read that tag,
+  and a signature on the elegant rail is a signature nothing checks.
+
+  **Signing is inert until something verifies it.** This chart ships no admission policy; example
+  Kyverno and policy-controller policies are in `docs/examples/verify`, along with the rollout order
+  that will not take out a `CronJob` a month later.
+
+  A converged reconcile costs **zero** extra registry requests: `status.attestations` records what
+  is attached, checked after the input-hash and published-digest checks a reconcile already
+  performs. That works only because the payloads are pure functions of the artifact's own inputs —
+  no timestamps, no UUIDs, no controller version — and there are tests pinning each of those.
+
+  The retention refresher now pulls each artifact's **referrers** too. Without that, an SBOM would
+  have been reclaimed one window after it was written, silently, while the image it describes lived
+  on — threat D6 on a new object type. Signatures need nothing, because a `.sig` is a tag.
+
+  **Enabling attestations on an `ImageBuild` changes its published digest**: BuildKit attaches them
+  as extra manifests in an index, so a single-platform build's artifact becomes an index. Existing
+  pins keep resolving; anything assuming the digest named a manifest now finds an index. It is in
+  the input hash, so it happens once, visibly.
+
 - **zot scale-out clustering, configurable in values — and it shards rather than replicates.**
   `registry.cluster.enabled=true` runs several members; zot hashes each repository name and exactly
   one member owns it, so a member that is down makes roughly 1/N of repositories unavailable, and

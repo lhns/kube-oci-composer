@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
+	"github.com/lhns/kube-oci-composer/internal/attest"
 	"github.com/lhns/kube-oci-composer/internal/build"
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 	"github.com/lhns/kube-oci-composer/internal/source"
@@ -46,6 +47,14 @@ type ImageBuildReconciler struct {
 	// Recorder surfaces failures as Events. A build failure's detail lives in the pod's logs,
 	// which vanish with the pod, so the Event is often the only durable trace of why.
 	Recorder record.EventRecorder
+
+	// Attestor signs the build's output, after the Job has terminated.
+	//
+	// The signing key stays in THIS process and is never projected into a build pod -- so code
+	// that came out of a git repository never runs in the same container as the key. The SBOM and
+	// provenance come from BuildKit instead, in-band, because only the build can see what it
+	// installed.
+	Attestor *attest.Attestor
 
 	// Transport, when set, trusts an additional CA on top of the system roots. Same object the
 	// other controllers use; see recon.Transport.
@@ -255,6 +264,7 @@ func (r *ImageBuildReconciler) resolveInputs(ctx context.Context, obj *ociv1alph
 		FrontendDigest:   r.JobConfig.FrontendImage,
 		ContextDigest:    art.Digest,
 		ContextRevision:  art.Revision,
+		Attestations:     attestationMode(r.JobConfig),
 		ContextSubpath:   spec.Context.Subpath,
 		Dockerfile:       spec.Dockerfile,
 		Target:           spec.Target,
@@ -344,6 +354,8 @@ func (r *ImageBuildReconciler) observeJob(ctx context.Context, obj *ociv1alpha1.
 			return ctrl.Result{}, err
 		}
 		r.recordSuccess(obj, inputs, inputHash, digest)
+		// After recordSuccess, so status already names what was built when signing looks at it.
+		obj.Status.Attestations = r.signBuild(ctx, obj, digest)
 		return ctrl.Result{RequeueAfter: recon.Interval(obj.Spec.Interval)}, nil
 
 	case jobFailed(job):
@@ -659,4 +671,20 @@ func (r *ImageBuildReconciler) recordKept(obj *ociv1alpha1.ImageBuild, c *ociv1a
 	obj.Status.Failures = 0
 	recon.Event(r.Recorder, obj, corev1.EventTypeNormal, ociv1alpha1.ReasonSucceeded,
 		fmt.Sprintf("Kept %s at %s; no build was run (onConflict: Keep)", c.Tag, c.Existing))
+}
+
+// attestationMode summarises the BuildKit attestation options for the input hash. A string rather
+// than two booleans so that adding a third option later cannot silently collide with an existing
+// combination.
+func attestationMode(cfg JobConfig) string {
+	switch {
+	case cfg.SBOM && cfg.Provenance:
+		return "sbom+provenance"
+	case cfg.SBOM:
+		return "sbom"
+	case cfg.Provenance:
+		return "provenance"
+	default:
+		return ""
+	}
 }

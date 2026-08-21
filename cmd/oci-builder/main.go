@@ -30,6 +30,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
+	"github.com/lhns/kube-oci-composer/internal/attest"
 	"github.com/lhns/kube-oci-composer/internal/buildcontroller"
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 	"github.com/lhns/kube-oci-composer/internal/retention"
@@ -74,6 +75,9 @@ func main() {
 		insecureRegs         string
 		refreshInterval      time.Duration
 		defaultRegistry      string
+		sbom                 bool
+		provenance           bool
+		signingKeySecret     string
 		registryCAFile       string
 		publicRegistryHost   string
 		defaultPushSecret    string
@@ -104,6 +108,17 @@ func main() {
 			"to <default-registry>/<namespace>/<name>.\n"+
 			"Namespace-qualified deliberately: one registry is shared by the whole cluster, so a "+
 			"bare object name would collide the moment two namespaces both have an \"app\".")
+	flag.BoolVar(&sbom, "sbom", false,
+		"Attach an SBOM to every artifact, as an OCI referrer. For compositions it is derived from "+
+			"the digest-pinned inputs and is exact rather than scanned; a build's is produced by "+
+			"BuildKit and is a scan of the result (ADR 0008).")
+	flag.BoolVar(&provenance, "provenance", false,
+		"Attach SLSA provenance to every artifact, as an OCI referrer.")
+	flag.StringVar(&signingKeySecret, "signing-key-secret", "",
+		"Name of a Secret in THIS controller's namespace holding a cosign key pair, created with "+
+			"`cosign generate-key-pair k8s://<namespace>/<name>`. Signing is inert until something "+
+			"verifies at admission -- see docs/examples/verify. Never nameable by an object: the "+
+			"operator signs, tenants do not choose the key.")
 	flag.StringVar(&registryCAFile, "registry-ca-file", "",
 		"PEM bundle of ADDITIONAL root CAs to trust, on top of the system roots. Needed when the "+
 			"registry serves a certificate signed by a CA the image does not already trust -- the "+
@@ -214,6 +229,27 @@ func main() {
 		}
 	}
 
+	// Supply-chain material. Read once at startup, so a key that cannot sign fails the process
+	// rather than the first artifact -- the same reasoning the chart applies to an unpinned
+	// builder image.
+	attestor := &attest.Attestor{SBOM: sbom, Provenance: provenance}
+	if signingKeySecret != "" {
+		ns := os.Getenv("POD_NAMESPACE")
+		if ns == "" {
+			setupLog.Error(nil, "POD_NAMESPACE is unset, so the signing key cannot be read")
+			os.Exit(1)
+		}
+		key, err := loadSigningKey(ns, signingKeySecret)
+		if err != nil {
+			setupLog.Error(err, "unable to load the signing key", "secret", signingKeySecret)
+			os.Exit(1)
+		}
+		attestor.Key = key
+		setupLog.Info("signing enabled; artifacts will carry a cosign signature",
+			"secret", signingKeySecret,
+			"note", "a signature changes nothing until something verifies it at admission")
+	}
+
 	defaults := recon.DefaultRegistry{
 		Host:       defaultRegistry,
 		PublicHost: publicRegistryHost,
@@ -230,6 +266,7 @@ func main() {
 		Client:    mgr.GetClient(),
 		Default:   defaults,
 		Transport: registryTransport,
+		Attestor:  attestor,
 		//nolint:staticcheck // SA1019: the new events API has no Event method; see the composer.
 		Recorder: mgr.GetEventRecorderFor("imagebuild-controller"),
 		JobConfig: buildcontroller.JobConfig{
@@ -238,6 +275,8 @@ func main() {
 			SourceDateEpoch:    sourceDateEpoch,
 			InsecureRegistries: splitList(insecureRegs),
 			RegistryCA:         registryCA,
+			SBOM:               sbom,
+			Provenance:         provenance,
 		},
 		HistoryLimit:         historyLimit,
 		RequirePinnedSources: requirePinnedSources,

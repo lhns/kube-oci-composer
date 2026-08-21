@@ -82,6 +82,15 @@ spec:
             {{- end }}
             {{- with (include "kube-oci-composer.defaultRegistry" .) }}
             - --default-registry={{ . }}
+            {{- if $.Values.operator.supplyChain.sbom }}
+            - --sbom
+            {{- end }}
+            {{- if $.Values.operator.supplyChain.provenance }}
+            - --provenance
+            {{- end }}
+            {{- if $.Values.operator.supplyChain.signing.enabled }}
+            - --signing-key-secret={{ required "signing.existingSecret is required when signing is enabled" $.Values.operator.supplyChain.signing.existingSecret }}
+            {{- end }}
             {{- if (include "kube-oci-composer.registryCASource" $) }}
             - --registry-ca-file=/etc/oci-composer/registry-ca/ca.crt
             {{- end }}
