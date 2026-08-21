@@ -17,19 +17,12 @@ BUILD_NS="${BUILD_NS:-oci-builder-e2e}"
 # The registry host baked into every published reference, and the NodePort the node actually reaches
 # it on.
 #
-# ONE name has to work from TWO places, and that is the whole difficulty:
+# This is the PUBLIC name only -- what a kubelet resolves, and what status.artifact.ref reports.
+# The controllers never see it; they use the registry's in-cluster Service.
 #
-#   * the CONTROLLERS resolve it through cluster DNS, to push and to refresh
-#   * the KUBELET resolves it with the node's resolver, to pull
-#
-# status.artifact.ref holds one string, so one name has to satisfy both. Below, a containerd
-# certs.d drop-in gives the nodes their answer and a CoreDNS hosts entry gives the cluster its own.
-# A real deployment does the same thing with ordinary DNS, which is why registry.host is documented
-# as "a name your nodes resolve" AND has to be resolvable in-cluster.
-#
-# Getting this wrong is not subtle: the first registry-only e2e run set the node half and not the
-# cluster half, and every composition failed with `lookup oci.e2e on 10.96.0.10:53: no such host`.
-REGISTRY_HOST="${REGISTRY_HOST:-oci.e2e:5000}"
+# Deliberately not a generic "oci.e2e": a cluster may well run other registries, and a name this
+# specific cannot be mistaken for the only one.
+REGISTRY_HOST="${REGISTRY_HOST:-oci-composer.e2e:5000}"
 NODE_PORT="${NODE_PORT:-30500}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -96,6 +89,7 @@ helm upgrade --install kube-oci-composer charts/kube-oci-composer \
   --set imageBuild.image.pullPolicy=Never \
   --set registry.service.type=NodePort \
   --set registry.service.nodePort="$NODE_PORT" \
+  --set registry.publish.mode=nodePort \
   --set registry.host="$E2E_REGISTRY" \
   --set defaultRegistry.insecure="$E2E_REGISTRY" \
   --set 'registry.retention.repositories={keepalive-*,keepalive-**}' \
@@ -107,29 +101,13 @@ helm upgrade --install kube-oci-composer charts/kube-oci-composer \
   --set imageBuild.retention.refreshInterval=1s \
   --wait --timeout 5m
 
-# The cluster half of the name. The controllers push and refresh over cluster DNS, which has never
-# heard of oci.e2e, so CoreDNS is told the registry Service's address for it. Applied after the
-# install because the ClusterIP does not exist until the Service does.
-REGISTRY_IP="$(kubectl -n oci-composer get svc kube-oci-composer-registry -o jsonpath='{.spec.clusterIP}')"
-REGISTRY_NAME="${REGISTRY_HOST%%:*}"
-echo "mapping ${REGISTRY_NAME} -> ${REGISTRY_IP} in CoreDNS"
-kubectl -n kube-system get configmap coredns -o jsonpath='{.data.Corefile}' > /tmp/Corefile.orig
-if ! grep -q "$REGISTRY_NAME" /tmp/Corefile.orig; then
-  # Inserted before `kubernetes`, so the static answer wins over the cluster-domain plugin.
-  awk -v ip="$REGISTRY_IP" -v name="$REGISTRY_NAME" '
-    /kubernetes cluster.local/ && !done {
-      print "    hosts {"
-      print "        " ip " " name
-      print "        fallthrough"
-      print "    }"
-      done = 1
-    }
-    { print }
-  ' /tmp/Corefile.orig > /tmp/Corefile.new
-  kubectl -n kube-system create configmap coredns --from-file=Corefile=/tmp/Corefile.new     --dry-run=client -o yaml | kubectl apply -f -
-  kubectl -n kube-system rollout restart deploy/coredns
-  kubectl -n kube-system rollout status deploy/coredns --timeout=2m
-fi
+# NO CoreDNS entry, and its absence is the assertion.
+#
+# An earlier version taught cluster DNS about the public name, because the controllers were pointed
+# at it and could not resolve it. They are not any more: --default-registry is the registry's own
+# Service and --public-registry-host carries the node-resolvable name into status.artifact.ref and
+# nowhere else. If this suite passes without the twenty lines that used to be here, the split is
+# right; that is what this deletion tests.
 
 kubectl -n oci-composer rollout status deploy/kube-oci-composer --timeout=5m
 kubectl -n oci-composer rollout status deploy/kube-oci-composer-builder --timeout=5m

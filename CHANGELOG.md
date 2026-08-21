@@ -209,6 +209,41 @@ may change between minor versions.
   too many.
 
 ### Changed
+- **BREAKING: `registry.publish.mode` is required, and the default install no longer publishes
+  images nothing can pull.**
+
+  `status.artifact.ref` is one string that two resolvers have to understand: the controllers reach
+  the registry through cluster DNS, the kubelet reaches it with the NODE's resolver. `registry.host`
+  fed both, so there was **no correct setting** -- unset produced `ErrImagePull` on every workload,
+  set to a node-resolvable name produced `no such host` on every object before anything published.
+
+  The two are now separate. `--default-registry` is always the in-cluster Service; the public name
+  travels in a new `--public-registry-host` and reaches `status.artifact.ref` and nothing else.
+  `registry.host` keeps its name and now means only what people already thought it meant.
+
+  Because which public path is possible depends on your cluster rather than on this chart,
+  `registry.publish.mode` has **no default** and the chart refuses to install without it:
+
+  ```yaml
+  registry:
+    publish:
+      mode: ingress        # needs nothing on the nodes: your ingress already has DNS and a cert
+      # mode: nodePort     # one containerd certs.d file per node
+      # mode: external     # you run the registry; registry.enabled=false + defaultRegistry.host
+      # mode: internalOnly # nothing outside the cluster pulls these, deliberately
+  ```
+
+  Upgrading: add `registry.publish.mode`. If you already set `registry.host` to a node-resolvable
+  name, keep it and use `mode: nodePort` -- and you can delete any CoreDNS entry you added to make
+  the controllers resolve it, because they no longer do.
+
+  This also fixes a second failure hiding behind the first: setting `registry.host` used to drop
+  `--insecure-registry` entirely, so the controllers would have failed the TLS handshake against a
+  plain-HTTP registry even if they could have resolved the name.
+
+  An Ingress template returns, which is the only mode needing nothing on the nodes -- the property
+  ADR 0006 claimed for the serving endpoint, which was never about the endpoint. See ADR 0037.
+
 - **BREAKING: the embedded serving endpoint is removed. A registry is the only publication path.**
 
   `spec.publish` no longer exists. `spec.push` is the only publication block, and it does what

@@ -22,11 +22,13 @@ import (
 // with imageBuild.enabled=false there must be no Job-creating role at all.
 const builderChartDir = "../../charts/kube-oci-composer"
 
-// pinned values the builder chart refuses to render without.
-var builderRenderArgs = []string{
+// Values the chart refuses to render without: the two pinned images, and how workloads reach the
+// registry. None of these tests is about either question, so they supply an answer and get on with
+// what they are actually asserting.
+var builderRenderArgs = append([]string{
 	"--set", "imageBuild.buildkitImage=moby/buildkit:v1@sha256:" + strings.Repeat("a", 64),
 	"--set", "imageBuild.dockerfileFrontend=docker/dockerfile:1@sha256:" + strings.Repeat("b", 64),
-}
+}, installable...)
 
 func renderBuilder(t *testing.T, args ...string) string {
 	t.Helper()

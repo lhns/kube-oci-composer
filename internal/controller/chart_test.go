@@ -19,9 +19,24 @@ import (
 
 const chartDir = "../../charts/kube-oci-composer"
 
+// installable is the smallest set of values that make the chart render at all.
+//
+// registry.publish.mode has no default on purpose — the chart refuses to install until an operator
+// says how workloads reach the registry, because guessing produces images nothing can pull. Every
+// test that is not ABOUT that question wants a valid install, so the helpers supply one. `--set`
+// later wins, so a test can still override the mode; `renderRaw` exists for the tests that must
+// see the unset case.
+var installable = []string{"--set", "registry.publish.mode=internalOnly"}
+
 // render runs `helm template`, skipping the test if helm is unavailable rather than failing —
 // a missing local tool is not a defect in the code under test.
 func render(t *testing.T, args ...string) string {
+	t.Helper()
+	return renderRaw(t, append(append([]string{}, installable...), args...)...)
+}
+
+// renderRaw is render without the installable defaults, for tests about what the chart REFUSES.
+func renderRaw(t *testing.T, args ...string) string {
 	t.Helper()
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed; skipping chart render")
@@ -36,7 +51,17 @@ func render(t *testing.T, args ...string) string {
 }
 
 // renderExpectingFailure returns helm's output when the render is supposed to fail.
+//
+// Carries the installable defaults for the same reason render does: a test asserting that the
+// chart refuses a thin retention margin must fail for THAT reason, not because it forgot to say
+// how workloads reach the registry.
 func renderExpectingFailure(t *testing.T, args ...string) string {
+	t.Helper()
+	return renderRawExpectingFailure(t, append(append([]string{}, installable...), args...)...)
+}
+
+// renderRawExpectingFailure is renderExpectingFailure with nothing supplied.
+func renderRawExpectingFailure(t *testing.T, args ...string) string {
 	t.Helper()
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed; skipping chart render")

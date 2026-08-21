@@ -424,7 +424,12 @@ func podBuildDigest(p corev1.Pod) string {
 
 // recordSuccess writes the artifact and rotates history.
 func (r *ImageBuildReconciler) recordSuccess(obj *ociv1alpha1.ImageBuild, inputs build.Inputs, inputHash, digest string) {
-	repo := r.repositoryFor(obj)
+	// The PULL name, which is the only place it is used. Everything that connects -- the Job's push
+	// target, the tag-conflict check, the cache reference, the retention refresh -- goes through
+	// repositoryFor, because those run from inside the cluster where the public name may not
+	// resolve. status.artifact is the one thing a workload reads, so it is the one thing that gets
+	// the public name.
+	repo := r.Default.PublicRepository(r.repositoryFor(obj))
 	// Same list the Job was told to push, so status cannot describe a different set of tags than
 	// the build actually wrote.
 	effective, err := recon.EffectiveTags(obj.Spec.Push.GetTags(), obj.Spec.Push.GetRef())

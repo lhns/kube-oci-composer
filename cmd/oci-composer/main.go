@@ -65,6 +65,7 @@ func main() {
 		fetchDenyPrivate     bool
 		requirePinnedSources bool
 		defaultRegistry      string
+		publicRegistryHost   string
 		defaultPushSecret    string
 		keepBuilds           int
 		gcKeepBuilds         int
@@ -110,6 +111,12 @@ func main() {
 			"to <default-registry>/<namespace>/<name>.\n"+
 			"Namespace-qualified deliberately: one registry is shared by the whole cluster, so a "+
 			"bare object name would collide the moment two namespaces both have an \"app\".")
+	flag.StringVar(&publicRegistryHost, "public-registry-host", "",
+		"What a WORKLOAD should pull from, when that differs from --default-registry. "+
+			"Used ONLY to render status.artifact.ref. One string cannot satisfy two resolvers: this "+
+			"controller reaches the registry through cluster DNS, and a kubelet reaches it with the "+
+			"NODE's resolver, which has never heard of anything.svc.cluster.local. Empty means the two "+
+			"are the same name, which is correct for an external registry or an ingress with real DNS.")
 	flag.StringVar(&defaultPushSecret, "default-push-secret", "",
 		"dockerconfigjson Secret authenticating pushes to --default-registry. Read from THIS "+
 			"controller's namespace (POD_NAMESPACE), not the object's: it is the operator's "+
@@ -218,6 +225,7 @@ func main() {
 
 	defaults := recon.DefaultRegistry{
 		Host:       defaultRegistry,
+		PublicHost: publicRegistryHost,
 		SecretName: defaultPushSecret,
 		Namespace:  os.Getenv("POD_NAMESPACE"),
 	}

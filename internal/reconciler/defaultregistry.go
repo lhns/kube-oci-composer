@@ -11,9 +11,27 @@ import (
 // hostname into every object. With the bundled registry that is the whole of the configuration: a
 // default install publishes somewhere real without anyone editing a spec.
 type DefaultRegistry struct {
-	// Host is "registry.example:5000" or "registry.example:5000/prefix". Empty disables the whole
-	// mechanism, and an object that names no repository then has nowhere to go.
+	// Host is where the CONTROLLERS reach the registry -- "registry.example:5000" or
+	// "registry.example:5000/prefix". Empty disables the whole mechanism, and an object that names
+	// no repository then has nowhere to go.
+	//
+	// With the bundled registry this is the in-cluster Service name, which is reachable through
+	// cluster DNS and is not reachable by a kubelet. See PublicHost.
 	Host string
+
+	// PublicHost is what a WORKLOAD is told to pull from, and it exists because one string cannot
+	// satisfy two resolvers.
+	//
+	// The controllers resolve the registry through cluster DNS to push and to refresh. The kubelet
+	// resolves it with the NODE's resolver to pull, and the node's resolver has never heard of
+	// anything.svc.cluster.local. status.artifact.ref holds one string, so before this split the
+	// operator had to pick which half to break: leave it internal and no Pod can pull, or set it to
+	// a node-resolvable name and the controllers fail with "no such host" before publishing
+	// anything.
+	//
+	// Empty means "same as Host", which is correct whenever one name genuinely works from both
+	// places -- an external registry, or an ingress with real DNS.
+	PublicHost string
 
 	// SecretName is a dockerconfigjson Secret in the CONTROLLER's own namespace -- not the
 	// object's. The credential belongs to the operator who installed the chart, not to the tenant
@@ -34,7 +52,39 @@ func (d DefaultRegistry) Configured() bool { return d.Host != "" }
 // the collision would be silent, resolved by whichever object reconciled last, under a tag policy
 // that would read it as a legitimate conflict.
 func (d DefaultRegistry) RepositoryFor(namespace, name string) string {
-	return fmt.Sprintf("%s/%s/%s", strings.TrimSuffix(d.Host, "/"), namespace, name)
+	return repositoryAt(d.Host, namespace, name)
+}
+
+// PublicRepositoryFor is the same repository, addressed as a workload should address it.
+//
+// Used ONLY to render status.artifact.ref and status.artifact.tags. Everything that actually talks
+// to a registry -- pushing, the tag-conflict check, the retention refresh -- uses RepositoryFor,
+// because those run from inside the cluster where the public name may not resolve at all.
+func (d DefaultRegistry) PublicRepositoryFor(namespace, name string) string {
+	if d.PublicHost == "" {
+		return d.RepositoryFor(namespace, name)
+	}
+	return repositoryAt(d.PublicHost, namespace, name)
+}
+
+// PublicRepository maps a repository the controller wrote to onto the name a workload should pull.
+//
+// Only the HOST is rewritten, and only for the operator's own registry. An object that named its
+// own repository somewhere else is reported back exactly as written -- the operator's public name
+// says nothing about a registry the operator does not run.
+func (d DefaultRegistry) PublicRepository(repository string) string {
+	if d.PublicHost == "" || repository == "" || !d.Owns(repository) {
+		return repository
+	}
+	_, path, found := strings.Cut(repository, "/")
+	if !found {
+		return strings.TrimSuffix(d.PublicHost, "/")
+	}
+	return strings.TrimSuffix(d.PublicHost, "/") + "/" + path
+}
+
+func repositoryAt(host, namespace, name string) string {
+	return fmt.Sprintf("%s/%s/%s", strings.TrimSuffix(host, "/"), namespace, name)
 }
 
 // CredentialFor decides which Secret authenticates a request, and it is a SECURITY boundary rather

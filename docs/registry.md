@@ -8,60 +8,75 @@ is easy to get silently wrong, and what happens if you bring your own registry i
 
 ## The one thing that is not automatic
 
-`registry.host`. Everything else has a working default.
+**How workloads reach the registry.** The chart refuses to install until you say, and everything
+else has a working default.
 
-**One name has to work from two places.** `status.artifact.ref` holds a single string, and two
-different resolvers have to make sense of it:
+The reason it asks rather than guesses: two different resolvers have to make sense of a registry
+address, and they answer differently.
 
 | Who | Resolves with | Needs it for |
 |---|---|---|
 | The controllers | **cluster DNS** | pushing, and refreshing to keep images alive |
 | The kubelet | the **node's** resolver | pulling, for every workload |
 
-containerd resolves image references with the node's resolver, which does not see cluster DNS, so a
-Pod cannot pull from a `.svc.cluster.local` name however healthy the Service is — the image
-publishes successfully and then fails with `ErrImagePull`. That much is the well-known half.
+The controllers are handled automatically — they always use the registry's in-cluster Service, and
+nothing you set here changes that. The kubelet is the open question, because containerd resolves
+image references with the node's resolver, which does not see cluster DNS. A Pod cannot pull from a
+`.svc.cluster.local` name however healthy the Service is.
 
-The half that is easy to miss: setting `registry.host` to a name only the *nodes* resolve breaks the
-other direction. The controllers then cannot reach the name they publish under, and every object
-fails with `no such host` from the cluster's DNS server before anything is published at all. This
-project's own e2e suite made exactly that mistake, gave the nodes a `hosts.toml` and cluster DNS
-nothing, and failed every composition.
-
-**So `registry.host` must resolve in BOTH places.** With an ordinary DNS name that is automatic. If
-you use a name only your nodes know, add the matching answer inside the cluster too — a CoreDNS
-`hosts` entry pointing at the registry Service is enough.
-
-Two ways to make the node half resolve:
-
-**An ingress**, if you already run one with a certificate.
-
-**A NodePort plus a containerd drop-in**, which needs neither:
+Which of those is possible depends on your cluster, not on this chart — whether you run an ingress
+controller, whether DNS serves a name for it, whether you are willing to put a file on every node.
+There is no answer that is right everywhere, so `registry.publish.mode` has no default:
 
 ```yaml
 registry:
-  host: oci.internal
-  service:
-    type: NodePort
-    nodePort: 30500
+  publish:
+    mode: ingress   # ingress | nodePort | external | internalOnly
+```
+
+**`ingress`** — the mode that needs nothing on the nodes, because your ingress controller already
+has a name your DNS serves and a certificate your nodes already trust. containerd pulls over HTTPS
+like it does from anywhere else.
+
+```yaml
+registry:
+  publish: {mode: ingress}
+  host: oci-composer.example.com
+  ingress:
+    className: nginx
+    annotations: {cert-manager.io/cluster-issuer: letsencrypt}
+```
+
+**`nodePort`** — no ingress controller required, at the price of one file per node:
+
+```yaml
+registry:
+  publish: {mode: nodePort}
+  host: oci-composer.internal:30500
+  service: {type: NodePort, nodePort: 30500}
 ```
 
 ```toml
-# /etc/containerd/certs.d/oci.internal/hosts.toml, on every node
+# /etc/containerd/certs.d/oci-composer.internal:30500/hosts.toml, on every node
 [host."http://<node-address>:30500"]
   capabilities = ["pull", "resolve"]
 ```
 
-```yaml
-# ...and, in the CoreDNS ConfigMap, the cluster half of the same name:
-#     hosts {
-#         <registry Service ClusterIP> oci.internal
-#         fallthrough
-#     }
-```
+**`external`** — you already run a registry; `registry.enabled=false` plus `defaultRegistry.host`
+and `defaultRegistry.existingPushSecret`.
 
-The chart warns at install time when `registry.host` is unset, because the failure otherwise shows up
-as a pull error against a Service that looks perfectly healthy.
+**`internalOnly`** — a deliberate statement that nothing outside the cluster pulls these images.
+Useful when something else copies them onward. Not a default, because silently producing images no
+Pod can pull is the failure this whole mechanism exists to prevent.
+
+### A historical note, because it used to be worse
+
+`registry.host` once fed *both* addresses. Setting it to a node-resolvable name pointed the
+controllers at a name cluster DNS could not resolve, and every object failed with `no such host`
+before publishing anything; leaving it unset produced images no Pod could pull. There was no
+correct value. This project's own e2e hit both halves in order, on consecutive runs, and needed a
+CoreDNS entry to work around it — an entry that no longer exists, because there is nothing left to
+work around.
 
 ## Bringing your own
 
