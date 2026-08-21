@@ -25,14 +25,20 @@ import (
 // which would mean the probe itself is wrong.
 func TestUserNamespacesOnThisCluster(t *testing.T) {
 	const pod = "userns-probe"
-	_, _ = kubectl(t, "-n", namespace, "delete", "pod", pod, "--ignore-not-found")
+	// Its OWN namespace. The first version borrowed the image-volume test's, which by then had
+	// been deleted -- so the probe reported "the cluster refused hostUsers: false" when what the
+	// cluster had actually said was "no such namespace". A probe that can report the wrong answer
+	// is worse than no probe.
+	ns := namespace + "-userns"
+	_, _ = kubectl(t, "create", "namespace", ns)
+	t.Cleanup(func() { _, _ = kubectl(t, "delete", "namespace", ns, "--wait=false") })
 
 	out, err := applyStdinAllowingFailure(t, `
 apiVersion: v1
 kind: Pod
 metadata:
   name: `+pod+`
-  namespace: `+namespace+`
+  namespace: `+ns+`
 spec:
   restartPolicy: Never
   hostUsers: false
@@ -49,14 +55,18 @@ spec:
           echo USERNS_PROBE_DONE
 `)
 	if err != nil {
-		// The API server rejecting the field IS the answer: the feature gate is off.
+		// Only a rejection that MENTIONS the field is evidence about the field. Anything else is
+		// the probe being broken, and must fail rather than quietly become a measurement.
+		if !strings.Contains(strings.ToLower(out), "hostuser") {
+			t.Fatalf("the probe could not be applied, and not because of hostUsers: %s", strings.TrimSpace(out))
+		}
 		t.Logf("E1 MEASURED: the cluster refused hostUsers: false -- %s", strings.TrimSpace(out))
 		t.Skip("user namespaces unavailable on this cluster; E1 stands as recorded in ADR 0027")
 	}
 
 	var phase string
 	eventually(t, "the user-namespace probe to settle", func() error {
-		p, err := kubectl(t, "-n", namespace, "get", "pod", pod, "-o", "jsonpath={.status.phase}")
+		p, err := kubectl(t, "-n", ns, "get", "pod", pod, "-o", "jsonpath={.status.phase}")
 		if err != nil {
 			return fmt.Errorf("%v: %s", err, p)
 		}
@@ -65,14 +75,14 @@ spec:
 		case "Succeeded", "Failed":
 			return nil
 		default:
-			events, _ := kubectl(t, "-n", namespace, "get", "events",
+			events, _ := kubectl(t, "-n", ns, "get", "events",
 				"--field-selector", "involvedObject.name="+pod,
 				"-o", "jsonpath={range .items[*]}{.reason}: {.message}{\"\n\"}{end}")
 			return fmt.Errorf("phase=%s\n%s", phase, events)
 		}
 	})
 
-	logs, _ := kubectl(t, "-n", namespace, "logs", pod)
+	logs, _ := kubectl(t, "-n", ns, "logs", pod)
 	uidMap := strings.TrimSpace(logs)
 
 	if phase != "Succeeded" {
