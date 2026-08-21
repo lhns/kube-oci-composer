@@ -109,7 +109,7 @@ func entriesOfArtifact(t *testing.T, host, repo, digest string) (map[string]stri
 // a three-layer source still contributes exactly one layer.
 func TestImageLayerIsContributedAsOneLayer(t *testing.T) {
 	obj := composition("from-image")
-	r, host := servingReconciler(t, obj)
+	r, host := registryReconciler(t, obj)
 
 	ref := publishContentImage(t, host, "ci-build",
 		map[string]string{"tool": "ELF"},
@@ -124,7 +124,7 @@ func TestImageLayerIsContributedAsOneLayer(t *testing.T) {
 	}}
 
 	art := build(t, r, obj, "compose from an image layer")
-	entries, layers := entriesOfArtifact(t, host, "from-image", art.Digest)
+	entries, layers := entriesOfArtifact(t, host, "default/from-image", art.Digest)
 
 	if layers != 1 {
 		t.Errorf("artifact has %d layers, want 1 — an image entry must flatten", layers)
@@ -140,7 +140,7 @@ func TestImageLayerIsContributedAsOneLayer(t *testing.T) {
 // is the shape this verb was added for.
 func TestImageLayerSubpath(t *testing.T) {
 	obj := composition("image-subpath")
-	r, host := servingReconciler(t, obj)
+	r, host := registryReconciler(t, obj)
 
 	ref := publishContentImage(t, host, "toolbox", map[string]string{
 		"usr/local/bin/tool": "ELF",
@@ -154,7 +154,7 @@ func TestImageLayerSubpath(t *testing.T) {
 	}}
 
 	art := build(t, r, obj, "compose an image subpath")
-	entries, _ := entriesOfArtifact(t, host, "image-subpath", art.Digest)
+	entries, _ := entriesOfArtifact(t, host, "default/image-subpath", art.Digest)
 
 	if _, ok := entries["opt/tools/tool"]; !ok {
 		t.Errorf("subpath contents did not land at the target; got %v", keysOf(entries))
@@ -170,7 +170,7 @@ func TestImageLayerSubpath(t *testing.T) {
 // flattening, not carried into the artifact as literal ".wh." files.
 func TestImageLayerAppliesWhiteouts(t *testing.T) {
 	obj := composition("image-whiteout")
-	r, host := servingReconciler(t, obj)
+	r, host := registryReconciler(t, obj)
 
 	ref := publishContentImage(t, host, "pruned",
 		map[string]string{"keep": "kept", "drop": "gone"},
@@ -184,7 +184,7 @@ func TestImageLayerAppliesWhiteouts(t *testing.T) {
 	}}
 
 	art := build(t, r, obj, "flatten a whiteout")
-	entries, _ := entriesOfArtifact(t, host, "image-whiteout", art.Digest)
+	entries, _ := entriesOfArtifact(t, host, "default/image-whiteout", art.Digest)
 
 	if _, ok := entries["opt/keep"]; !ok {
 		t.Error("opt/keep was lost")
@@ -203,7 +203,7 @@ func TestImageLayerAppliesWhiteouts(t *testing.T) {
 // must rebuild. Without this the short-circuit would serve the old artifact after a repin.
 func TestImageLayerDigestIsInTheInputHash(t *testing.T) {
 	obj := composition("image-hash")
-	r, host := servingReconciler(t, obj)
+	r, host := registryReconciler(t, obj)
 
 	first := publishContentImage(t, host, "app", map[string]string{"x": "one"})
 	obj.Spec.Layers = []ociv1alpha1.Layer{{
@@ -225,7 +225,7 @@ func TestImageLayerDigestIsInTheInputHash(t *testing.T) {
 // every artifact for no change in content.
 func TestBaseRefIsEquivalentToImageAndDigest(t *testing.T) {
 	split := composition("base-split")
-	r, host := servingReconciler(t, split)
+	r, host := registryReconciler(t, split)
 
 	repo, digest := publishBaseImage(t, host, "base", 2, nil)
 	origin := newCountingOrigin(t, map[string]string{"plugins/core.jar": "jar"})

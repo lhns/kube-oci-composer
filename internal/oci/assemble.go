@@ -36,7 +36,7 @@ var epoch = time.Unix(0, 0).UTC()
 // ordering, header normalisation, media types, the config it stamps. Forgetting to means an
 // upgraded controller looks at an artifact built by the old algorithm, sees an unchanged input
 // hash, and keeps serving it forever.
-const AssemblyVersion = 1
+const AssemblyVersion = 2
 
 // identity returns what the hash should treat as this entry's content.
 func (in LayerInput) identity() string {
@@ -333,7 +333,7 @@ func AssembleAs(base v1.Image, inputs []LayerInput, cfg Config, plat Platform, w
 	if err != nil {
 		return nil, err
 	}
-	return assembleFor(base, layers, cfg, plat)
+	return assembleFor(base, layers, inputs, cfg, plat)
 }
 
 // AssembleIndex builds one image per platform and returns them as an OCI image index.
@@ -370,7 +370,7 @@ func AssembleIndex(bases map[Platform]v1.Image, inputs []LayerInput, cfg Config,
 			}
 			base = b
 		}
-		img, err := assembleFor(base, layers, cfg, plat)
+		img, err := assembleFor(base, layers, inputs, cfg, plat)
 		if err != nil {
 			return nil, fmt.Errorf("platform %s: %w", plat, err)
 		}
@@ -409,7 +409,7 @@ func buildLayers(inputs []LayerInput, workDir string) ([]v1.Layer, error) {
 }
 
 // assembleFor stacks the layers on the base and stamps the config for one platform.
-func assembleFor(base v1.Image, layers []v1.Layer, cfg Config, plat Platform) (v1.Image, error) {
+func assembleFor(base v1.Image, layers []v1.Layer, inputs []LayerInput, cfg Config, plat Platform) (v1.Image, error) {
 	// The base's layers come first and are reused verbatim: they are already content-addressed,
 	// so repacking them would change their digests, break sharing with anything else on the same
 	// base, and re-upload content the registry already holds.
@@ -496,7 +496,10 @@ func assembleFor(base v1.Image, layers []v1.Layer, cfg Config, plat Platform) (v
 	if err != nil {
 		return nil, fmt.Errorf("setting config: %w", err)
 	}
-	return img, nil
+
+	// Provenance last, so it describes the finished manifest. See provenance.go for why this is
+	// annotations rather than config labels, and why nothing here is time-dependent.
+	return withProvenance(img, base, inputs), nil
 }
 
 // toSet converts a list into the map-of-empty-struct shape the OCI config uses.

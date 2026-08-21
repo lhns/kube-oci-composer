@@ -55,8 +55,8 @@ func fetchLayer(name string) ociv1alpha1.Layer {
 // rejected everything would look like a complete pass.
 func TestIntegrationValidSpecIsAccepted(t *testing.T) {
 	if err := apply(t, "valid", ociv1alpha1.ImageCompositionSpec{
-		Layers:  []ociv1alpha1.Layer{fetchLayer("core")},
-		Publish: &ociv1alpha1.Publish{Name: "valid", Tags: []string{"main"}},
+		Layers: []ociv1alpha1.Layer{fetchLayer("core")},
+		Push:   &ociv1alpha1.Push{Tags: []string{"main"}},
 	}); err != nil {
 		t.Fatalf("a valid spec was rejected: %v", err)
 	}
@@ -281,29 +281,21 @@ func TestIntegrationBaseWithInheritIsAccepted(t *testing.T) {
 			ExposedPorts: []string{"9092/tcp"},
 			StopSignal:   "SIGTERM",
 		},
-		Publish: &ociv1alpha1.Publish{Name: "runnable", Tags: []string{"main"}},
+		Push: &ociv1alpha1.Push{Tags: []string{"main"}},
 	}); err != nil {
 		t.Fatalf("the runnable-image shape was rejected: %v", err)
 	}
 }
 
-// TestIntegrationPushAndPublishAreMutuallyExclusive — setting both leaves it ambiguous where the
-// artifact goes and what status.artifact.ref should say.
-func TestIntegrationPushAndPublishAreMutuallyExclusive(t *testing.T) {
-	if err := apply(t, "both-targets", ociv1alpha1.ImageCompositionSpec{
-		Layers:  []ociv1alpha1.Layer{fetchLayer("core")},
-		Publish: &ociv1alpha1.Publish{Name: "x", Tags: []string{"main"}},
-		Push:    &ociv1alpha1.Push{Repository: "ghcr.io/example/x", Tags: []string{"main"}},
-	}); err == nil {
-		t.Fatal("both push and publish were accepted")
-	}
-}
+// The push/publish mutual-exclusion rule is gone with publish itself (ADR 0035). It refused a spec
+// that named two destinations, leaving it ambiguous where the artifact went; there is one
+// destination now, so the ambiguity it guarded cannot be expressed.
 
 // TestIntegrationEmptyLayersIsRejected — an empty list is far more likely to be a templating
 // accident than a deliberate empty artifact.
 func TestIntegrationEmptyLayersIsRejected(t *testing.T) {
 	if err := apply(t, "no-layers", ociv1alpha1.ImageCompositionSpec{
-		Publish: &ociv1alpha1.Publish{Name: "x", Tags: []string{"main"}},
+		Push: &ociv1alpha1.Push{Tags: []string{"main"}},
 	}); err == nil {
 		t.Fatal("an ImageComposition with no layers was accepted")
 	}
@@ -401,7 +393,7 @@ func TestIntegrationDefaultsAreApplied(t *testing.T) {
 				Fetch: &ociv1alpha1.FetchSource{URL: "https://example.com/a.tgz", Digest: validDigest},
 				To:    "/x",
 			}},
-			Publish: &ociv1alpha1.Publish{Name: "defaults"},
+			Push: &ociv1alpha1.Push{},
 		},
 	}
 	if err := k8s.Create(integrationCtx(t), obj); err != nil {
@@ -417,14 +409,14 @@ func TestIntegrationDefaultsAreApplied(t *testing.T) {
 	}
 	// No tags by default: publishing by digest alone is the safe floor, and inventing a "latest"
 	// nobody asked for would make an unreferenced mutable tag appear on every object.
-	if len(obj.Spec.Publish.Tags) != 0 {
-		t.Errorf("publish tags defaulted to %v, want none", obj.Spec.Publish.Tags)
+	if len(obj.Spec.Push.Tags) != 0 {
+		t.Errorf("publish tags defaulted to %v, want none", obj.Spec.Push.Tags)
 	}
 	// ...but the conflict policy resolves to Fail, so a tag cannot be silently remeaned by
 	// accident. Asserted through the resolver rather than through a materialised field value,
 	// because onConflict deliberately has no schema default -- see
 	// TestIntegrationOnConflictHasNoSchemaDefault for why.
-	if got := obj.Spec.Publish.ResolveConflictPolicy(); got != ociv1alpha1.ConflictFail {
+	if got := obj.Spec.Push.ResolveConflictPolicy(); got != ociv1alpha1.ConflictFail {
 		t.Errorf("an object that says nothing resolves to %q, want Fail", got)
 	}
 }
@@ -446,8 +438,7 @@ func TestIntegrationImmutableFalseSurvivesTheRoundTrip(t *testing.T) {
 				Fetch: &ociv1alpha1.FetchSource{URL: "https://example.com/a.tgz", Digest: validDigest},
 				To:    "/x",
 			}},
-			Publish: &ociv1alpha1.Publish{
-				Name:      "moving-pointer",
+			Push: &ociv1alpha1.Push{
 				Tags:      []string{"main"},
 				Immutable: ptr.To(false),
 			},
@@ -462,10 +453,10 @@ func TestIntegrationImmutableFalseSurvivesTheRoundTrip(t *testing.T) {
 	if err := k8s.Get(integrationCtx(t), client.ObjectKeyFromObject(obj), fetched); err != nil {
 		t.Fatalf("re-reading: %v", err)
 	}
-	if fetched.Spec.Publish.Immutable == nil {
+	if fetched.Spec.Push.Immutable == nil {
 		t.Fatal("explicit immutable: false was dropped on the wire and defaulted back to true")
 	}
-	if got := fetched.Spec.Publish.ResolveConflictPolicy(); got != ociv1alpha1.ConflictOverwrite {
+	if got := fetched.Spec.Push.ResolveConflictPolicy(); got != ociv1alpha1.ConflictOverwrite {
 		t.Errorf("a deprecated immutable:false resolved to %q, want Overwrite; objects written "+
 			"before onConflict existed must keep behaving as they did", got)
 	}

@@ -24,14 +24,12 @@ graph TB
         SRC["Flux source<br/>GitRepository / OCIRepository / Bucket"]
     end
 
-    subgraph composerNS["oci-composer namespace"]
+    subgraph releaseNS["release namespace (one chart, ADR 0033)"]
         COMP["kube-oci-composer<br/>distroless, non-root, read-only rootfs"]
-        STORE[("Blob store<br/>PVC or emptyDir")]
-        SERVE["Registry endpoint<br/>plain HTTP, no auth"]
-    end
-
-    subgraph builderNS["oci-builder namespace"]
         BUILD["kube-oci-builder<br/>distroless, non-root"]
+        ZOT["Bundled registry (zot)<br/>anonymous read, authenticated write"]
+        STORE[("Registry storage<br/>PVC or emptyDir")]
+        CACHE[("Layer cache<br/>disk or S3 — inputs only")]
     end
 
     subgraph node["Node (shared kernel)"]
@@ -39,7 +37,7 @@ graph TB
     end
 
     EXT["External origins<br/>HTTP URLs, upstream registries"]
-    REG["Target registry<br/>anonymous read, authenticated write<br/>expires what is not pulled"]
+    REG["Target registry<br/>the bundled zot by default, or one you supply<br/>anonymous read, authenticated write<br/>expires what is not pulled"]
     CONSUMER["Workloads pulling images"]
 
     IC -->|watch| COMP
@@ -47,11 +45,11 @@ graph TB
     SRC -->|get artifact| COMP
     SEC -->|get| COMP
     COMP -->|fetch by digest| EXT
-    COMP --> STORE
-    STORE --> SERVE
+    COMP --> CACHE
+    ZOT --> STORE
+    ZOT -.->|"the default target, in-cluster"| REG
     COMP -->|push| REG
     COMP -->|"refresh: pull only,<br/>renews the retention lease"| REG
-    SERVE -->|pull| CONSUMER
     REG -->|pull| CONSUMER
 
     DB -->|watch| BUILD
@@ -68,7 +66,7 @@ graph TB
     classDef neutral fill:#0d47a1,stroke:#90caf9,color:#ffffff
     class COMP,BUILD trusted
     class JOB,EXT hostile
-    class IC,DB,CM,SEC,SRC,STORE,SERVE,REG,CONSUMER neutral
+    class IC,DB,CM,SEC,SRC,STORE,CACHE,ZOT,REG,CONSUMER neutral
 ```
 
 The boundaries that matter:
@@ -78,7 +76,7 @@ The boundaries that matter:
 | **Tenant → controller** | A spec is written by anyone with `create` on the CRD | Spec fields become URLs fetched, images pulled, and Jobs run |
 | **Origin → controller** | Fetched tarballs, pulled base images | Attacker-controlled bytes parsed in-process |
 | **Controller → build pod** | A Job running BuildKit | The pod executes arbitrary code from a git repository |
-| **Store → consumer** | The serve endpoint | Unauthenticated, plain HTTP |
+| **Registry → consumer** | A pull, by any client that can reach the registry | Anonymous by default, so reachability is the access control (I5) |
 | **Namespace → namespace** | `sourceRef.namespace` | The one place a tenant reaches outside its own namespace |
 
 ## The core invariant, and what it buys
@@ -104,15 +102,14 @@ nothing read it, so every build overwrote whatever its tags held.
 
 | # | Threat | Status | Evidence |
 |---|---|---|---|
-| S1 | A client impersonates the controller and **writes** to the serve endpoint | **Mitigated** | `loopbackWritesOnly` (`internal/serve/writepath.go`) refuses `PUT`/`POST`/`PATCH`/`DELETE` unless the TCP peer is loopback, which means this process. Enforced in the handler rather than left to the deployment. **This row previously read "partially mitigated — depends on deployment", and that was wrong**: the bind address defaults to every interface, the chart exposes it as a Service, the Ingress routes `/v2/` including `PUT`, and there was no authentication — a test confirmed an arbitrary pod's `PUT` returned **201 Created**. ADR 0025:87-90 rested on the same false premise when it said a build Job could not write here. |
+| S1 | A client impersonates the controller and **writes** published images | **Mitigated by the registry** | The serve endpoint this row was written about no longer exists (ADR 0035). The bundled zot enforces `anonymousPolicy: [read]` and requires the generated credential for `create`/`update`, so an arbitrary pod cannot write. That is a stronger guarantee than the one it replaces, and it is enforced by a component with its own test suite rather than by a handler in this repo. **The history is worth keeping**: this row once read "partially mitigated — depends on deployment", which was wrong, and then "mitigated" via a loopback guard added only after a test confirmed an arbitrary pod's `PUT` returned **201 Created**. ADR 0025:87-90 rested on the same false premise. |
 | S2 | A registry impersonates the origin of a base image or layer | **Mitigated** | Base images and image layers are pulled by digest only — `name.NewDigest` fails on a tag (`internal/source/image.go`), and the CRD pattern requires `@sha256:`. Fetched layers are verified against the declared digest (`internal/oci/fetch.go`). |
 | S3 | A build pushes to a registry impersonating the intended one over plain HTTP | **Mitigated, opt-in per host** | `--insecure-registry` is a list of hosts, matched on the push target's host rather than applied globally (`insecureAttr`, `internal/buildcontroller/job.go`). Naming one internal registry does not downgrade every other push. |
 
-**I5 is now the sharpest item in this section.** Writes are closed, but reads remain anonymous by
-design, and the endpoint is HTTP-only — `ListenAndServe`, no TLS anywhere in `internal/serve` — with
-the chart's TLS story being an Ingress terminating in front, routing only `/v2/`. In a multi-tenant
-cluster a NetworkPolicy is the only thing separating one namespace's artifacts from another's
-readers.
+**Reads remain anonymous by design** — a kubelet pulls without credentials — but that is now a zot
+policy an operator can change, rather than a property of code here that could not be changed at all.
+In a multi-tenant cluster a NetworkPolicy is still what separates one namespace's artifacts from
+another's readers.
 
 The lesson worth keeping from S1: the guarantee had been *written down* in a package comment for a
 long time without ever being *implemented*, and nothing tested it. A claim about behaviour is not
@@ -122,18 +119,18 @@ behaviour.
 
 | # | Threat | Status | Evidence |
 |---|---|---|---|
-| T1 | Layer content changes without the spec changing | **Mitigated, with one opt-in** | `fetch` carries a declared digest. For `sourceRef`: an artifact that predates its own source's spec is refused (`internal/source/flux.go`, ADR 0026), and `sourceRef.revision` pins the revision a layer expects. The pin is what covers a **branch or semver range**, which moves with no generation bump for the staleness check to see — but it is optional, so a spec that omits it still consumes whatever the source publishes. |
+| T1 | Layer content changes without the spec changing | **Mitigated; optional pinning, cluster-enforceable** | `fetch` carries a declared digest. For `sourceRef`: an artifact that predates its own source's spec is refused (`internal/source/flux.go`, ADR 0026), and `sourceRef.revision` pins the revision a layer expects. The pin is what covers a **branch or semver range**, which moves with no generation bump for the staleness check to see. Pinning stays optional per ADR 0026 — tracking a branch is a legitimate thing to want — but `--require-pinned-sources` now lets an operator refuse unpinned sources for a whole cluster, on both kinds. Objects that omit `revision:` go Stalled naming the flag. |
 | T2 | A published tag is repointed at different content | **Mitigated by default** | `onConflict: Fail` (the default on both kinds) refuses to move a tag resolving to a different digest, and on `ImageBuild` the check runs *before* the Job, since a push from inside it cannot be undone. Two inherent limits: it cannot validate a tag's **first** publish, because there is nothing to compare against; and `onConflict: Overwrite` disables it by design. |
 | T3 | A malicious archive escapes the target directory on unpack | **Mitigated** | Traversal is refused rather than sanitised (`internal/oci/extract.go`): any entry whose cleaned path is `..` or starts with `../` is an error. Zip entries normalise `\` to `/` **before** the check (`internal/oci/zip.go`). |
 | T4 | A build tampers with another build's cache | **Mitigated** | The cache ref is per-object, derived from namespace and name (`cacheRefFor`). A shared cache would be a channel between whoever can write Dockerfiles. |
-| T5 | The controller is upgraded to assemble differently, silently | **Mitigated by discipline, not by mechanism** | `AssemblyVersion` is in the input hash so a change rebuilds everything — but it is a constant a human must remember to bump. It has been missed before. |
+| T5 | The controller is upgraded to assemble differently, silently | **Mitigated by a golden-digest test** | `TestAssembleMatchesItsGoldenDigest` (`internal/oci/assemble_test.go`) pins the assembled bytes: change the tar writer, the gzip level, the config, the ordering or the toolchain's flate output and it fails, naming `AssemblyVersion` in the failure. It also refuses to run if `AssemblyVersion` has moved without the digest being re-recorded, so the two cannot drift apart. What stays manual is the deliberate bump once the test has told you the output changed — but the *silent* case this row is about is caught by mechanism, not discipline. |
 | T6 | A build pod tampers with the node or other pods | **See E1** | |
 
 ## R — Repudiation
 
 | # | Threat | Status | Evidence |
 |---|---|---|---|
-| R1 | An artifact exists and nobody can say what produced it | **Partially mitigated** | `status.history[].sources` records each layer's name, resolved digest and revision, which is what ADR 0026's incident needed and did not have — it had to be diagnosed by extracting a layer and reading its payload. Still missing: no OCI annotations carry provenance, so the record lives only in the object's status and is lost with it. |
+| R1 | An artifact exists and nobody can say what produced it | **Mitigated** | Two records, deliberately. `status.history[].sources` carries each layer's name, resolved digest and revision — which is what ADR 0026's incident needed and did not have, having been diagnosed by extracting a layer and reading its payload. And the artifact itself now carries OCI **manifest** annotations (`internal/oci/provenance.go`): `de.lhns.oci-composer.sources`, `.assembly-version`, `.base`. Annotations rather than config labels, because a label is part of the image config and would present provenance as the application's own metadata. Nothing written is time-dependent, so `output digest = f(spec)` still holds. **What remains uncovered:** an `ImageBuild`'s output carries no equivalent — BuildKit writes that manifest, not this code. |
 | R2 | A failure leaves no trace after the pod is gone | **Mitigated** | A failed build's Job is kept for the whole backoff so its pod's logs survive; the exit code, reason and termination message are copied into status and raised as an Event. |
 
 R1 is materially better than it was: `status.history[].sources` now records each layer's name,
@@ -149,13 +146,13 @@ the answer exists only while the object does.
 | I2 | Secret values leak through build args | **Mitigated** | Secrets are projected via BuildKit's secret mount, never as `--opt build-arg`. Build args *are* hashed, so anything placed there is world-readable by design. |
 | I3 | The controller holds credentials it does not need | **Mitigated** | Both roles grant `get` on secrets — never `list` or `watch` — and a chart drift guard fails the build if that ever changes (`TestBuilderChartNeverGrantsSecretListOrWatch`). Push credentials for builds are projected straight into the build pod and never read by the controller. |
 | I4 | A tenant reads another namespace's source content | **Mitigated** | A `sourceRef` naming any namespace but the object's own is refused with a terminal error (`internal/controller/resolve.go`), and `ImageBuild.spec.context` the same. It had to be fixed controller-side rather than in CEL: a CRD validation rule cannot read `metadata.namespace`. Both controllers still hold cluster-wide `get;list;watch` on Flux sources, so this rule is the whole of the boundary — which is why it is asserted by tests on both kinds. Secrets and ConfigMaps were never exposed this way; both always resolved against `obj.Namespace`. |
-| I5 | Anyone on the network pulls any served image | **NOT mitigated by this code** | The serve endpoint has no authentication. Any client that can reach the Service or NodePort can pull every artifact the composer serves, across all namespaces. |
-| I6 | An SSRF via a `fetch` URL reaches cluster-internal services | **NOT mitigated** | `fetch.url` is used to build a request directly (`internal/oci/fetch.go`); there is no allow-list or private-range block. The response must match a declared digest to become a layer, which limits *exfiltration* — but the request itself is still made from the controller's network position. |
+| I5 | Anyone on the network pulls any published image | **Deliberate default, now configurable** | The bundled registry allows anonymous reads, because a kubelet pulls without credentials. Any client that can reach the registry pulls every artifact in it, across all namespaces. What changed with ADR 0035 is that this is zot's `anonymousPolicy`, so an operator who wants authenticated pulls can have them and put imagePullSecrets on the workloads — where before, `internal/serve` had no authentication to enable. |
+| I6 | An SSRF via a `fetch` URL reaches cluster-internal services | **The credential case is closed; the rest is opt-in** | Link-local (`169.254.0.0/16`, `fe80::/10`) is refused unconditionally, which covers the cloud metadata endpoint every major provider serves credentials from (`internal/oci/dialguard.go`, ADR 0036). Other private ranges — RFC1918, loopback, unique-local, CGNAT — are refused only under `--fetch-deny-private`, because an artifact server on a private address is this project's most ordinary layer source and a guard that refuses those gets disabled. Enforced in `net.Dialer.Control`, after resolution and before `connect(2)`, so a hostname pointing at the metadata IP, a redirect to it, and a DNS rebind are all caught — none is visible in the URL. **With the flag off, which is the default, a tenant can still make the controller `GET` an internal address.** |
+| I7 | The registry write credential is observable on the wire | **NOT mitigated** | The bundled registry serves plain HTTP — it terminates no TLS (`templates/registry-config.yaml`) — and zot authenticates writes with HTTP Basic. So the generated password crosses the pod network base64-encoded and readable. Anyone positioned to observe that traffic (a compromised CNI, a node, a container with `NET_RAW` on the path) can capture the credential that is the whole of the "nothing but the controllers can push" guarantee, and the capture leaves no trace in any log. Pulls are anonymous, so **only the write path is exposed** — but the write path is the one that matters. Mitigations are the operator's: put TLS in front of the registry and drop the host from `defaultRegistry.insecure`, or use an external registry that already has a certificate. |
 
-I5 is now the sharpest item in this section, and it is deliberate: the endpoint has no
-authentication, and restricting who can reach it is the deployment's job. Note what that means in a
-multi-tenant cluster — a NetworkPolicy is the only thing separating one namespace's artifacts from
-another's readers.
+I5 is deliberate rather than overlooked, and it is the shape almost every in-cluster registry
+ships in. Note what it means in a multi-tenant cluster: with the default policy, a NetworkPolicy is
+the only thing separating one namespace's artifacts from another's readers.
 
 ## D — Denial of service
 
@@ -167,7 +164,8 @@ another's readers.
 | D4 | Builds exhaust node resources | **Partially mitigated** | `spec.resources` applies to both the build and fetch containers, but is optional; a namespace `ResourceQuota` is the real control and is the cluster's job. |
 | D5 | Unbounded history growth in status | **Mitigated** | Rotation is capped by `historyLimit`, and a rebuild reproducing an earlier digest moves that entry rather than adding one. |
 | D6 | A registry reclaims images live workloads are still running | **Mitigated, and it fails unsafe** | Both controllers re-pull every image a live object references (`--retention-refresh-interval`, default `1h`), which is what keeps a recency-based expiry policy from collecting them. A refresh only READS, so no bug in it can delete anything. The mitigation depends on the interval staying far below the registry's window — the RATIO is the guarantee — and on refreshing actually running: sustained failure raises `RetentionDegraded`, because the symptom of silence here is deletion one window later. See ADR 0031. |
-| D7 | Refreshing is disabled or misconfigured against a registry that expires content | **NOT mitigated by this code** | `--retention-refresh-interval=0`, or a registry window shorter than the interval, silently removes the protection in D6. Nothing can detect this from inside the controller: it cannot know the registry's policy. Documented in `docs/registry.md`, and the operator owns it. |
+| D7 | Refreshing is disabled or misconfigured against a registry that expires content | **Mitigated for the bundled registry; the operator owns it otherwise** | `--retention-refresh-interval=0`, or a window shorter than the interval, silently removes the protection in D6. For the registry the chart installs, both numbers are now rendered by one chart, so it **refuses to install** a margin below 24x or refreshing disabled while a window is set (`templates/_retention.tpl`, `TestChartRefusesARetentionMarginThatIsTooThin`). For a registry you supply, nothing here can read its policy, and the relationship is documented in `docs/registry.md` and unenforced. |
+| D8 | A digest a workload still needs is reclaimed because no live object produces it any more | **NOT mitigated here, but narrower than it looks** | D6 refreshes what a live `ImageComposition` or `ImageBuild` references — its current artifact plus `status.history`, capped by `--keep-builds`. A digest older than that cap, or one whose object was deleted, is refreshed by nothing and expires. **Two layers absorb most of the impact.** The kubelet never garbage-collects an image a running container is using, so a running workload does not break when the registry forgets its image; and where Spegel is deployed, any node that still holds it serves it peer-to-peer to a node that does not. What is left is the case where **no node holds it any more and the registry has expired it**: a scale-to-zero followed by a scale-up, a node pool replaced or a cluster rebuilt, a rarely-run `CronJob`, or — the sharpest one — a **rollback** to a digest that has aged out of history, been expired by the registry, and been reclaimed locally once nothing was running it. See ADR 0019. |
 
 ## E — Elevation of privilege
 
@@ -195,8 +193,30 @@ reinstated. But builds share the node's kernel, and a kernel vulnerability reach
 unconfined seccomp profile is the realistic escape path.
 
 Kubernetes user namespaces (`hostUsers: false`) would remove the need for escalation entirely and
-map the container's root to an unprivileged host uid. ADR 0027 records that as the destination; it
-did not run on the CI cluster and is not shipped.
+map the container's root to an unprivileged host uid. ADR 0027 records that as the destination.
+
+**Re-measured on 2026-08-21, on Kubernetes 1.36**, by a probe in the e2e suite
+(`test/e2e/usernamespaces_test.go`) rather than by argument. The result, and it is more specific
+than "it did not run":
+
+- The **API server accepts** `hostUsers: false`. The feature gate is on; that half has moved since
+  ADR 0027 was written.
+- The **sandbox fails to start**, repeatably:
+
+  ```
+  FailedCreatePodSandBox: runc create failed: error during container init:
+    error mounting "sysfs" to rootfs at "/sys": operation not permitted
+  ```
+
+**That is a property of the test environment, not a verdict on the feature.** The e2e runs on kind,
+which is Kubernetes inside a Docker container, and a user namespace nested inside that container
+cannot mount `sysfs`. A real node very possibly can. So this measurement rules out *shipping it on
+the strength of CI*, and rules nothing else out.
+
+The probe stays in the suite and reports on every run, so the day this starts working it says so
+instead of waiting to be remembered. It skips rather than fails when unsupported — but fails loudly
+if `hostUsers: false` is ever accepted and silently **ignored**, which would look like mitigation
+and be none.
 
 **If builds are hostile rather than merely untrusted, run them on dedicated nodes, or behind a
 sandboxing runtime such as Kata or gVisor.** That is a cluster decision this project cannot make.
@@ -294,7 +314,7 @@ These are not mitigations. They are things assumed true, and each one is somebod
 
 1. **`create` on `ImageComposition` / `ImageBuild` is a privilege.** A `ImageBuild` runs code, and
    both read every source in their own namespace. Grant them like you grant Pod creation.
-2. **The serve endpoint is not exposed with its write path reachable** (S1), and network policy —
+2. **The registry's write path is reachable only with its credential** (S1), and network policy —
    not this code — restricts who can pull (I5).
 3. **The registry is durable.** For `ImageBuild`, losing the store or status can mean a rebuild
    producing a digest that conflicts with an already-published tag under `onConflict: Fail`
@@ -306,13 +326,15 @@ These are not mitigations. They are things assumed true, and each one is somebod
 
 | Gap | Threat | Note |
 |---|---|---|
-| Serve endpoint serves reads anonymously over plaintext | I5 | Deliberate; a kubelet must pull without credentials. Restricting *who* may pull is a NetworkPolicy question. The largest remaining item |
-| No SSRF controls on `fetch.url` | I6 | Digest verification limits exfiltration, not reachability. Considered and declined |
-| Provenance lives only in status, not in the artifact | R1 | OCI annotations would survive the object; config labels would change the digest |
-| `sourceRef.revision` is opt-in | T1 | A spec that omits it still consumes whatever the source publishes |
-| `AssemblyVersion` is a human discipline | T5 | Has been missed |
-| Build pods share the node kernel with seccomp unconfined | E1 | User namespaces are the destination (ADR 0027) |
-| Retention depends on two numbers in different systems | D7 | The refresh interval is a controller flag; the window is registry config. Nothing enforces the relationship between them |
+| The registry serves reads anonymously | I5 | Deliberate; a kubelet must pull without credentials. Now a zot policy rather than an unconditional property of this code, so it is changeable. Restricting *who* may pull is a NetworkPolicy question |
+| `fetch.url` can still reach internal services by default | I6 | Link-local is always refused; the rest needs `--fetch-deny-private`, off by default because refusing in-cluster artifact servers would make the guard something people disable (ADR 0036) |
+| The registry write credential crosses the pod network in the clear | I7 | The bundled zot terminates no TLS and authenticates writes with HTTP Basic. Fix it with TLS in front, or an external registry that has a certificate |
+| A digest only a workload still needs is not refreshed | D8 | Retention follows live *objects*, not live *workloads*. Node-local images and Spegel absorb the running case; what is exposed is a pull onto a node that has never held it, once the registry has expired it — a rollback being the sharpest example. ADR 0019 |
+| An `ImageBuild`'s output carries no provenance annotations | R1 | Compositions do, and they survive the object. A build's manifest is written by BuildKit, so the same record has to be added a different way |
+| `sourceRef.revision` is opt-in | T1 | Deliberate (ADR 0026), and now enforceable cluster-wide with `--require-pinned-sources`. Off by default: a spec that omits it still consumes whatever the source publishes |
+| The `AssemblyVersion` bump is manual | T5 | The silent case is caught by a golden-digest test; what stays manual is deciding the change is intended and bumping the constant |
+| Build pods share the node kernel with seccomp unconfined | E1 | User namespaces are the destination (ADR 0027). Measured on 1.36: the API server accepts `hostUsers: false` and the sandbox fails to start under kind, which is a nested-container limitation rather than a verdict. An e2e probe re-measures every run |
+| Retention depends on two numbers | D7 | **Closed for the bundled registry**: one chart renders both, so it refuses a margin below 24x and refuses refreshing disabled while a window is set. Still open for a registry you supply -- nothing here can read its policy |
 
 ## Reviewing this document
 

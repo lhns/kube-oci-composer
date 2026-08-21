@@ -13,25 +13,24 @@ import (
 func TestPublishRefDrivesTheTag(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("viaref", urlLayer("core", url, digest, "/core"))
-	obj.Spec.Publish = &ociv1alpha1.Publish{
-		Name: "viaref",
+	obj.Spec.Push = &ociv1alpha1.Push{
 		// Exactly what the transformer produces: full reference, host and repo included.
 		Ref: "oci-composer.internal/viaref:s0123456789abcdef",
 	}
-	r, host := servingReconciler(t, obj)
+	r, host := registryReconciler(t, obj)
 
 	art := build(t, r, obj, "publish via ref")
-	if want := []string{"oci.test/viaref:s0123456789abcdef"}; !slices.Equal(art.Tags, want) {
+	if want := []string{host + "/default/viaref:s0123456789abcdef"}; !slices.Equal(art.Tags, want) {
 		t.Fatalf("tags %v, want %v", art.Tags, want)
 	}
 
-	ref, err := name.ParseReference(host+"/viaref:s0123456789abcdef", name.Insecure)
+	ref, err := name.ParseReference(host+"/default/viaref:s0123456789abcdef", name.Insecure)
 	if err != nil {
 		t.Fatalf("parsing: %v", err)
 	}
 	desc, err := remote.Head(ref)
 	if err != nil {
-		t.Fatalf("the tag from publish.ref does not resolve: %v", err)
+		t.Fatalf("the tag from push.ref does not resolve: %v", err)
 	}
 	if desc.Digest.String() != art.Digest {
 		t.Fatalf("resolves to %s, want %s", desc.Digest, art.Digest)
@@ -44,15 +43,15 @@ func TestPublishRefDrivesTheTag(t *testing.T) {
 func TestUntemplatedRefPublishesByDigest(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("untemplated", urlLayer("core", url, digest, "/core"))
-	obj.Spec.Publish = &ociv1alpha1.Publish{Name: "untemplated", Ref: "untemplated"}
-	r, host := servingReconciler(t, obj)
+	obj.Spec.Push = &ociv1alpha1.Push{Ref: "untemplated"}
+	r, _ := registryReconciler(t, obj)
 
 	art := build(t, r, obj, "untemplated ref")
 	if len(art.Tags) != 0 {
 		t.Fatalf("tags %v, want none — a bare ref must not become :latest", art.Tags)
 	}
 
-	ref, err := name.ParseReference(host+"/untemplated@"+art.Digest, name.Insecure)
+	ref, err := name.ParseReference(art.Ref, name.Insecure)
 	if err != nil {
 		t.Fatalf("parsing: %v", err)
 	}

@@ -10,13 +10,29 @@ is easy to get silently wrong, and what happens if you bring your own registry i
 
 `registry.host`. Everything else has a working default.
 
-The controllers reach the registry over cluster DNS and need no configuration. **Workloads do not.**
-containerd resolves image references with the *node's* resolver, which does not see cluster DNS, so
-a Pod cannot pull from a `.svc.cluster.local` name however healthy the Service is — the image
-publishes successfully and then fails with `ErrImagePull`.
+**One name has to work from two places.** `status.artifact.ref` holds a single string, and two
+different resolvers have to make sense of it:
 
-So `registry.host` is a name your nodes resolve, and it is what `status.artifact.ref` reports. Two
-ways to make it resolve:
+| Who | Resolves with | Needs it for |
+|---|---|---|
+| The controllers | **cluster DNS** | pushing, and refreshing to keep images alive |
+| The kubelet | the **node's** resolver | pulling, for every workload |
+
+containerd resolves image references with the node's resolver, which does not see cluster DNS, so a
+Pod cannot pull from a `.svc.cluster.local` name however healthy the Service is — the image
+publishes successfully and then fails with `ErrImagePull`. That much is the well-known half.
+
+The half that is easy to miss: setting `registry.host` to a name only the *nodes* resolve breaks the
+other direction. The controllers then cannot reach the name they publish under, and every object
+fails with `no such host` from the cluster's DNS server before anything is published at all. This
+project's own e2e suite made exactly that mistake, gave the nodes a `hosts.toml` and cluster DNS
+nothing, and failed every composition.
+
+**So `registry.host` must resolve in BOTH places.** With an ordinary DNS name that is automatic. If
+you use a name only your nodes know, add the matching answer inside the cluster too — a CoreDNS
+`hosts` entry pointing at the registry Service is enough.
+
+Two ways to make the node half resolve:
 
 **An ingress**, if you already run one with a certificate.
 
@@ -34,6 +50,14 @@ registry:
 # /etc/containerd/certs.d/oci.internal/hosts.toml, on every node
 [host."http://<node-address>:30500"]
   capabilities = ["pull", "resolve"]
+```
+
+```yaml
+# ...and, in the CoreDNS ConfigMap, the cluster half of the same name:
+#     hosts {
+#         <registry Service ClusterIP> oci.internal
+#         fallthrough
+#     }
 ```
 
 The chart warns at install time when `registry.host` is unset, because the failure otherwise shows up
@@ -152,6 +176,27 @@ entry with no `patterns` matches no tags, and every tag becomes a deletion candi
 independently, which is why the controllers refresh **both** the digest and every tag. Leaving
 `keepUntagged` out deletes exactly the digest-pinned images
 [ADR 0010](adr/0010-workloads-reference-digests.md) tells your workloads to reference.
+
+**A repository the policy does not match is not therefore safe.** Retention policies govern
+manifests; zot's blob GC is separate and reclaims what nothing references. An **untagged** manifest
+references nothing, so a digest-only artifact in an unmatched repository can be collected within
+`gcDelay` of being published -- the publish succeeds, and the pull that follows says `not found`.
+
+That is why the shipped policy is `repositories: ["**"]` with `keepUntagged.pulledWithin`: the
+refresher's pull is what keeps a digest-only artifact alive, and it only counts where a policy
+applies. If you narrow `repositories`, narrow it to something that still covers every repository
+the controllers publish to.
+
+This project's own e2e ran into it from the other end -- a composition whose tags were dropped
+became untagged, and the image it had just published was gone before a Pod could pull it.
+
+**The bundled registry terminates no TLS, and that has a cost worth stating.** zot authenticates
+writes with HTTP Basic, so over plain HTTP the generated password crosses the pod network readable
+by anything positioned to watch it — and that credential is the whole of the "only the controllers
+can push" guarantee. Pulls are anonymous, so only the write path is exposed. If your cluster's
+network is not a boundary you trust, put TLS in front of the registry and remove its host from
+`defaultRegistry.insecure`, or point `defaultRegistry.host` at a registry that already has a
+certificate. Threat I7.
 
 **Anonymous read, authenticated write.** zot enforces this itself; no proxy is needed in front. Only
 the controllers get a write identity — give them a `dockerconfigjson` Secret and point

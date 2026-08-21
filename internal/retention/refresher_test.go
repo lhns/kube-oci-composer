@@ -389,15 +389,19 @@ func TestRecoveryClearsTheFailureCount(t *testing.T) {
 	}
 }
 
-// An object served from the embedded endpoint has no external registry to convince of anything, and
-// must not be treated as a refresh failure.
-func TestServingOnlyObjectsAreNotRefreshed(t *testing.T) {
+// An object with no repository AND no default registry configured has nothing to refresh, and must
+// not be counted as a failure.
+//
+// This used to be the serving case -- an object served from the embedded endpoint had no external
+// registry to convince of anything. That endpoint is gone (ADR 0035), so the only way to reach this
+// state now is an operator who has configured no default registry, where the object is Pending and
+// has never published anything.
+func TestAnObjectWithNowhereToPublishIsNotAFailure(t *testing.T) {
 	reg := newRegistry(t)
 
 	obj := &ociv1alpha1.ImageComposition{
-		ObjectMeta: metav1.ObjectMeta{Name: "served", Namespace: "team-a"},
+		ObjectMeta: metav1.ObjectMeta{Name: "nowhere", Namespace: "team-a"},
 	}
-	obj.Spec.Publish = &ociv1alpha1.Publish{Name: "served"}
 	obj.Status.History = []ociv1alpha1.BuildRecord{{Digest: digestA}}
 
 	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithObjects(obj).Build()
@@ -406,6 +410,7 @@ func TestServingOnlyObjectsAreNotRefreshed(t *testing.T) {
 		Source:   sourceFor(obj, c),
 		Pending:  allReconciled{},
 		Recorder: record.NewFakeRecorder(50),
+		// No Default: nothing is configured, so there is nowhere for this object to publish.
 	}
 
 	res, err := r.RefreshOnce(context.Background())
@@ -413,10 +418,11 @@ func TestServingOnlyObjectsAreNotRefreshed(t *testing.T) {
 		t.Fatalf("refreshing: %v", err)
 	}
 	if res.Failed != 0 {
-		t.Errorf("failed = %d, want 0: a serving-only object is not a refresh failure", res.Failed)
+		t.Errorf("failed = %d, want 0: an object with nowhere to publish is not a refresh failure",
+			res.Failed)
 	}
 	if len(reg.requests()) != 0 {
-		t.Error("a serving-only object produced registry traffic")
+		t.Error("an object with no registry produced registry traffic")
 	}
 }
 

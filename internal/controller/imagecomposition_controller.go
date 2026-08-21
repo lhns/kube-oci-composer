@@ -31,7 +31,6 @@ import (
 	"github.com/lhns/kube-oci-composer/internal/cache"
 	"github.com/lhns/kube-oci-composer/internal/oci"
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
-	"github.com/lhns/kube-oci-composer/internal/serve"
 )
 
 // pendingRetryInterval is how often a composition waiting on a dependency re-checks. Short
@@ -45,13 +44,24 @@ type ImageCompositionReconciler struct {
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
 
-	// Server is the built-in endpoint used when spec.push is unset.
-	Server *serve.Server
-
 	// Default is where objects publish when they name no repository of their own. Configured once
 	// by the operator; see recon.DefaultRegistry for why its credential is namespaced to the
 	// controller rather than to the object.
 	Default recon.DefaultRegistry
+
+	// InsecureRegistries are hosts this controller may push to over plain HTTP, matched on host
+	// exactly as the builder and the retention refresher match it (recon.InsecureHost).
+	//
+	// It exists on this controller at all because the loopback serving endpoint is gone (ADR 0035):
+	// pushes used to be either loopback -- always plaintext -- or to a real registry over HTTPS,
+	// so there was no third case. Now the DEFAULT case is a bundled registry reached over a
+	// NodePort or a Service, and neither has a certificate.
+	InsecureRegistries []string
+
+	// RequirePinnedSources refuses any sourceRef that names no revision (threat T1). Off by
+	// default: pinning is deliberately optional per ADR 0026, and this is how an operator opts a
+	// whole cluster out of that.
+	RequirePinnedSources bool
 
 	// Fetcher retrieves layer content from its origin.
 	Fetcher *oci.Fetcher
@@ -67,10 +77,6 @@ type ImageCompositionReconciler struct {
 	// HistoryLimit is how many past builds to retain per object when the object does not say.
 	// Zero means DefaultHistoryLimit.
 	HistoryLimit int
-
-	// replay tracks which objects have had their published history restored into the registry
-	// this process. See replay.go.
-	replay replayer
 }
 
 // The controller never creates or deletes ImageCompositions — it only observes them and patches
@@ -109,7 +115,6 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			if r.Readiness != nil {
 				r.Readiness.Forget(req.NamespacedName)
 			}
-			r.replay.forget(req.NamespacedName)
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -374,18 +379,11 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 		return buildResult{}, err
 	}
 
-	// name.Insecure applies ONLY to the loopback serving endpoint. Applying it unconditionally
-	// would silently downgrade pushes to a real registry to plaintext HTTP — the sort of quiet
-	// weakening nobody notices until it matters.
-	var refOpts []name.Option
-	if tgt.insecure {
-		refOpts = append(refOpts, name.Insecure)
-	}
+	refOpts := r.refOptions(tgt.writeRepo)
 
 	// Restore previously published builds before checking convergence, so that after a restart
 	// the references resolve from replayed state rather than looking absent and forcing a
 	// rebuild of something already in the store.
-	r.replayHistory(ctx, obj)
 
 	// What each tag currently resolves to, plus whether the previously recorded digest is still
 	// present at all. A HEAD failure is not an error: the ordinary cause is that the reference
@@ -536,11 +534,6 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	//
 	// For an index this stores the children too — an index alone would replay into a reference
 	// that resolves but cannot be pulled.
-	if r.Server != nil && obj.Spec.Push == nil {
-		if sErr := art.saveManifests(ctx, r.Server.SaveManifest); sErr != nil {
-			log.FromContext(ctx).Error(sErr, "could not persist the manifest; a restart will lose this build")
-		}
-	}
 
 	recon.Event(r.Recorder, obj, corev1.EventTypeNormal, ociv1alpha1.ReasonSucceeded,
 		fmt.Sprintf("Published %s@%s%s", tgt.pullRepo, digest, tagSuffix(tgt.tags)))
@@ -562,8 +555,8 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 
 // historyLimit resolves the retention count for one object.
 func (r *ImageCompositionReconciler) historyLimit(obj *ociv1alpha1.ImageComposition) int {
-	if obj.Spec.Publish != nil && obj.Spec.Publish.History != nil {
-		return int(*obj.Spec.Publish.History)
+	if obj.Spec.Push != nil && obj.Spec.Push.History != nil {
+		return int(*obj.Spec.Push.History)
 	}
 	if r.HistoryLimit > 0 {
 		return r.HistoryLimit
@@ -597,62 +590,64 @@ type target struct {
 	tags []string
 	// onConflict decides what happens to a tag that already means something else.
 	onConflict ociv1alpha1.TagConflictPolicy
-	// insecure allows plaintext HTTP, true only for the loopback endpoint.
-	insecure bool
 	// usesDefault marks a target the OBJECT did not choose, which is the only case where the
 	// operator's own credential may be used. See recon.DefaultRegistry.CredentialFor.
 	usesDefault bool
 }
 
-// resolve picks the publication target: an external registry when push is set, otherwise the
-// built-in endpoint.
+// target is where this object publishes.
+//
+// One shape now: the controller uploads to a registry, either one the object named or the
+// operator's default (ADR 0035). There is no second surface to choose between, which is why this
+// stopped being a branch.
 func (r *ImageCompositionReconciler) target(obj *ociv1alpha1.ImageComposition) (target, error) {
-	if p := obj.Spec.Push; p != nil {
-		return target{
-			writeRepo:  p.Repository,
-			pullRepo:   p.Repository,
-			tags:       p.Tags,
-			onConflict: p.ResolveConflictPolicy(),
-		}, nil
+	p := obj.Spec.Push
+	repo := ""
+	usesDefault := false
+	if p != nil {
+		repo = p.Repository
 	}
-	if r.Server == nil {
-		// No serving endpoint. Publish to the operator's default registry, which is what a chart
-		// install configures and what makes a default deployment publish somewhere real without
-		// anyone editing a spec.
-		if r.Default.Configured() {
-			tags, err := recon.EffectiveTags(obj.Spec.Publish.GetTags(), obj.Spec.Publish.GetRef())
-			if err != nil {
-				return target{}, err
-			}
-			repo := r.Default.RepositoryFor(obj.Namespace, publishName(obj))
-			return target{
-				writeRepo:   repo,
-				pullRepo:    repo,
-				tags:        tags,
-				onConflict:  obj.Spec.Publish.ResolveConflictPolicy(),
-				usesDefault: true,
-			}, nil
+	if repo == "" {
+		if !r.Default.Configured() {
+			// Operator-level misconfiguration, not a spec error. Configuring a registry means
+			// restarting the controller with different flags -- which changes nothing about this
+			// object, so stalling would leave every composition wedged after the fix. It waits.
+			return target{}, recon.Pending(
+				"this object names no repository, and no default registry is configured")
 		}
-
-		// Operator-level misconfiguration, not a spec error. Configuring a registry means
-		// restarting the controller with different flags — which changes nothing about this
-		// object, so stalling would leave every composition wedged after the fix. It waits.
-		return target{}, recon.Pending(
-			"this object names no repository, and neither a default registry nor a serving " +
-				"endpoint is configured yet")
+		repo = r.Default.RepositoryFor(obj.Namespace, publishName(obj))
+		usesDefault = true
 	}
-	tags, err := recon.EffectiveTags(obj.Spec.Publish.GetTags(), obj.Spec.Publish.GetRef())
+
+	tags, err := recon.EffectiveTags(p.GetTags(), p.GetRef())
 	if err != nil {
 		return target{}, err
 	}
-	path := publishName(obj)
 	return target{
-		writeRepo:  fmt.Sprintf("127.0.0.1%s/%s", r.Server.Addr, path),
-		pullRepo:   fmt.Sprintf("%s/%s", r.Server.Host, path),
-		tags:       tags,
-		onConflict: obj.Spec.Publish.ResolveConflictPolicy(),
-		insecure:   true,
+		writeRepo:   repo,
+		pullRepo:    repo,
+		tags:        tags,
+		onConflict:  p.ResolveConflictPolicy(),
+		usesDefault: usesDefault,
 	}, nil
+}
+
+// refOptions decides whether this repository may be reached over plain HTTP.
+//
+// A method rather than three lines inline, because it is the only part of the push path that a
+// unit test can actually check. go-containerregistry treats localhost and 127.0.0.1 as insecure on
+// its own, so a test against an httptest registry succeeds whether or not this controller ever
+// consults --insecure-registry -- which is exactly how the controller shipped with no plain-HTTP
+// push path at all and a green suite. That was found in a cluster, by the e2e, one round after the
+// serving endpoint was removed.
+//
+// Matched on HOST, never on prefix: naming one internal registry must not downgrade requests to a
+// lookalike name that merely starts the same way.
+func (r *ImageCompositionReconciler) refOptions(repository string) []name.Option {
+	if recon.InsecureHost(repository, r.InsecureRegistries) {
+		return []name.Option{name.Insecure}
+	}
+	return nil
 }
 
 // artifactStatus reports the PULL reference, never the loopback one the controller wrote to.
@@ -680,10 +675,12 @@ func artifactStatus(t target, digest v1.Hash) *ociv1alpha1.ArtifactStatus {
 	return st
 }
 
+// publishName is the repository path an object gets inside the default registry.
+//
+// The object's own name. spec.publish.name used to let a composition choose a different one; with
+// publish gone, an object wanting a specific path names the whole repository in spec.push instead,
+// which is one fewer way to express the same thing.
 func publishName(obj *ociv1alpha1.ImageComposition) string {
-	if obj.Spec.Publish != nil && obj.Spec.Publish.Name != "" {
-		return obj.Spec.Publish.Name
-	}
 	return obj.Name
 }
 

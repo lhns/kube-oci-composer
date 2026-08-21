@@ -64,18 +64,19 @@ func splitList(s string) []string {
 
 func main() {
 	var (
-		metricsAddr       string
-		probeAddr         string
-		enableLeader      bool
-		builderImage      string
-		frontendImage     string
-		sourceDateEpoch   string
-		insecureRegs      string
-		refreshInterval   time.Duration
-		defaultRegistry   string
-		defaultPushSecret string
-		historyLimit      int
-		showVersion       bool
+		metricsAddr          string
+		probeAddr            string
+		enableLeader         bool
+		builderImage         string
+		frontendImage        string
+		sourceDateEpoch      string
+		insecureRegs         string
+		refreshInterval      time.Duration
+		defaultRegistry      string
+		defaultPushSecret    string
+		historyLimit         int
+		requirePinnedSources bool
+		showVersion          bool
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "Address the metric endpoint binds to.")
@@ -110,6 +111,8 @@ func main() {
 	flag.StringVar(&insecureRegs, "insecure-registry", "",
 		"Comma-separated registry hosts to push to over plain HTTP. Opt-in per host, for an "+
 			"internal or air-gapped registry without TLS.")
+	flag.BoolVar(&requirePinnedSources, "require-pinned-sources", false,
+		"Refuse an ImageBuild whose spec.context names no revision. Pinning is optional by design (ADR 0026), so this is how an operator decides otherwise for a whole cluster. It matters more here than on the composer: an unpinned context builds whatever the branch is at now, and a build's output cannot be reproduced from its spec (ADR 0025).")
 	flag.IntVar(&historyLimit, "keep-builds", ociv1alpha1.DefaultHistoryLimit, "How many past builds to retain in status.")
 	flag.BoolVar(&showVersion, "version", false, "Print the version and exit.")
 
@@ -194,7 +197,8 @@ func main() {
 			SourceDateEpoch:    sourceDateEpoch,
 			InsecureRegistries: splitList(insecureRegs),
 		},
-		HistoryLimit: historyLimit,
+		HistoryLimit:         historyLimit,
+		RequirePinnedSources: requirePinnedSources,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to set up the ImageBuild controller")
 		os.Exit(1)

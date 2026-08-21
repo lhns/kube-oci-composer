@@ -24,10 +24,9 @@ import (
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 	"github.com/lhns/kube-oci-composer/internal/cache"
 	"github.com/lhns/kube-oci-composer/internal/controller"
-	gcpkg "github.com/lhns/kube-oci-composer/internal/gc"
+	"github.com/lhns/kube-oci-composer/internal/oci"
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 	"github.com/lhns/kube-oci-composer/internal/retention"
-	"github.com/lhns/kube-oci-composer/internal/serve"
 	"github.com/lhns/kube-oci-composer/internal/store"
 )
 
@@ -37,27 +36,6 @@ var (
 	commit  = "none"
 	date    = "unknown"
 )
-
-// Storage backend names, kept as constants so the flag validation and the selection cannot drift.
-const (
-	backendDisk = "disk"
-	backendS3   = "s3"
-)
-
-// newBlobStore picks where served blobs live.
-func newBlobStore(backend, dir string, s3 store.Store) (store.Store, error) {
-	switch backend {
-	case backendS3:
-		if s3 == nil {
-			return nil, fmt.Errorf("storage backend %q requires S3 to be configured", backend)
-		}
-		return s3, nil
-	case backendDisk:
-		return store.NewDisk(dir)
-	default:
-		return nil, fmt.Errorf("unknown storage backend %q", backend)
-	}
-}
 
 var (
 	scheme   = runtime.NewScheme()
@@ -71,53 +49,31 @@ func init() {
 
 func main() {
 	var (
-		metricsAddr           string
-		probeAddr             string
-		enableLeaderElection  bool
-		showVersion           bool
-		servingHost           string
-		servingAddr           string
-		storageBackend        string
-		storageDir            string
-		cacheDir              string
-		s3Endpoint            string
-		s3Bucket              string
-		s3Prefix              string
-		s3Region              string
-		s3PathStyle           bool
-		s3Presign             bool
-		gcInterval            time.Duration
-		gcGrace               time.Duration
-		refreshInterval       time.Duration
-		insecureRegs          string
-		defaultRegistry       string
-		defaultPushSecret     string
-		keepBuilds            int
-		gcKeepBuilds          int
-		gcDryRun              bool
-		sharedStorage         bool
-		standbyReplayInterval time.Duration
+		metricsAddr          string
+		probeAddr            string
+		enableLeaderElection bool
+		showVersion          bool
+		cacheDir             string
+		s3Endpoint           string
+		s3Bucket             string
+		s3Prefix             string
+		s3Region             string
+		s3PathStyle          bool
+		s3Presign            bool
+		refreshInterval      time.Duration
+		insecureRegs         string
+		fetchDenyPrivate     bool
+		requirePinnedSources bool
+		defaultRegistry      string
+		defaultPushSecret    string
+		keepBuilds           int
+		gcKeepBuilds         int
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "Address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "Address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election, ensuring only one active controller manager.")
-	flag.StringVar(&servingHost, "serving-host", "",
-		"Externally reachable host workloads pull artifacts from, e.g. oci.example.com. "+
-			"Required unless every ImageComposition sets spec.push, because it is what "+
-			"status.artifact.ref is built from.")
-	flag.StringVar(&servingAddr, "serving-bind-address", ":5000", "Address the OCI endpoint binds to.")
-	flag.StringVar(&storageBackend, "storage-backend", backendDisk,
-		"Where served blobs live: \"disk\" or \"s3\". S3 requires --s3-endpoint. Note this only "+
-			"moves the blobs; manifests are held in memory by the registry implementation and are "+
-			"rebuilt at startup either way, so S3 here saves re-uploading layers after a restart "+
-			"rather than removing the rebuild.")
-	flag.StringVar(&storageDir, "storage-dir", "/var/lib/oci-composer",
-		"Directory backing the served blobs. An emptyDir is fine: composition is deterministic, so "+
-			"anything lost is rebuilt by the reconcile that runs at startup. Note that rebuilding "+
-			"re-fetches every layer from upstream unless a cache is configured, and the pod stays "+
-			"unready until it has.")
 	flag.StringVar(&cacheDir, "cache-dir", "/var/cache/oci-composer",
 		"Directory holding fetched layer sources, keyed by digest. Assembly reads from here, so a "+
 			"local directory is always used even when object storage is configured behind it.")
@@ -141,8 +97,6 @@ func main() {
 			"controller. Off by default because it exposes the object-store endpoint to every "+
 			"pulling client, which on a private gateway may not be reachable from every node.")
 
-	flag.DurationVar(&gcInterval, "gc-interval", gcpkg.DefaultInterval,
-		"How often to reclaim blobs and cache entries nothing references. Zero disables collection.")
 	flag.DurationVar(&refreshInterval, "retention-refresh-interval", retention.DefaultInterval,
 		"How often to re-pull the images every live object still references, so that a registry "+
 			"with an expiry policy does not reclaim them. Zero disables it.\n"+
@@ -166,10 +120,14 @@ func main() {
 	flag.StringVar(&insecureRegs, "insecure-registry", "",
 		"Comma-separated registry hosts that may be reached over plain HTTP. Matched on host, so "+
 			"naming one internal registry does not downgrade any other request.")
-	flag.DurationVar(&gcGrace, "gc-grace", gcpkg.DefaultGrace,
-		"Never reclaim anything written more recently than this. A build writes its blobs before "+
-			"recording them in status, so a sweep landing in that window would delete content that "+
-			"is moments from being referenced.")
+	flag.BoolVar(&fetchDenyPrivate, "fetch-deny-private", false,
+		"Refuse `fetch` URLs that resolve to private, loopback or CGNAT addresses. Cloud metadata "+
+			"endpoints on link-local addresses are ALWAYS refused, flag or no flag, because they "+
+			"hand out credentials and no layer source lives there. The rest is opt-in: an artifact "+
+			"server on a private address is this project's most ordinary source, so refusing those "+
+			"by default would be a guard people turn off. See ADR 0036 (threat I6).")
+	flag.BoolVar(&requirePinnedSources, "require-pinned-sources", false,
+		"Refuse any sourceRef (or ImageBuild context) that names no revision. Pinning is optional by design -- a composition that tracks a branch is a legitimate thing to want (ADR 0026) -- so this is how an operator decides otherwise for a whole cluster. Objects that omit `revision:` go Stalled with a message saying so.")
 	flag.IntVar(&keepBuilds, "keep-builds", ociv1alpha1.DefaultHistoryLimit,
 		"How many past builds to retain per object, unless the object overrides it. Retention is "+
 			"the ONLY thing keeping an old digest pullable, so reverting a commit or rescheduling a "+
@@ -180,20 +138,6 @@ func main() {
 	// merely honours that cap. Kept because silently dropping a flag someone set in a values file
 	// becomes a crash-loop on an unknown flag, which is a worse upgrade than a rename.
 	flag.IntVar(&gcKeepBuilds, "gc-keep-builds", 0, "Deprecated alias for --keep-builds.")
-	flag.BoolVar(&gcDryRun, "gc-dry-run", false,
-		"Log what garbage collection would reclaim without deleting anything.")
-
-	flag.BoolVar(&sharedStorage, "shared-storage", false,
-		"Assert that --storage-dir is reachable by every replica (an RWX volume), which lets "+
-			"NON-LEADER replicas serve pulls instead of standing by. Implied by --storage-backend=s3, "+
-			"which is shared by construction. Serving is read-only, so this is safe; publishing, "+
-			"garbage collection and status writes stay on the leader either way. Set it wrongly, with "+
-			"a node-local directory and more than one replica, and standbys will answer 404 for "+
-			"artifacts they do not have.")
-	flag.DurationVar(&standbyReplayInterval, "standby-replay-interval", time.Minute,
-		"How often a replica refreshes its manifest map from the shared store, picking up builds "+
-			"the leader published since the last pass. Only used with shared storage. Bounds how "+
-			"long a non-leader can 404 an artifact that was just built.")
 
 	flag.BoolVar(&showVersion, "version", false, "Print version information and exit.")
 
@@ -223,14 +167,6 @@ func main() {
 		SecretAccessKey: os.Getenv("AWS_SECRET_ACCESS_KEY"),
 	}
 
-	// Validate before building the manager, so a typo in chart values fails immediately rather
-	// than producing a controller that reports Ready and cannot cache anything.
-	if storageBackend != backendDisk && storageBackend != backendS3 {
-		setupLog.Error(nil, "invalid --storage-backend", "value", storageBackend,
-			"expected", []string{backendDisk, backendS3})
-		os.Exit(1)
-	}
-
 	var remote store.Store
 	if s3Endpoint != "" {
 		s3, err := store.NewS3(s3Config)
@@ -246,10 +182,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	if storageBackend == backendS3 && remote == nil {
-		setupLog.Error(nil, "--storage-backend=s3 needs --s3-endpoint")
-		os.Exit(1)
-	}
 	if s3Presign && remote == nil {
 		setupLog.Error(nil, "--s3-presign-blobs needs an S3 backend")
 		os.Exit(1)
@@ -282,52 +214,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	var server *serve.Server
-	if servingHost != "" {
-		blobStore, err := newBlobStore(storageBackend, storageDir, remote)
-		if err != nil {
-			setupLog.Error(err, "unable to set up blob storage")
-			os.Exit(1)
-		}
-		server, err = serve.New(servingHost, servingAddr, blobStore, s3Presign)
-		if err != nil {
-			setupLog.Error(err, "unable to set up the serving endpoint")
-			os.Exit(1)
-		}
-		// S3 is shared by construction, so making the operator assert it again would be noise.
-		// A directory is ambiguous — node-local and an RWX mount look identical from in here —
-		// so that case has to be asserted.
-		server.SharedStorage = sharedStorage || storageBackend == backendS3
-		// Runnable rather than a bare goroutine, so the manager owns its lifecycle and a
-		// listener failure takes the process down instead of leaving a controller that
-		// reports Ready for artifacts nothing can pull.
-		if err := mgr.Add(server); err != nil {
-			setupLog.Error(err, "unable to register the serving endpoint")
-			os.Exit(1)
-		}
-		setupLog.Info("serving endpoint enabled",
-			"host", servingHost, "addr", servingAddr, "sharedStorage", server.SharedStorage)
-	} else {
-		setupLog.Info("no serving host configured; only ImageCompositions with spec.push will reconcile")
-	}
-
 	readiness := &controller.Readiness{Client: mgr.GetClient()}
-
-	// With shared storage every replica serves, so every replica needs the manifests that the
-	// leader published — they live in an in-memory map, not in the store. Registered without
-	// leader election, which is the entire point.
-	if server != nil && server.SharedStorage {
-		if err := mgr.Add(&controller.StandbyReplay{
-			Client:    mgr.GetClient(),
-			Server:    server,
-			Readiness: readiness,
-			Interval:  standbyReplayInterval,
-		}); err != nil {
-			setupLog.Error(err, "unable to register standby replay")
-			os.Exit(1)
-		}
-		setupLog.Info("standby replay enabled; non-leader replicas will serve pulls")
-	}
 
 	defaults := recon.DefaultRegistry{
 		Host:       defaultRegistry,
@@ -349,37 +236,17 @@ func main() {
 		// and the FakeRecorder the tests rely on change with it. Worth doing deliberately rather
 		// than as a drive-by while repairing CI.
 		//nolint:staticcheck // SA1019: deliberate; see above.
-		Recorder:     mgr.GetEventRecorderFor("imagecomposition-controller"),
-		Server:       server,
-		Readiness:    readiness,
-		Default:      defaults,
-		Cache:        layerCache,
-		HistoryLimit: keepBuilds,
+		Recorder:             mgr.GetEventRecorderFor("imagecomposition-controller"),
+		Readiness:            readiness,
+		Default:              defaults,
+		Cache:                layerCache,
+		HistoryLimit:         keepBuilds,
+		Fetcher:              oci.NewFetcherWithGuard(oci.DialGuard{DenyPrivate: fetchDenyPrivate}),
+		RequirePinnedSources: requirePinnedSources,
+		InsecureRegistries:   splitList(insecureRegs),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ImageComposition")
 		os.Exit(1)
-	}
-
-	if gcInterval > 0 {
-		collector := &gcpkg.Collector{
-			Client:   mgr.GetClient(),
-			Cache:    layerCache.Local,
-			Pending:  readiness,
-			Interval: gcInterval,
-			Grace:    gcGrace,
-			DryRun:   gcDryRun,
-		}
-		if server != nil {
-			collector.Blobs = server.Blobs
-		}
-		if err := collector.SetupWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to set up garbage collection")
-			os.Exit(1)
-		}
-		setupLog.Info("garbage collection enabled",
-			"interval", gcInterval, "grace", gcGrace, "keepBuilds", keepBuilds, "dryRun", gcDryRun)
-	} else {
-		setupLog.Info("garbage collection disabled; blobs and cache entries will accumulate")
 	}
 
 	if refreshInterval > 0 {
@@ -410,13 +277,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Readiness gates on the served store being warm, so the pod does not join the Service and
-	// answer 404 to pulls while it is still rebuilding after a restart.
-	readyCheck := healthz.Ping
-	if server != nil {
-		readyCheck = readiness.Check
-	}
-	if err := mgr.AddReadyzCheck("readyz", readyCheck); err != nil {
+	// A bare ping. Readiness used to gate on the served store being warm so the pod would not join
+	// the Service and 404 pulls while rebuilding; there is no store and no Service to join now.
+	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}

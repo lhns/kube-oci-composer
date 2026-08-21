@@ -239,10 +239,6 @@ func TestOnConflictWinsOverTheDeprecatedField(t *testing.T) {
 			if got := push.ResolveConflictPolicy(); got != tc.want {
 				t.Errorf("Push = %q, want %q", got, tc.want)
 			}
-			pub := &ociv1alpha1.Publish{OnConflict: tc.explicit, Immutable: tc.deprecated}
-			if got := pub.ResolveConflictPolicy(); got != tc.want {
-				t.Errorf("Publish = %q, want %q; the two kinds must not disagree", got, tc.want)
-			}
 		})
 	}
 

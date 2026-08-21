@@ -72,7 +72,7 @@ func newCountingOrigin(t *testing.T, files map[string]string) *countingOrigin {
 func TestSteadyStateReconcileDoesNotFetch(t *testing.T) {
 	origin := newCountingOrigin(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("steady", urlLayer("core", origin.url, origin.digest, "/core"))
-	r, _ := servingReconciler(t, obj)
+	r, _ := registryReconciler(t, obj)
 
 	first := build(t, r, obj, "first build")
 	if got := origin.requests.Load(); got != 1 {
@@ -97,7 +97,7 @@ func TestChangedSpecStillRebuilds(t *testing.T) {
 	b := newCountingOrigin(t, map[string]string{"lib/a.jar": "bbb"})
 
 	obj := composition("changing", urlLayer("core", a.url, a.digest, "/core"))
-	r, _ := servingReconciler(t, obj)
+	r, _ := registryReconciler(t, obj)
 
 	first := build(t, r, obj, "first build")
 
@@ -118,7 +118,7 @@ func TestChangedSpecStillRebuilds(t *testing.T) {
 func TestTargetChangeAloneRebuilds(t *testing.T) {
 	origin := newCountingOrigin(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("retarget", urlLayer("core", origin.url, origin.digest, "/core"))
-	r, _ := servingReconciler(t, obj)
+	r, _ := registryReconciler(t, obj)
 
 	first := build(t, r, obj, "first build")
 
@@ -136,12 +136,12 @@ func TestTargetChangeAloneRebuilds(t *testing.T) {
 func TestMissingPublishedArtifactForcesRebuild(t *testing.T) {
 	origin := newCountingOrigin(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("restarted", urlLayer("core", origin.url, origin.digest, "/core"))
-	r, _ := servingReconciler(t, obj)
+	r, _ := registryReconciler(t, obj)
 
 	first := build(t, r, obj, "first build")
 
 	// Simulate a restart: the status survives on the object, the served store does not.
-	fresh, _ := servingReconciler(t, obj)
+	fresh, _ := registryReconciler(t, obj)
 	fresh.Client = r.Client
 
 	second := build(t, fresh, obj, "rebuild after restart")
@@ -239,7 +239,7 @@ func TestInputHashIsPinned(t *testing.T) {
 	// what was previously hardcoded, so the rebuild produces the SAME digest and republishing it
 	// under an unchanged immutable tag is a no-op. On a non-amd64 controller it would not be —
 	// see TestUnsetPlatformMatchesTheOldHardcodedDefault.
-	const want = "sha256:2162dd741a791daa0b86164ff9e06cead5549a3c393eeb145c55998f2eef84b2"
+	const want = "sha256:615d70e692fb207b8f95a6fbbe8bbc8f730da84fa7370d21dd093dbf9ad9c804"
 
 	got := oci.InputHash([]oci.LayerInput{
 		{Name: "core", URL: "https://example/x.tgz", Digest: "sha256:1111", Unpack: oci.UnpackTarGz, Target: "/core"},

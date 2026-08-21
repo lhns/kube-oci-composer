@@ -14,20 +14,20 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0003](0003-one-ordered-layers-list.md) | One ordered `layers` list, no separate `base` field | Partly superseded by 0016 |
 | [0004](0004-two-kinds-two-controllers.md) | Two kinds, two controllers, two charts, one repo | Superseded by 0016 |
 | [0005](0005-go-controller-runtime.md) | Go and controller-runtime | Accepted |
-| [0006](0006-push-is-optional.md) | `push` is optional; a built-in endpoint means no registry is required | Accepted |
+| [0006](0006-push-is-optional.md) | `push` is optional; a built-in endpoint means no registry is required | **Superseded by [0035](0035-a-registry-is-the-only-publication-path.md)** |
 | [0007](0007-packaging.md) | Packaging: OCI chart and image published to ghcr | Accepted |
 | [0008](0008-supply-chain.md) | Supply chain: referrers for SBOM and signatures; key-based signing, not keyless | Proposed |
 | [0009](0009-flux-conventions-without-dependency.md) | Flux conventions without a Flux dependency, and the name | Accepted |
 | [0010](0010-workloads-reference-digests.md) | Workloads reference digests, never tags | Accepted |
 | [0011](0011-content-tags-expire.md) | Content tags expire: mark-and-sweep garbage collection | Accepted, amends 0010 |
-| [0012](0012-keep-pkg-registry.md) | Keep `pkg/registry`; own only the blob handler | Accepted |
-| [0013](0013-persist-manifests.md) | Persist manifests so published builds survive a restart | Accepted |
-| [0014](0014-pluggable-storage.md) | Pluggable storage and a two-tier input cache | Accepted |
+| [0012](0012-keep-pkg-registry.md) | Keep `pkg/registry`; own only the blob handler | Moot since [0035](0035-a-registry-is-the-only-publication-path.md) |
+| [0013](0013-persist-manifests.md) | Persist manifests so published builds survive a restart | Moot since [0035](0035-a-registry-is-the-only-publication-path.md) |
+| [0014](0014-pluggable-storage.md) | Pluggable storage and a two-tier input cache | Accepted; the serving half is moot since [0035](0035-a-registry-is-the-only-publication-path.md) |
 | [0015](0015-base-images-are-platform-pinned.md) | Base images are platform-pinned; config inheritance is opt-in | Accepted |
 | [0016](0016-the-scope-line-is-determinism.md) | The scope line is determinism, not Dockerfile parity | Accepted, supersedes 0004 and part of 0003 |
 | [0017](0017-updating-the-consumed-digest.md) | How a workload's digest reference gets updated | Accepted, amends 0010 |
 | [0018](0018-multi-architecture-output.md) | Multi-architecture output | Accepted, implemented |
-| [0021](0021-active-standby-or-shared-storage.md) | Active/standby, or shared storage for the serving endpoint | Accepted, in favour of shared storage |
+| [0021](0021-active-standby-or-shared-storage.md) | Active/standby, or shared storage for the serving endpoint | Moot since [0035](0035-a-registry-is-the-only-publication-path.md) |
 | [0022](0022-distro-packages-as-layer-sources.md) | Distro packages are a layer source: `unpack: deb` | Accepted |
 | [0023](0023-more-archive-formats.md) | More archive formats: `unpack: zip` and the compressed-tar family | Accepted |
 | [0024](0024-images-as-layer-sources.md) | An image can be a layer source, flattened | Accepted |
@@ -38,9 +38,11 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0029](0029-three-valued-tag-conflict-policy.md) | A tag conflict has three answers, not two | Accepted, amends 0017 |
 | [0030](0030-a-real-registry-serves-both-kinds.md) | A real registry serves both kinds, and zot is the one we ship | Accepted, amends 0006 |
 | [0031](0031-the-retention-guarantee.md) | Live objects' images are never reclaimed, by anything | Accepted, sharpens 0011 |
-| [0032](0032-the-embedded-registrys-future.md) | The embedded registry stays, and stops being the default | Accepted, revisits 0012 |
+| [0032](0032-the-embedded-registrys-future.md) | The embedded registry stays, and stops being the default | **Superseded by [0035](0035-a-registry-is-the-only-publication-path.md)** |
 | [0033](0033-one-chart-one-namespace.md) | One chart, one namespace, toggleable components | Accepted, reverses 0004's packaging |
 | [0034](0034-a-default-registry.md) | A default registry, and whose credential is used | Accepted, amends 0030 and 0031 |
+| [0035](0035-a-registry-is-the-only-publication-path.md) | A registry is the only publication path | Accepted, supersedes 0006 and 0032 |
+| [0036](0036-ssrf-on-fetch-urls.md) | SSRF on `fetch` URLs: block the metadata endpoint, make the rest opt-in | Accepted, closes threat I6 |
 
 ## Open questions
 
@@ -59,7 +61,7 @@ first.
 
 | # | Question | Status |
 |---|---|---|
-| [0019](0019-pod-reference-protection-revisited.md) | Should garbage collection protect Pod-referenced digests? | Open, reopened |
+| [0019](0019-pod-reference-protection-revisited.md) | Should garbage collection protect Pod-referenced digests? | Open, reopened twice; threat D8 |
 | [0020](0020-is-the-supply-chain-work-worth-building.md) | Is the supply-chain work worth building? | Open |
 
 ## Format

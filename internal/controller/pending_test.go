@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"io"
+	"log"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -11,10 +13,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/google/go-containerregistry/pkg/registry"
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 	"github.com/lhns/kube-oci-composer/internal/oci"
-	"github.com/lhns/kube-oci-composer/internal/serve"
-	"github.com/lhns/kube-oci-composer/internal/store"
+	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 )
 
 // A composition may reference things it does not own: a Flux source, a Secret, a ConfigMap. None
@@ -25,23 +27,14 @@ import (
 // commit; the one that lost the race went Stalled and sat there reporting "source not found"
 // while the GitRepository it named was Ready in the same namespace. Only deleting it cleared it.
 
-// pendingReconciler is servingReconciler plus the Flux source kinds, so a test can reconcile a
+// pendingReconciler is registryReconciler plus the Flux source kinds, so a test can reconcile a
 // sourceRef composition end to end and then create the source underneath it.
 func pendingReconciler(t *testing.T, objs ...client.Object) *ImageCompositionReconciler {
 	t.Helper()
 
-	blobs, err := store.NewDisk(t.TempDir())
-	if err != nil {
-		t.Fatalf("creating blob store: %v", err)
-	}
-	srv, err := serve.New("oci.test", ":0", blobs, false)
-	if err != nil {
-		t.Fatalf("creating server: %v", err)
-	}
-	httpSrv := httptest.NewServer(srv.Handler())
+	httpSrv := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
 	t.Cleanup(httpSrv.Close)
 	host := strings.TrimPrefix(httpSrv.URL, "http://")
-	srv.Addr = host[strings.LastIndex(host, ":"):]
 
 	scheme := fluxScheme(t)
 	builder := fake.NewClientBuilder().WithScheme(scheme)
@@ -56,7 +49,7 @@ func pendingReconciler(t *testing.T, objs ...client.Object) *ImageCompositionRec
 		Client:   builder.Build(),
 		Scheme:   scheme,
 		Recorder: record.NewFakeRecorder(64),
-		Server:   srv,
+		Default:  recon.DefaultRegistry{Host: host},
 		Fetcher:  oci.NewFetcher(),
 	}
 }
