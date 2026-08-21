@@ -30,7 +30,11 @@ const (
 	contextPath = "/workspace"
 	resultPath  = "/result"
 	secretPath  = "/secrets"
-	dockerPath  = "/docker"
+	// Where the copied registry CA is mounted, and where the merged bundle is written. The bundle
+	// is an emptyDir because uid 1000 cannot write to the image's root-owned /etc/ssl/certs.
+	registryCAPath = "/registry-ca"
+	caBundlePath   = "/certs/ca-bundle.crt"
+	dockerPath     = "/docker"
 
 	// metadataFile is where buildctl writes the pushed digest, which is the one thing the
 	// controller needs back out of the build.
@@ -52,6 +56,13 @@ type JobConfig struct {
 	// FrontendImage is the Dockerfile frontend, pinned by digest. BuildKit resolves `# syntax=`
 	// over the network unless told otherwise.
 	FrontendImage string
+	// RegistryCA is a PEM bundle the build must trust, copied into the build's namespace and
+	// merged with the image's own roots. Empty when the registry's certificate is already trusted.
+	//
+	// Deliberately NOT part of the input hash. How the bytes are transported does not change what
+	// they are -- the same note InsecureRegistries carries below.
+	RegistryCA []byte
+
 	// InsecureRegistries are registry hosts to talk to over plain HTTP.
 	//
 	// Operator-level and opt-in per host, not a global "trust anything": an internal or air-gapped
@@ -287,13 +298,40 @@ func buildVolumes(spec ociv1alpha1.ImageBuildSpec, pushSecret string) ([]corev1.
 	return volumes, mounts
 }
 
+// registryCAVolumes mounts the copied CA and a writable place to merge it with the image's roots.
+//
+// Returned together with the env var and rendered alongside the script prelude, all three gated on
+// the same condition, so a test can assert on the rendered container instead of on runtime
+// behaviour. A `[ -f ... ]` check in the shell instead would silently no-op if a mount name drifted.
+func registryCAVolumes(caSecret string) ([]corev1.Volume, []corev1.VolumeMount) {
+	if caSecret == "" {
+		return nil, nil
+	}
+	return []corev1.Volume{
+			{
+				Name:         "registry-ca",
+				VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: caSecret}},
+			},
+			{
+				Name:         "ca-bundle",
+				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+			},
+		}, []corev1.VolumeMount{
+			{Name: "registry-ca", MountPath: registryCAPath, ReadOnly: true},
+			{Name: "ca-bundle", MountPath: path.Dir(caBundlePath)},
+		}
+}
+
 // buildJob renders the Job for one build.
 func buildJob(obj *ociv1alpha1.ImageBuild, inputHash, contextURL string, cfg JobConfig,
-	repo, pushSecret string, cacheAvailable bool) *batchv1.Job {
+	repo, pushSecret, caSecret string, cacheAvailable bool) *batchv1.Job {
 
 	spec := obj.Spec
 	args := buildctlArgs(obj, cfg, repo, cacheAvailable)
 	volumes, mounts := buildVolumes(spec, pushSecret)
+	caVolumes, caMounts := registryCAVolumes(caSecret)
+	volumes = append(volumes, caVolumes...)
+	mounts = append(mounts, caMounts...)
 	hasPushSecret := pushSecret != ""
 
 	env := []corev1.EnvVar{
@@ -303,6 +341,10 @@ func buildJob(obj *ociv1alpha1.ImageBuild, inputHash, contextURL string, cfg Job
 	if hasPushSecret {
 		env = append(env, corev1.EnvVar{Name: "DOCKER_CONFIG", Value: dockerPath})
 	}
+	if caSecret != "" {
+		// Both buildctl and the buildkitd it forks are Go binaries, so one variable covers both.
+		env = append(env, corev1.EnvVar{Name: "SSL_CERT_FILE", Value: caBundlePath})
+	}
 
 	// buildctl writes the pushed digest to a file in an emptyDir, which the controller cannot read.
 	// Copying it to the termination log is what gets it back out: Kubernetes surfaces that in the
@@ -311,10 +353,29 @@ func buildJob(obj *ociv1alpha1.ImageBuild, inputHash, contextURL string, cfg Job
 	//
 	// The `sh -c "$@"` form passes the buildctl arguments positionally, so nothing here has to
 	// quote them and an argument containing a space cannot break the script.
+	// The CA prelude, when there is one.
+	//
+	// SSL_CERT_FILE REPLACES Go's system pool rather than adding to it, so pointing it straight at
+	// the registry's CA would leave the build unable to verify docker.io -- and every `FROM
+	// alpine` and every frontend fetch would fail. Hence the merge.
+	//
+	// Written at runtime because a mount cannot be merged at render time, and possible because the
+	// build container does NOT set readOnlyRootFilesystem: rootlessSecurityContext deliberately
+	// omits it, and the comment there says the read-only rootfs is the controller's property.
+	//
+	// Braces and `|| true` because the script runs under `set -e` and a builder image without a
+	// system bundle must not fail the build before it starts.
+	//
+	// Not `/etc/buildkit/certs/<host>/ca.pem`: rootless BuildKit ignores it (moby/buildkit#6406).
+	caPrelude := ""
+	if caSecret != "" {
+		caPrelude = fmt.Sprintf(`{ cat /etc/ssl/certs/ca-certificates.crt 2>/dev/null || true; cat %s/ca.crt; } > %s
+`, registryCAPath, caBundlePath)
+	}
 	script := fmt.Sprintf(`set -e
-buildctl-daemonless.sh "$@"
+%sbuildctl-daemonless.sh "$@"
 cat %s > /dev/termination-log
-`, path.Join(resultPath, metadataFile))
+`, caPrelude, path.Join(resultPath, metadataFile))
 
 	container := corev1.Container{
 		Name:  "build",

@@ -269,6 +269,62 @@ registry:
     #                    a default: useful when another system copies them onward.
     mode: ""
 
+  # TLS on the registry itself.
+  #
+  # OFF by default, and that is not timidity -- turning it on invalidates the containerd drop-in on
+  # every node. zot has one listener, so it cannot serve HTTP and HTTPS at once: each node's
+  # hosts.toml has to move from http:// to https:// and, in selfSigned mode, learn the CA. Anyone
+  # terminating TLS at an ingress instead is unaffected.
+  #
+  # What it buys: today the generated push password crosses the pod network in an HTTP Basic
+  # header, readable by anything positioned to watch, with no trace in any log -- and that
+  # credential is the whole of the "only the controllers can push" guarantee. This closes it.
+  tls:
+    enabled: false
+
+    #   selfSigned  -- the chart generates a CA and a leaf, and distributes the CA to the
+    #                  controllers and to build Jobs. No dependencies. Does NOT renew: the chart
+    #                  refuses to render once the certificate is near expiry, and rotation is a
+    #                  documented manual sequence.
+    #   certManager -- the chart renders a Certificate and cert-manager owns renewal. Recommended
+    #                  if you run cert-manager, because renewal is the thing selfSigned cannot do.
+    #   secret      -- you supply a kubernetes.io/tls Secret and manage it yourself.
+    mode: selfSigned
+
+    # Empty means "<release>-kube-oci-composer-registry-tls". In mode=secret this is the Secret you
+    # created; in mode=certManager it is the name cert-manager is told to write.
+    secretName: ""
+
+    certManager:
+      issuerRef:
+        kind: Issuer
+        name: ""
+        group: cert-manager.io
+      duration: 2160h
+      # Generous on purpose. zot reads its certificate once at startup, so a renewed Secret is not
+      # picked up until the pod restarts -- nothing in the chart can notice, because it does not
+      # own the Secret cert-manager rewrites. A long renewBefore leaves room to restart it.
+      renewBefore: 360h
+
+    selfSigned:
+      caDays: 3650
+      certDays: 365
+      # Refuse to render when the stored certificate is this close to expiring. An expired
+      # certificate here stops the retention refresh, and that reclaims images live objects still
+      # reference (ADR 0031) -- so this fails rather than warns.
+      failWithinDays: 1
+
+    # Extra SANs beyond the ones computed automatically (the Service names and registry.host).
+    dnsNames: []
+    ipAddresses: []
+
+    # How the CA reaches the controllers and the build Jobs. Turn it off when the certificate is
+    # already publicly trusted -- an ACME issuer, or a corporate CA your images already trust.
+    trust:
+      enabled: true
+      existingConfigMap: ""
+      key: ca.crt
+
   # A NetworkPolicy admitting traffic to the registry.
   #
   # It is a CONNECTIVITY guarantee, not a security control. Reads are anonymous by design and

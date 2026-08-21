@@ -208,7 +208,7 @@ Note what depends on this beyond the controllers: the same list becomes BuildKit
 name here once TLS is on would leave builds pushing credentials in the clear while everything
 looked fixed.
 */}}
-{{- if and .Values.registry.enabled (not .Values.defaultRegistry.host) -}}
+{{- if and .Values.registry.enabled (not .Values.registry.tls.enabled) (not .Values.defaultRegistry.host) -}}
 {{- $hosts = append $hosts (include "kube-oci-composer.defaultRegistry" .) -}}
 {{- end -}}
 {{- with .Values.defaultRegistry.insecure }}{{- $hosts = concat $hosts (splitList "," .) -}}{{- end -}}

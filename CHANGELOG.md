@@ -6,6 +6,26 @@ may change between minor versions.
 ## [Unreleased]
 
 ### Added
+- **TLS on the bundled registry, closing threat I7.** `registry.tls.enabled=true` makes zot
+  terminate TLS itself, with the certificate from `certManager`, a Secret you supply, or a
+  chart-generated self-signed CA. The CA is distributed to both controllers (`--registry-ca-file`,
+  additive to the system roots) and to build Jobs, through the same owned, short-lived,
+  cross-namespace Secret the push credential already uses.
+
+  Without it, the generated push password crosses the pod network in an HTTP Basic header,
+  readable by anything positioned to watch and leaving no trace in any log — and that credential is
+  the whole of the "only the controllers can push" guarantee.
+
+  **Off by default**, because zot has one listener and cannot serve HTTP and HTTPS at once:
+  enabling it invalidates the containerd drop-in on every node, which must move from `http://` to
+  `https://` and, in self-signed mode, learn the CA. `docs/registry.md` has the exact edit.
+  Terminating at an ingress instead avoids all of it.
+
+  **Self-signed certificates do not renew**, and the chart refuses to render once one is close to
+  expiring rather than warning. An expired certificate here stops the retention refresh, and that
+  is not an outage but a deletion one window later (ADR 0031). Use `mode: certManager` if you would
+  rather not rotate by hand. See ADR 0038.
+
 - **A NetworkPolicy for the registry, enabled by default.** Build Jobs run in their object's
   namespace, not the release's, so every build crosses a namespace boundary to reach the registry
   and a default-deny cluster blocks it. The policy admits every namespace on the registry port,

@@ -47,6 +47,10 @@ type ImageBuildReconciler struct {
 	// which vanish with the pod, so the Event is often the only durable trace of why.
 	Recorder record.EventRecorder
 
+	// Transport, when set, trusts an additional CA on top of the system roots. Same object the
+	// other controllers use; see recon.Transport.
+	Transport http.RoundTripper
+
 	// HTTPClient fetches the build context for the Dockerfile check. Nil uses a default with a
 	// timeout; the build itself never streams through this process.
 	HTTPClient *http.Client
@@ -301,9 +305,14 @@ func (r *ImageBuildReconciler) startBuild(ctx context.Context, obj *ociv1alpha1.
 	if err != nil {
 		return err
 	}
+	// Same lifetime, same owner, same reason: a pod mounts only from its own namespace.
+	caSecret, err := r.registryCASecretFor(ctx, obj, jobName(obj, inputHash))
+	if err != nil {
+		return err
+	}
 
 	job := buildJob(obj, inputHash, contextURL, r.JobConfig, r.repositoryFor(obj), pushSecret,
-		r.cacheAvailable(ctx, obj))
+		caSecret, r.cacheAvailable(ctx, obj))
 	if err := ctrl.SetControllerReference(obj, job, r.Scheme()); err != nil {
 		return fmt.Errorf("setting owner: %w", err)
 	}
