@@ -141,7 +141,9 @@ kubectl -n "$BUILD_NS" create configmap e2e-context \
 
 kubectl -n "$BUILD_NS" apply -f "$HERE/manifests/context-server.yaml"
 # The registry is part of the release now, so `helm --wait` above already waited for it.
-kubectl -n oci-composer rollout status deploy/kube-oci-composer-registry --timeout=3m
+# statefulset, not deploy: the registry became one so that clustering could never be a kind switch
+# under a running install (ADR 0039).
+kubectl -n oci-composer rollout status statefulset/kube-oci-composer-registry --timeout=3m
 kubectl -n "$BUILD_NS" rollout status deploy/e2e-context --timeout=3m
 
 # The source's published artifact. Nothing verifies this digest -- a real source-controller is what
