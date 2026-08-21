@@ -85,7 +85,7 @@ spec:
         {{- if .Values.registry.auth.enabled }}
         - name: auth
           secret:
-            secretName: {{ include "kube-oci-composer.registryFullname" . }}-htpasswd
+            secretName: {{ .Values.registry.auth.existingHtpasswdSecret | default (printf "%s-htpasswd" (include "kube-oci-composer.registryFullname" .)) }}
         {{- end }}
         - name: data
         {{- if .Values.registry.persistence.enabled }}

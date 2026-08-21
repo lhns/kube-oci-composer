@@ -163,6 +163,28 @@ may change between minor versions.
   recorded with the reason the destination makes it meaningless. Verified to fail on drift.
 
 ### Fixed
+- **A registry pod that wedged on a Secret the chart declined to create.** Setting
+  `defaultRegistry.existingPushSecret` while leaving `registry.enabled` and `registry.auth.enabled`
+  on skipped **both** generated Secrets, but the registry Deployment mounts the htpasswd Secret on
+  `registry.auth.enabled` alone -- so the pod referenced a Secret that render did not produce and
+  never started. It rendered cleanly and failed only in a cluster.
+
+  The two Secrets now have independent conditions, and the combination that caused it is **refused
+  at render time** with the three ways out named: pin `registry.auth.password` to the credential
+  inside your Secret, supply `registry.auth.existingHtpasswdSecret` (new), or set
+  `registry.auth.enabled=false`.
+
+  Refusing rather than repairing is deliberate, and the tempting repair is the trap: gating the
+  htpasswd Secret on `registry.auth.enabled` alone leaves the password helper with no `-push`
+  Secret to read the previous value back out of, so every `helm upgrade` would mint a fresh random
+  password and the registry would demand one that exists nowhere -- including in the credential you
+  supplied. That configuration renders forever and never works.
+
+  Added with it: a structural guard asserting that **every chart-generated Secret or ConfigMap a
+  workload mounts is actually rendered**, across the toggle matrix. It reproduces this bug exactly
+  when the old condition is restored, and it is the test that was missing -- a mount and the object
+  it mounts live in different files, under different conditions, edited by different changes.
+
 - **E1 is measured rather than cited.** An e2e probe runs a pod with `hostUsers: false` and reports
   what the cluster actually does. On Kubernetes 1.36 the API server **accepts** the field -- that
   half has moved since ADR 0027 -- and the sandbox then fails to start, because a user namespace

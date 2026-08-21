@@ -9,3 +9,4 @@ Helm drops a template whose output is only whitespace, so nothing lands in the r
 inside the include still aborts `helm template`, `helm install` and `helm upgrade` alike.
 */}}
 {{- include "kube-oci-composer.checkRetention" . -}}
+{{- include "kube-oci-composer.checkRegistryAuth" . -}}

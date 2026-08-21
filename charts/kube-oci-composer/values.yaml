@@ -243,6 +243,12 @@ registry:
     # your GitOps tool refuses to leave chart-generated state in the cluster.
     password: ""
 
+    # Supply the htpasswd Secret yourself instead of having the chart generate it. The Secret must
+    # hold an `htpasswd` key. Pair it with defaultRegistry.existingPushSecret when you manage both
+    # halves of the credential -- the chart refuses to render a configuration where it generates
+    # one half and you supply the other, because nothing would agree on the password.
+    existingHtpasswdSecret: ""
+
   # How the registry is reached.
   #
   # The CONTROLLERS always use in-cluster DNS, which needs nothing here. This is about WORKLOADS:
