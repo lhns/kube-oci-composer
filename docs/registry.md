@@ -177,6 +177,19 @@ independently, which is why the controllers refresh **both** the digest and ever
 `keepUntagged` out deletes exactly the digest-pinned images
 [ADR 0010](adr/0010-workloads-reference-digests.md) tells your workloads to reference.
 
+**A repository the policy does not match is not therefore safe.** Retention policies govern
+manifests; zot's blob GC is separate and reclaims what nothing references. An **untagged** manifest
+references nothing, so a digest-only artifact in an unmatched repository can be collected within
+`gcDelay` of being published -- the publish succeeds, and the pull that follows says `not found`.
+
+That is why the shipped policy is `repositories: ["**"]` with `keepUntagged.pulledWithin`: the
+refresher's pull is what keeps a digest-only artifact alive, and it only counts where a policy
+applies. If you narrow `repositories`, narrow it to something that still covers every repository
+the controllers publish to.
+
+This project's own e2e ran into it from the other end -- a composition whose tags were dropped
+became untagged, and the image it had just published was gone before a Pod could pull it.
+
 **Anonymous read, authenticated write.** zot enforces this itself; no proxy is needed in front. Only
 the controllers get a write identity — give them a `dockerconfigjson` Secret and point
 `spec.push.secretRef` at it. The refresh path needs no more than *read*.
