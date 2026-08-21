@@ -25,12 +25,18 @@ import (
 // pointing somewhere the fixtures are not.
 const (
 	buildNamespace = "oci-builder-e2e"
-	// The SAME host every other reference uses, and it has to be: the operator names exactly one
-	// registry over plain HTTP (--insecure-registry, matched on host), so a build naming the
-	// Service DNS name instead pushed over HTTPS to a registry that speaks HTTP and died with
-	// `server gave HTTP response to HTTPS client`. This constant was a leftover from when the
-	// e2e ran its own fixture registry alongside the chart's.
-	buildRegistry = registryHost
+	// The INTERNAL name, and the contrast with registryHost is the point.
+	//
+	// These fixtures set spec.push.repository explicitly, because the retention tests need to
+	// name specific repositories. An explicit repository is used VERBATIM -- the operator's
+	// public name is only substituted for objects that named none (ADR 0037), and rewriting a
+	// host a tenant chose would be a lie in the one field a workload reads.
+	//
+	// So an explicit repository has to be a name whoever pushes can resolve, and the push happens
+	// from a Job inside the cluster. Naming the public host here produced exactly the failure the
+	// split exists to prevent, from the other side: `lookup oci-composer.e2e: no such host`, from
+	// BuildKit, in a namespace with no drop-in and no reason to have one.
+	buildRegistry = "kube-oci-composer-registry.oci-composer.svc.cluster.local:5000"
 	// Where the chart puts everything now: one release, one namespace (ADR 0033).
 	operatorNamespace = "oci-composer"
 )

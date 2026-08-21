@@ -69,6 +69,18 @@ and `defaultRegistry.existingPushSecret`.
 Useful when something else copies them onward. Not a default, because silently producing images no
 Pod can pull is the failure this whole mechanism exists to prevent.
 
+### One consequence worth knowing
+
+`registry.host` is substituted only for objects that named **no** repository. An object that sets
+`spec.push.repository` explicitly is reported back exactly as written — rewriting a host a tenant
+chose would be a lie in the one field a workload reads.
+
+So an explicit repository has to name something **whoever pushes** can resolve, and for an
+`ImageBuild` that is a Job inside the cluster. Naming a node-only address there fails with
+`no such host` from BuildKit, in a namespace that has no containerd drop-in and no reason to have
+one. Either omit `repository` and let the default registry handle both halves, or name the
+in-cluster Service.
+
 ### A historical note, because it used to be worse
 
 `registry.host` once fed *both* addresses. Setting it to a node-resolvable name pointed the

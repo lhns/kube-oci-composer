@@ -91,7 +91,8 @@ helm upgrade --install kube-oci-composer charts/kube-oci-composer \
   --set registry.service.nodePort="$NODE_PORT" \
   --set registry.publish.mode=nodePort \
   --set registry.host="$E2E_REGISTRY" \
-  --set defaultRegistry.insecure="$E2E_REGISTRY" \
+  # NOT defaultRegistry.insecure: the controllers never connect to the public name. The in-cluster
+  # Service they do connect to is marked insecure by the chart automatically.
   --set 'registry.retention.repositories={keepalive-*,keepalive-**}' \
   --set registry.retention.window=30s \
   --set registry.retention.gcInterval=5s \
