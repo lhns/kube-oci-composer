@@ -20,10 +20,35 @@ A workload pinned to a digest **older than that cap**, or to one whose object ha
 deleted, is outside the set. Nothing pulls it, the registry's window elapses, and the image is
 reclaimed. Threat D8.
 
-**The failure is delayed and displaced, which is what makes it expensive.** Nothing breaks when the
-image is deleted, because a running Pod does not re-pull. It breaks on the next reschedule, node
-drain, or scale-up — as `ErrImagePull` for an image that worked yesterday, caused by a change
-nobody made today. Raising `--keep-builds` widens the window; it does not close it.
+**Two layers already absorb most of this, and they are the reason the question has never been
+urgent.**
+
+- **The kubelet never garbage-collects an image a running container is using.** Image GC removes
+  *unused* images under disk pressure, oldest-unused first. So a running workload does not break
+  when the registry forgets its image — the copy on its node is pinned by the container using it.
+- **Spegel, where it is deployed, serves any image at least one node still holds**, peer-to-peer.
+  A reschedule onto a node that never ran the image can still succeed without the registry.
+
+**What is actually exposed is a pull onto a node that has never held the image, at a time when no
+node holds it either.** That is a much smaller set than "any reschedule":
+
+- scale to zero, then scale up later — nothing is running, so nothing pins it anywhere
+- a node pool replaced, or a cluster rebuilt, so no node's content store survives
+- a `CronJob` or a rarely-run `Job` whose image nothing keeps warm
+- **rollback, which is the sharpest case.** Roll forward; the old digest ages out of
+  `--keep-builds`; the registry expires it; nothing is running it, so the kubelet reclaims the last
+  local copies. The rollback that was supposed to be the safety net is the thing that fails.
+
+The failure is therefore delayed and displaced twice over, which is what makes it expensive to
+diagnose: `ErrImagePull` for an image that worked yesterday, caused by a change nobody made today.
+Raising `--keep-builds` widens the window; it does not close it.
+
+**One thing here is unverified and should not be assumed.** Whether the kubelet counts an image
+mounted as an **image volume** — this project's primary consumption path — as "in use" for image
+GC purposes. If it does not, a long-running Pod could have its mounted artifact reclaimed locally
+and fail on restart, which would make the first bullet above false exactly where it matters most.
+It is testable in the e2e the same way E1 is, and until it is measured, it is a question rather
+than a caveat.
 
 ### What the two earlier rounds got wrong, and why it matters now
 
@@ -46,7 +71,9 @@ That is a much smaller question than the one this record has been carrying.
 **A. A component that refreshes what Pods reference.** List Pods, collect image references whose
 host belongs to a registry this operator manages, `GET` each digest.
 
-- Closes the reschedule failure, which retention alone cannot.
+- Closes the cases above that node-local images and Spegel do not: it keeps the digest alive in
+  the registry whether or not any node still holds it, which is what rollback and scale-from-zero
+  need.
 - Costs cluster-wide `pods` read. That is the real objection — it is a broad grant, and neither
   controller has anything like it today.
 - **Must read more than `containers[].image`.** `initContainers`, `ephemeralContainers`, and —
@@ -56,8 +83,10 @@ host belongs to a registry this operator manages, `GET` each digest.
 - **Must be scoped by registry host**, on the same rule as
   [ADR 0034](0034-a-default-registry.md): pulling every image every Pod references would mean
   authenticating to registries this operator has no relationship with.
-- Still leaves the **scaled-to-zero hole**: a Deployment at zero replicas has no Pods, so its images
-  are unprotected. Closing that means reading workload *templates* too, which widens the grant again.
+- Still leaves the **scaled-to-zero hole**, which is now known to be one of the *main* cases rather
+  than an edge: a Deployment at zero replicas has no Pods, so watching Pods protects nothing exactly
+  when node-local copies have also gone. Closing it means reading workload *templates* too, which
+  widens the grant again — and is arguably the more useful thing to read in the first place.
 
 **B. Leave retention as the only mechanism, and document the cap.** Cheapest. Turns a correctness
 property into a capacity guess, and the guess is made by whoever sets `--keep-builds` without
@@ -102,6 +131,10 @@ informer. It may not even need to be a long-running process.
   is worse than a documented cap.
 - **The cost of the sweep on a real cluster**, which remains unmeasured, and is now a much smaller
   number than round one assumed.
+- **Whether the kubelet treats an image-volume image as in use.** If it does, the running case is
+  genuinely covered and this is only about rollback and cold starts. If it does not, the exposure
+  reaches running workloads on their next restart, and the priority changes. This is one e2e probe,
+  and it should be measured before any of the options above is chosen.
 
 ## Consequences of leaving it open
 
