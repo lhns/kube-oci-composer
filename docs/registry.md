@@ -190,6 +190,14 @@ the controllers publish to.
 This project's own e2e ran into it from the other end -- a composition whose tags were dropped
 became untagged, and the image it had just published was gone before a Pod could pull it.
 
+**The bundled registry terminates no TLS, and that has a cost worth stating.** zot authenticates
+writes with HTTP Basic, so over plain HTTP the generated password crosses the pod network readable
+by anything positioned to watch it — and that credential is the whole of the "only the controllers
+can push" guarantee. Pulls are anonymous, so only the write path is exposed. If your cluster's
+network is not a boundary you trust, put TLS in front of the registry and remove its host from
+`defaultRegistry.insecure`, or point `defaultRegistry.host` at a registry that already has a
+certificate. Threat I7.
+
 **Anonymous read, authenticated write.** zot enforces this itself; no proxy is needed in front. Only
 the controllers get a write identity — give them a `dockerconfigjson` Secret and point
 `spec.push.secretRef` at it. The refresh path needs no more than *read*.

@@ -244,7 +244,10 @@ surface; publication to a bundled or external registry with `secretRef`; the inp
 short-circuit; a two-tier layer cache with optional S3; multi-architecture output; and a retention
 refresher that keeps live objects' images from being reclaimed.
 
-Not implemented: SBOM, provenance and signing ([ADR 0008](docs/adr/0008-supply-chain.md) is Proposed, not
+Composed artifacts carry **provenance annotations** naming every source that went into them, which
+survive the object that produced them.
+
+Not implemented: SBOM and signing ([ADR 0008](docs/adr/0008-supply-chain.md) is Proposed, not
 built — and signing is theatre until something verifies it at admission).
 
 **`ImageComposition` will never run a Dockerfile.** That is the scope line, and everything else
