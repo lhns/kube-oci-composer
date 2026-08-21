@@ -59,6 +59,9 @@ spec:
             {{- end }}
             - --keep-builds={{ .Values.imageBuild.keepBuilds }}
             - --retention-refresh-interval={{ .Values.imageBuild.retention.refreshInterval }}
+            {{- if .Values.imageBuild.requirePinnedSources }}
+            - --require-pinned-sources
+            {{- end }}
           env:
             # The default push credential is read from the CONTROLLER's namespace, not the
             # object's: it belongs to the operator, not to a tenant. See ADR H.

@@ -74,6 +74,12 @@ spec:
             {{- end }}
             - --keep-builds={{ .Values.operator.keepBuilds }}
             - --retention-refresh-interval={{ .Values.operator.retention.refreshInterval }}
+            {{- if .Values.operator.requirePinnedSources }}
+            - --require-pinned-sources
+            {{- end }}
+            {{- if .Values.operator.fetchDenyPrivate }}
+            - --fetch-deny-private
+            {{- end }}
             {{- with (include "kube-oci-composer.defaultRegistry" .) }}
             - --default-registry={{ . }}
             {{- end }}

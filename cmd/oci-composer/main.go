@@ -24,6 +24,7 @@ import (
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 	"github.com/lhns/kube-oci-composer/internal/cache"
 	"github.com/lhns/kube-oci-composer/internal/controller"
+	"github.com/lhns/kube-oci-composer/internal/oci"
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 	"github.com/lhns/kube-oci-composer/internal/retention"
 	"github.com/lhns/kube-oci-composer/internal/store"
@@ -61,6 +62,8 @@ func main() {
 		s3Presign            bool
 		refreshInterval      time.Duration
 		insecureRegs         string
+		fetchDenyPrivate     bool
+		requirePinnedSources bool
 		defaultRegistry      string
 		defaultPushSecret    string
 		keepBuilds           int
@@ -117,6 +120,14 @@ func main() {
 	flag.StringVar(&insecureRegs, "insecure-registry", "",
 		"Comma-separated registry hosts that may be reached over plain HTTP. Matched on host, so "+
 			"naming one internal registry does not downgrade any other request.")
+	flag.BoolVar(&fetchDenyPrivate, "fetch-deny-private", false,
+		"Refuse `fetch` URLs that resolve to private, loopback or CGNAT addresses. Cloud metadata "+
+			"endpoints on link-local addresses are ALWAYS refused, flag or no flag, because they "+
+			"hand out credentials and no layer source lives there. The rest is opt-in: an artifact "+
+			"server on a private address is this project's most ordinary source, so refusing those "+
+			"by default would be a guard people turn off. See ADR 0036 (threat I6).")
+	flag.BoolVar(&requirePinnedSources, "require-pinned-sources", false,
+		"Refuse any sourceRef (or ImageBuild context) that names no revision. Pinning is optional by design -- a composition that tracks a branch is a legitimate thing to want (ADR 0026) -- so this is how an operator decides otherwise for a whole cluster. Objects that omit `revision:` go Stalled with a message saying so.")
 	flag.IntVar(&keepBuilds, "keep-builds", ociv1alpha1.DefaultHistoryLimit,
 		"How many past builds to retain per object, unless the object overrides it. Retention is "+
 			"the ONLY thing keeping an old digest pullable, so reverting a commit or rescheduling a "+
@@ -225,11 +236,13 @@ func main() {
 		// and the FakeRecorder the tests rely on change with it. Worth doing deliberately rather
 		// than as a drive-by while repairing CI.
 		//nolint:staticcheck // SA1019: deliberate; see above.
-		Recorder:     mgr.GetEventRecorderFor("imagecomposition-controller"),
-		Readiness:    readiness,
-		Default:      defaults,
-		Cache:        layerCache,
-		HistoryLimit: keepBuilds,
+		Recorder:             mgr.GetEventRecorderFor("imagecomposition-controller"),
+		Readiness:            readiness,
+		Default:              defaults,
+		Cache:                layerCache,
+		HistoryLimit:         keepBuilds,
+		Fetcher:              oci.NewFetcherWithGuard(oci.DialGuard{DenyPrivate: fetchDenyPrivate}),
+		RequirePinnedSources: requirePinnedSources,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ImageComposition")
 		os.Exit(1)

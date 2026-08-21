@@ -239,7 +239,7 @@ func TestInputHashIsPinned(t *testing.T) {
 	// what was previously hardcoded, so the rebuild produces the SAME digest and republishing it
 	// under an unchanged immutable tag is a no-op. On a non-amd64 controller it would not be —
 	// see TestUnsetPlatformMatchesTheOldHardcodedDefault.
-	const want = "sha256:2162dd741a791daa0b86164ff9e06cead5549a3c393eeb145c55998f2eef84b2"
+	const want = "sha256:615d70e692fb207b8f95a6fbbe8bbc8f730da84fa7370d21dd093dbf9ad9c804"
 
 	got := oci.InputHash([]oci.LayerInput{
 		{Name: "core", URL: "https://example/x.tgz", Digest: "sha256:1111", Unpack: oci.UnpackTarGz, Target: "/core"},

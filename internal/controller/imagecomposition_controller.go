@@ -49,6 +49,11 @@ type ImageCompositionReconciler struct {
 	// controller rather than to the object.
 	Default recon.DefaultRegistry
 
+	// RequirePinnedSources refuses any sourceRef that names no revision (threat T1). Off by
+	// default: pinning is deliberately optional per ADR 0026, and this is how an operator opts a
+	// whole cluster out of that.
+	RequirePinnedSources bool
+
 	// Fetcher retrieves layer content from its origin.
 	Fetcher *oci.Fetcher
 

@@ -6,6 +6,49 @@ may change between minor versions.
 ## [Unreleased]
 
 ### Added
+- **Provenance travels with the artifact (threat R1).** Composed images carry OCI manifest
+  annotations naming what produced them: `de.lhns.oci-composer.sources` (each layer as
+  `name=digest`, or `name=revision` where the revision is what identifies the content), plus the
+  assembly version and the base image's digest.
+
+  `status.history[].sources` already answered this, but only while the object existed -- delete the
+  ImageComposition and the answer went with it while the image kept running. Annotations rather
+  than config labels: a label is part of the image config, so writing one changes what every
+  consumer's `docker inspect` reports as the application's own metadata. Nothing written is
+  time-dependent, because `output digest = f(spec)` outranks the feature -- which is why
+  `org.opencontainers.image.created` is deliberately absent.
+
+  **BREAKING in effect: every artifact rebuilds once.** The manifest changed, so `AssemblyVersion`
+  is bumped to 2 and every input hash moves with it. Nothing is deleted and no tag moves that
+  `onConflict` would not already refuse; expect one rebuild per object on upgrade. Both pinned-hash
+  guards caught this before it left the machine, which is what they are for.
+
+- **`--require-pinned-sources` (threat T1).** Refuses any `sourceRef` -- or `ImageBuild` context --
+  that names no revision, on both controllers, as `imageComposition.requirePinnedSources` and
+  `imageBuild.requirePinnedSources`. Off by default: pinning is optional by design (ADR 0026),
+  since tracking a branch is a legitimate thing to want. What was missing was an operator's ability
+  to decide otherwise for a whole cluster. Objects that omit `revision:` go Stalled naming the flag.
+
+- **SSRF controls on `fetch.url` (threat I6, ADR 0036).** Link-local addresses are now refused
+  unconditionally -- `169.254.169.254` is the cloud metadata endpoint on every major provider and
+  hands credentials to anything that asks. Other private ranges (RFC1918, loopback, unique-local,
+  CGNAT) are refused only under `--fetch-deny-private` / `operator.fetchDenyPrivate`, because an
+  artifact server on a private address is an ordinary layer source and a guard that refuses those
+  is one people turn off.
+
+  Enforced in the dialer, after resolution and immediately before `connect(2)`, so a hostname
+  pointing at the metadata IP, a redirect to it, and a DNS rebind are all caught -- none of them is
+  visible in the URL. Until now this decision existed only in a commit message, while the threat
+  model still said "NOT mitigated".
+
+- **The chart refuses a retention margin too thin to be a guarantee (threat D7).** `helm install`
+  fails when `registry.retention.window` is less than 24x a controller's refresh interval, or when
+  refreshing is disabled while a window is set. The two numbers used to live in different systems
+  -- a controller flag and a registry's config -- so nothing could compare them; one chart renders
+  both. It fails the render rather than warning because the symptom otherwise arrives one window
+  later, as a deleted image.
+
+### Added
 - **One chart, one namespace, three toggleable components.** `kube-oci-builder` is folded into
   `kube-oci-composer` as `imageBuild.enabled`, alongside `imageComposition.enabled` and
   `registry.enabled` -- all on by default, so one install gives a working, entirely local system.

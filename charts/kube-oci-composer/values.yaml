@@ -2,10 +2,9 @@
 
 # replicaCount is deliberately 1, and raising it does NOT scale throughput.
 #
-# The serving endpoint runs under leader election and its blob store is node-local unless S3 backs
-# it, so a standby replica neither reconciles nor listens. It stays out of the Service because it
-# never reports ready, which makes failover work without a second mechanism. Two replicas buy a
-# warm standby, not more capacity. See ADR 0006 and ADR 0007.
+# Reconciling runs under leader election, so a second replica is a warm standby that reconciles
+# nothing until it wins the lease. It is no longer a STORAGE question -- the registry holds the
+# images now (ADR 0035) -- so extra replicas are merely idle rather than dangerous.
 replicaCount: 1
 
 image:
@@ -26,8 +25,8 @@ serviceAccount:
 operator:
   metricsBindAddress: ":8080"
   healthProbeBindAddress: ":8081"
-  # Leader election. On by default because the serving endpoint and the garbage collector are both
-  # leader-scoped, and running two of either would mean two processes issuing deletes.
+  # Leader election. On by default: two controllers reconciling the same object would push and
+  # re-tag concurrently, which the tag-conflict policy would then read as a genuine conflict.
   leaderElect: true
 
   storage:
@@ -79,26 +78,37 @@ operator:
   # builds, so a generous value costs far less than the count suggests.
   keepBuilds: 10
 
+  # Refuse any sourceRef that names no revision (threat T1).
+  #
+  # Pinning is optional by design -- a composition tracking a branch is a legitimate thing to want
+  # (ADR 0026) -- so this is how an operator decides otherwise for a whole cluster. Objects that
+  # omit `revision:` go Stalled with a message saying so.
+  requirePinnedSources: false
+
+  # Refuse `fetch` URLs resolving to private, loopback or CGNAT addresses (threat I6).
+  #
+  # Cloud metadata endpoints on link-local addresses are refused ALWAYS, whatever this says: they
+  # hand out credentials and no layer source lives there. This covers the rest, and is off by
+  # default because an artifact server on a private address is an ordinary layer source -- refusing
+  # those would make this a guard people turn off. Set it if all your sources are external.
+  # See ADR 0036.
+  fetchDenyPrivate: false
+
   retention:
     # Must stay MUCH shorter than the registry's retention window. The RATIO is the guarantee, not
     # either number: the default assumes a window of 30 days, which is a margin of 720. Anyone
     # shortening the window has to shorten this with it.
     #
-    # Zero disables refreshing entirely. Correct only when serving from the built-in endpoint, or
-    # when the registry has no expiry policy at all.
+    # Zero disables refreshing entirely. Correct only when the registry has no expiry policy at
+    # all -- and the chart refuses to render it while registry.retention.window is set, because
+    # that combination guarantees the deletion ADR 0031 exists to prevent.
     refreshInterval: 1h
 
-# Service exposing the OCI endpoint that workloads pull from.
+# The bundled registry (zot), ON by default.
 #
-# Note who the client is: image pulls are performed by the KUBELET on each node, never by the pod
-# that mounts the result. A ClusterIP *name* is therefore unusable — nodes resolve with the host
-# resolver, which knows nothing of cluster DNS — so this must be exposed somewhere the nodes can
-# actually reach: a LoadBalancer address, a NodePort, or an Ingress.
-# An optional bundled registry (zot), OFF by default.
-#
-# ADR 0030 makes a real registry the serving surface for both kinds. Without this, that would turn
-# "helm install and you are done" into "helm install, then go and run a registry". Turn it on if you
-# have not already got one; leave it off if you have, and point spec.push.repository at yours.
+# A registry is now the only way an artifact becomes pullable (ADR 0035), so shipping this enabled
+# is what keeps "helm install and you are done" true. Turn it off if you already run one, point
+# defaultRegistry.host at yours, and give it defaultRegistry.existingPushSecret.
 #
 # Deliberately plain: no HA, no object storage, no TLS termination. If you need any of those, run
 # zot's own chart or Harbor instead of this.
@@ -153,6 +163,11 @@ imageBuild:
   keepBuilds: 10
   leaderElect: true
   serviceAccountName: ""
+
+  # Refuse an ImageBuild whose spec.context names no revision (threat T1). It matters more here
+  # than on the composer: an unpinned context builds whatever the branch is at now, and a build's
+  # output cannot be reproduced from its spec (ADR 0025).
+  requirePinnedSources: false
 
   retention:
     refreshInterval: 1h
@@ -213,9 +228,10 @@ registry:
 
   # Anonymous read, authenticated WRITE, enforced by the registry itself with no proxy in front.
   #
-  # Reads are open in the cluster, exactly as the embedded serving endpoint's were: a kubelet pulls
-  # without credentials, so anything else breaks image pulls. Restricting who may pull is a
-  # NetworkPolicy question, not this registry's.
+  # Reads are open in the cluster because a kubelet pulls without credentials, so anything else
+  # breaks image pulls unless every workload carries an imagePullSecret. Unlike what came before
+  # this, that IS now a choice: zot can require authentication for reads. Restricting merely who
+  # can reach the registry is a NetworkPolicy question, not this registry's.
   #
   # The password is GENERATED at install and reused on upgrade. Nothing to create by hand: the chart
   # writes both halves -- the htpasswd zot authenticates against, and the dockerconfigjson both

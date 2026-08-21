@@ -42,6 +42,7 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0033](0033-one-chart-one-namespace.md) | One chart, one namespace, toggleable components | Accepted, reverses 0004's packaging |
 | [0034](0034-a-default-registry.md) | A default registry, and whose credential is used | Accepted, amends 0030 and 0031 |
 | [0035](0035-a-registry-is-the-only-publication-path.md) | A registry is the only publication path | Accepted, supersedes 0006 and 0032 |
+| [0036](0036-ssrf-on-fetch-urls.md) | SSRF on `fetch` URLs: block the metadata endpoint, make the rest opt-in | Accepted, closes threat I6 |
 
 ## Open questions
 

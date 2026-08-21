@@ -55,6 +55,16 @@ func applyStdin(t *testing.T, manifest string) {
 	}
 }
 
+// applyStdinAllowingFailure is applyStdin for the cases where a REJECTION is the result, not an
+// error -- probing whether the cluster supports a field at all.
+func applyStdinAllowingFailure(t *testing.T, manifest string) (string, error) {
+	t.Helper()
+	cmd := exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(manifest)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
 // eventually polls until fn succeeds. On timeout it reports the last error AND dumps the
 // controller's logs, because "timed out waiting for Ready" on its own tells you nothing.
 func eventually(t *testing.T, what string, fn func() error) {
