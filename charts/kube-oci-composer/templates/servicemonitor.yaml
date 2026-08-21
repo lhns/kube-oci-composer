@@ -11,9 +11,20 @@ metadata:
     {{- toYaml . | nindent 4 }}
     {{- end }}
 spec:
+  {{- /*
+  BOTH controllers, not just the composer.
+  
+  matchExpressions rather than two ServiceMonitors: the registry's Service carries the same two
+  chart labels, so selecting on those alone would have Prometheus scrape /metrics on a registry
+  that serves the OCI API there -- a scrape that fails in a way nobody investigates.
+  */}}
   selector:
     matchLabels:
-      {{- include "kube-oci-composer.componentSelectorLabels" (dict "ctx" . "component" "composer") | nindent 6 }}
+      {{- include "kube-oci-composer.selectorLabels" . | nindent 6 }}
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [composer, builder]
   endpoints:
     - port: metrics
       interval: {{ .Values.metrics.serviceMonitor.interval }}

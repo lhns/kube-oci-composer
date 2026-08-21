@@ -1,0 +1,26 @@
+{{- if .Values.imageBuild.enabled }}
+{{- /*
+The builder's metrics Service.
+
+It had none, so its :8080 was unscrapable while the composer's was scraped -- an asymmetry with no
+reason behind it, and the sort that survives because nobody notices a metric that was never there.
+The builder is the component that creates Jobs; its reconcile errors and queue depth are exactly
+what you want when builds stop happening.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "kube-oci-composer.builderFullname" . }}-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kube-oci-composer.componentLabels" (dict "ctx" . "component" "builder") | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: metrics
+      port: {{ include "kube-oci-composer.port" .Values.imageBuild.metricsBindAddress }}
+      targetPort: metrics
+      protocol: TCP
+  selector:
+    {{- include "kube-oci-composer.componentSelectorLabels" (dict "ctx" . "component" "builder") | nindent 4 }}
+{{- end }}

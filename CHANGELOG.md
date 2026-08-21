@@ -245,6 +245,22 @@ may change between minor versions.
   recorded with the reason the destination makes it meaningless. Verified to fail on drift.
 
 ### Fixed
+- **The builder's metrics were unscrapable.** It had no Service at all, while the composer's was
+  scraped — an asymmetry with no reason behind it, and the kind that survives because nobody
+  notices a metric that was never there. The builder is the component that creates Jobs; its
+  reconcile errors are exactly what you want when builds stop happening.
+
+  The ServiceMonitor now selects both controllers, and by expression rather than by dropping the
+  component label: the registry's Service carries the same chart labels, so a looser selector
+  would have Prometheus scrape `/metrics` on a port serving the OCI API — a scrape that fails
+  quietly, from a ServiceMonitor that looks like monitoring that works.
+
+- **`imageBuild.insecureRegistry` was read by nothing.** Removed; `operator.insecureRegistry` and
+  `defaultRegistry.insecure` are the live values.
+
+- **The builder pod carried a narrower label set than the composer's.** Harmless until something
+  selects on labels — which the new NetworkPolicy and metrics Service both do.
+
 - **A registry pod that wedged on a Secret the chart declined to create.** Setting
   `defaultRegistry.existingPushSecret` while leaving `registry.enabled` and `registry.auth.enabled`
   on skipped **both** generated Secrets, but the registry Deployment mounts the htpasswd Secret on
