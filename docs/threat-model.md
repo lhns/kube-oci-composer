@@ -130,7 +130,7 @@ behaviour.
 
 | # | Threat | Status | Evidence |
 |---|---|---|---|
-| R1 | An artifact exists and nobody can say what produced it | **Partially mitigated** | `status.history[].sources` records each layer's name, resolved digest and revision, which is what ADR 0026's incident needed and did not have — it had to be diagnosed by extracting a layer and reading its payload. Still missing: no OCI annotations carry provenance, so the record lives only in the object's status and is lost with it. |
+| R1 | An artifact exists and nobody can say what produced it | **Mitigated** | Two records, deliberately. `status.history[].sources` carries each layer's name, resolved digest and revision — which is what ADR 0026's incident needed and did not have, having been diagnosed by extracting a layer and reading its payload. And the artifact itself now carries OCI **manifest** annotations (`internal/oci/provenance.go`): `de.lhns.oci-composer.sources`, `.assembly-version`, `.base`. Annotations rather than config labels, because a label is part of the image config and would present provenance as the application's own metadata. Nothing written is time-dependent, so `output digest = f(spec)` still holds. **What remains uncovered:** an `ImageBuild`'s output carries no equivalent — BuildKit writes that manifest, not this code. |
 | R2 | A failure leaves no trace after the pod is gone | **Mitigated** | A failed build's Job is kept for the whole backoff so its pod's logs survive; the exit code, reason and termination message are copied into status and raised as an Event. |
 
 R1 is materially better than it was: `status.history[].sources` now records each layer's name,
@@ -326,7 +326,7 @@ These are not mitigations. They are things assumed true, and each one is somebod
 |---|---|---|
 | The registry serves reads anonymously | I5 | Deliberate; a kubelet must pull without credentials. Now a zot policy rather than an unconditional property of this code, so it is changeable. Restricting *who* may pull is a NetworkPolicy question |
 | `fetch.url` can still reach internal services by default | I6 | Link-local is always refused; the rest needs `--fetch-deny-private`, off by default because refusing in-cluster artifact servers would make the guard something people disable (ADR 0036) |
-| Provenance lives only in status, not in the artifact | R1 | OCI annotations would survive the object; config labels would change the digest |
+| An `ImageBuild`'s output carries no provenance annotations | R1 | Compositions do, and they survive the object. A build's manifest is written by BuildKit, so the same record has to be added a different way |
 | `sourceRef.revision` is opt-in | T1 | Deliberate (ADR 0026), and now enforceable cluster-wide with `--require-pinned-sources`. Off by default: a spec that omits it still consumes whatever the source publishes |
 | The `AssemblyVersion` bump is manual | T5 | The silent case is caught by a golden-digest test; what stays manual is deciding the change is intended and bumping the constant |
 | Build pods share the node kernel with seccomp unconfined | E1 | User namespaces are the destination (ADR 0027). Measured on 1.36: the API server accepts `hostUsers: false` and the sandbox fails to start under kind, which is a nested-container limitation rather than a verdict. An e2e probe re-measures every run |
