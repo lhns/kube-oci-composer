@@ -375,6 +375,21 @@ cat %s > /dev/termination-log
 			// the pod name in status for exactly that.
 			TTLSecondsAfterFinished: ptr.To[int32](3600),
 			Template: corev1.PodTemplateSpec{
+				// Labels on the POD, not only on the Job.
+				//
+				// Kubernetes adds its own `job-name` and `controller-uid`, which is enough to find
+				// a pod and not enough to describe it. Anything selecting build pods as a CLASS --
+				// a NetworkPolicy letting them reach the registry, a quota, an admission rule --
+				// needs a label that says what they are, in a namespace this chart does not own.
+				//
+				// Without this the pods carried nothing at all, so a policy in a tenant namespace
+				// had no way to name them except by matching every pod.
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						ManagedByLabel: "kube-oci-builder",
+						InputHashLabel: shortHash(inputHash),
+					},
+				},
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
 					ServiceAccountName: spec.ServiceAccountName,

@@ -6,6 +6,22 @@ may change between minor versions.
 ## [Unreleased]
 
 ### Added
+- **A NetworkPolicy for the registry, enabled by default.** Build Jobs run in their object's
+  namespace, not the release's, so every build crosses a namespace boundary to reach the registry
+  and a default-deny cluster blocks it. The policy admits every namespace on the registry port,
+  which is deliberate: reads are anonymous by design and writes need the password, so a namespace
+  boundary in front of that adds no authority. It is a connectivity guarantee, not a security
+  control, and it says so.
+
+  Narrow it with `registry.networkPolicy.allowedNamespaces` (the release namespace is always kept
+  — losing it would stop the retention refresh, whose silence deletes images a window later), and
+  add `nodeCIDRs` where kubelet pulls need admitting explicitly. Turn it off entirely with
+  `registry.networkPolicy.enabled=false`.
+
+  **Build pods now carry labels.** They had none but the `job-name` Kubernetes adds itself, so
+  nothing outside their namespace could select them as a class — a policy, a quota, an admission
+  rule all had to match every pod instead.
+
 - **Provenance travels with the artifact (threat R1).** Composed images carry OCI manifest
   annotations naming what produced them: `de.lhns.oci-composer.sources` (each layer as
   `name=digest`, or `name=revision` where the revision is what identifies the content), plus the
