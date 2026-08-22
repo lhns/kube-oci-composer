@@ -1,0 +1,64 @@
+{{- if and .Values.registry.enabled .Values.registry.networkPolicy.enabled }}
+{{- /*
+A CONNECTIVITY guarantee, not a security control.
+
+Restricting which namespace may reach the registry adds no authority: reads are anonymous by design
+(threat I5, because a kubelet pulls without credentials) and writes need the generated password.
+What it buys is builds that work -- a build Job runs in its OBJECT's namespace, so every build
+crosses a namespace boundary to push, and a default-deny cluster blocks it. Hence the permissive
+default.
+
+Before narrowing it, two things. Once any policy selects the registry pod, that pod goes from
+"everything allowed" to "only what is listed", so this file must be COMPLETE rather than merely
+correct. And image pulls come from the KUBELET, in the node's network namespace, which no
+podSelector can ever match -- that is what nodeCIDRs is for, and omitting it where pods and nodes
+sit on different networks turns every pull into a timeout that looks like a broken registry.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "kube-oci-composer.registryFullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kube-oci-composer.componentLabels" (dict "ctx" . "component" "registry") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "kube-oci-composer.componentSelectorLabels" (dict "ctx" . "component" "registry") | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.registry.service.port }}
+      from:
+        {{- if .Values.registry.networkPolicy.allowedNamespaces }}
+        {{- range .Values.registry.networkPolicy.allowedNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . | quote }}
+        {{- end }}
+        {{- /*
+        The release's own namespace is added unconditionally when the list is narrowed: both
+        controllers live here and both talk to the registry constantly, so omitting it would stop
+        publishing and -- worse -- stop the retention refresh, whose silence deletes images one
+        window later (ADR 0031).
+        */}}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+        {{- else }}
+        {{- /*
+        Every namespace. An empty namespaceSelector matches all of them, which is the default
+        because a build can land anywhere and this policy's job is to let it through.
+        */}}
+        - namespaceSelector: {}
+        {{- end }}
+        {{- /*
+        Node traffic, for kubelet image pulls. Not a pod, so not selectable any other way.
+        */}}
+        {{- range .Values.registry.networkPolicy.nodeCIDRs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+{{- end }}

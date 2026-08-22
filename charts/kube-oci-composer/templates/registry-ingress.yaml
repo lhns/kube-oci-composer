@@ -1,0 +1,60 @@
+{{- if and .Values.registry.enabled (eq .Values.registry.publish.mode "ingress") }}
+{{- /*
+The ingress path exists because it is the only one that needs nothing on the nodes.
+
+A NodePort makes workloads pull from a name the node's resolver has to know and, on plain HTTP,
+a containerd certs.d drop-in on every node. An ingress with a name your DNS already serves and a
+certificate your nodes already trust needs neither -- containerd just pulls over HTTPS, the way it
+pulls from anywhere else. That was the one genuinely good property of the serving endpoint this
+project used to ship (ADR 0006), and it was never about the endpoint: it was about being behind an
+ingress with a real certificate. This is the same property, kept.
+
+Note what is NOT here: the registry's own TLS. This terminates at the ingress, which is where
+almost everyone's certificate already is. In-cluster traffic between the controllers and the
+registry is a separate question, and a separate value (registry.tls).
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "kube-oci-composer.registryFullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kube-oci-composer.componentLabels" (dict "ctx" . "component" "registry") | nindent 4 }}
+  {{- with .Values.registry.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.registry.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- if .Values.registry.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ include "kube-oci-composer.publicHostname" . | quote }}
+      {{- /*
+      Only emitted when you name a Secret. An ingress controller with a default certificate, or
+      cert-manager writing one from the annotation above, both work without this -- and inventing a
+      name here would point at a Secret nobody creates.
+      */}}
+      {{- with .Values.registry.ingress.tls.secretName }}
+      secretName: {{ . }}
+      {{- end }}
+  {{- end }}
+  rules:
+    - host: {{ include "kube-oci-composer.publicHostname" . | quote }}
+      http:
+        paths:
+          {{- /*
+          The whole registry API, not just /v2/. A registry behind a path-scoped ingress answers
+          the version check and then fails the blob upload, which reads as a broken registry
+          rather than a broken route.
+          */}}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "kube-oci-composer.registryFullname" . }}
+                port:
+                  number: {{ .Values.registry.service.port }}
+{{- end }}

@@ -2,8 +2,7 @@
 
 ## Status
 
-Proposed. Not implemented. Recorded now because the storage and API decisions around it are
-already being made.
+**Accepted and implemented, amended by [0040](0040-the-supply-chain-work-is-worth-building.md)**, which decided WHETHER (0020's question) and changed one thing here: signatures use cosign's `.sig` tag convention rather than referrers, for the reason this record itself gives -- the verifiers that exist read that tag. Attestations do use referrers, as designed below.
 
 ## Context
 

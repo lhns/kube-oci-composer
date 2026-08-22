@@ -118,6 +118,9 @@ func (r *ImageBuildReconciler) remoteOptions(
 	ctx context.Context, obj *ociv1alpha1.ImageBuild,
 ) ([]remote.Option, error) {
 	opts := []remote.Option{remote.WithContext(ctx)}
+	if r.Transport != nil {
+		opts = append(opts, remote.WithTransport(r.Transport))
+	}
 
 	var ownRef string
 	if p := obj.Spec.Push; p != nil && p.SecretRef != nil {
@@ -275,4 +278,62 @@ func (r *ImageBuildReconciler) pushSecretFor(
 		}
 	}
 	return copied.Name, nil
+}
+
+// registryCASecretFor puts the operator's registry CA where a build Job can mount it.
+//
+// Same shape and same reasoning as pushSecretFor: the Job runs in the OBJECT's namespace and a pod
+// can only mount Secrets from its own, so the material is copied there, owned by the ImageBuild,
+// and garbage-collected with it.
+//
+// A SEPARATE object rather than an extra key on the copied push credential, and that is not
+// tidiness. pushSecretFor returns early when the object has its own `spec.push.secretRef` — an
+// object may legitimately use its own credential to push to a path in the operator's registry
+// (recon.DefaultRegistry.CredentialFor permits exactly that). Riding the CA on the copy would give
+// those builds no CA at all and a TLS failure that looks nothing like a credential problem.
+//
+// A Secret rather than a ConfigMap for something that is not secret: the builder already holds
+// get/create/update on secrets cluster-wide (see the RBAC markers above). ConfigMaps would mean a
+// new verb on a new resource in every tenant namespace, which is a real cost for a cosmetic gain.
+func (r *ImageBuildReconciler) registryCASecretFor(
+	ctx context.Context, obj *ociv1alpha1.ImageBuild, jobName string,
+) (string, error) {
+	if len(r.JobConfig.RegistryCA) == 0 {
+		return "", nil
+	}
+
+	ca := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jobName + "-registry-ca",
+			Namespace: obj.Namespace,
+			Labels:    map[string]string{"app.kubernetes.io/managed-by": "kube-oci-builder"},
+			Annotations: map[string]string{
+				"oci.lhns.de/description": "The registry CA this build's Job trusts. " +
+					"Not secret; a Secret only because the builder already has permission to " +
+					"write Secrets here. Deleted with the build.",
+			},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{"ca.crt": r.JobConfig.RegistryCA},
+	}
+	if err := ctrl.SetControllerReference(obj, ca, r.Scheme()); err != nil {
+		return "", fmt.Errorf("setting owner on the registry CA: %w", err)
+	}
+
+	if err := r.Create(ctx, ca); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return "", fmt.Errorf("creating the registry CA: %w", err)
+		}
+		// Update rather than leave it: a rotated CA has to reach a retried build, or the retry
+		// fails for a reason that was already fixed.
+		existing := &corev1.Secret{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(ca), existing); err != nil {
+			return "", fmt.Errorf("reading the existing registry CA: %w", err)
+		}
+		existing.Data = ca.Data
+		if err := r.Update(ctx, existing); err != nil {
+			return "", fmt.Errorf("refreshing the registry CA: %w", err)
+		}
+	}
+	return ca.Name, nil
 }

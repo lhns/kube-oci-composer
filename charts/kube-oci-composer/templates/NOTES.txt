@@ -44,6 +44,23 @@ insecure would force plaintext on the deployment that took the trouble to set it
 See docs/registry.md.
 {{- end }}
 
+{{- if .Values.registry.cluster.enabled }}
+
+The registry is CLUSTERED, which shards rather than replicates.
+
+zot hashes each repository name and one member owns it. A member that is down makes roughly 1/{{ .Values.registry.cluster.replicaCount }}
+of your repositories unavailable, and zot's own documentation says the cluster is not self-healing.
+What this buys is throughput and a proxy layer that survives a rolling update -- not availability.
+
+{{- if eq .Values.registry.cache.driver "redis" }}
+
+If that redis is not persistent, READ THIS. extensions.search records the pull timestamps the
+retention policy depends on, and in clustered mode that metadata lives in redis rather than on
+each pod. A redis restart loses every timestamp, every image then looks unpulled, and the next GC
+pass reclaims images your live objects still reference -- on a gcDelay fuse, not a retention window.
+{{- end }}
+{{- end }}
+
 REFERENCE A DIGEST, NEVER THE TAG. The tag moves; a workload pinned to it plus
 pullPolicy: IfNotPresent will silently keep stale bytes. See docs/adr/0010.
 

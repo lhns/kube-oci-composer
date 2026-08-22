@@ -24,7 +24,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "kube-oci-composer.componentSelectorLabels" (dict "ctx" . "component" "builder") | nindent 8 }}
+        {{- include "kube-oci-composer.componentLabels" (dict "ctx" . "component" "builder") | nindent 8 }}
       {{- with .Values.podAnnotations }}
       annotations:
         {{- toYaml . | nindent 8 }}
@@ -48,15 +48,7 @@ spec:
             - --buildkit-image={{ .Values.imageBuild.buildkitImage }}
             - --dockerfile-frontend={{ .Values.imageBuild.dockerfileFrontend }}
             - --source-date-epoch={{ .Values.imageBuild.sourceDateEpoch }}
-            {{- with (include "kube-oci-composer.defaultRegistry" .) }}
-            - --default-registry={{ . }}
-            {{- end }}
-            {{- with (include "kube-oci-composer.pushSecretName" .) }}
-            - --default-push-secret={{ . }}
-            {{- end }}
-            {{- with (include "kube-oci-composer.insecureRegistries" .) }}
-            - --insecure-registry={{ . }}
-            {{- end }}
+            {{- include "kube-oci-composer.registryArgs" (dict "ctx" $ "supplyChain" .Values.imageBuild.supplyChain) | trim | nindent 12 }}
             - --keep-builds={{ .Values.imageBuild.keepBuilds }}
             - --retention-refresh-interval={{ .Values.imageBuild.retention.refreshInterval }}
             {{- if .Values.imageBuild.requirePinnedSources }}
@@ -90,6 +82,14 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           resources:
             {{- toYaml .Values.imageBuild.resources | nindent 12 }}
+          {{- with (include "kube-oci-composer.registryCAVolumeMount" $) }}
+          volumeMounts:
+            {{- . | nindent 12 }}
+          {{- end }}
+      {{- with (include "kube-oci-composer.registryCAVolume" $) }}
+      volumes:
+        {{- . | nindent 8 }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

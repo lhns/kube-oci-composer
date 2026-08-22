@@ -470,6 +470,28 @@
           },
           "type": "object"
         },
+        "attestations": {
+          "description": "Attestations records what supply-chain material is attached to Artifact, so a converged\nreconcile can tell there is nothing to do without asking the registry.",
+          "properties": {
+            "provenance": {
+              "description": "Provenance is the manifest digest of the SLSA referrer.",
+              "type": "string"
+            },
+            "sbom": {
+              "description": "SBOM is the manifest digest of the SPDX referrer.",
+              "type": "string"
+            },
+            "signature": {
+              "description": "Signature is the manifest digest of the cosign signature.",
+              "type": "string"
+            },
+            "subject": {
+              "description": "Subject is the artifact digest these attestations describe.",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
         "conditions": {
           "description": "Conditions follow kstatus: Ready, Reconciling, Stalled.",
           "items": {

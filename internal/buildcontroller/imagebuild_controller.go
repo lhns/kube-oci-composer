@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
+	"github.com/lhns/kube-oci-composer/internal/attest"
 	"github.com/lhns/kube-oci-composer/internal/build"
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 	"github.com/lhns/kube-oci-composer/internal/source"
@@ -46,6 +47,18 @@ type ImageBuildReconciler struct {
 	// Recorder surfaces failures as Events. A build failure's detail lives in the pod's logs,
 	// which vanish with the pod, so the Event is often the only durable trace of why.
 	Recorder record.EventRecorder
+
+	// Attestor signs the build's output, after the Job has terminated.
+	//
+	// The signing key stays in THIS process and is never projected into a build pod -- so code
+	// that came out of a git repository never runs in the same container as the key. The SBOM and
+	// provenance come from BuildKit instead, in-band, because only the build can see what it
+	// installed.
+	Attestor *attest.Attestor
+
+	// Transport, when set, trusts an additional CA on top of the system roots. Same object the
+	// other controllers use; see recon.Transport.
+	Transport http.RoundTripper
 
 	// HTTPClient fetches the build context for the Dockerfile check. Nil uses a default with a
 	// timeout; the build itself never streams through this process.
@@ -251,6 +264,7 @@ func (r *ImageBuildReconciler) resolveInputs(ctx context.Context, obj *ociv1alph
 		FrontendDigest:   r.JobConfig.FrontendImage,
 		ContextDigest:    art.Digest,
 		ContextRevision:  art.Revision,
+		Attestations:     attestationMode(r.JobConfig),
 		ContextSubpath:   spec.Context.Subpath,
 		Dockerfile:       spec.Dockerfile,
 		Target:           spec.Target,
@@ -301,9 +315,14 @@ func (r *ImageBuildReconciler) startBuild(ctx context.Context, obj *ociv1alpha1.
 	if err != nil {
 		return err
 	}
+	// Same lifetime, same owner, same reason: a pod mounts only from its own namespace.
+	caSecret, err := r.registryCASecretFor(ctx, obj, jobName(obj, inputHash))
+	if err != nil {
+		return err
+	}
 
 	job := buildJob(obj, inputHash, contextURL, r.JobConfig, r.repositoryFor(obj), pushSecret,
-		r.cacheAvailable(ctx, obj))
+		caSecret, r.cacheAvailable(ctx, obj))
 	if err := ctrl.SetControllerReference(obj, job, r.Scheme()); err != nil {
 		return fmt.Errorf("setting owner: %w", err)
 	}
@@ -335,6 +354,8 @@ func (r *ImageBuildReconciler) observeJob(ctx context.Context, obj *ociv1alpha1.
 			return ctrl.Result{}, err
 		}
 		r.recordSuccess(obj, inputs, inputHash, digest)
+		// After recordSuccess, so status already names what was built when signing looks at it.
+		obj.Status.Attestations = r.signBuild(ctx, obj, digest)
 		return ctrl.Result{RequeueAfter: recon.Interval(obj.Spec.Interval)}, nil
 
 	case jobFailed(job):
@@ -424,7 +445,12 @@ func podBuildDigest(p corev1.Pod) string {
 
 // recordSuccess writes the artifact and rotates history.
 func (r *ImageBuildReconciler) recordSuccess(obj *ociv1alpha1.ImageBuild, inputs build.Inputs, inputHash, digest string) {
-	repo := r.repositoryFor(obj)
+	// The PULL name, which is the only place it is used. Everything that connects -- the Job's push
+	// target, the tag-conflict check, the cache reference, the retention refresh -- goes through
+	// repositoryFor, because those run from inside the cluster where the public name may not
+	// resolve. status.artifact is the one thing a workload reads, so it is the one thing that gets
+	// the public name.
+	repo := r.Default.PublicRepository(r.repositoryFor(obj))
 	// Same list the Job was told to push, so status cannot describe a different set of tags than
 	// the build actually wrote.
 	effective, err := recon.EffectiveTags(obj.Spec.Push.GetTags(), obj.Spec.Push.GetRef())
@@ -645,4 +671,20 @@ func (r *ImageBuildReconciler) recordKept(obj *ociv1alpha1.ImageBuild, c *ociv1a
 	obj.Status.Failures = 0
 	recon.Event(r.Recorder, obj, corev1.EventTypeNormal, ociv1alpha1.ReasonSucceeded,
 		fmt.Sprintf("Kept %s at %s; no build was run (onConflict: Keep)", c.Tag, c.Existing))
+}
+
+// attestationMode summarises the BuildKit attestation options for the input hash. A string rather
+// than two booleans so that adding a third option later cannot silently collide with an existing
+// combination.
+func attestationMode(cfg JobConfig) string {
+	switch {
+	case cfg.SBOM && cfg.Provenance:
+		return "sbom+provenance"
+	case cfg.SBOM:
+		return "sbom"
+	case cfg.Provenance:
+		return "provenance"
+	default:
+		return ""
+	}
 }

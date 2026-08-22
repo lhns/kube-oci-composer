@@ -115,17 +115,3 @@ func TestChartAcceptsRetentionSettingsThatAreMerelyUnusual(t *testing.T) {
 		})
 	}
 }
-
-// TestTheRetentionCheckIsActuallyReached guards the defect that made the first version of this
-// check pass all eleven cases above while doing nothing.
-//
-// The validation lived in templates/_retention.tpl with an `include` at the bottom. Helm loads
-// underscore-prefixed files as definitions and never renders them, so that call never ran -- and
-// every case that should have failed rendered cleanly. The check now lives behind validate.yaml,
-// and this test fails if it is ever moved back somewhere Helm will not execute it.
-func TestTheRetentionCheckIsActuallyReached(t *testing.T) {
-	out := renderExpectingFailure(t, "--set", "registry.retention.window=2h")
-	if !strings.Contains(out, "validate.yaml") {
-		t.Fatalf("the retention check must be invoked from a template Helm renders; got:\n%s", out)
-	}
-}

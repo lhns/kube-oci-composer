@@ -51,10 +51,6 @@ operator:
     # Path-style addressing (host/bucket/key). Required by most self-hosted gateways, whose
     # certificate does not cover per-bucket subdomains.
     pathStyle: true
-    # Redirect blob pulls to a presigned URL so bytes bypass the controller. Off by default: it
-    # exposes the object-store endpoint to every pulling client, which on a private gateway may
-    # not be reachable from every node.
-    presignBlobs: false
     # Secret holding AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY. Credentials are injected as
     # environment variables, never as flags — flags appear in ps, in the pod spec, and in every
     # kubectl describe.
@@ -77,6 +73,25 @@ operator:
   # pinned to a previous digest being rescheduled, both depend on it. Layers are shared between
   # builds, so a generous value costs far less than the count suggests.
   keepBuilds: 10
+
+  # SBOM, provenance and signing. All off by default.
+  #
+  # SIGNING IS INERT UNTIL SOMETHING VERIFIES IT. This chart ships no admission policy, so turning
+  # it on changes nothing an attacker experiences until you install Kyverno, policy-controller or
+  # Connaisseur and point it at the public key. Example policies: docs/examples/verify.
+  #
+  # For an ImageComposition the SBOM is DERIVED from the digest-pinned inputs and is exact rather
+  # than scanned -- it says "core-1.1.1.tgz sha256:... unpacked at /core", not "openssl 3.0.11".
+  # For an ImageBuild it comes from BuildKit and is a scan of the result, because only the build
+  # can see what it installed (ADR 0008).
+  supplyChain:
+    sbom: false
+    provenance: false
+    signing:
+      enabled: false
+      # A Secret in the RELEASE namespace, from `cosign generate-key-pair k8s://<ns>/<name>`.
+      # Never nameable by an object: the operator signs, tenants do not choose the key.
+      existingSecret: ""
 
   # Refuse any sourceRef that names no revision (threat T1).
   #
@@ -159,10 +174,23 @@ imageBuild:
   healthProbeBindAddress: ":8081"
 
   sourceDateEpoch: "0"
-  insecureRegistry: ""
   keepBuilds: 10
   leaderElect: true
   serviceAccountName: ""
+
+  # SBOM, provenance and signing for builds. See operator.supplyChain for the caveats -- they all
+  # apply, and the SBOM here is a scan rather than a derivation.
+  #
+  # Enabling either attestation CHANGES THE PUBLISHED DIGEST: BuildKit attaches attestations as
+  # extra manifests in an index, so a single-platform build's artifact becomes an index. Existing
+  # pins keep resolving; anything that assumed the digest named a manifest now finds an index. It
+  # is in the input hash, so it happens once, visibly, when you turn it on.
+  supplyChain:
+    sbom: false
+    provenance: false
+    signing:
+      enabled: false
+      existingSecret: ""
 
   # Refuse an ImageBuild whose spec.context names no revision (threat T1). It matters more here
   # than on the composer: an unpinned context builds whatever the branch is at now, and a build's
@@ -194,7 +222,7 @@ defaultRegistry:
   # `registry.host` is NOT, because it may be an ingress terminating TLS and forcing HTTP would break
   # it. Set this when registry.host is plain HTTP, which a NodePort is:
   #
-  #   defaultRegistry.insecure: oci.internal:5000
+  #   defaultRegistry.insecure: oci-composer.internal:5000
   insecure: ""
 
 registry:
@@ -243,23 +271,202 @@ registry:
     # your GitOps tool refuses to leave chart-generated state in the cluster.
     password: ""
 
+    # Supply the htpasswd Secret yourself instead of having the chart generate it. The Secret must
+    # hold an `htpasswd` key. Pair it with defaultRegistry.existingPushSecret when you manage both
+    # halves of the credential -- the chart refuses to render a configuration where it generates
+    # one half and you supply the other, because nothing would agree on the password.
+    existingHtpasswdSecret: ""
+
+  # The cluster's DNS domain. Used to address the registry Service internally, and later as a
+  # certificate SAN. Change it only if your cluster does not use cluster.local.
+  clusterDomain: cluster.local
+
+  # HOW WORKLOADS REACH THE REGISTRY. There is no default, and the chart refuses to install until
+  # this is set -- see the long note in templates/_publish.tpl for why.
+  #
+  # The short version: the CONTROLLERS always use the in-cluster Service and need nothing here.
+  # This is entirely about the kubelet, which resolves image references with the NODE's resolver
+  # and cannot see cluster DNS. Getting it wrong does not fail at install time on its own; it
+  # publishes successfully and then fails every pull with ErrImagePull, days later, somewhere else.
+  publish:
+    #   ingress       -- an Ingress is rendered; `host` is its hostname
+    #   nodePort      -- the Service is a NodePort; `host` is a name your NODES resolve to it,
+    #                    which needs a containerd certs.d drop-in per node (docs/registry.md)
+    #   external      -- you run the registry; set registry.enabled=false and defaultRegistry.host
+    #   internalOnly  -- nothing outside the cluster pulls these images. A deliberate choice, not
+    #                    a default: useful when another system copies them onward.
+    mode: ""
+
+  # SCALE-OUT CLUSTERING. Read the next paragraph before turning it on.
+  #
+  # It is NOT replication. zot shards by repository-name hash and proxies each request to the member
+  # that owns that repository, so N members means each repository lives on exactly one of them: a
+  # member that is down makes roughly 1/N of your repositories unavailable, and zot's own
+  # documentation says the cluster is not self-healing. What this buys is throughput and a proxy
+  # layer that survives a rolling update. It does not buy availability, which is why the value is
+  # called `cluster` and not `ha`.
+  #
+  # It also has hard prerequisites the chart does not install: S3-compatible object storage and a
+  # shared cache driver (redis or dynamodb). BoltDB cannot be shared, so there is no "just add
+  # replicas to the PVC" path, and the chart refuses the combinations that look like one.
+  #
+  # Worth saying plainly: anyone who already runs S3 and redis could equally run a registry of
+  # their own and set publish.mode=external. This exists so the bundled registry is not a FORCED
+  # single point of failure -- not because this chart is the right way to run a registry estate.
+  cluster:
+    enabled: false
+    replicaCount: 3
+    # Exactly 16 characters -- siphash-2-4 takes a 128-bit key. Generated and kept stable if empty.
+    # Changing it reshuffles every repository onto a different member; survivable with shared
+    # storage, but it is a cluster-wide reshuffle, so stability is the default.
+    hashKey: ""
+
+  # Where the registry keeps blobs. `local` is the PVC below; `s3` is required for clustering.
+  storage:
+    driver: local
+    s3:
+      bucket: ""
+      region: ""
+      regionEndpoint: ""
+      rootDirectory: /zot
+      secure: true
+      # Credentials come from the environment (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY) via this
+      # Secret, never from the config file -- a ConfigMap is visible in every `kubectl describe`.
+      existingSecret: ""
+
+  # The metadata cache. `none` is BoltDB on local disk, which cannot be shared between members.
+  #
+  # WARNING, and it is the one most likely to bite: `extensions.search` records the pull timestamps
+  # that the retention policy's `pulledWithin` depends on. In clustered mode that metadata lives
+  # HERE rather than in per-pod BoltDB -- so if redis is not persistent, a redis restart loses every
+  # pull timestamp, every image looks unpulled, and the next GC pass reclaims images your live
+  # objects still reference. That is ADR 0031's failure mode reintroduced by a component this chart
+  # does not manage, on a gcDelay fuse rather than a retention window. Use persistent redis.
+  cache:
+    driver: none
+    redis:
+      url: ""
+      keyprefix: zot
+    dynamodb:
+      region: ""
+      endpoint: ""
+      cacheTablename: ""
+      repoMetaTablename: ""
+      imageMetaTablename: ""
+      repoBlobsInfoTablename: ""
+      apiKeyTablename: ""
+      userDataTablename: ""
+      versionTablename: ""
+
+  # TLS on the registry itself.
+  #
+  # OFF by default, and that is not timidity -- turning it on invalidates the containerd drop-in on
+  # every node. zot has one listener, so it cannot serve HTTP and HTTPS at once: each node's
+  # hosts.toml has to move from http:// to https:// and, in selfSigned mode, learn the CA. Anyone
+  # terminating TLS at an ingress instead is unaffected.
+  #
+  # What it buys: today the generated push password crosses the pod network in an HTTP Basic
+  # header, readable by anything positioned to watch, with no trace in any log -- and that
+  # credential is the whole of the "only the controllers can push" guarantee. This closes it.
+  tls:
+    enabled: false
+
+    #   selfSigned  -- the chart generates a CA and a leaf, and distributes the CA to the
+    #                  controllers and to build Jobs. No dependencies. Does NOT renew: the chart
+    #                  refuses to render once the certificate is near expiry, and rotation is a
+    #                  documented manual sequence.
+    #   certManager -- the chart renders a Certificate and cert-manager owns renewal. Recommended
+    #                  if you run cert-manager, because renewal is the thing selfSigned cannot do.
+    #   secret      -- you supply a kubernetes.io/tls Secret and manage it yourself.
+    mode: selfSigned
+
+    # Empty means "<release>-kube-oci-composer-registry-tls". In mode=secret this is the Secret you
+    # created; in mode=certManager it is the name cert-manager is told to write.
+    secretName: ""
+
+    certManager:
+      issuerRef:
+        kind: Issuer
+        name: ""
+        group: cert-manager.io
+      duration: 2160h
+      # Generous on purpose. zot reads its certificate once at startup, so a renewed Secret is not
+      # picked up until the pod restarts -- nothing in the chart can notice, because it does not
+      # own the Secret cert-manager rewrites. A long renewBefore leaves room to restart it.
+      renewBefore: 360h
+
+    selfSigned:
+      caDays: 3650
+      certDays: 365
+      # Refuse to render when the stored certificate is this close to expiring. An expired
+      # certificate here stops the retention refresh, and that reclaims images live objects still
+      # reference (ADR 0031) -- so this fails rather than warns.
+      failWithinDays: 1
+
+    # Extra SANs beyond the ones computed automatically (the Service names and registry.host).
+    dnsNames: []
+    ipAddresses: []
+
+    # How the CA reaches the controllers and the build Jobs. Turn it off when the certificate is
+    # already publicly trusted -- an ACME issuer, or a corporate CA your images already trust.
+    trust:
+      enabled: true
+      # A ConfigMap you maintain instead, holding the CA under `ca.crt`. The key name is fixed:
+      # it is what a kubernetes.io/tls Secret uses, so the two sources stay interchangeable.
+      existingConfigMap: ""
+
+  # A NetworkPolicy admitting traffic to the registry.
+  #
+  # It is a CONNECTIVITY guarantee, not a security control. Reads are anonymous by design and
+  # writes need the password, so restricting which namespace may connect adds no authority to
+  # either. What it buys is builds that work: a build Job runs in ITS OWN object's namespace and
+  # crosses a namespace boundary to push, and in a default-deny cluster nothing lets it through.
+  #
+  # Two things to know before narrowing it:
+  #
+  #   * The moment any policy selects the registry pod, that pod goes from "everything allowed" to
+  #     "only what is listed". This file therefore has to be complete, not merely correct.
+  #   * Image pulls come from the KUBELET, in the node's network namespace. No pod selector can
+  #     match them. That is what nodeCIDRs is for -- and on a cluster where pods and nodes sit on
+  #     different networks, leaving it empty turns every pull into a timeout that looks exactly
+  #     like a broken registry.
+  networkPolicy:
+    enabled: true
+    # Empty means every namespace, which is the default because a build can land anywhere.
+    # Listing namespaces asserts you know every one a build will ever run in.
+    allowedNamespaces: []
+    # CIDRs the kubelets pull from. Needed when node traffic is not already permitted -- check
+    # before assuming it is; the symptom of getting this wrong is a pull that hangs.
+    nodeCIDRs: []
+
+  # Rendered when publish.mode=ingress. The hostname comes from registry.host, with any port
+  # stripped -- an Ingress rule host is a hostname, not a registry reference.
+  #
+  # TLS terminates HERE, at the ingress, which is where almost everyone's certificate already is.
+  # That is what makes this the only mode needing nothing on the nodes: containerd pulls over HTTPS
+  # with a certificate it already trusts, so no certs.d drop-in and no CA distribution.
+  ingress:
+    className: ""
+    annotations: {}
+    tls:
+      enabled: true
+      # Leave empty when your ingress controller has a default certificate, or when cert-manager
+      # writes one from an annotation above. A name here that nothing creates is worse than none.
+      secretName: ""
+
   # How the registry is reached.
   #
-  # The CONTROLLERS always use in-cluster DNS, which needs nothing here. This is about WORKLOADS:
-  # containerd resolves image references with the node's resolver, which cannot see cluster DNS, so
-  # a Pod cannot pull from a .svc.cluster.local name however healthy the Service is.
-  #
-  # NodePort plus a containerd certs.d drop-in mapping `host` to that port is the arrangement that
-  # works without an ingress controller or a certificate. See docs/registry.md.
+  # The CONTROLLERS always use in-cluster DNS, which needs nothing here.
   service:
     type: ClusterIP
     port: 5000
     nodePort: ""
 
-  # The hostname workloads pull from, and what status.artifact.ref reports.
+  # The hostname WORKLOADS pull from, and the only thing status.artifact.ref reports.
   #
-  # Leave empty and references name the in-cluster Service -- correct for the controllers, and NOT
-  # pullable by a kubelet. Set it to whatever name your nodes resolve to this registry.
+  # It is not what the controllers connect to -- they always use the in-cluster Service -- so this
+  # name never has to resolve inside the cluster, and setting it can no longer break publishing.
+  # Required by every publish.mode except internalOnly.
   host: ""
 
   persistence:
@@ -275,10 +482,11 @@ registry:
     requests: {cpu: 50m, memory: 128Mi}
     limits: {memory: 1Gi}
 
-# Persistence for the blob store and layer cache.
+# Persistence for the layer cache.
 #
-# Neither is a system of record: composition is deterministic, so anything lost is rebuilt. An
-# emptyDir is therefore correct and supported. A PVC only buys a faster restart.
+# Not a system of record -- it holds fetched layer SOURCES, so anything lost is refetched from
+# upstream. An emptyDir is therefore correct and supported; a PVC only buys a faster restart.
+# (The images themselves live in the registry, which has its own registry.persistence.)
 persistence:
   enabled: false
   storageClass: ""

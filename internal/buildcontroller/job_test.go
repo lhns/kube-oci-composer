@@ -79,7 +79,7 @@ func TestJobNameStaysWithinLimit(t *testing.T) {
 // refusing to build at all. Rootless is the half of that this project accepts; privileged is not
 // offered at any setting, so nothing in the spec can reach these fields.
 func TestBuildJobRunsRootless(t *testing.T) {
-	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo, "", true)
+	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo, "", "", true)
 
 	pod := job.Spec.Template.Spec
 	if len(pod.Containers) != 1 {
@@ -155,7 +155,7 @@ func TestBuildJobRunsRootless(t *testing.T) {
 func TestBuildJobUsesTheObjectsServiceAccount(t *testing.T) {
 	obj := sampleBuild()
 	obj.Spec.ServiceAccountName = "builder"
-	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo, "", true)
+	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo, "", "", true)
 
 	if got := job.Spec.Template.Spec.ServiceAccountName; got != "builder" {
 		t.Errorf("service account = %q, want %q", got, "builder")
@@ -170,7 +170,7 @@ func TestBuildJobArgs(t *testing.T) {
 	obj.Spec.Target = "runtime"
 	obj.Spec.Args = []ociv1alpha1.BuildArg{{Name: "VERSION", Value: "1.2.3"}}
 
-	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo, "", true)
+	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo, "", "", true)
 	argv := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " ")
 
 	for _, want := range []string{
@@ -193,7 +193,7 @@ func TestBuildJobArgs(t *testing.T) {
 func TestNetworkNoneIsPassedThrough(t *testing.T) {
 	obj := sampleBuild()
 	obj.Spec.Network = "None"
-	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo, "", true)
+	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo, "", "", true)
 
 	argv := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " ")
 	if !strings.Contains(argv, "no-network=true") {
@@ -232,7 +232,7 @@ func TestSecretsAreMountedNotInlined(t *testing.T) {
 		SecretRef: &ociv1alpha1.LocalObjectReference{Name: "npm-creds"},
 	}}
 
-	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo, "", true)
+	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo, "", "", true)
 	argv := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " ")
 
 	if !strings.Contains(argv, "--secret id=npmrc") {
@@ -273,14 +273,14 @@ func TestInsecureRegistryIsOptInPerHost(t *testing.T) {
 	cfg := sampleConfig()
 	cfg.InsecureRegistries = []string{"registry.internal:5000"}
 
-	secure := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", cfg, sampleRepo, "", true)
+	secure := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", cfg, sampleRepo, "", "", true)
 	if argv := strings.Join(secure.Spec.Template.Spec.Containers[0].Args, " "); strings.Contains(argv, "registry.insecure") {
 		t.Errorf("a non-listed host was pushed insecurely\ngot: %s", argv)
 	}
 
 	obj := sampleBuild()
 	obj.Spec.Push.Repository = "registry.internal:5000/team/app"
-	listed := buildJob(obj, testHash, "https://example/ctx.tgz", cfg, obj.Spec.Push.Repository, "", true)
+	listed := buildJob(obj, testHash, "https://example/ctx.tgz", cfg, obj.Spec.Push.Repository, "", "", true)
 	if argv := strings.Join(listed.Spec.Template.Spec.Containers[0].Args, " "); !strings.Contains(argv, "registry.insecure=true") {
 		t.Errorf("a listed host was not allowed plain HTTP\ngot: %s", argv)
 	}
@@ -297,8 +297,8 @@ func TestInsecureRegistryIsNotInTheInputHash(t *testing.T) {
 	insecure.InsecureRegistries = []string{"registry.internal:5000"}
 
 	// The Job name is derived from the input hash, so identical names prove the hash did not move.
-	a := buildJob(obj, testHash, "https://example/ctx.tgz", plain, obj.Spec.Push.Repository, "", true)
-	b := buildJob(obj, testHash, "https://example/ctx.tgz", insecure, obj.Spec.Push.Repository, "", true)
+	a := buildJob(obj, testHash, "https://example/ctx.tgz", plain, obj.Spec.Push.Repository, "", "", true)
+	b := buildJob(obj, testHash, "https://example/ctx.tgz", insecure, obj.Spec.Push.Repository, "", "", true)
 	if a.Name != b.Name {
 		t.Errorf("the insecure list moved the input hash: %q vs %q", a.Name, b.Name)
 	}
@@ -364,5 +364,116 @@ func TestFetchContextUnwrapsTheSourceControllerDirectory(t *testing.T) {
 				t.Error("the staging directory was left behind, so it becomes part of the build context")
 			}
 		})
+	}
+}
+
+// TestBuildPodsAreSelectable covers a gap that only shows up from outside this package.
+//
+// The labels were on the Job and not on its pod template, so build pods carried nothing but the
+// `job-name` and `controller-uid` Kubernetes adds itself. That is enough to find one pod and not
+// enough to describe a class of them — and anything selecting build pods as a class lives in a
+// namespace this chart does not own and was not written by whoever created the build: a
+// NetworkPolicy letting them reach the registry, a quota, an admission rule.
+//
+// Without pod labels the only way to write such a policy was to match every pod in the namespace.
+func TestBuildPodsAreSelectable(t *testing.T) {
+	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo, "", "", true)
+
+	labels := job.Spec.Template.Labels
+	if labels == nil {
+		t.Fatal("build pods carry no labels; nothing outside this namespace can select them")
+	}
+	if got := labels[ManagedByLabel]; got != "kube-oci-builder" {
+		t.Errorf("%s = %q, want kube-oci-builder", ManagedByLabel, got)
+	}
+	if labels[InputHashLabel] == "" {
+		t.Errorf("%s is empty; a pod cannot be tied back to the build that made it", InputHashLabel)
+	}
+
+	// The Job's own labels must not regress while the pod's are added — the controller finds
+	// existing Jobs by them.
+	if got := job.Labels[ManagedByLabel]; got != "kube-oci-builder" {
+		t.Errorf("the Job lost its own %s label: %q", ManagedByLabel, got)
+	}
+}
+
+// TestTheBuildTrustsTheRegistryCA covers the half of TLS that does not live in the chart.
+//
+// A build Job runs in the tenant's namespace, so the CA has to be copied there and mounted, and
+// rootless BuildKit has to be persuaded to use it. Four things arrive together or not at all — the
+// volume, the writable bundle, the env var and the merge in the script — and they are gated on one
+// condition in Go precisely so this test can assert on the rendered container rather than on
+// runtime behaviour. A `[ -f ... ]` check in the shell instead would silently no-op if a mount name
+// drifted.
+func TestTheBuildTrustsTheRegistryCA(t *testing.T) {
+	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo,
+		"", "build-registry-ca", true)
+	pod := job.Spec.Template.Spec
+	container := pod.Containers[0]
+
+	var haveCA, haveBundle bool
+	for _, v := range pod.Volumes {
+		switch v.Name {
+		case "registry-ca":
+			haveCA = true
+			if v.Secret == nil || v.Secret.SecretName != "build-registry-ca" {
+				t.Errorf("the CA volume must come from the copied Secret: %+v", v)
+			}
+		case "ca-bundle":
+			haveBundle = true
+			// An emptyDir because uid 1000 cannot write to the image's root-owned /etc/ssl/certs.
+			if v.EmptyDir == nil {
+				t.Errorf("the merged bundle needs a writable volume: %+v", v)
+			}
+		}
+	}
+	if !haveCA || !haveBundle {
+		t.Fatalf("both volumes are required; got %v", pod.Volumes)
+	}
+
+	var sslCertFile string
+	for _, e := range container.Env {
+		if e.Name == "SSL_CERT_FILE" {
+			sslCertFile = e.Value
+		}
+	}
+	if sslCertFile != caBundlePath {
+		t.Errorf("SSL_CERT_FILE = %q, want the merged bundle %q", sslCertFile, caBundlePath)
+	}
+
+	// The merge itself. SSL_CERT_FILE REPLACES the system pool rather than adding to it, so
+	// pointing it straight at the registry's CA would break every `FROM alpine` and every frontend
+	// fetch from Docker Hub.
+	script := container.Command[2]
+	if !strings.Contains(script, "ca-certificates.crt") {
+		t.Error("the bundle must include the image's own roots, or public registries stop verifying")
+	}
+	if !strings.Contains(script, caBundlePath) {
+		t.Errorf("the script must write the bundle SSL_CERT_FILE names:\n%s", script)
+	}
+	if !strings.Contains(script, "|| true") {
+		t.Error("a builder image with no system bundle must not fail the build under `set -e`")
+	}
+}
+
+// TestNoCAMeansNoCAPlumbing — the ordinary case must stay exactly as it was. An empty SSL_CERT_FILE
+// or a stray empty volume would be a change to every build for the benefit of none.
+func TestNoCAMeansNoCAPlumbing(t *testing.T) {
+	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo,
+		"", "", true)
+	pod := job.Spec.Template.Spec
+
+	for _, v := range pod.Volumes {
+		if v.Name == "registry-ca" || v.Name == "ca-bundle" {
+			t.Errorf("no CA is configured, so %q should not be mounted", v.Name)
+		}
+	}
+	for _, e := range pod.Containers[0].Env {
+		if e.Name == "SSL_CERT_FILE" {
+			t.Errorf("SSL_CERT_FILE must not be set without a CA to point it at: %q", e.Value)
+		}
+	}
+	if strings.Contains(pod.Containers[0].Command[2], "ca-bundle") {
+		t.Error("the script must not merge a bundle that does not exist")
 	}
 }
