@@ -15,7 +15,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -31,9 +30,8 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
-	"github.com/lhns/kube-oci-composer/internal/attest"
 	"github.com/lhns/kube-oci-composer/internal/buildcontroller"
-	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
+	"github.com/lhns/kube-oci-composer/internal/opts"
 	"github.com/lhns/kube-oci-composer/internal/retention"
 )
 
@@ -54,18 +52,11 @@ func init() {
 	utilruntime.Must(ociv1alpha1.AddToScheme(scheme))
 }
 
-// splitList turns a comma-separated flag into a slice, dropping blanks.
-func splitList(s string) []string {
-	var out []string
-	for _, part := range strings.Split(s, ",") {
-		if part = strings.TrimSpace(part); part != "" {
-			out = append(out, part)
-		}
-	}
-	return out
-}
-
 func main() {
+	// Everything both controllers share about publishing, trust and supply chain.
+	var registry opts.Registry
+	registry.Bind(flag.CommandLine)
+
 	var (
 		metricsAddr          string
 		probeAddr            string
@@ -73,15 +64,7 @@ func main() {
 		builderImage         string
 		frontendImage        string
 		sourceDateEpoch      string
-		insecureRegs         string
 		refreshInterval      time.Duration
-		defaultRegistry      string
-		sbom                 bool
-		provenance           bool
-		signingKeySecret     string
-		registryCAFile       string
-		publicRegistryHost   string
-		defaultPushSecret    string
 		historyLimit         int
 		requirePinnedSources bool
 		showVersion          bool
@@ -103,52 +86,13 @@ func main() {
 			"registry's retention window -- the ratio is the guarantee, not either number. It matters "+
 			"more here than on the composer: a build cannot be reproduced from its spec, so a reclaimed "+
 			"image is gone rather than rebuildable. See ADR 0031.")
-	flag.StringVar(&defaultRegistry, "default-registry", "",
-		"Registry to publish to when an object names no repository of its own, as "+
-			"\"registry.example:5000\" or \"registry.example:5000/prefix\". Objects then publish "+
-			"to <default-registry>/<namespace>/<name>.\n"+
-			"Namespace-qualified deliberately: one registry is shared by the whole cluster, so a "+
-			"bare object name would collide the moment two namespaces both have an \"app\".")
-	flag.BoolVar(&sbom, "sbom", false,
-		"Attach an SBOM to every artifact, as an OCI referrer. For compositions it is derived from "+
-			"the digest-pinned inputs and is exact rather than scanned; a build's is produced by "+
-			"BuildKit and is a scan of the result (ADR 0008).")
-	flag.BoolVar(&provenance, "provenance", false,
-		"Attach SLSA provenance to every artifact, as an OCI referrer.")
-	flag.StringVar(&signingKeySecret, "signing-key-secret", "",
-		"Name of a Secret in THIS controller's namespace holding a cosign key pair, created with "+
-			"`cosign generate-key-pair k8s://<namespace>/<name>`. Signing is inert until something "+
-			"verifies at admission -- see docs/examples/verify. Never nameable by an object: the "+
-			"operator signs, tenants do not choose the key.")
-	flag.StringVar(&registryCAFile, "registry-ca-file", "",
-		"PEM bundle of ADDITIONAL root CAs to trust, on top of the system roots. Needed when the "+
-			"registry serves a certificate signed by a CA the image does not already trust -- the "+
-			"chart's self-signed mode, or a corporate CA. Applies to every registry this controller "+
-			"talks to, including base-image pulls, because a composition layered on a build pulls its "+
-			"base from the same registry it pushes to.")
-	flag.StringVar(&publicRegistryHost, "public-registry-host", "",
-		"What a WORKLOAD should pull from, when that differs from --default-registry. "+
-			"Used ONLY to render status.artifact.ref. One string cannot satisfy two resolvers: this "+
-			"controller reaches the registry through cluster DNS, and a kubelet reaches it with the "+
-			"NODE's resolver, which has never heard of anything.svc.cluster.local. Empty means the two "+
-			"are the same name, which is correct for an external registry or an ingress with real DNS.")
-	flag.StringVar(&defaultPushSecret, "default-push-secret", "",
-		"dockerconfigjson Secret authenticating pushes to --default-registry. Read from THIS "+
-			"controller's namespace (POD_NAMESPACE), not the object's: it is the operator's "+
-			"credential, not a tenant's.\n"+
-			"Used ONLY for objects that named no repository. An object that chooses its own "+
-			"registry authenticates with its own secretRef or not at all -- otherwise anyone able "+
-			"to create an object could point it at a host they control and be handed this password.")
-	flag.StringVar(&insecureRegs, "insecure-registry", "",
-		"Comma-separated registry hosts to push to over plain HTTP. Opt-in per host, for an "+
-			"internal or air-gapped registry without TLS.")
 	flag.BoolVar(&requirePinnedSources, "require-pinned-sources", false,
 		"Refuse an ImageBuild whose spec.context names no revision. Pinning is optional by design (ADR 0026), so this is how an operator decides otherwise for a whole cluster. It matters more here than on the composer: an unpinned context builds whatever the branch is at now, and a build's output cannot be reproduced from its spec (ADR 0025).")
 	flag.IntVar(&historyLimit, "keep-builds", ociv1alpha1.DefaultHistoryLimit, "How many past builds to retain in status.")
 	flag.BoolVar(&showVersion, "version", false, "Print the version and exit.")
 
-	opts := zap.Options{Development: false}
-	opts.BindFlags(flag.CommandLine)
+	zapOpts := zap.Options{Development: false}
+	zapOpts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
 	if showVersion {
@@ -156,7 +100,7 @@ func main() {
 		return
 	}
 
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
 
 	// Both images must be pinned, and this is refused at startup rather than warned about.
 	//
@@ -206,57 +150,25 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Read once at startup. A CA that rotates on the order of a year does not justify a
-	// stat-and-reload path, and rotation needs a restart anyway -- zot reads its own certificate
-	// once too. Failing here rather than at the first artifact is deliberate: a controller that
-	// cannot trust its registry has nothing useful to do.
-	var registryTransport http.RoundTripper
-	var registryCA []byte
-	if registryCAFile != "" {
-		var err error
-		registryTransport, err = recon.Transport(registryCAFile)
-		if err != nil {
-			setupLog.Error(err, "unable to build the registry transport", "caFile", registryCAFile)
-			os.Exit(1)
-		}
-		setupLog.Info("trusting an additional registry CA", "caFile", registryCAFile)
-		// The same bytes travel on to every build Job: the controller trusts the registry, and so
-		// must the pod that pushes to it. Read here rather than in the reconciler so a build never
-		// waits on a file read.
-		registryCA, err = os.ReadFile(registryCAFile)
-		if err != nil {
-			setupLog.Error(err, "unable to read the registry CA for builds", "caFile", registryCAFile)
-			os.Exit(1)
-		}
+	// Everything the two controllers share about publishing, trust and supply chain. Built here so
+	// a CA that cannot be read or a key that cannot sign fails the process rather than the first
+	// artifact -- the same reasoning the chart applies to an unpinned builder image.
+	registryTransport, registryCA, err := registry.Transport()
+	if err != nil {
+		setupLog.Error(err, "unable to trust the registry CA", "caFile", registry.CAFile)
+		os.Exit(1)
 	}
-
-	// Supply-chain material. Read once at startup, so a key that cannot sign fails the process
-	// rather than the first artifact -- the same reasoning the chart applies to an unpinned
-	// builder image.
-	attestor := &attest.Attestor{SBOM: sbom, Provenance: provenance}
-	if signingKeySecret != "" {
-		ns := os.Getenv("POD_NAMESPACE")
-		if ns == "" {
-			setupLog.Error(nil, "POD_NAMESPACE is unset, so the signing key cannot be read")
-			os.Exit(1)
-		}
-		key, err := attest.LoadKeyFromCluster(context.Background(), ns, signingKeySecret)
-		if err != nil {
-			setupLog.Error(err, "unable to load the signing key", "secret", signingKeySecret)
-			os.Exit(1)
-		}
-		attestor.Key = key
+	attestor, err := registry.Attestor(context.Background(), os.Getenv("POD_NAMESPACE"))
+	if err != nil {
+		setupLog.Error(err, "unable to set up supply-chain signing", "secret", registry.SigningKeySecret)
+		os.Exit(1)
+	}
+	if attestor.Key != nil {
 		setupLog.Info("signing enabled; artifacts will carry a cosign signature",
-			"secret", signingKeySecret,
 			"note", "a signature changes nothing until something verifies it at admission")
 	}
 
-	defaults := recon.DefaultRegistry{
-		Host:       defaultRegistry,
-		PublicHost: publicRegistryHost,
-		SecretName: defaultPushSecret,
-		Namespace:  os.Getenv("POD_NAMESPACE"),
-	}
+	defaults := registry.Default(os.Getenv("POD_NAMESPACE"))
 	if defaults.SecretName != "" && defaults.Namespace == "" {
 		setupLog.Error(nil, "POD_NAMESPACE is unset, so the default push credential cannot be "+
 			"read; set it from the downward API")
@@ -274,10 +186,10 @@ func main() {
 			BuilderImage:       builderImage,
 			FrontendImage:      frontendImage,
 			SourceDateEpoch:    sourceDateEpoch,
-			InsecureRegistries: splitList(insecureRegs),
+			InsecureRegistries: registry.Insecure(),
 			RegistryCA:         registryCA,
-			SBOM:               sbom,
-			Provenance:         provenance,
+			SBOM:               registry.SBOM,
+			Provenance:         registry.Provenance,
 		},
 		HistoryLimit:         historyLimit,
 		RequirePinnedSources: requirePinnedSources,
@@ -297,7 +209,7 @@ func main() {
 			Interval: refreshInterval,
 			//nolint:staticcheck // SA1019: the new events API has no Event method; same as above.
 			Recorder:           mgr.GetEventRecorderFor("retention"),
-			InsecureRegistries: splitList(insecureRegs),
+			InsecureRegistries: registry.Insecure(),
 			Transport:          registryTransport,
 			Default:            defaults,
 		}
