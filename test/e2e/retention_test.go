@@ -220,7 +220,7 @@ func sleepInCluster(t *testing.T, seconds int) {
 // the answer the whole time.
 func registryLogs(t *testing.T) string {
 	t.Helper()
-	out, err := kubectl(t, "-n", operatorNamespace, "logs", "deploy/kube-oci-composer-registry", "--tail=120")
+	out, err := kubectl(t, "-n", operatorNamespace, "logs", "statefulset/kube-oci-composer-registry", "--tail=120")
 	if err != nil {
 		return "\n\n(registry logs unavailable: " + err.Error() + ")"
 	}

@@ -8,4 +8,9 @@ render, all of them rendering cleanly, because the check was never invoked at al
 Helm drops a template whose output is only whitespace, so nothing lands in the release; `fail`
 inside the include still aborts `helm template`, `helm install` and `helm upgrade` alike.
 */}}
+{{- include "kube-oci-composer.checkPublishMode" . -}}
 {{- include "kube-oci-composer.checkRetention" . -}}
+{{- include "kube-oci-composer.checkRegistryAuth" . -}}
+{{- include "kube-oci-composer.checkRegistryCert" . -}}
+{{- include "kube-oci-composer.checkRegistryCluster" . -}}
+{{- include "kube-oci-composer.checkRegistryMigration" . -}}

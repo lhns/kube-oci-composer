@@ -1,16 +1,10 @@
 {{- if .Values.imageComposition.enabled }}
-{{- if and .Values.operator.s3.presignBlobs (not .Values.operator.s3.endpoint) }}
-{{- fail "operator.s3.presignBlobs requires operator.s3.endpoint" }}
-{{- end }}
 {{- if and .Values.operator.s3.endpoint (not .Values.operator.s3.bucket) }}
 {{- fail "operator.s3.endpoint requires operator.s3.bucket" }}
 {{- end }}
 {{- /*
-The shared-storage guards are gone with the serving endpoint. They existed because a second replica
-without shared blobs would join the Service and 404 every pull that reached it -- there is no Service
-and no blob store now, and what remains is a layer CACHE, which is per-pod by design and costs a
-refetch rather than a failed pull. Multiple replicas are ordinary; only publishing and status writes
-are leader-scoped.
+Extra replicas are ordinary here: only reconciling is leader-scoped, and the volume below is a
+per-pod layer CACHE, where a cold start costs a refetch rather than a failed pull.
 */}}
 apiVersion: apps/v1
 kind: Deployment
@@ -21,9 +15,8 @@ metadata:
     {{- include "kube-oci-composer.componentLabels" (dict "ctx" . "component" "composer") | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
-  # Recreate, not RollingUpdate. With a node-local blob store on a ReadWriteOnce volume, two pods
-  # cannot mount it at once; and a rolling update would briefly have a new pod that is not the
-  # leader, serving nothing, while the old one is being torn down.
+  # Recreate, not RollingUpdate: with persistence enabled the layer cache is a ReadWriteOnce
+  # volume, and a rolling update would deadlock waiting for the old pod to release it.
   strategy:
     type: Recreate
   selector:
@@ -68,9 +61,6 @@ spec:
             {{- end }}
             - --s3-region={{ $.Values.operator.s3.region }}
             - --s3-path-style={{ $.Values.operator.s3.pathStyle }}
-            {{- if $.Values.operator.s3.presignBlobs }}
-            - --s3-presign-blobs
-            {{- end }}
             {{- end }}
             - --keep-builds={{ .Values.operator.keepBuilds }}
             - --retention-refresh-interval={{ .Values.operator.retention.refreshInterval }}
@@ -80,15 +70,7 @@ spec:
             {{- if .Values.operator.fetchDenyPrivate }}
             - --fetch-deny-private
             {{- end }}
-            {{- with (include "kube-oci-composer.defaultRegistry" .) }}
-            - --default-registry={{ . }}
-            {{- end }}
-            {{- with (include "kube-oci-composer.pushSecretName" .) }}
-            - --default-push-secret={{ . }}
-            {{- end }}
-            {{- with (include "kube-oci-composer.insecureRegistries" .) }}
-            - --insecure-registry={{ . }}
-            {{- end }}
+            {{- include "kube-oci-composer.registryArgs" (dict "ctx" $ "supplyChain" .Values.operator.supplyChain) | trim | nindent 12 }}
           {{- if .Values.operator.s3.existingSecret }}
           env:
             # Credentials as environment variables, never as flags: flags are visible in ps, in the
@@ -141,7 +123,10 @@ spec:
               mountPath: {{ .Values.operator.storage.cacheDir }}
             - name: tmp
               mountPath: /tmp
+            {{- include "kube-oci-composer.registryCAVolumeMount" $ | nindent 12 }}
       volumes:
+        {{- include "kube-oci-composer.registryCAVolume" $ | nindent 8 }}
+
         # The layer CACHE, and only that. It used to sit beside a blob store holding served
         # artifacts; that store is gone, and what is left is a cache -- losing it costs a refetch,
         # not a failed pull, which is why emptyDir is a reasonable default and a PVC only buys a

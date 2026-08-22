@@ -224,6 +224,11 @@ type ImageBuildStatus struct {
 	// +optional
 	Artifact *ArtifactStatus `json:"artifact,omitempty"`
 
+	// Attestations records what supply-chain material is attached to Artifact, so a converged
+	// reconcile can tell there is nothing to do without asking the registry.
+	// +optional
+	Attestations *AttestationStatus `json:"attestations,omitempty"`
+
 	// History is the retained builds, newest first.
 	// +optional
 	History []BuildRecord `json:"history,omitempty"`

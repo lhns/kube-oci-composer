@@ -1,14 +1,14 @@
-// Command oci-composer runs the ImageComposition controller and its built-in OCI endpoint.
+// Command oci-composer runs the ImageComposition controller.
 //
-// One binary, no privileges, no daemon: assembly happens in-process. The serving endpoint runs
-// alongside the manager so a cluster with no registry needs nothing else installed.
+// One binary, no privileges, no daemon: assembly happens in-process, and the result is pushed to a
+// registry -- the one the chart bundles, or one the operator supplies (ADR 0035).
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -25,7 +25,7 @@ import (
 	"github.com/lhns/kube-oci-composer/internal/cache"
 	"github.com/lhns/kube-oci-composer/internal/controller"
 	"github.com/lhns/kube-oci-composer/internal/oci"
-	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
+	"github.com/lhns/kube-oci-composer/internal/opts"
 	"github.com/lhns/kube-oci-composer/internal/retention"
 	"github.com/lhns/kube-oci-composer/internal/store"
 )
@@ -48,6 +48,10 @@ func init() {
 }
 
 func main() {
+	// Everything both controllers share about publishing, trust and supply chain.
+	var registry opts.Registry
+	registry.Bind(flag.CommandLine)
+
 	var (
 		metricsAddr          string
 		probeAddr            string
@@ -59,13 +63,9 @@ func main() {
 		s3Prefix             string
 		s3Region             string
 		s3PathStyle          bool
-		s3Presign            bool
 		refreshInterval      time.Duration
-		insecureRegs         string
 		fetchDenyPrivate     bool
 		requirePinnedSources bool
-		defaultRegistry      string
-		defaultPushSecret    string
 		keepBuilds           int
 		gcKeepBuilds         int
 	)
@@ -92,11 +92,6 @@ func main() {
 		"Use path-style addressing (host/bucket/key) instead of virtual-host style. Required by "+
 			"most self-hosted gateways, whose certificate does not cover per-bucket subdomains.")
 
-	flag.BoolVar(&s3Presign, "s3-presign-blobs", false,
-		"Redirect blob pulls to a presigned S3 URL so the bytes do not stream through the "+
-			"controller. Off by default because it exposes the object-store endpoint to every "+
-			"pulling client, which on a private gateway may not be reachable from every node.")
-
 	flag.DurationVar(&refreshInterval, "retention-refresh-interval", retention.DefaultInterval,
 		"How often to re-pull the images every live object still references, so that a registry "+
 			"with an expiry policy does not reclaim them. Zero disables it.\n"+
@@ -104,22 +99,6 @@ func main() {
 			"guarantee, not either number, and the default assumes a window of 30 days. Refreshing "+
 			"only reads: it needs no write or delete permission and can destroy nothing. See "+
 			"ADR 0031.")
-	flag.StringVar(&defaultRegistry, "default-registry", "",
-		"Registry to publish to when an object names no repository of its own, as "+
-			"\"registry.example:5000\" or \"registry.example:5000/prefix\". Objects then publish "+
-			"to <default-registry>/<namespace>/<name>.\n"+
-			"Namespace-qualified deliberately: one registry is shared by the whole cluster, so a "+
-			"bare object name would collide the moment two namespaces both have an \"app\".")
-	flag.StringVar(&defaultPushSecret, "default-push-secret", "",
-		"dockerconfigjson Secret authenticating pushes to --default-registry. Read from THIS "+
-			"controller's namespace (POD_NAMESPACE), not the object's: it is the operator's "+
-			"credential, not a tenant's.\n"+
-			"Used ONLY for objects that named no repository. An object that chooses its own "+
-			"registry authenticates with its own secretRef or not at all -- otherwise anyone able "+
-			"to create an object could point it at a host they control and be handed this password.")
-	flag.StringVar(&insecureRegs, "insecure-registry", "",
-		"Comma-separated registry hosts that may be reached over plain HTTP. Matched on host, so "+
-			"naming one internal registry does not downgrade any other request.")
 	flag.BoolVar(&fetchDenyPrivate, "fetch-deny-private", false,
 		"Refuse `fetch` URLs that resolve to private, loopback or CGNAT addresses. Cloud metadata "+
 			"endpoints on link-local addresses are ALWAYS refused, flag or no flag, because they "+
@@ -141,8 +120,8 @@ func main() {
 
 	flag.BoolVar(&showVersion, "version", false, "Print version information and exit.")
 
-	opts := zap.Options{Development: false}
-	opts.BindFlags(flag.CommandLine)
+	zapOpts := zap.Options{Development: false}
+	zapOpts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
 	keepBuilds = effectiveKeepBuilds(keepBuilds, gcKeepBuilds)
@@ -152,7 +131,7 @@ func main() {
 		return
 	}
 
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
 
 	// Credentials come from the environment, never from a flag: flags show up in `ps`, in the
 	// pod spec, and in every `kubectl describe`. This matches how the rest of this estate injects
@@ -179,11 +158,6 @@ func main() {
 			"endpoint", s3Endpoint, "bucket", s3Bucket, "prefix", s3Prefix, "pathStyle", s3PathStyle)
 	} else if s3Bucket != "" {
 		setupLog.Error(nil, "--s3-bucket is set but --s3-endpoint is not; the cache would stay local")
-		os.Exit(1)
-	}
-
-	if s3Presign && remote == nil {
-		setupLog.Error(nil, "--s3-presign-blobs needs an S3 backend")
 		os.Exit(1)
 	}
 
@@ -216,11 +190,27 @@ func main() {
 
 	readiness := &controller.Readiness{Client: mgr.GetClient()}
 
-	defaults := recon.DefaultRegistry{
-		Host:       defaultRegistry,
-		SecretName: defaultPushSecret,
-		Namespace:  os.Getenv("POD_NAMESPACE"),
+	// Everything the two controllers share about publishing, trust and supply chain. Built here so
+	// a CA that cannot be read or a key that cannot sign fails the process rather than the first
+	// artifact -- the same reasoning the chart applies to an unpinned builder image.
+	// The CA bytes themselves are discarded: only the builder passes them on, into each build
+	// pod. This controller pushes from its own process.
+	registryTransport, _, err := registry.Transport()
+	if err != nil {
+		setupLog.Error(err, "unable to trust the registry CA", "caFile", registry.CAFile)
+		os.Exit(1)
 	}
+	attestor, err := registry.Attestor(context.Background(), os.Getenv("POD_NAMESPACE"))
+	if err != nil {
+		setupLog.Error(err, "unable to set up supply-chain signing", "secret", registry.SigningKeySecret)
+		os.Exit(1)
+	}
+	if attestor.Key != nil {
+		setupLog.Info("signing enabled; artifacts will carry a cosign signature",
+			"note", "a signature changes nothing until something verifies it at admission")
+	}
+
+	defaults := registry.Default(os.Getenv("POD_NAMESPACE"))
 	if defaults.SecretName != "" && defaults.Namespace == "" {
 		setupLog.Error(nil, "POD_NAMESPACE is unset, so the default push credential cannot be "+
 			"read; set it from the downward API")
@@ -243,7 +233,9 @@ func main() {
 		HistoryLimit:         keepBuilds,
 		Fetcher:              oci.NewFetcherWithGuard(oci.DialGuard{DenyPrivate: fetchDenyPrivate}),
 		RequirePinnedSources: requirePinnedSources,
-		InsecureRegistries:   splitList(insecureRegs),
+		InsecureRegistries:   registry.Insecure(),
+		Attestor:             attestor,
+		Transport:            registryTransport,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ImageComposition")
 		os.Exit(1)
@@ -257,7 +249,8 @@ func main() {
 			Interval: refreshInterval,
 			//nolint:staticcheck // SA1019: the new events API has no Event method; same as above.
 			Recorder:           mgr.GetEventRecorderFor("retention"),
-			InsecureRegistries: splitList(insecureRegs),
+			InsecureRegistries: registry.Insecure(),
+			Transport:          registryTransport,
 			Default:            defaults,
 		}
 		if err := refresher.SetupWithManager(mgr); err != nil {
@@ -270,8 +263,8 @@ func main() {
 			"images this operator's objects still reference (ADR 0031)")
 	}
 
-	// Liveness stays a bare ping. A standby replica is alive and must not be restarted just
-	// because it is not the leader.
+	// Liveness stays a bare ping. A replica that has not won the lease is alive and must not be
+	// restarted just because it is not the leader.
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)
@@ -302,15 +295,4 @@ func effectiveKeepBuilds(keepBuilds, deprecated int) int {
 		return deprecated
 	}
 	return keepBuilds
-}
-
-// splitList parses a comma-separated flag value, ignoring blanks and surrounding spaces.
-func splitList(s string) []string {
-	var out []string
-	for _, part := range strings.Split(s, ",") {
-		if part = strings.TrimSpace(part); part != "" {
-			out = append(out, part)
-		}
-	}
-	return out
 }

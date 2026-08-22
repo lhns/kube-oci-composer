@@ -473,6 +473,11 @@ type ImageCompositionStatus struct {
 	// +optional
 	Artifact *ArtifactStatus `json:"artifact,omitempty"`
 
+	// Attestations records what supply-chain material is attached to Artifact, so a converged
+	// reconcile can tell there is nothing to do without asking the registry.
+	// +optional
+	Attestations *AttestationStatus `json:"attestations,omitempty"`
+
 	// History records past builds, newest first, capped at the retention count. It is the live
 	// set garbage collection marks from. See ADR 0011.
 	// +optional

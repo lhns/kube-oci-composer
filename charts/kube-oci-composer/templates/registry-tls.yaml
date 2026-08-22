@@ -1,0 +1,86 @@
+{{- if and .Values.registry.enabled .Values.registry.tls.enabled }}
+{{- /*
+The TLS material is computed ONCE here, into $tls, and every object below reads that variable.
+Nothing else in the chart may call registryTLSMaterial.
+
+`genCA` is not deterministic and `lookup` returns nothing during `helm template`, `--dry-run` and
+every FIRST install. So two callers would generate two unrelated CAs: the render succeeds, and the
+install writes a certificate signed by one CA beside a trust bundle containing the other. The
+controllers then fail with `x509: certificate signed by unknown authority` against a registry this
+same chart installed. TestTheGeneratedCAIsTheSameCAEverywhere guards it.
+
+Corollary: no `checksum/tls` pod annotation, despite the `checksum/config` precedent. Computing one
+would re-run `genCA` on every render and roll all three workloads on every no-op upgrade.
+*/}}
+{{- $tls := include "kube-oci-composer.registryTLSMaterial" . | fromJson }}
+{{- $secretName := include "kube-oci-composer.registryTLSSecretName" . }}
+{{- if eq .Values.registry.tls.mode "selfSigned" }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secretName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kube-oci-composer.componentLabels" (dict "ctx" . "component" "registry") | nindent 4 }}
+type: kubernetes.io/tls
+stringData:
+  tls.crt: {{ $tls.cert | quote }}
+  tls.key: {{ $tls.key | quote }}
+  ca.crt: {{ $tls.ca | quote }}
+  {{- /*
+  The expiry, stored because nothing else can read it back.
+
+  sprig cannot parse a PEM, so `lookup` can hand back a certificate that expired last week and the
+  chart would re-emit it without comment. That is not a wobble: zot serves it, the controllers
+  refuse it with `x509: certificate has expired`, every push and every retention refresh fails --
+  and a refresher that stops running is what DELETES images a live object still references
+  (ADR 0031). An unnoticed expiry is data loss on a one-window fuse.
+
+  So the expiry is written at generation and compared on every later render. See checkRegistryCert.
+  */}}
+  notAfter: {{ $tls.notAfter | quote }}
+{{- else if eq .Values.registry.tls.mode "certManager" }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "kube-oci-composer.registryFullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kube-oci-composer.componentLabels" (dict "ctx" . "component" "registry") | nindent 4 }}
+spec:
+  secretName: {{ $secretName }}
+  duration: {{ .Values.registry.tls.certManager.duration }}
+  renewBefore: {{ .Values.registry.tls.certManager.renewBefore }}
+  issuerRef:
+    kind: {{ .Values.registry.tls.certManager.issuerRef.kind }}
+    name: {{ required "registry.tls.certManager.issuerRef.name is required when tls.mode=certManager" .Values.registry.tls.certManager.issuerRef.name }}
+    group: {{ .Values.registry.tls.certManager.issuerRef.group }}
+  dnsNames:
+    {{- range $tls.dnsNames }}
+    - {{ . | quote }}
+    {{- end }}
+  {{- with .Values.registry.tls.ipAddresses }}
+  ipAddresses:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- if and .Values.registry.tls.trust.enabled (not .Values.registry.tls.trust.existingConfigMap) $tls.ca }}
+---
+{{- /*
+The CA the CONTROLLERS trust. Same $tls, same render, same bytes as the Secret above -- see the
+note at the top of this file for what happens when that is not true.
+
+Only rendered in selfSigned mode: with cert-manager or a supplied Secret the CA travels in the
+Secret's own ca.crt key, so a ConfigMap here would be a second copy that can go stale.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kube-oci-composer.registryFullname" . }}-ca
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kube-oci-composer.componentLabels" (dict "ctx" . "component" "registry") | nindent 4 }}
+data:
+  ca.crt: {{ $tls.ca | quote }}
+{{- end }}
+{{- end }}

@@ -84,8 +84,8 @@ type PendingLister interface {
 type Target struct {
 	// Object is what an Event is recorded against.
 	Object client.Object
-	// Push describes the registry. Nil means the object is served from the embedded endpoint, whose
-	// content this controller owns outright.
+	// Push describes where the object publishes. Nil means it named no repository and goes to the
+	// operator's default registry.
 	Push *ociv1alpha1.Push
 	// Artifact is the current publication, which may not be in History yet.
 	Artifact *ociv1alpha1.ArtifactStatus
@@ -171,6 +171,10 @@ type Refresher struct {
 
 	// Default is the operator's registry and credential. See recon.DefaultRegistry.
 	Default recon.DefaultRegistry
+
+	// Transport, when set, trusts an additional CA on top of the system roots. Same object the
+	// other controllers use; see recon.Transport.
+	Transport http.RoundTripper
 
 	// InsecureRegistries are hosts that may be reached over plain HTTP, matched on host exactly as
 	// the builder matches them, so a host that can be pushed to can also be refreshed.
@@ -302,8 +306,8 @@ func (r *Refresher) refreshObject(ctx context.Context, target Target, out *Resul
 	}
 
 	if repo == "" {
-		// Nothing external to convince: served from the embedded endpoint, whose content this
-		// controller owns outright.
+		// Nowhere to publish, so nothing to keep alive: no repository named and no default
+		// registry configured.
 		//
 		// Keyed on the resolved REPOSITORY, not on push being nil. An object with no push block
 		// still publishes -- to the operator's default registry -- and skipping those would stop
@@ -353,6 +357,16 @@ func (r *Refresher) refreshObject(ctx context.Context, target Target, out *Resul
 		switch {
 		case err == nil:
 			out.Refreshed++
+			// And whatever describes it.
+			//
+			// A referrer manifest is UNTAGGED, and the shipped registry policy is
+			// deleteUntagged with keepUntagged.pulledWithin -- so an SBOM, a provenance
+			// statement or an attestation child would be reclaimed one window after it was
+			// written, silently, while the image it describes stayed alive. That is threat D6
+			// reappearing on a new object type, in the deleting direction.
+			//
+			// Signatures need nothing here: cosign's .sig is a TAG, so keepTags already covers it.
+			r.refreshReferrers(parsed, opts, out)
 		case isNotFound(err):
 			// The guarantee has ALREADY been broken by something else, and quietly. Counted
 			// separately because it is a different alarm from a registry that is merely unreachable:
@@ -478,6 +492,9 @@ func qualify(repo, tag string) string {
 // what to put in that Secret.
 func (r *Refresher) remoteOptions(ctx context.Context, namespace, repository string, push *ociv1alpha1.Push) ([]remote.Option, error) {
 	opts := []remote.Option{remote.WithContext(ctx)}
+	if r.Transport != nil {
+		opts = append(opts, remote.WithTransport(r.Transport))
+	}
 
 	var ownRef string
 	if push != nil && push.SecretRef != nil {
@@ -515,6 +532,39 @@ func (r *Refresher) SetupWithManager(mgr ctrl.Manager) error {
 //
 // Matched on host rather than applied globally, exactly as the builder matches it, so naming one
 // internal registry does not quietly downgrade every other request this controller makes.
+// refreshReferrers pulls whatever is attached to a digest, so untagged attestations are kept alive
+// by the same mechanism that keeps the artifact alive.
+//
+// Failures here are counted but never fatal: an attestation is metadata about an image that is
+// itself already refreshed, and a registry with no Referrers API at all should not turn a working
+// retention refresh into a reported failure.
+func (r *Refresher) refreshReferrers(ref name.Reference, opts []remote.Option, out *Result) {
+	digestRef, ok := ref.(name.Digest)
+	if !ok {
+		// Tags are refreshed as tags; referrers hang off digests.
+		return
+	}
+
+	idx, err := remote.Referrers(digestRef, opts...)
+	if err != nil {
+		return
+	}
+	mf, err := idx.IndexManifest()
+	if err != nil {
+		return
+	}
+	for _, d := range mf.Manifests {
+		attached := digestRef.Context().Digest(d.Digest.String())
+		desc, err := remote.Get(attached, opts...)
+		if err != nil {
+			out.Failed++
+			continue
+		}
+		_ = desc
+		out.Refreshed++
+	}
+}
+
 // isNotFound distinguishes "the registry says this is gone" from "the registry did not answer".
 //
 // The difference is the difference between an alarm and a warning: a 404 means the guarantee has

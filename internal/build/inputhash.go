@@ -58,6 +58,14 @@ type Inputs struct {
 	CacheMode  string
 	CacheRef   string
 
+	// Attestations records whether BuildKit was asked for an SBOM and provenance.
+	//
+	// Hashed, deliberately, because it changes WHAT IS PUSHED -- attestations make the output an
+	// index rather than a manifest. The pleasant consequence is that enabling them re-runs every
+	// build once, visibly, rather than leaving existing objects converged at a digest with no
+	// attestations and no record of why.
+	Attestations string
+
 	// SourceDateEpoch is the timestamp policy, not a wall clock. A clock in the hash would make
 	// every reconcile a rebuild.
 	SourceDateEpoch string
@@ -96,6 +104,7 @@ func (in Inputs) Hash() string {
 	writeField(in.CacheMode)
 	writeField(in.CacheRef)
 	writeField(in.SourceDateEpoch)
+	writeField(in.Attestations)
 
 	// Platforms are ordered by the spec and the order reaches the output index, so it is NOT
 	// sorted away.

@@ -95,19 +95,23 @@ jobs:
         # combinations the chart actually branches on.
         run: |
           set -euo pipefail
+          # registry.publish.mode has no default: the chart refuses to install until an operator
+          # says how workloads reach the registry (ADR 0037). None of these cases is about that
+          # question, so they answer it once and get on with what they are checking.
+          MODE="--set registry.publish.mode=internalOnly"
           # Each component toggled off on its own. imageBuild.enabled=false is the one that matters
           # most: it must remove the RBAC, not just the controller (ADR 0033).
-          helm template t charts/kube-oci-composer --set imageComposition.enabled=false > /dev/null
-          helm template t charts/kube-oci-composer --set imageBuild.enabled=false > /dev/null
+          helm template t charts/kube-oci-composer $MODE --set imageComposition.enabled=false > /dev/null
+          helm template t charts/kube-oci-composer $MODE --set imageBuild.enabled=false > /dev/null
           # No bundled registry: the BYO shape, where the operator supplies a registry and its
           # credential. This has to keep working -- it is the reason defaultRegistry exists
           # separately from registry.
-          helm template t charts/kube-oci-composer             --set registry.enabled=false             --set defaultRegistry.host=ghcr.io/example             --set defaultRegistry.existingPushSecret=my-push-secret > /dev/null
+          helm template t charts/kube-oci-composer $MODE             --set registry.enabled=false             --set defaultRegistry.host=ghcr.io/example             --set defaultRegistry.existingPushSecret=my-push-secret > /dev/null
           # NodePort with a pinned port plus a node-resolvable host, which is the arrangement a
           # workload actually pulls through.
-          helm template t charts/kube-oci-composer             --set registry.service.type=NodePort             --set registry.service.nodePort=30500             --set registry.host=oci.example.com:30500 > /dev/null
+          helm template t charts/kube-oci-composer $MODE             --set registry.service.type=NodePort             --set registry.service.nodePort=30500             --set registry.host=oci.example.com:30500 > /dev/null
           # Persistence, S3 layer cache and metrics on.
-          helm template t charts/kube-oci-composer             --set registry.persistence.enabled=true             --set registry.persistence.storageClass=cephfs             --set operator.s3.endpoint=https://s3.test             --set operator.s3.bucket=blobs             --set metrics.serviceMonitor.enabled=true > /dev/null
+          helm template t charts/kube-oci-composer $MODE             --set registry.persistence.enabled=true             --set registry.persistence.storageClass=cephfs             --set operator.s3.endpoint=https://s3.test             --set operator.s3.bucket=blobs             --set metrics.serviceMonitor.enabled=true > /dev/null
 
       - name: imageBuild.enabled=false must remove the Job RBAC, not just the controller
         # A toggle that leaves the Role behind is a setting that LOOKS like a security control and
@@ -115,7 +119,8 @@ jobs:
         # because turning it off removes the permission.
         run: |
           set -euo pipefail
-          if helm template t charts/kube-oci-composer --set imageBuild.enabled=false                | grep -q 'jobs'; then
+          MODE="--set registry.publish.mode=internalOnly"
+          if helm template t charts/kube-oci-composer $MODE --set imageBuild.enabled=false                | grep -q 'jobs'; then
             echo "FAIL: a rendered role still grants jobs with imageBuild disabled"
             exit 1
           fi
@@ -127,10 +132,11 @@ jobs:
         # broken when the policy simply matched nothing. See ADR 0031 and docs/registry.md.
         run: |
           set -euo pipefail
+          MODE="--set registry.publish.mode=internalOnly"
           pip install --quiet pyyaml
-          helm template t charts/kube-oci-composer --set registry.auth.password=fixed-for-render > /dev/null
-          helm template t charts/kube-oci-composer --set registry.persistence.enabled=false > /dev/null
-          helm template t charts/kube-oci-composer | python3 hack/check-bundled-registry.py
+          helm template t charts/kube-oci-composer $MODE --set registry.auth.password=fixed-for-render > /dev/null
+          helm template t charts/kube-oci-composer $MODE --set registry.persistence.enabled=false > /dev/null
+          helm template t charts/kube-oci-composer $MODE | python3 hack/check-bundled-registry.py
 
       - name: The chart must REFUSE a retention margin too thin to be a guarantee
         # Threat-model gap D7. The window and the refresh interval were unfixable while they lived
@@ -141,11 +147,12 @@ jobs:
         # falsification case while doing nothing at all.
         run: |
           set -euo pipefail
-          if helm template t charts/kube-oci-composer                --set registry.retention.window=2h > /dev/null 2>&1; then
+          MODE="--set registry.publish.mode=internalOnly"
+          if helm template t charts/kube-oci-composer $MODE                --set registry.retention.window=2h > /dev/null 2>&1; then
             echo "FAIL: the chart rendered a 2h window against a 1h refresh interval"
             exit 1
           fi
-          if helm template t charts/kube-oci-composer                --set operator.retention.refreshInterval=0 > /dev/null 2>&1; then
+          if helm template t charts/kube-oci-composer $MODE                --set operator.retention.refreshInterval=0 > /dev/null 2>&1; then
             echo "FAIL: the chart rendered with refreshing disabled and a window still set"
             exit 1
           fi

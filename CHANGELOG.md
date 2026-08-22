@@ -6,6 +6,88 @@ may change between minor versions.
 ## [Unreleased]
 
 ### Added
+- **SBOM, provenance and signing, for both kinds, all off by default (ADR 0040, closing ADR 0020).**
+
+  `operator.supplyChain` and `imageBuild.supplyChain` turn on an SPDX SBOM, SLSA provenance, and a
+  cosign signature. For an `ImageComposition` the SBOM is **derived** from the digest-pinned inputs
+  and is exact rather than scanned; for an `ImageBuild` it comes from BuildKit, because only the
+  build can see what it installed.
+
+  Attestations attach as OCI **referrers**. Signatures use cosign's `sha256-<hex>.sig` **tag**,
+  which amends ADR 0008 for the reason 0008 itself gives: the verifiers that exist read that tag,
+  and a signature on the elegant rail is a signature nothing checks.
+
+  **Signing is inert until something verifies it.** This chart ships no admission policy; example
+  Kyverno and policy-controller policies are in `docs/examples/verify`, along with the rollout order
+  that will not take out a `CronJob` a month later.
+
+  A converged reconcile costs **zero** extra registry requests: `status.attestations` records what
+  is attached, checked after the input-hash and published-digest checks a reconcile already
+  performs. That works only because the payloads are pure functions of the artifact's own inputs —
+  no timestamps, no UUIDs, no controller version — and there are tests pinning each of those.
+
+  The retention refresher now pulls each artifact's **referrers** too. Without that, an SBOM would
+  have been reclaimed one window after it was written, silently, while the image it describes lived
+  on — threat D6 on a new object type. Signatures need nothing, because a `.sig` is a tag.
+
+  **Enabling attestations on an `ImageBuild` changes its published digest**: BuildKit attaches them
+  as extra manifests in an index, so a single-platform build's artifact becomes an index. Existing
+  pins keep resolving; anything assuming the digest named a manifest now finds an index. It is in
+  the input hash, so it happens once, visibly.
+
+- **zot scale-out clustering, configurable in values — and it shards rather than replicates.**
+  `registry.cluster.enabled=true` runs several members; zot hashes each repository name and exactly
+  one member owns it, so a member that is down makes roughly 1/N of repositories unavailable, and
+  zot's own docs say the cluster is not self-healing. What it buys is throughput and a proxy layer
+  that survives a rolling update. The value is called `cluster`, not `ha`, for that reason.
+
+  Prerequisites the chart wires but does not install: S3-compatible storage, a shared cache driver
+  (**redis** or dynamodb), and TLS. Five combinations are refused rather than rendered, including
+  clustering with the ReadWriteOnce PVC still enabled — refused instead of silently dropped,
+  because that volume may hold the only copy of an `ImageBuild`'s output.
+
+  **Use persistent redis.** `extensions.search` records the pull timestamps retention depends on,
+  and clustering moves that metadata into the cache driver. A redis restart without persistence
+  loses every timestamp, every image looks unpulled, and the next GC reclaims images live objects
+  still reference — ADR 0031's failure mode arriving through a component this chart does not
+  manage. See ADR 0039.
+
+- **TLS on the bundled registry, closing threat I7.** `registry.tls.enabled=true` makes zot
+  terminate TLS itself, with the certificate from `certManager`, a Secret you supply, or a
+  chart-generated self-signed CA. The CA is distributed to both controllers (`--registry-ca-file`,
+  additive to the system roots) and to build Jobs, through the same owned, short-lived,
+  cross-namespace Secret the push credential already uses.
+
+  Without it, the generated push password crosses the pod network in an HTTP Basic header,
+  readable by anything positioned to watch and leaving no trace in any log — and that credential is
+  the whole of the "only the controllers can push" guarantee.
+
+  **Off by default**, because zot has one listener and cannot serve HTTP and HTTPS at once:
+  enabling it invalidates the containerd drop-in on every node, which must move from `http://` to
+  `https://` and, in self-signed mode, learn the CA. `docs/registry.md` has the exact edit.
+  Terminating at an ingress instead avoids all of it.
+
+  **Self-signed certificates do not renew**, and the chart refuses to render once one is close to
+  expiring rather than warning. An expired certificate here stops the retention refresh, and that
+  is not an outage but a deletion one window later (ADR 0031). Use `mode: certManager` if you would
+  rather not rotate by hand. See ADR 0038.
+
+- **A NetworkPolicy for the registry, enabled by default.** Build Jobs run in their object's
+  namespace, not the release's, so every build crosses a namespace boundary to reach the registry
+  and a default-deny cluster blocks it. The policy admits every namespace on the registry port,
+  which is deliberate: reads are anonymous by design and writes need the password, so a namespace
+  boundary in front of that adds no authority. It is a connectivity guarantee, not a security
+  control, and it says so.
+
+  Narrow it with `registry.networkPolicy.allowedNamespaces` (the release namespace is always kept
+  — losing it would stop the retention refresh, whose silence deletes images a window later), and
+  add `nodeCIDRs` where kubelet pulls need admitting explicitly. Turn it off entirely with
+  `registry.networkPolicy.enabled=false`.
+
+  **Build pods now carry labels.** They had none but the `job-name` Kubernetes adds itself, so
+  nothing outside their namespace could select them as a class — a policy, a quota, an admission
+  rule all had to match every pod instead.
+
 - **Provenance travels with the artifact (threat R1).** Composed images carry OCI manifest
   annotations naming what produced them: `de.lhns.oci-composer.sources` (each layer as
   `name=digest`, or `name=revision` where the revision is what identifies the content), plus the
@@ -163,6 +245,44 @@ may change between minor versions.
   recorded with the reason the destination makes it meaningless. Verified to fail on drift.
 
 ### Fixed
+- **The builder's metrics were unscrapable.** It had no Service at all, while the composer's was
+  scraped — an asymmetry with no reason behind it, and the kind that survives because nobody
+  notices a metric that was never there. The builder is the component that creates Jobs; its
+  reconcile errors are exactly what you want when builds stop happening.
+
+  The ServiceMonitor now selects both controllers, and by expression rather than by dropping the
+  component label: the registry's Service carries the same chart labels, so a looser selector
+  would have Prometheus scrape `/metrics` on a port serving the OCI API — a scrape that fails
+  quietly, from a ServiceMonitor that looks like monitoring that works.
+
+- **`imageBuild.insecureRegistry` was read by nothing.** Removed; `operator.insecureRegistry` and
+  `defaultRegistry.insecure` are the live values.
+
+- **The builder pod carried a narrower label set than the composer's.** Harmless until something
+  selects on labels — which the new NetworkPolicy and metrics Service both do.
+
+- **A registry pod that wedged on a Secret the chart declined to create.** Setting
+  `defaultRegistry.existingPushSecret` while leaving `registry.enabled` and `registry.auth.enabled`
+  on skipped **both** generated Secrets, but the registry Deployment mounts the htpasswd Secret on
+  `registry.auth.enabled` alone -- so the pod referenced a Secret that render did not produce and
+  never started. It rendered cleanly and failed only in a cluster.
+
+  The two Secrets now have independent conditions, and the combination that caused it is **refused
+  at render time** with the three ways out named: pin `registry.auth.password` to the credential
+  inside your Secret, supply `registry.auth.existingHtpasswdSecret` (new), or set
+  `registry.auth.enabled=false`.
+
+  Refusing rather than repairing is deliberate, and the tempting repair is the trap: gating the
+  htpasswd Secret on `registry.auth.enabled` alone leaves the password helper with no `-push`
+  Secret to read the previous value back out of, so every `helm upgrade` would mint a fresh random
+  password and the registry would demand one that exists nowhere -- including in the credential you
+  supplied. That configuration renders forever and never works.
+
+  Added with it: a structural guard asserting that **every chart-generated Secret or ConfigMap a
+  workload mounts is actually rendered**, across the toggle matrix. It reproduces this bug exactly
+  when the old condition is restored, and it is the test that was missing -- a mount and the object
+  it mounts live in different files, under different conditions, edited by different changes.
+
 - **E1 is measured rather than cited.** An e2e probe runs a pod with `hostUsers: false` and reports
   what the cluster actually does. On Kubernetes 1.36 the API server **accepts** the field -- that
   half has moved since ADR 0027 -- and the sandbox then fails to start, because a user namespace
@@ -187,6 +307,61 @@ may change between minor versions.
   too many.
 
 ### Changed
+- **BREAKING: the registry is a StatefulSet, not a Deployment.** Delete the old one before
+  upgrading:
+
+  ```console
+  kubectl -n <namespace> delete deployment <release>-kube-oci-composer-registry
+  helm upgrade ...
+  ```
+
+  The chart refuses to render until you do, with that command in the message. **Your images are not
+  affected**: the PVC carries `helm.sh/resource-policy: keep` and was never owned by the Deployment,
+  so the new pod mounts the same volume.
+
+  Unconditional rather than only when clustering is on, deliberately: a kind switch hidden behind
+  `cluster.enabled=true` would have Helm create the StatefulSet while the Deployment's ReplicaSet
+  still owned a pod matching the same selector, and the two would fight over one ReadWriteOnce
+  volume — on the day the operator is changing storage, cache and TLS at once.
+
+  It also removes a wart: a StatefulSet terminates pod-0 before creating its replacement, so the
+  RWO deadlock that forced `strategy: Recreate` no longer exists.
+
+- **BREAKING: `registry.publish.mode` is required, and the default install no longer publishes
+  images nothing can pull.**
+
+  `status.artifact.ref` is one string that two resolvers have to understand: the controllers reach
+  the registry through cluster DNS, the kubelet reaches it with the NODE's resolver. `registry.host`
+  fed both, so there was **no correct setting** -- unset produced `ErrImagePull` on every workload,
+  set to a node-resolvable name produced `no such host` on every object before anything published.
+
+  The two are now separate. `--default-registry` is always the in-cluster Service; the public name
+  travels in a new `--public-registry-host` and reaches `status.artifact.ref` and nothing else.
+  `registry.host` keeps its name and now means only what people already thought it meant.
+
+  Because which public path is possible depends on your cluster rather than on this chart,
+  `registry.publish.mode` has **no default** and the chart refuses to install without it:
+
+  ```yaml
+  registry:
+    publish:
+      mode: ingress        # needs nothing on the nodes: your ingress already has DNS and a cert
+      # mode: nodePort     # one containerd certs.d file per node
+      # mode: external     # you run the registry; registry.enabled=false + defaultRegistry.host
+      # mode: internalOnly # nothing outside the cluster pulls these, deliberately
+  ```
+
+  Upgrading: add `registry.publish.mode`. If you already set `registry.host` to a node-resolvable
+  name, keep it and use `mode: nodePort` -- and you can delete any CoreDNS entry you added to make
+  the controllers resolve it, because they no longer do.
+
+  This also fixes a second failure hiding behind the first: setting `registry.host` used to drop
+  `--insecure-registry` entirely, so the controllers would have failed the TLS handshake against a
+  plain-HTTP registry even if they could have resolved the name.
+
+  An Ingress template returns, which is the only mode needing nothing on the nodes -- the property
+  ADR 0006 claimed for the serving endpoint, which was never about the endpoint. See ADR 0037.
+
 - **BREAKING: the embedded serving endpoint is removed. A registry is the only publication path.**
 
   `spec.publish` no longer exists. `spec.push` is the only publication block, and it does what
@@ -981,6 +1156,12 @@ those changes describe the older shapes:
   being accepted rather than rejected.
 
 ### Removed
+- **`--s3-presign-blobs` and `operator.s3.presignBlobs`.** Presigning existed so the serving
+  endpoint could redirect a blob pull straight to object storage. That endpoint is gone (ADR 0035),
+  and the flag had been left behind doing nothing but validating itself. `store.Presigner` and the
+  `blobs` and `manifests` key namespaces go with it -- the layer cache only ever used `inputs`.
+
+
 - Pod-reference protection in the garbage collector: implemented, measured to protect nothing, and
   removed. See [ADR 0011](docs/adr/0011-content-tags-expire.md).
 

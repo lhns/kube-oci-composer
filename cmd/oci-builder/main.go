@@ -12,6 +12,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -30,7 +31,7 @@ import (
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 	"github.com/lhns/kube-oci-composer/internal/buildcontroller"
-	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
+	"github.com/lhns/kube-oci-composer/internal/opts"
 	"github.com/lhns/kube-oci-composer/internal/retention"
 )
 
@@ -51,18 +52,11 @@ func init() {
 	utilruntime.Must(ociv1alpha1.AddToScheme(scheme))
 }
 
-// splitList turns a comma-separated flag into a slice, dropping blanks.
-func splitList(s string) []string {
-	var out []string
-	for _, part := range strings.Split(s, ",") {
-		if part = strings.TrimSpace(part); part != "" {
-			out = append(out, part)
-		}
-	}
-	return out
-}
-
 func main() {
+	// Everything both controllers share about publishing, trust and supply chain.
+	var registry opts.Registry
+	registry.Bind(flag.CommandLine)
+
 	var (
 		metricsAddr          string
 		probeAddr            string
@@ -70,10 +64,7 @@ func main() {
 		builderImage         string
 		frontendImage        string
 		sourceDateEpoch      string
-		insecureRegs         string
 		refreshInterval      time.Duration
-		defaultRegistry      string
-		defaultPushSecret    string
 		historyLimit         int
 		requirePinnedSources bool
 		showVersion          bool
@@ -95,29 +86,13 @@ func main() {
 			"registry's retention window -- the ratio is the guarantee, not either number. It matters "+
 			"more here than on the composer: a build cannot be reproduced from its spec, so a reclaimed "+
 			"image is gone rather than rebuildable. See ADR 0031.")
-	flag.StringVar(&defaultRegistry, "default-registry", "",
-		"Registry to publish to when an object names no repository of its own, as "+
-			"\"registry.example:5000\" or \"registry.example:5000/prefix\". Objects then publish "+
-			"to <default-registry>/<namespace>/<name>.\n"+
-			"Namespace-qualified deliberately: one registry is shared by the whole cluster, so a "+
-			"bare object name would collide the moment two namespaces both have an \"app\".")
-	flag.StringVar(&defaultPushSecret, "default-push-secret", "",
-		"dockerconfigjson Secret authenticating pushes to --default-registry. Read from THIS "+
-			"controller's namespace (POD_NAMESPACE), not the object's: it is the operator's "+
-			"credential, not a tenant's.\n"+
-			"Used ONLY for objects that named no repository. An object that chooses its own "+
-			"registry authenticates with its own secretRef or not at all -- otherwise anyone able "+
-			"to create an object could point it at a host they control and be handed this password.")
-	flag.StringVar(&insecureRegs, "insecure-registry", "",
-		"Comma-separated registry hosts to push to over plain HTTP. Opt-in per host, for an "+
-			"internal or air-gapped registry without TLS.")
 	flag.BoolVar(&requirePinnedSources, "require-pinned-sources", false,
 		"Refuse an ImageBuild whose spec.context names no revision. Pinning is optional by design (ADR 0026), so this is how an operator decides otherwise for a whole cluster. It matters more here than on the composer: an unpinned context builds whatever the branch is at now, and a build's output cannot be reproduced from its spec (ADR 0025).")
 	flag.IntVar(&historyLimit, "keep-builds", ociv1alpha1.DefaultHistoryLimit, "How many past builds to retain in status.")
 	flag.BoolVar(&showVersion, "version", false, "Print the version and exit.")
 
-	opts := zap.Options{Development: false}
-	opts.BindFlags(flag.CommandLine)
+	zapOpts := zap.Options{Development: false}
+	zapOpts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
 	if showVersion {
@@ -125,7 +100,7 @@ func main() {
 		return
 	}
 
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
 
 	// Both images must be pinned, and this is refused at startup rather than warned about.
 	//
@@ -175,11 +150,25 @@ func main() {
 		os.Exit(1)
 	}
 
-	defaults := recon.DefaultRegistry{
-		Host:       defaultRegistry,
-		SecretName: defaultPushSecret,
-		Namespace:  os.Getenv("POD_NAMESPACE"),
+	// Everything the two controllers share about publishing, trust and supply chain. Built here so
+	// a CA that cannot be read or a key that cannot sign fails the process rather than the first
+	// artifact -- the same reasoning the chart applies to an unpinned builder image.
+	registryTransport, registryCA, err := registry.Transport()
+	if err != nil {
+		setupLog.Error(err, "unable to trust the registry CA", "caFile", registry.CAFile)
+		os.Exit(1)
 	}
+	attestor, err := registry.Attestor(context.Background(), os.Getenv("POD_NAMESPACE"))
+	if err != nil {
+		setupLog.Error(err, "unable to set up supply-chain signing", "secret", registry.SigningKeySecret)
+		os.Exit(1)
+	}
+	if attestor.Key != nil {
+		setupLog.Info("signing enabled; artifacts will carry a cosign signature",
+			"note", "a signature changes nothing until something verifies it at admission")
+	}
+
+	defaults := registry.Default(os.Getenv("POD_NAMESPACE"))
 	if defaults.SecretName != "" && defaults.Namespace == "" {
 		setupLog.Error(nil, "POD_NAMESPACE is unset, so the default push credential cannot be "+
 			"read; set it from the downward API")
@@ -187,15 +176,20 @@ func main() {
 	}
 
 	if err := (&buildcontroller.ImageBuildReconciler{
-		Client:  mgr.GetClient(),
-		Default: defaults,
+		Client:    mgr.GetClient(),
+		Default:   defaults,
+		Transport: registryTransport,
+		Attestor:  attestor,
 		//nolint:staticcheck // SA1019: the new events API has no Event method; see the composer.
 		Recorder: mgr.GetEventRecorderFor("imagebuild-controller"),
 		JobConfig: buildcontroller.JobConfig{
 			BuilderImage:       builderImage,
 			FrontendImage:      frontendImage,
 			SourceDateEpoch:    sourceDateEpoch,
-			InsecureRegistries: splitList(insecureRegs),
+			InsecureRegistries: registry.Insecure(),
+			RegistryCA:         registryCA,
+			SBOM:               registry.SBOM,
+			Provenance:         registry.Provenance,
 		},
 		HistoryLimit:         historyLimit,
 		RequirePinnedSources: requirePinnedSources,
@@ -215,7 +209,8 @@ func main() {
 			Interval: refreshInterval,
 			//nolint:staticcheck // SA1019: the new events API has no Event method; same as above.
 			Recorder:           mgr.GetEventRecorderFor("retention"),
-			InsecureRegistries: splitList(insecureRegs),
+			InsecureRegistries: registry.Insecure(),
+			Transport:          registryTransport,
 			Default:            defaults,
 		}
 		if err := refresher.SetupWithManager(mgr); err != nil {

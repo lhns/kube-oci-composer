@@ -103,13 +103,47 @@ chart warns about it at install time.
 {{- printf "%s-registry" (include "kube-oci-composer.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{- /*
+Where the CONTROLLERS reach the registry. Never registry.host.
+
+registry.host used to fold in here, and that was the defect: one value fed both the address the
+controllers connect to and the address workloads pull from, and no single name can be both. A
+.svc.cluster.local name is unreachable from a kubelet; a node-resolvable name is unreachable from
+cluster DNS. Setting it broke publishing; leaving it unset broke pulling. See publicRegistry.
+*/}}
 {{- define "kube-oci-composer.defaultRegistry" -}}
 {{- if .Values.defaultRegistry.host -}}
 {{- .Values.defaultRegistry.host -}}
-{{- else if and .Values.registry.enabled .Values.registry.host -}}
-{{- .Values.registry.host -}}
 {{- else if .Values.registry.enabled -}}
-{{- printf "%s.%s.svc.cluster.local:%d" (include "kube-oci-composer.registryFullname" .) .Release.Namespace (int .Values.registry.service.port) -}}
+{{- printf "%s.%s.svc.%s:%d" (include "kube-oci-composer.registryFullname" .) .Release.Namespace .Values.registry.clusterDomain (int .Values.registry.service.port) -}}
+{{- end -}}
+{{- end -}}
+
+{{- /*
+What a WORKLOAD is told to pull from. Rendered into status.artifact.ref and nowhere else.
+
+Empty whenever it would equal the internal name -- an external registry is one name that already
+works from both places, and emitting it twice would only invite the two to drift.
+*/}}
+{{- /*
+registry.host with any port stripped.
+
+An Ingress rule and a certificate SAN are HOSTNAMES; registry.host is a registry reference and may
+carry a port, because a NodePort deployment needs one there. Passing "oci.example.com:30500" to a
+rule host produces an Ingress that matches nothing, silently.
+*/}}
+{{- define "kube-oci-composer.publicHostname" -}}
+{{- $h := .Values.registry.host | default "" -}}
+{{- if contains ":" $h -}}
+{{- (splitList ":" $h) | first -}}
+{{- else -}}
+{{- $h -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "kube-oci-composer.publicRegistry" -}}
+{{- if and .Values.registry.enabled .Values.registry.host -}}
+{{- .Values.registry.host -}}
 {{- end -}}
 {{- end -}}
 
@@ -160,13 +194,21 @@ Matched on host, so naming it does not downgrade any other registry the same con
 {{- $hosts := list -}}
 {{- with .Values.operator.insecureRegistry }}{{- $hosts = concat $hosts (splitList "," .) -}}{{- end -}}
 {{- /*
-ONLY the in-cluster Service name is added automatically. That one is always plain HTTP -- there is
-no certificate for a .svc.cluster.local name and no way to get one.
-registry.host is deliberately NOT added: it may well be an ingress terminating TLS, and marking it
-insecure would force plain HTTP and break the very deployment that took the trouble to set it up.
-A plain-HTTP registry.host (a NodePort, say) opts in through defaultRegistry.insecure.
+The in-cluster Service name, which is what the controllers now always talk to, and which speaks
+plain HTTP until registry.tls is turned on.
+
+registry.host is deliberately NOT added and never was: it may well be an ingress terminating TLS,
+and marking it insecure would force plain HTTP on the deployment that took the trouble to set it
+up. That reasoning was always right about the PUBLIC name -- it was simply being applied to a value
+that was also the internal one. Now that the two are separate, both halves are true at once, and a
+plain-HTTP public host (a NodePort, say) still opts in through defaultRegistry.insecure.
+
+Note what depends on this beyond the controllers: the same list becomes BuildKit's
+`registry.insecure=true`, which means allow plaintext AND skip verification. Leaving the Service
+name here once TLS is on would leave builds pushing credentials in the clear while everything
+looked fixed.
 */}}
-{{- if and .Values.registry.enabled (not .Values.defaultRegistry.host) (not .Values.registry.host) -}}
+{{- if and .Values.registry.enabled (not .Values.registry.tls.enabled) (not .Values.defaultRegistry.host) -}}
 {{- $hosts = append $hosts (include "kube-oci-composer.defaultRegistry" .) -}}
 {{- end -}}
 {{- with .Values.defaultRegistry.insecure }}{{- $hosts = concat $hosts (splitList "," .) -}}{{- end -}}

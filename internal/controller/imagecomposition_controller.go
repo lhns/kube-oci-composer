@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -28,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
+	"github.com/lhns/kube-oci-composer/internal/attest"
 	"github.com/lhns/kube-oci-composer/internal/cache"
 	"github.com/lhns/kube-oci-composer/internal/oci"
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
@@ -48,6 +50,16 @@ type ImageCompositionReconciler struct {
 	// by the operator; see recon.DefaultRegistry for why its credential is namespaced to the
 	// controller rather than to the object.
 	Default recon.DefaultRegistry
+
+	// Attestor attaches the SBOM, provenance and signature, when any of them is enabled. Nil or
+	// disabled changes nothing about the reconcile.
+	Attestor *attest.Attestor
+
+	// Transport, when set, trusts an additional CA on top of the system roots. Applies to EVERY
+	// registry this controller talks to, not only the operator's own -- see recon.Transport for
+	// why scoping it per host would break base-image pulls from the bundled registry, which is the
+	// flagship flow.
+	Transport http.RoundTripper
 
 	// InsecureRegistries are hosts this controller may push to over plain HTTP, matched on host
 	// exactly as the builder and the retention refresher match it (recon.InsecureHost).
@@ -202,6 +214,7 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	if err := r.patchStatus(ctx, &obj, func(o *ociv1alpha1.ImageComposition) {
 		o.Status.Artifact = result.Artifact
+		o.Status.Attestations = result.Attestations
 		o.Status.InputHash = result.InputHash
 		o.Status.History = recon.RecordHistory(o.Status.History, result.Record, r.historyLimit(o))
 		// Assigned unconditionally, including to nil: a divergence that has been resolved must stop
@@ -231,6 +244,9 @@ type buildResult struct {
 	Artifact *ociv1alpha1.ArtifactStatus
 	// InputHash is the hash of everything that determined the output.
 	InputHash string
+	// Attestations records what supply-chain material is attached, so the next reconcile can tell
+	// there is nothing to do without asking the registry.
+	Attestations *ociv1alpha1.AttestationStatus
 	// Conflict is set when onConflict: Keep left an existing tag in place and dropped what this
 	// reconcile produced. Copied into status so the divergence is visible rather than inferred.
 	Conflict *ociv1alpha1.TagConflictStatus
@@ -381,10 +397,6 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 
 	refOpts := r.refOptions(tgt.writeRepo)
 
-	// Restore previously published builds before checking convergence, so that after a restart
-	// the references resolve from replayed state rather than looking absent and forcing a
-	// rebuild of something already in the store.
-
 	// What each tag currently resolves to, plus whether the previously recorded digest is still
 	// present at all. A HEAD failure is not an error: the ordinary cause is that the reference
 	// does not exist yet, or that the serving store was emptied by a restart.
@@ -399,8 +411,14 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	// learned by downloading every layer and assembling them, every hour, forever.
 	if prev := obj.Status.Artifact; prev != nil &&
 		obj.Status.InputHash == inputHash &&
-		published.Matches(prev.Digest) {
-		return buildResult{Artifact: prev.DeepCopy(), InputHash: inputHash}, nil
+		published.Matches(prev.Digest) &&
+		// The third conjunct, added last so an object with attestations disabled evaluates exactly
+		// the expression it evaluated before. Complete() reads only status, so a converged
+		// reconcile still costs zero extra registry requests -- which is the whole point of
+		// recording what was attached rather than asking every hour.
+		r.Attestor.Complete(attestRecord(obj.Status.Attestations), prev.Digest) {
+		return buildResult{Artifact: prev.DeepCopy(), InputHash: inputHash,
+			Attestations: obj.Status.Attestations.DeepCopy()}, nil
 	}
 
 	for i := range inputs {
@@ -466,7 +484,14 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	// same content under the same tag has to stay a no-op, or a steady reconcile loop would fail
 	// every time round with immutable tags.
 	if published.Matches(digest.String()) {
-		return buildResult{Artifact: artifactStatus(tgt, digest), InputHash: inputHash}, nil
+		// Attested here too, and this is the path that matters when the feature is newly enabled:
+		// the bytes are unchanged and nothing needs republishing, but there is no attestation yet.
+		// Without this, turning signing on would do nothing until something else changed.
+		return buildResult{
+			Artifact:     artifactStatus(tgt, digest),
+			InputHash:    inputHash,
+			Attestations: r.attestPublished(ctx, obj, tgt, digest, inputs, baseDigest, refOpts, opts),
+		}, nil
 	}
 
 	// Checked before anything is written, so a partial rename cannot happen.
@@ -528,12 +553,9 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 		}
 	}
 
-	// Record the manifest so this build can be replayed after a restart. Not fatal: the artifact
-	// is published and pullable right now, and losing replayability is a smaller failure than
-	// reporting a build that actually succeeded as failed.
-	//
-	// For an index this stores the children too — an index alone would replay into a reference
-	// that resolves but cannot be pulled.
+	// Supply-chain material AFTER the artifact is addressable, so a failure here cannot leave a
+	// signature describing something that was never published.
+	attestations := r.attestPublished(ctx, obj, tgt, digest, inputs, baseDigest, refOpts, opts)
 
 	recon.Event(r.Recorder, obj, corev1.EventTypeNormal, ociv1alpha1.ReasonSucceeded,
 		fmt.Sprintf("Published %s@%s%s", tgt.pullRepo, digest, tagSuffix(tgt.tags)))
@@ -547,9 +569,10 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	}
 
 	return buildResult{
-		Artifact:  artifactStatus(tgt, digest),
-		InputHash: inputHash,
-		Record:    record,
+		Artifact:     artifactStatus(tgt, digest),
+		InputHash:    inputHash,
+		Record:       record,
+		Attestations: attestations,
 	}, nil
 }
 
@@ -579,12 +602,18 @@ func (r *ImageCompositionReconciler) resolveLayer(ctx context.Context, in oci.La
 	return r.Cache.Path(ctx, in.Digest, fetch)
 }
 
-// target is where an artifact is written and how it should be referenced. The two differ in
-// serving mode: the controller writes over loopback but workloads pull via the Service.
+// target is where an artifact is written and how it should be referenced.
+//
+// The two differ because one string cannot satisfy two resolvers: the controller reaches the
+// registry through cluster DNS, and a kubelet reaches it with the node's resolver. They are equal
+// whenever one name genuinely works from both places, which is every external registry and any
+// ingress with real DNS.
 type target struct {
-	// writeRepo is what the controller pushes to.
+	// writeRepo is what the controller pushes to, checks tags against, and refreshes. Everything
+	// that opens a connection uses this one.
 	writeRepo string
-	// pullRepo is what a workload references. Equal to writeRepo in push mode.
+	// pullRepo is what a workload references, and it appears in status.artifact.ref and nowhere
+	// else. The controller never connects to it and may well be unable to resolve it.
 	pullRepo string
 	// tags are the tags to publish under, in order. Empty means publish by digest alone.
 	tags []string
@@ -625,7 +654,7 @@ func (r *ImageCompositionReconciler) target(obj *ociv1alpha1.ImageComposition) (
 	}
 	return target{
 		writeRepo:   repo,
-		pullRepo:    repo,
+		pullRepo:    r.Default.PublicRepository(repo),
 		tags:        tags,
 		onConflict:  p.ResolveConflictPolicy(),
 		usesDefault: usesDefault,
@@ -688,6 +717,9 @@ func publishName(obj *ociv1alpha1.ImageComposition) string {
 // never taken from the spec.
 func (r *ImageCompositionReconciler) remoteOptions(ctx context.Context, obj *ociv1alpha1.ImageComposition) ([]remote.Option, error) {
 	opts := []remote.Option{remote.WithContext(ctx)}
+	if r.Transport != nil {
+		opts = append(opts, remote.WithTransport(r.Transport))
+	}
 
 	var ownRef string
 	if p := obj.Spec.Push; p != nil && p.SecretRef != nil {
