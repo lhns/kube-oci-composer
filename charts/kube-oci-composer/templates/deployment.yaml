@@ -70,30 +70,7 @@ spec:
             {{- if .Values.operator.fetchDenyPrivate }}
             - --fetch-deny-private
             {{- end }}
-            {{- with (include "kube-oci-composer.defaultRegistry" .) }}
-            - --default-registry={{ . }}
-            {{- if $.Values.operator.supplyChain.sbom }}
-            - --sbom
-            {{- end }}
-            {{- if $.Values.operator.supplyChain.provenance }}
-            - --provenance
-            {{- end }}
-            {{- if $.Values.operator.supplyChain.signing.enabled }}
-            - --signing-key-secret={{ required "signing.existingSecret is required when signing is enabled" $.Values.operator.supplyChain.signing.existingSecret }}
-            {{- end }}
-            {{- if (include "kube-oci-composer.registryCAWanted" $) }}
-            - --registry-ca-file={{ include "kube-oci-composer.registryCAFile" $ }}
-            {{- end }}
-            {{- with (include "kube-oci-composer.publicRegistry" $) }}
-            - --public-registry-host={{ . }}
-            {{- end }}
-            {{- end }}
-            {{- with (include "kube-oci-composer.pushSecretName" .) }}
-            - --default-push-secret={{ . }}
-            {{- end }}
-            {{- with (include "kube-oci-composer.insecureRegistries" .) }}
-            - --insecure-registry={{ . }}
-            {{- end }}
+            {{- include "kube-oci-composer.registryArgs" (dict "ctx" $ "supplyChain" .Values.operator.supplyChain) | trim | nindent 12 }}
           {{- if .Values.operator.s3.existingSecret }}
           env:
             # Credentials as environment variables, never as flags: flags are visible in ps, in the
