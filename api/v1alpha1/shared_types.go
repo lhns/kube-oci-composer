@@ -36,6 +36,7 @@ const (
 	ReasonImmutableConflict = "ImmutableTagConflict"
 	ReasonFetchFailed       = "FetchFailed"
 	ReasonPublishFailed     = "PublishFailed"
+	ReasonAttestationFailed = "AttestationFailed"
 	ReasonSuspended         = "Suspended"
 	// ReasonRetentionDegraded reports that the refresh keeping this object's images from being
 	// reclaimed has been failing. See ADR 0031: the refresh fails UNSAFE, so sustained failure
@@ -71,7 +72,6 @@ type LocalObjectReference struct {
 	// +required
 	Name string `json:"name"`
 }
-
 
 // ResolveConflictPolicy returns the effective policy for a tag that already resolves to something
 // else, reconciling the three-valued field with the deprecated two-valued one.

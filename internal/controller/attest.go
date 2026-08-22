@@ -119,7 +119,7 @@ func externalParameters(obj *ociv1alpha1.ImageComposition) map[string]any {
 }
 
 func (r *ImageCompositionReconciler) noteAttestationFailure(obj *ociv1alpha1.ImageComposition, err error) {
-	recon.Event(r.Recorder, obj, corev1.EventTypeWarning, "AttestationFailed",
+	recon.Event(r.Recorder, obj, corev1.EventTypeWarning, ociv1alpha1.ReasonAttestationFailed,
 		fmt.Sprintf("the artifact is published, but attaching supply-chain material failed: %v", err))
 }
 

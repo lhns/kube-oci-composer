@@ -1,25 +1,16 @@
 {{- if and .Values.registry.enabled .Values.registry.tls.enabled }}
 {{- /*
-EVERYTHING TLS IS RENDERED FROM THIS ONE FILE, AND THAT IS LOAD-BEARING.
+The TLS material is computed ONCE here, into $tls, and every object below reads that variable.
+Nothing else in the chart may call registryTLSMaterial.
 
-The material is computed ONCE, into $tls, and every object below reads that variable. Nothing else
-in the chart may call registryTLSMaterial.
+`genCA` is not deterministic and `lookup` returns nothing during `helm template`, `--dry-run` and
+every FIRST install. So two callers would generate two unrelated CAs: the render succeeds, and the
+install writes a certificate signed by one CA beside a trust bundle containing the other. The
+controllers then fail with `x509: certificate signed by unknown authority` against a registry this
+same chart installed. TestTheGeneratedCAIsTheSameCAEverywhere guards it.
 
-The reason is a bug that would otherwise be almost impossible to catch in review. `genCA` is not
-deterministic, and `lookup` returns nothing during `helm template`, during `--dry-run`, and on
-EVERY FIRST INSTALL. So if the TLS Secret and the trust ConfigMap each included the material
-helper, they would each generate their own unrelated CA. The render succeeds. The diff looks
-right. `helm install` writes a certificate signed by one CA and a trust bundle containing another,
-and the controllers fail at runtime with `x509: certificate signed by unknown authority` against a
-registry the same chart just installed.
-
-It is the same class as the password-reuse problem documented in registry-secret.yaml, and worse in
-one specific way: the password bug shows up as a 401 on UPGRADE, which is a path people watch. This
-one shows up only on a FRESH INSTALL, which is the path with the least scrutiny.
-
-There is a corollary. Do NOT add a `checksum/tls` annotation to the registry pod in the style of
-`checksum/config`: computing it would re-run `genCA` and produce a different value on every render,
-rolling all three workloads on every no-op `helm upgrade`.
+Corollary: no `checksum/tls` pod annotation, despite the `checksum/config` precedent. Computing one
+would re-run `genCA` on every render and roll all three workloads on every no-op upgrade.
 */}}
 {{- $tls := include "kube-oci-composer.registryTLSMaterial" . | fromJson }}
 {{- $secretName := include "kube-oci-composer.registryTLSSecretName" . }}

@@ -14,7 +14,7 @@ import (
 )
 
 // The conformance suite. Every backend runs the same tests, because the whole point of the
-// interface is that the input cache and the serving endpoint cannot tell which one they have.
+// interface is that a caller cannot tell which backend it has.
 // A backend that passes here is substitutable; one that only passes its own tests is not.
 
 func eachBackend(t *testing.T, fn func(t *testing.T, s Store)) {
@@ -52,7 +52,7 @@ func read(t *testing.T, s Store, key string) string {
 
 func TestRoundTrip(t *testing.T) {
 	eachBackend(t, func(t *testing.T, s Store) {
-		key := MustKey(NamespaceBlobs, "sha256:aa11")
+		key := MustKey(NamespaceInputs, "sha256:aa11")
 		put(t, s, key, "hello")
 
 		if got := read(t, s, key); got != "hello" {
@@ -72,7 +72,7 @@ func TestRoundTrip(t *testing.T) {
 }
 
 // TestMissIsErrNotFound — callers treat a miss as ordinary control flow: the cache falls through
-// to the origin and the serving endpoint returns 404. A backend-specific error would turn both
+// to the origin. A backend-specific error would turn both
 // into failures.
 func TestMissIsErrNotFound(t *testing.T) {
 	eachBackend(t, func(t *testing.T, s Store) {
@@ -91,7 +91,7 @@ func TestMissIsErrNotFound(t *testing.T) {
 // listing and the delete must not fail the sweep.
 func TestDeleteIsIdempotent(t *testing.T) {
 	eachBackend(t, func(t *testing.T, s Store) {
-		key := MustKey(NamespaceBlobs, "sha256:bb22")
+		key := MustKey(NamespaceInputs, "sha256:bb22")
 		put(t, s, key, "x")
 
 		for i := 0; i < 3; i++ {
@@ -109,7 +109,7 @@ func TestDeleteIsIdempotent(t *testing.T) {
 // key is the normal case, not an error.
 func TestOverwriteWithIdenticalContentSucceeds(t *testing.T) {
 	eachBackend(t, func(t *testing.T, s Store) {
-		key := MustKey(NamespaceBlobs, "sha256:cc33")
+		key := MustKey(NamespaceInputs, "sha256:cc33")
 		put(t, s, key, "same")
 		put(t, s, key, "same")
 
@@ -123,7 +123,7 @@ func TestOverwriteWithIdenticalContentSucceeds(t *testing.T) {
 // so that a reader never observes a half-written object.
 func TestConcurrentWritesDoNotCorrupt(t *testing.T) {
 	eachBackend(t, func(t *testing.T, s Store) {
-		key := MustKey(NamespaceBlobs, "sha256:dd44")
+		key := MustKey(NamespaceInputs, "sha256:dd44")
 		body := strings.Repeat("payload", 4096)
 
 		var wg sync.WaitGroup
@@ -143,12 +143,17 @@ func TestConcurrentWritesDoNotCorrupt(t *testing.T) {
 }
 
 func TestListIsScopedToPrefix(t *testing.T) {
-	eachBackend(t, func(t *testing.T, s Store) {
-		put(t, s, MustKey(NamespaceBlobs, "sha256:1111"), "a")
-		put(t, s, MustKey(NamespaceBlobs, "sha256:2222"), "b")
-		put(t, s, MustKey(NamespaceInputs, "sha256:3333"), "c")
+	// A second namespace, declared here rather than in the package: the store takes any namespace
+	// string, and only `inputs` has a production caller now that the serving endpoint is gone.
+	// Keeping a second constant alive purely so a test could use it would be the tail wagging.
+	const otherNamespace = "other"
 
-		blobs, err := s.List(context.Background(), NamespaceBlobs)
+	eachBackend(t, func(t *testing.T, s Store) {
+		put(t, s, MustKey(NamespaceInputs, "sha256:1111"), "a")
+		put(t, s, MustKey(NamespaceInputs, "sha256:2222"), "b")
+		put(t, s, MustKey(otherNamespace, "sha256:3333"), "c")
+
+		blobs, err := s.List(context.Background(), NamespaceInputs)
 		if err != nil {
 			t.Fatalf("list: %v", err)
 		}
@@ -156,7 +161,7 @@ func TestListIsScopedToPrefix(t *testing.T) {
 			t.Fatalf("listed %d blobs, want 2: %v", len(blobs), blobs)
 		}
 		for _, info := range blobs {
-			if !strings.HasPrefix(info.Key, NamespaceBlobs+"/") {
+			if !strings.HasPrefix(info.Key, NamespaceInputs+"/") {
 				t.Fatalf("listing leaked across namespaces: %q", info.Key)
 			}
 			if info.Size == 0 {
@@ -183,7 +188,7 @@ func TestListEmptyNamespaceIsNotAnError(t *testing.T) {
 // TestLargeObjectRoundTrips — these hold real artifact layers, not test strings.
 func TestLargeObjectRoundTrips(t *testing.T) {
 	eachBackend(t, func(t *testing.T, s Store) {
-		key := MustKey(NamespaceBlobs, "sha256:ee55")
+		key := MustKey(NamespaceInputs, "sha256:ee55")
 		body := bytes.Repeat([]byte("0123456789abcdef"), 1<<16) // 1 MiB
 
 		if err := s.Write(context.Background(), key, bytes.NewReader(body)); err != nil {
@@ -217,7 +222,7 @@ func TestKeyRejectsTraversal(t *testing.T) {
 	}
 	for _, digest := range bad {
 		t.Run(digest, func(t *testing.T) {
-			if k, err := Key(NamespaceBlobs, digest); err == nil {
+			if k, err := Key(NamespaceInputs, digest); err == nil {
 				t.Fatalf("accepted %q, producing key %q", digest, k)
 			}
 		})
@@ -254,15 +259,15 @@ func TestDiskIgnoresInFlightWrites(t *testing.T) {
 	if err != nil {
 		t.Fatalf("creating disk store: %v", err)
 	}
-	put(t, s, MustKey(NamespaceBlobs, "sha256:aaaa"), "committed")
+	put(t, s, MustKey(NamespaceInputs, "sha256:aaaa"), "committed")
 
 	// Simulate a write in progress by planting a temp file the way Write does.
-	inflight := filepath.Join(root, "blobs", "sha256", ".tmp-inflight")
+	inflight := filepath.Join(root, NamespaceInputs, "sha256", ".tmp-inflight")
 	if err := os.WriteFile(inflight, []byte("half written"), 0o600); err != nil {
 		t.Fatalf("planting temp file: %v", err)
 	}
 
-	got, err := s.List(context.Background(), NamespaceBlobs)
+	got, err := s.List(context.Background(), NamespaceInputs)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}

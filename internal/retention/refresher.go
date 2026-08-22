@@ -84,8 +84,8 @@ type PendingLister interface {
 type Target struct {
 	// Object is what an Event is recorded against.
 	Object client.Object
-	// Push describes the registry. Nil means the object is served from the embedded endpoint, whose
-	// content this controller owns outright.
+	// Push describes where the object publishes. Nil means it named no repository and goes to the
+	// operator's default registry.
 	Push *ociv1alpha1.Push
 	// Artifact is the current publication, which may not be in History yet.
 	Artifact *ociv1alpha1.ArtifactStatus
@@ -306,8 +306,8 @@ func (r *Refresher) refreshObject(ctx context.Context, target Target, out *Resul
 	}
 
 	if repo == "" {
-		// Nothing external to convince: served from the embedded endpoint, whose content this
-		// controller owns outright.
+		// Nowhere to publish, so nothing to keep alive: no repository named and no default
+		// registry configured.
 		//
 		// Keyed on the resolved REPOSITORY, not on push being nil. An object with no push block
 		// still publishes -- to the operator's default registry -- and skipping those would stop

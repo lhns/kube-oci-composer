@@ -71,6 +71,6 @@ func (r *ImageBuildReconciler) signBuild(ctx context.Context, obj *ociv1alpha1.I
 }
 
 func (r *ImageBuildReconciler) noteAttestationFailure(obj *ociv1alpha1.ImageBuild, err error) {
-	recon.Event(r.Recorder, obj, corev1.EventTypeWarning, "AttestationFailed",
+	recon.Event(r.Recorder, obj, corev1.EventTypeWarning, ociv1alpha1.ReasonAttestationFailed,
 		fmt.Sprintf("the image is pushed, but signing it failed: %v", err))
 }

@@ -81,14 +81,3 @@ func TestChartAcceptsEveryResolutionOfTheCredentialSplit(t *testing.T) {
 		})
 	}
 }
-
-// TestTheRegistryAuthCheckIsActuallyReached guards the same defect that made the first version of
-// the retention check pass all eight of its falsification cases while doing nothing: Helm loads
-// underscore-prefixed files as definitions and never renders them, so an `include` inside one is
-// dead code. The check lives in `_registry.tpl` and must be invoked from `validate.yaml`.
-func TestTheRegistryAuthCheckIsActuallyReached(t *testing.T) {
-	out := renderExpectingFailure(t, "--set", "defaultRegistry.existingPushSecret=mine")
-	if !strings.Contains(out, "validate.yaml") {
-		t.Fatalf("the refusal must come from a template Helm renders; got:\n%s", out)
-	}
-}

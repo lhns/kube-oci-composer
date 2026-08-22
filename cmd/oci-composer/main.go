@@ -1,10 +1,11 @@
-// Command oci-composer runs the ImageComposition controller and its built-in OCI endpoint.
+// Command oci-composer runs the ImageComposition controller.
 //
-// One binary, no privileges, no daemon: assembly happens in-process. The serving endpoint runs
-// alongside the manager so a cluster with no registry needs nothing else installed.
+// One binary, no privileges, no daemon: assembly happens in-process, and the result is pushed to a
+// registry -- the one the chart bundles, or one the operator supplies (ADR 0035).
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"net/http"
@@ -61,7 +62,6 @@ func main() {
 		s3Prefix             string
 		s3Region             string
 		s3PathStyle          bool
-		s3Presign            bool
 		refreshInterval      time.Duration
 		insecureRegs         string
 		fetchDenyPrivate     bool
@@ -98,11 +98,6 @@ func main() {
 	flag.BoolVar(&s3PathStyle, "s3-path-style", true,
 		"Use path-style addressing (host/bucket/key) instead of virtual-host style. Required by "+
 			"most self-hosted gateways, whose certificate does not cover per-bucket subdomains.")
-
-	flag.BoolVar(&s3Presign, "s3-presign-blobs", false,
-		"Redirect blob pulls to a presigned S3 URL so the bytes do not stream through the "+
-			"controller. Off by default because it exposes the object-store endpoint to every "+
-			"pulling client, which on a private gateway may not be reachable from every node.")
 
 	flag.DurationVar(&refreshInterval, "retention-refresh-interval", retention.DefaultInterval,
 		"How often to re-pull the images every live object still references, so that a registry "+
@@ -212,11 +207,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	if s3Presign && remote == nil {
-		setupLog.Error(nil, "--s3-presign-blobs needs an S3 backend")
-		os.Exit(1)
-	}
-
 	layerCache, err := cache.New(cacheDir, remote)
 	if err != nil {
 		setupLog.Error(err, "unable to set up the layer cache")
@@ -271,7 +261,7 @@ func main() {
 			setupLog.Error(nil, "POD_NAMESPACE is unset, so the signing key cannot be read")
 			os.Exit(1)
 		}
-		key, err := loadSigningKey(ns, signingKeySecret)
+		key, err := attest.LoadKeyFromCluster(context.Background(), ns, signingKeySecret)
 		if err != nil {
 			setupLog.Error(err, "unable to load the signing key", "secret", signingKeySecret)
 			os.Exit(1)
@@ -340,8 +330,8 @@ func main() {
 			"images this operator's objects still reference (ADR 0031)")
 	}
 
-	// Liveness stays a bare ping. A standby replica is alive and must not be restarted just
-	// because it is not the leader.
+	// Liveness stays a bare ping. A replica that has not won the lease is alive and must not be
+	// restarted just because it is not the leader.
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)

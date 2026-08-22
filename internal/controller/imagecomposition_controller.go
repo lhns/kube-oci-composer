@@ -397,10 +397,6 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 
 	refOpts := r.refOptions(tgt.writeRepo)
 
-	// Restore previously published builds before checking convergence, so that after a restart
-	// the references resolve from replayed state rather than looking absent and forcing a
-	// rebuild of something already in the store.
-
 	// What each tag currently resolves to, plus whether the previously recorded digest is still
 	// present at all. A HEAD failure is not an error: the ordinary cause is that the reference
 	// does not exist yet, or that the serving store was emptied by a restart.
@@ -556,13 +552,6 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 			return buildResult{}, fmt.Errorf("publishing %s: %w", ref, err)
 		}
 	}
-
-	// Record the manifest so this build can be replayed after a restart. Not fatal: the artifact
-	// is published and pullable right now, and losing replayability is a smaller failure than
-	// reporting a build that actually succeeded as failed.
-	//
-	// For an index this stores the children too — an index alone would replay into a reference
-	// that resolves but cannot be pulled.
 
 	// Supply-chain material AFTER the artifact is addressable, so a failure here cannot leave a
 	// signature describing something that was never published.

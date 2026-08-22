@@ -59,8 +59,8 @@ spec:
             {{- if $.Values.imageBuild.supplyChain.signing.enabled }}
             - --signing-key-secret={{ required "signing.existingSecret is required when signing is enabled" $.Values.imageBuild.supplyChain.signing.existingSecret }}
             {{- end }}
-            {{- if (include "kube-oci-composer.registryCASource" $) }}
-            - --registry-ca-file=/etc/oci-composer/registry-ca/ca.crt
+            {{- if (include "kube-oci-composer.registryCAWanted" $) }}
+            - --registry-ca-file={{ include "kube-oci-composer.registryCAFile" $ }}
             {{- end }}
             {{- with (include "kube-oci-composer.publicRegistry" $) }}
             - --public-registry-host={{ . }}
@@ -105,27 +105,13 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           resources:
             {{- toYaml .Values.imageBuild.resources | nindent 12 }}
-          {{- with (include "kube-oci-composer.registryCASource" $) }}
+          {{- with (include "kube-oci-composer.registryCAVolumeMount" $) }}
           volumeMounts:
-            - name: registry-ca
-              mountPath: /etc/oci-composer/registry-ca
-              readOnly: true
+            {{- . | nindent 12 }}
           {{- end }}
-      {{- with (include "kube-oci-composer.registryCASource" $) }}
+      {{- with (include "kube-oci-composer.registryCAVolume" $) }}
       volumes:
-        - name: registry-ca
-          {{- $kind := (splitList ":" .) | first }}
-          {{- $name := (splitList ":" .) | last }}
-          {{- if eq $kind "configMap" }}
-          configMap:
-            name: {{ $name }}
-          {{- else }}
-          secret:
-            secretName: {{ $name }}
-            items:
-              - key: ca.crt
-                path: ca.crt
-          {{- end }}
+        {{- . | nindent 8 }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

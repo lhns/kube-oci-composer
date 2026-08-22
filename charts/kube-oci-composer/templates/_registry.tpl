@@ -128,26 +128,58 @@ Every client has to learn the new CA, including the containerd drop-in on each n
 {{- end -}}
 
 {{- /*
-Whether the controllers need a CA mounted, and where it comes from.
+Whether the controllers need the registry's CA mounted.
 
-Empty means the registry's certificate is already trusted by the controller image -- an ACME
-issuer, a corporate CA baked into the image, or TLS turned off entirely.
+Empty means its certificate is already trusted by the controller image: an ACME issuer, a corporate
+CA baked in, or TLS off entirely. Callers use it only as a truthiness test -- registryCAVolume and
+registryCAVolumeMount below emit the YAML.
 */}}
-{{- define "kube-oci-composer.registryCASource" -}}
+{{- define "kube-oci-composer.registryCAWanted" -}}
 {{- if and .Values.registry.enabled .Values.registry.tls.enabled .Values.registry.tls.trust.enabled -}}
-{{- if .Values.registry.tls.trust.existingConfigMap -}}
-configMap:{{ .Values.registry.tls.trust.existingConfigMap }}
-{{- else if eq .Values.registry.tls.mode "selfSigned" -}}
-configMap:{{ include "kube-oci-composer.registryFullname" . }}-ca
-{{- else -}}
+yes
+{{- end -}}
+{{- end -}}
+
 {{- /*
-cert-manager and supplied Secrets both carry the CA in the Secret's own ca.crt key, so mounting
-that directly beats copying it into a ConfigMap that can go stale behind a renewal.
+Where the CA comes from, as a volume entry.
+
+cert-manager and operator-supplied Secrets both carry it in the Secret's own ca.crt key, so it is
+mounted from there rather than copied into a ConfigMap that could go stale behind a renewal. Only
+the self-signed mode, where the chart generates the CA itself, uses a ConfigMap.
 */}}
-secret:{{ include "kube-oci-composer.registryTLSSecretName" . }}
+{{- define "kube-oci-composer.registryCAVolume" -}}
+{{- if include "kube-oci-composer.registryCAWanted" . -}}
+- name: registry-ca
+{{- if .Values.registry.tls.trust.existingConfigMap }}
+  configMap:
+    name: {{ .Values.registry.tls.trust.existingConfigMap }}
+{{- else if eq .Values.registry.tls.mode "selfSigned" }}
+  configMap:
+    name: {{ include "kube-oci-composer.registryFullname" . }}-ca
+{{- else }}
+  secret:
+    secretName: {{ include "kube-oci-composer.registryTLSSecretName" . }}
+    items:
+      - key: ca.crt
+        path: ca.crt
+{{- end }}
 {{- end -}}
 {{- end -}}
+
+{{- define "kube-oci-composer.registryCAVolumeMount" -}}
+{{- if include "kube-oci-composer.registryCAWanted" . -}}
+- name: registry-ca
+  mountPath: {{ include "kube-oci-composer.registryCADir" . }}
+  readOnly: true
 {{- end -}}
+{{- end -}}
+
+{{- /*
+Where the CA is mounted, and the file --registry-ca-file names inside it. One definition because
+the mount path and the flag have to agree, in two Deployments.
+*/}}
+{{- define "kube-oci-composer.registryCADir" -}}/etc/oci-composer/registry-ca{{- end -}}
+{{- define "kube-oci-composer.registryCAFile" -}}{{ include "kube-oci-composer.registryCADir" . }}/ca.crt{{- end -}}
 
 {{- /*
 Refusals about clustering.

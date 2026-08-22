@@ -133,7 +133,6 @@ func TestChartFlagsMatchTheBinary(t *testing.T) {
 		"--set", "operator.s3.endpoint=https://s3.test",
 		"--set", "operator.s3.bucket=artifacts",
 		"--set", "operator.s3.prefix=composer",
-		"--set", "operator.s3.presignBlobs=true",
 	)
 
 	known := knownFlags(t, "../../cmd/oci-composer")
@@ -167,10 +166,6 @@ func TestChartRejectsIncoherentValues(t *testing.T) {
 		args []string
 		want string
 	}{
-		"presign without an endpoint": {
-			[]string{"--set", "operator.s3.presignBlobs=true"},
-			"requires operator.s3.endpoint",
-		},
 		"endpoint without a bucket": {
 			[]string{"--set", "operator.s3.endpoint=https://s3.test"},
 			"requires operator.s3.bucket",
@@ -186,12 +181,6 @@ func TestChartRejectsIncoherentValues(t *testing.T) {
 		})
 	}
 }
-
-// The Recreate-strategy and ingress-narrowing guards are gone with the serving endpoint (ADR 0035).
-// Recreate existed because a rolling update briefly ran two pods contending for one ReadWriteOnce
-// blob store; there is no blob store, the volume left is a per-pod cache, and losing it costs a
-// refetch. The ingress guard existed to keep metrics and probes off a public listener that no longer
-// exists.
 
 // TestChartMountsWritablePaths — the root filesystem is read-only, so assembly's temp directory and
 // the layer cache must be explicitly writable or every build fails.
@@ -330,11 +319,6 @@ func knownFlags(t *testing.T, cmdPath string) map[string]struct{} {
 	}
 	return flags
 }
-
-// The shared-storage guards are gone with the serving endpoint (ADR 0035). They refused
-// replicaCount > 1 without a genuinely shared blob store, because a standby would join the Service
-// and 404 every pull routed to it. There is no Service and no blob store; the volume that remains is
-// a per-pod layer cache, where a second replica costs a refetch rather than a failed pull.
 
 // TestMoreThanOneComposerReplicaStillRenders.
 //
