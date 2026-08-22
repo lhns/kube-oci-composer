@@ -411,8 +411,9 @@ registry:
     # already publicly trusted -- an ACME issuer, or a corporate CA your images already trust.
     trust:
       enabled: true
+      # A ConfigMap you maintain instead, holding the CA under `ca.crt`. The key name is fixed:
+      # it is what a kubernetes.io/tls Secret uses, so the two sources stay interchangeable.
       existingConfigMap: ""
-      key: ca.crt
 
   # A NetworkPolicy admitting traffic to the registry.
   #

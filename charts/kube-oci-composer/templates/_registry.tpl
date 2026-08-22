@@ -280,3 +280,43 @@ Without this, Helm creates the StatefulSet while the Deployment's ReplicaSet sti
 {{- end -}}
 {{- end -}}
 {{- end -}}
+
+{{- /*
+The registry arguments both controllers take.
+
+One definition because they are the same questions for both -- where to publish, what a workload
+pulls, whose credential, what to trust, what to attach -- and a flag added to one and not the other
+is a controller that quietly behaves differently from its sibling.
+
+Call with the supplyChain block, which is the only thing that differs:
+
+    {{ include "kube-oci-composer.registryArgs" (dict "ctx" $ "supplyChain" .Values.operator.supplyChain) }}
+*/}}
+{{- define "kube-oci-composer.registryArgs" -}}
+{{- $ctx := .ctx -}}
+{{- $sc := .supplyChain -}}
+{{- with (include "kube-oci-composer.defaultRegistry" $ctx) }}
+- --default-registry={{ . }}
+{{- end }}
+{{- with (include "kube-oci-composer.publicRegistry" $ctx) }}
+- --public-registry-host={{ . }}
+{{- end }}
+{{- with (include "kube-oci-composer.pushSecretName" $ctx) }}
+- --default-push-secret={{ . }}
+{{- end }}
+{{- with (include "kube-oci-composer.insecureRegistries" $ctx) }}
+- --insecure-registry={{ . }}
+{{- end }}
+{{- if (include "kube-oci-composer.registryCAWanted" $ctx) }}
+- --registry-ca-file={{ include "kube-oci-composer.registryCAFile" $ctx }}
+{{- end }}
+{{- if $sc.sbom }}
+- --sbom
+{{- end }}
+{{- if $sc.provenance }}
+- --provenance
+{{- end }}
+{{- if $sc.signing.enabled }}
+- --signing-key-secret={{ required "supplyChain.signing.existingSecret is required when signing is enabled" $sc.signing.existingSecret }}
+{{- end }}
+{{- end -}}
