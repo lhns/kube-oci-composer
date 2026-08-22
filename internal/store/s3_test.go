@@ -90,7 +90,7 @@ func TestS3PrefixRoundTrip(t *testing.T) {
 	for _, prefix := range []string{"", "composer", "/composer/", "a/b"} {
 		t.Run("prefix="+prefix, func(t *testing.T) {
 			s := &S3{prefix: strings.Trim(prefix, "/")}
-			key := MustKey(NamespaceBlobs, "sha256:abcd")
+			key := MustKey(NamespaceInputs, "sha256:abcd")
 
 			if got := s.key(s.object(key)); got != key {
 				t.Fatalf("key round-trip gave %q, want %q", got, key)

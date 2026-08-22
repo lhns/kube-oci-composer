@@ -51,10 +51,6 @@ operator:
     # Path-style addressing (host/bucket/key). Required by most self-hosted gateways, whose
     # certificate does not cover per-bucket subdomains.
     pathStyle: true
-    # Redirect blob pulls to a presigned URL so bytes bypass the controller. Off by default: it
-    # exposes the object-store endpoint to every pulling client, which on a private gateway may
-    # not be reachable from every node.
-    presignBlobs: false
     # Secret holding AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY. Credentials are injected as
     # environment variables, never as flags — flags appear in ps, in the pod spec, and in every
     # kubectl describe.
@@ -485,10 +481,11 @@ registry:
     requests: {cpu: 50m, memory: 128Mi}
     limits: {memory: 1Gi}
 
-# Persistence for the blob store and layer cache.
+# Persistence for the layer cache.
 #
-# Neither is a system of record: composition is deterministic, so anything lost is rebuilt. An
-# emptyDir is therefore correct and supported. A PVC only buys a faster restart.
+# Not a system of record -- it holds fetched layer SOURCES, so anything lost is refetched from
+# upstream. An emptyDir is therefore correct and supported; a PVC only buys a faster restart.
+# (The images themselves live in the registry, which has its own registry.persistence.)
 persistence:
   enabled: false
   storageClass: ""

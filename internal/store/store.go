@@ -1,13 +1,13 @@
 // Package store provides content-addressed blob storage with interchangeable backends.
 //
-// Two things in this controller need to keep bytes around, and they want the same operations:
+// One caller today: the layer cache, holding fetched layer sources keyed by their declared digest
+// (internal/cache). It is disposable -- anything lost is refetched from upstream -- and it should
+// be able to live on a volume or in object storage without the caller knowing which, which is what
+// the interface is for.
 //
-//   - the input cache, holding fetched layer sources keyed by their declared digest;
-//   - the served blob store, holding assembled layers and configs for workloads to pull.
-//
-// Both are content-addressed, both are disposable in the sense that anything lost can be rebuilt
-// from the spec, and both should be able to live on a volume or in object storage without either
-// caller knowing which. Hence one interface and two key namespaces rather than two subsystems.
+// It once also backed the serving endpoint's blob store, which is why the design is namespaced and
+// backend-agnostic rather than simply a directory. That endpoint is gone (ADR 0035); the shape it
+// left behind is still the right one for a cache that may be local or remote.
 //
 // Keys are opaque strings, conventionally "<namespace>/sha256/<hex>". Callers build them with
 // Key; nothing in here parses them.
@@ -23,22 +23,15 @@ import (
 )
 
 // ErrNotFound is returned when a key does not exist. Backends must return this rather than a
-// backend-specific error, because callers routinely treat a miss as ordinary control flow — a
-// cache miss is not a failure, and the serving endpoint has to turn it into a 404 rather than a
-// 500.
+// backend-specific error, because callers routinely treat a miss as ordinary control flow: a cache
+// miss is not a failure, it is a refetch.
 var ErrNotFound = errors.New("not found")
 
-// Namespaces. Kept as constants because a typo would silently create a parallel universe of
-// objects that nothing reads and garbage collection would then delete as unreferenced.
+// Namespaces keep unrelated content apart within one backend. A constant rather than a literal
+// because a typo would silently create a parallel set of objects that nothing ever reads.
 const (
 	// NamespaceInputs holds fetched layer sources, keyed by the digest declared in the spec.
 	NamespaceInputs = "inputs"
-	// NamespaceBlobs holds assembled layers and configs, served to workloads.
-	NamespaceBlobs = "blobs"
-	// NamespaceManifests holds manifest bytes, so a published build can be replayed into the
-	// registry after a restart. Without this the blobs survive but nothing names them, and an
-	// older build's digest reference stops resolving. See ADR 0013.
-	NamespaceManifests = "manifests"
 )
 
 // Info describes a stored object.
@@ -73,14 +66,6 @@ type Store interface {
 	// make it slow, but it must be complete — a partial listing would make the collector treat
 	// live objects as absent and, on the next pass, unreferenced ones as still present.
 	List(ctx context.Context, prefix string) ([]Info, error)
-}
-
-// Presigner is an optional extension for backends that can hand out a URL a client may fetch
-// directly. When available, the serving endpoint can redirect blob pulls straight to object
-// storage instead of streaming every byte through the controller.
-type Presigner interface {
-	// Presign returns a temporary URL for reading key, or ErrNotFound.
-	Presign(ctx context.Context, key string, ttl time.Duration) (string, error)
 }
 
 // Key builds the canonical key for a digest within a namespace, e.g.

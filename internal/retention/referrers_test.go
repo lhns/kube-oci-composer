@@ -41,9 +41,8 @@ func (p *pathRecorder) RoundTrip(req *http.Request) (*http.Response, error) {
 	return p.inner.RoundTrip(req)
 }
 
-// artifactWithAttestation pushes an image and attaches one attestation to it, using the same code
-// path the controllers use.
-func artifactWithAttestation(t *testing.T) (name.Repository, v1.Hash, v1.Hash) {
+// artifact pushes an empty image to a throwaway registry and returns where it landed.
+func artifact(t *testing.T) (name.Repository, v1.Descriptor) {
 	t.Helper()
 	srv := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
 	t.Cleanup(srv.Close)
@@ -55,6 +54,7 @@ func artifactWithAttestation(t *testing.T) (name.Repository, v1.Hash, v1.Hash) {
 	if err := remote.Write(repo.Tag("v1"), empty.Image); err != nil {
 		t.Fatalf("pushing the artifact: %v", err)
 	}
+
 	digest, err := empty.Image.Digest()
 	if err != nil {
 		t.Fatal(err)
@@ -67,14 +67,21 @@ func artifactWithAttestation(t *testing.T) (name.Repository, v1.Hash, v1.Hash) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return repo, v1.Descriptor{MediaType: mt, Digest: digest, Size: size}
+}
 
-	attestation, err := attest.Push(repo,
-		v1.Descriptor{MediaType: mt, Digest: digest, Size: size},
+// artifactWithAttestation is the same, with one attestation attached through the code path the
+// controllers use.
+func artifactWithAttestation(t *testing.T) (name.Repository, v1.Hash, v1.Hash) {
+	t.Helper()
+	repo, desc := artifact(t)
+
+	attestation, err := attest.Push(repo, desc,
 		attest.PredicateSPDX, []byte(`{"spdxVersion":"SPDX-2.3"}`), false, nil)
 	if err != nil {
 		t.Fatalf("attaching the attestation: %v", err)
 	}
-	return repo, digest, attestation
+	return repo, desc.Digest, attestation
 }
 
 // TestReferrersAreRefreshedToo guards a failure that would arrive a retention window after anyone
@@ -113,23 +120,10 @@ func TestReferrersAreRefreshedToo(t *testing.T) {
 // TestRefreshingReferrersIsHarmlessWithoutAny — the ordinary case, and the one that must not turn a
 // working retention refresh into a reported failure on a registry with no Referrers API at all.
 func TestRefreshingReferrersIsHarmlessWithoutAny(t *testing.T) {
-	srv := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
-	defer srv.Close()
-
-	repo, err := name.NewRepository(strings.TrimPrefix(srv.URL, "http://") + "/team-a/app")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := remote.Write(repo.Tag("v1"), empty.Image); err != nil {
-		t.Fatal(err)
-	}
-	digest, err := empty.Image.Digest()
-	if err != nil {
-		t.Fatal(err)
-	}
+	repo, desc := artifact(t)
 
 	out := &Result{}
-	(&Refresher{}).refreshReferrers(repo.Digest(digest.String()), nil, out)
+	(&Refresher{}).refreshReferrers(repo.Digest(desc.Digest.String()), nil, out)
 
 	if out.Failed != 0 {
 		t.Errorf("an artifact with no referrers must not be counted as a failure: %+v", out)

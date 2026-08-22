@@ -148,14 +148,6 @@ func TestTheIngressServesTheWholeRegistryAPI(t *testing.T) {
 	}
 }
 
-// TestThePublishModeCheckIsActuallyReached — same guard as the retention and registry-auth checks,
-// for the same reason: a `fail` inside a `_`-prefixed file is never executed.
-func TestThePublishModeCheckIsActuallyReached(t *testing.T) {
-	if out := renderRawExpectingFailure(t); !strings.Contains(out, "validate.yaml") {
-		t.Fatalf("the publish-mode check must be invoked from a template Helm renders:\n%s", out)
-	}
-}
-
 // grepFlags trims a render down to the controller arguments, so a failure message is readable.
 func grepFlags(out string) string {
 	var b strings.Builder

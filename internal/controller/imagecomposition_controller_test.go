@@ -147,9 +147,8 @@ func urlLayer(name, url, digest, to string) ociv1alpha1.Layer {
 	}
 }
 
-// TestServingModePublishesAndIsIdempotent covers the central claim: with no registry configured
-// the controller publishes to its own endpoint, and reconciling again converges without
-// republishing.
+// TestPublishingIsIdempotent covers the central claim: a second reconcile of an unchanged spec
+// converges without republishing. That is what makes reconciling on an interval nearly free.
 func TestPublishingIsIdempotent(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("plugins", urlLayer("core", url, digest, "/core"))
@@ -418,9 +417,9 @@ func TestTagListingWorks(t *testing.T) {
 	}
 }
 
-// TestServingModeWithoutServerIsTerminal — misconfiguration must say so plainly rather than
-// retry forever against an endpoint that does not exist.
-func TestServingModeWithoutServerIsPending(t *testing.T) {
+// TestNoRegistryConfiguredIsPending — an object that names no repository, on a controller with no
+// default registry, has nowhere to publish. It must say so plainly rather than retry forever.
+func TestNoRegistryConfiguredIsPending(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("noserver", urlLayer("core", url, digest, "/core"))
 
@@ -433,9 +432,9 @@ func TestServingModeWithoutServerIsPending(t *testing.T) {
 
 	_, err := r.reconcileArtifact(context.Background(), obj)
 	if err == nil {
-		t.Fatal("expected an error with no serving endpoint and no spec.push")
+		t.Fatal("expected an error with no default registry and no spec.push")
 	}
-	// Pending, not terminal: giving the operator an endpoint means restarting it with different
+	// Pending, not terminal: configuring a registry means restarting the controller with different
 	// flags, which changes nothing about any ImageComposition. Stalling would leave every
 	// composition in the cluster wedged after the fix landed.
 	var te *recon.TerminalError

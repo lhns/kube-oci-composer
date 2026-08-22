@@ -1156,6 +1156,12 @@ those changes describe the older shapes:
   being accepted rather than rejected.
 
 ### Removed
+- **`--s3-presign-blobs` and `operator.s3.presignBlobs`.** Presigning existed so the serving
+  endpoint could redirect a blob pull straight to object storage. That endpoint is gone (ADR 0035),
+  and the flag had been left behind doing nothing but validating itself. `store.Presigner` and the
+  `blobs` and `manifests` key namespaces go with it -- the layer cache only ever used `inputs`.
+
+
 - Pod-reference protection in the garbage collector: implemented, measured to protect nothing, and
   removed. See [ADR 0011](docs/adr/0011-content-tags-expire.md).
 

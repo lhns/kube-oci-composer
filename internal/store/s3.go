@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -28,8 +27,7 @@ type S3 struct {
 }
 
 var (
-	_ Store     = (*S3)(nil)
-	_ Presigner = (*S3)(nil)
+	_ Store = (*S3)(nil)
 )
 
 // S3Config configures the S3 backend.
@@ -224,19 +222,4 @@ func (s *S3) List(ctx context.Context, prefix string) ([]Info, error) {
 		})
 	}
 	return out, nil
-}
-
-// Presign returns a temporary read URL, letting the serving endpoint redirect a blob pull
-// straight to object storage instead of streaming every byte through the controller.
-func (s *S3) Presign(ctx context.Context, key string, ttl time.Duration) (string, error) {
-	if _, err := s.Stat(ctx, key); err != nil {
-		// Presigning a missing object would hand the client a URL that 404s later, turning a
-		// clean miss into a confusing pull failure.
-		return "", err
-	}
-	u, err := s.client.PresignedGetObject(ctx, s.bucket, s.object(key), ttl, nil)
-	if err != nil {
-		return "", fmt.Errorf("presign %s: %w", key, err)
-	}
-	return u.String(), nil
 }

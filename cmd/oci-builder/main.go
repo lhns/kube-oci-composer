@@ -12,6 +12,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"net/http"
@@ -239,7 +240,7 @@ func main() {
 			setupLog.Error(nil, "POD_NAMESPACE is unset, so the signing key cannot be read")
 			os.Exit(1)
 		}
-		key, err := loadSigningKey(ns, signingKeySecret)
+		key, err := attest.LoadKeyFromCluster(context.Background(), ns, signingKeySecret)
 		if err != nil {
 			setupLog.Error(err, "unable to load the signing key", "secret", signingKeySecret)
 			os.Exit(1)

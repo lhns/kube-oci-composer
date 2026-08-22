@@ -1,29 +1,18 @@
 {{- if and .Values.registry.enabled .Values.registry.networkPolicy.enabled }}
 {{- /*
-This is a CONNECTIVITY GUARANTEE, not a security control, and the distinction is the whole reason
-it is shaped the way it is.
+A CONNECTIVITY guarantee, not a security control.
 
-Restricting which namespace may reach the registry buys nothing that is not already bought: reads
-are anonymous by design (threat I5) because a kubelet pulls without credentials, and writes need
-the generated password. A namespace boundary in front of that adds no authority to either rule.
+Restricting which namespace may reach the registry adds no authority: reads are anonymous by design
+(threat I5, because a kubelet pulls without credentials) and writes need the generated password.
+What it buys is builds that work -- a build Job runs in its OBJECT's namespace, so every build
+crosses a namespace boundary to push, and a default-deny cluster blocks it. Hence the permissive
+default.
 
-What it DOES buy is builds that work. A build Job runs in its object's namespace, not this one, so
-every build crosses a namespace boundary to push -- and in a cluster with a default-deny policy,
-nothing lets it through. That is the failure this exists to prevent, and it is why the default is
-permissive rather than tight.
-
-READ THIS BEFORE NARROWING IT. The moment any policy selects the registry pod, that pod goes from
-"no policy applies, so everything is allowed" to "only what is listed is allowed". So this file has
-to be COMPLETE, not merely correct. In particular:
-
-  * Image pulls come from the KUBELET, in the NODE's network namespace. No podSelector can ever
-    match them -- there is no pod. That is what `nodeCIDRs` is for, and leaving it empty on a
-    cluster where pods and nodes are on different networks turns every pull into a timeout that
-    looks exactly like a broken registry.
-  * Build pods live in namespaces this chart has never heard of, created after it was installed.
-
-If you narrow `allowedNamespaces`, you are asserting that you know every namespace a build will
-ever run in. That is a real thing to know and a bad thing to guess.
+Before narrowing it, two things. Once any policy selects the registry pod, that pod goes from
+"everything allowed" to "only what is listed", so this file must be COMPLETE rather than merely
+correct. And image pulls come from the KUBELET, in the node's network namespace, which no
+podSelector can ever match -- that is what nodeCIDRs is for, and omitting it where pods and nodes
+sit on different networks turns every pull into a timeout that looks like a broken registry.
 */}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
