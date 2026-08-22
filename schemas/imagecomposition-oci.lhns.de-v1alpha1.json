@@ -357,61 +357,8 @@
           "maxItems": 16,
           "type": "array"
         },
-        "publish": {
-          "description": "Publish serves the artifact from the controller's own read-only OCI endpoint. The default\nmode, needing no registry and no credentials.",
-          "properties": {
-            "history": {
-              "description": "History is how many past builds to keep before garbage collection reclaims their blobs.\nDefaults to the controller's --keep-builds.\n\nOld builds are worth keeping for three independent reasons: reverting a commit must find\nthe old reference still pullable; a pod pinned to one that gets rescheduled must be able\nto pull it again; and with spec-hash tags a rollback names a tag from an earlier build,\nwhich only resolves while that build is retained. Layers are shared between builds, so a\ngenerous value costs far less than the count suggests. See ADR 0011.",
-              "format": "int32",
-              "minimum": 1,
-              "type": "integer"
-            },
-            "immutable": {
-              "description": "Immutable is DEPRECATED; use OnConflict. true means Fail, false means Overwrite, and there\nwas no way to spell Keep at all.\n\nHonoured when OnConflict is unset, so objects written before the enum existed keep behaving\nas they did. Setting both to values that CONTRADICT each other is refused; setting both to\nvalues that agree is allowed, because every object stored before this release already has\n`immutable: true` materialised under it and would otherwise be unable to adopt the new field\nwithout a separate edit.\n\nIts schema default was REMOVED with this change. Keeping it would materialise `immutable`\nunder every new object, which makes an explicit setting indistinguishable from a defaulted\none and so leaves no rule able to catch a contradiction. Removing it changes nothing for\nstored objects, whose value is already written, and nothing for new ones, which resolve to\nFail either way.\n\nA pointer because the zero value is meaningful: a plain bool with omitempty would drop an\nexplicit `false` on the wire and let the default quietly win.",
-              "type": "boolean"
-            },
-            "name": {
-              "description": "Name is the repository path the artifact is served under, e.g. \"kafka-tiered-storage\"\nresults in \u003cserving-host\u003e/kafka-tiered-storage.",
-              "type": "string"
-            },
-            "onConflict": {
-              "description": "OnConflict decides what happens when a tag already resolves to different content: Fail\n(refuse and stall), Overwrite (move the tag), or Keep (leave it, drop this build, stay\nReady). Defaults to Fail.\n\nRepublishing IDENTICAL content is a no-op regardless of this field, so a steady reconcile\nloop never reaches it -- only a real change of meaning does.\n\nDeliberately carries NO schema default, unlike the `immutable` field it replaces. Structural\ndefaults are applied when an object is read back from storage, so defaulting this would\nrewrite every existing `immutable: false` object into a refusing one the moment the CRD was\nupgraded -- a silent reversal of a setting its author chose on purpose. The effective default\nlives in ResolveConflictPolicy instead, where it can consult `immutable` first.",
-              "enum": [
-                "Fail",
-                "Overwrite",
-                "Keep"
-              ],
-              "type": "string"
-            },
-            "ref": {
-              "description": "Ref is a full image reference whose TAG is added to Tags. The host and repository path are\nparsed and then ignored: the controller already knows its own serving address, and the\nrepository comes from Name.\n\nIt exists so the tag can be set by whatever already rewrites image references, rather than\nneeding a second mechanism. kustomize's images transformer, for one, rewrites a scalar\nimage field wherever a fieldSpec points at it — so one entry can retag this artifact AND\nthe workload that consumes it, keeping them in step by construction:\n\n  images:\n    - name: my-artifact                       # matches this field and the consumer's\n      newName: registry.example/my-artifact\n      newTag: s1a2b3c4d5e6f7890\n\nA ref with NO tag contributes nothing rather than failing. That is what an untemplated\nmanifest looks like, and it degrades to publishing by digest alone — which is supported.\nThe consumer's reference would be equally unrewritten, so the mistake surfaces at the pod\nrather than being hidden here.",
-              "maxLength": 512,
-              "type": "string"
-            },
-            "tags": {
-              "description": "Tags are the tags this build is published under, in order. Optional, and defaulted to\nnothing: with no tags the artifact is published by digest alone, which is all a workload\npinned by image automation needs.\n\nThe intended use is a SPEC-HASH tag — a hash of the build-determining part of this spec,\ncomputed by whatever templates it, written into both this field and the consuming\nworkload's image reference. Because assembly is deterministic (ADR 0016), such a tag\nidentifies the output as precisely as its digest does, and both sides derive it from one\nsource with nothing observing anything at runtime. See ADR 0017.\n\nA list, so one build can carry several: a spec-hash tag alongside a readable pointer, or\nthe same hash under more than one algorithm.",
-              "items": {
-                "maxLength": 128,
-                "pattern": "^[a-zA-Z0-9_][a-zA-Z0-9._-]*$",
-                "type": "string"
-              },
-              "maxItems": 32,
-              "type": "array"
-            }
-          },
-          "required": [
-            "name"
-          ],
-          "type": "object",
-          "x-kubernetes-validations": [
-            {
-              "message": "immutable and onConflict contradict each other: immutable true means onConflict Fail, immutable false means onConflict Overwrite. immutable is deprecated; prefer setting onConflict alone.",
-              "rule": "!(has(self.immutable) \u0026\u0026 has(self.onConflict)) || (self.immutable \u0026\u0026 self.onConflict == 'Fail') || (!self.immutable \u0026\u0026 self.onConflict == 'Overwrite')"
-            }
-          ]
-        },
         "push": {
-          "description": "Push publishes to an external registry instead. Use it when the artifact must outlive the\ncluster, be consumed from outside it, or carry registry-native attestations.",
+          "description": "Push is where the artifact goes: tags, retention, and the tag-conflict policy.\n\nOptional in full. Omitted, the artifact publishes to the operator's default registry as\n\u003cnamespace\u003e/\u003cname\u003e, which is what a default install configures -- so an ImageComposition\nusually names nothing here at all. Set `repository` to publish somewhere else, and pair it\nwith `secretRef`: the operator's credential is only ever sent to the operator's own registry\n(ADR 0034).",
           "properties": {
             "history": {
               "description": "History is how many past builds to retain, overriding the controller's default. Identical\nto Publish's.\n\nIt matters MORE here than there, not less: a composition can rebuild any artifact from its\nspec, so retention is a convenience. A build cannot (ADR 0025), so retention is how much of\nthe only copy is kept. That this knob existed only on the kind where it matters least was an\noversight rather than a decision.",
@@ -484,10 +431,6 @@
       ],
       "type": "object",
       "x-kubernetes-validations": [
-        {
-          "message": "set at most one of push or publish",
-          "rule": "!has(self.push) || !has(self.publish)"
-        },
         {
           "message": "config.inherit requires a base to inherit from",
           "rule": "!has(self.config) || !self.config.inherit || has(self.base)"

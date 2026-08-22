@@ -9,6 +9,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -16,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/registry"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -27,8 +30,6 @@ import (
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 	"github.com/lhns/kube-oci-composer/internal/oci"
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
-	"github.com/lhns/kube-oci-composer/internal/serve"
-	"github.com/lhns/kube-oci-composer/internal/store"
 )
 
 func testScheme(t *testing.T) *runtime.Scheme {
@@ -80,24 +81,22 @@ func contentServer(t *testing.T, files map[string]string) (url, digest string) {
 
 // servingReconciler wires a reconciler to an in-process OCI endpoint, i.e. exactly the default
 // no-registry mode the design promises.
-func servingReconciler(t *testing.T, objs ...*ociv1alpha1.ImageComposition) (*ImageCompositionReconciler, string) {
+// registryReconciler stands up an in-memory registry and points the controller's default at it.
+//
+// It was servingReconciler, wiring an internal/serve endpoint the controller pushed to over
+// loopback. That endpoint is gone (ADR 0035), and so is the only reason these tests differed from
+// the path production takes: they now push to a registry, because that is the only thing the
+// controller does.
+//
+// go-containerregistry's own in-memory registry rather than a hand-rolled stub -- it enforces the
+// distribution spec, so a manifest this controller writes and cannot read back is a real defect
+// rather than an artefact of a lenient double.
+func registryReconciler(t *testing.T, objs ...*ociv1alpha1.ImageComposition) (*ImageCompositionReconciler, string) {
 	t.Helper()
 
-	blobs, err := store.NewDisk(t.TempDir())
-	if err != nil {
-		t.Fatalf("creating blob store: %v", err)
-	}
-	srv, err := serve.New("oci.test", ":0", blobs, false)
-	if err != nil {
-		t.Fatalf("creating server: %v", err)
-	}
-	httpSrv := httptest.NewServer(srv.Handler())
+	httpSrv := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
 	t.Cleanup(httpSrv.Close)
-
-	// httptest picks the port, so the Server must be told which one it actually got — the
-	// controller pushes to its own endpoint over loopback.
 	host := strings.TrimPrefix(httpSrv.URL, "http://")
-	srv.Addr = host[strings.LastIndex(host, ":"):]
 
 	builder := fake.NewClientBuilder().WithScheme(testScheme(t))
 	for _, o := range objs {
@@ -108,7 +107,7 @@ func servingReconciler(t *testing.T, objs ...*ociv1alpha1.ImageComposition) (*Im
 		Client:   builder.Build(),
 		Scheme:   testScheme(t),
 		Recorder: record.NewFakeRecorder(64),
-		Server:   srv,
+		Default:  recon.DefaultRegistry{Host: host},
 		Fetcher:  oci.NewFetcher(),
 	}, host
 }
@@ -117,8 +116,8 @@ func composition(name string, layers ...ociv1alpha1.Layer) *ociv1alpha1.ImageCom
 	return &ociv1alpha1.ImageComposition{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 		Spec: ociv1alpha1.ImageCompositionSpec{
-			Layers:  layers,
-			Publish: &ociv1alpha1.Publish{Name: name, Tags: []string{"main"}, Immutable: ptr.To(false)},
+			Layers: layers,
+			Push:   &ociv1alpha1.Push{Tags: []string{"main"}, Immutable: ptr.To(false)},
 		},
 	}
 }
@@ -151,29 +150,29 @@ func urlLayer(name, url, digest, to string) ociv1alpha1.Layer {
 // TestServingModePublishesAndIsIdempotent covers the central claim: with no registry configured
 // the controller publishes to its own endpoint, and reconciling again converges without
 // republishing.
-func TestServingModePublishesAndIsIdempotent(t *testing.T) {
+func TestPublishingIsIdempotent(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("plugins", urlLayer("core", url, digest, "/core"))
-	r, host := servingReconciler(t, obj)
+	r, host := registryReconciler(t, obj)
 
 	art := build(t, r, obj, "first reconcile")
 	if art.Digest == "" {
 		t.Fatal("no digest recorded")
 	}
 
-	// status must carry the PULL host, not the loopback address the controller wrote to.
-	if !strings.HasPrefix(art.Ref, "oci.test/plugins:main@") {
-		t.Fatalf("ref %q does not use the serving host", art.Ref)
+	// status carries the reference a consumer pulls: the registry, namespace-qualified.
+	if !strings.HasPrefix(art.Ref, host+"/default/plugins:main@") {
+		t.Fatalf("ref %q does not name the registry it was published to", art.Ref)
 	}
-	if want := []string{"oci.test/plugins:main"}; !slices.Equal(art.Tags, want) {
+	if want := []string{host + "/default/plugins:main"}; !slices.Equal(art.Tags, want) {
 		t.Fatalf("tags %v, want %v", art.Tags, want)
 	}
 
 	// Both the tag and the digest must resolve, and to the same manifest. The digest reference
 	// is the one a build with no tags would have to rely on entirely.
 	for _, ref := range []string{
-		fmt.Sprintf("%s/plugins:main", host),
-		fmt.Sprintf("%s/plugins@%s", host, art.Digest),
+		fmt.Sprintf("%s/default/plugins:main", host),
+		fmt.Sprintf("%s/default/plugins@%s", host, art.Digest),
 	} {
 		parsed, err := name.ParseReference(ref, name.Insecure)
 		if err != nil {
@@ -200,7 +199,7 @@ func TestDigestMismatchIsTerminalAndPublishesNothing(t *testing.T) {
 	url, _ := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	wrong := "sha256:" + strings.Repeat("0", 64)
 	obj := composition("tampered", urlLayer("core", url, wrong, "/core"))
-	r, host := servingReconciler(t, obj)
+	r, host := registryReconciler(t, obj)
 
 	_, err := r.reconcileArtifact(context.Background(), obj)
 	if err == nil {
@@ -215,7 +214,7 @@ func TestDigestMismatchIsTerminalAndPublishesNothing(t *testing.T) {
 		t.Fatalf("reason %q, want %q", got, ociv1alpha1.ReasonDigestMismatch)
 	}
 
-	ref, err := name.ParseReference(host+"/tampered:main", name.Insecure)
+	ref, err := name.ParseReference(host+"/default/tampered:main", name.Insecure)
 	if err != nil {
 		t.Fatalf("parsing: %v", err)
 	}
@@ -232,7 +231,7 @@ func TestConvergenceOnChangedContent(t *testing.T) {
 	urlB, digestB := contentServer(t, map[string]string{"lib/a.jar": "bbb"})
 
 	obj := composition("converge", urlLayer("core", urlA, digestA, "/core"))
-	r, _ := servingReconciler(t, obj)
+	r, _ := registryReconciler(t, obj)
 
 	first := build(t, r, obj, "reconcile A")
 
@@ -257,7 +256,7 @@ func TestOldDigestSurvivesRebuild(t *testing.T) {
 	urlB, digestB := contentServer(t, map[string]string{"lib/a.jar": "bbb"})
 
 	obj := composition("dual", urlLayer("core", urlA, digestA, "/core"))
-	r, host := servingReconciler(t, obj)
+	r, host := registryReconciler(t, obj)
 
 	first := build(t, r, obj, "first")
 
@@ -282,10 +281,10 @@ func TestOldDigestSurvivesRebuild(t *testing.T) {
 		}
 	}
 
-	resolves(fmt.Sprintf("%s/dual@%s", host, first.Digest), first.Digest)
-	resolves(fmt.Sprintf("%s/dual@%s", host, second.Digest), second.Digest)
+	resolves(fmt.Sprintf("%s/default/dual@%s", host, first.Digest), first.Digest)
+	resolves(fmt.Sprintf("%s/default/dual@%s", host, second.Digest), second.Digest)
 	// This object opts out of immutability, so its tag is a pointer and follows the newest build.
-	resolves(host+"/dual:main", second.Digest)
+	resolves(host+"/default/dual:main", second.Digest)
 }
 
 // TestSpecHashTagPattern is the pattern from ADR 0017 end to end: a tag derived from the spec,
@@ -297,22 +296,22 @@ func TestSpecHashTagPattern(t *testing.T) {
 	urlB, digestB := contentServer(t, map[string]string{"lib/a.jar": "bbb"})
 
 	obj := composition("hashed", urlLayer("core", urlA, digestA, "/core"))
-	obj.Spec.Publish = &ociv1alpha1.Publish{Name: "hashed", Tags: []string{"sAAAA"}}
-	r, host := servingReconciler(t, obj)
+	obj.Spec.Push = &ociv1alpha1.Push{Tags: []string{"sAAAA"}}
+	r, host := registryReconciler(t, obj)
 
 	first := build(t, r, obj, "first")
 
 	// A different spec is a different tag, exactly as the consumer would have computed.
 	obj.Spec.Layers[0] = urlLayer("core", urlB, digestB, "/core")
-	obj.Spec.Publish.Tags = []string{"sBBBB"}
+	obj.Spec.Push.Tags = []string{"sBBBB"}
 	second := build(t, r, obj, "second")
 	if second.Digest == first.Digest {
 		t.Fatal("rebuild produced the same digest")
 	}
 
 	for ref, want := range map[string]string{
-		host + "/hashed:sAAAA": first.Digest,
-		host + "/hashed:sBBBB": second.Digest,
+		host + "/default/hashed:sAAAA": first.Digest,
+		host + "/default/hashed:sBBBB": second.Digest,
 	} {
 		parsed, err := name.ParseReference(ref, name.Insecure)
 		if err != nil {
@@ -336,8 +335,8 @@ func TestImmutableTagRefusesToBeRemeaned(t *testing.T) {
 	urlB, digestB := contentServer(t, map[string]string{"lib/a.jar": "bbb"})
 
 	obj := composition("pinned", urlLayer("core", urlA, digestA, "/core"))
-	obj.Spec.Publish = &ociv1alpha1.Publish{Name: "pinned", Tags: []string{"v1"}}
-	r, _ := servingReconciler(t, obj)
+	obj.Spec.Push = &ociv1alpha1.Push{Tags: []string{"v1"}}
+	r, _ := registryReconciler(t, obj)
 
 	build(t, r, obj, "first")
 
@@ -350,7 +349,7 @@ func TestImmutableTagRefusesToBeRemeaned(t *testing.T) {
 	}
 
 	// Opting out is what a genuinely moving pointer does.
-	obj.Spec.Publish.Immutable = ptr.To(false)
+	obj.Spec.Push.Immutable = ptr.To(false)
 	if art := build(t, r, obj, "after opting out"); art.Digest == "" {
 		t.Fatal("immutable: false did not allow the tag to move")
 	}
@@ -361,18 +360,18 @@ func TestImmutableTagRefusesToBeRemeaned(t *testing.T) {
 func TestDigestOnlyPublishing(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("untagged", urlLayer("core", url, digest, "/core"))
-	obj.Spec.Publish = &ociv1alpha1.Publish{Name: "untagged"}
-	r, host := servingReconciler(t, obj)
+	obj.Spec.Push = &ociv1alpha1.Push{}
+	r, host := registryReconciler(t, obj)
 
 	art := build(t, r, obj, "first")
 	if len(art.Tags) != 0 {
 		t.Fatalf("tags %v, want none", art.Tags)
 	}
-	if art.Ref != fmt.Sprintf("%s/untagged@%s", "oci.test", art.Digest) {
+	if art.Ref != fmt.Sprintf("%s/default/untagged@%s", host, art.Digest) {
 		t.Fatalf("ref %q is not a bare digest reference", art.Ref)
 	}
 
-	ref, err := name.ParseReference(fmt.Sprintf("%s/untagged@%s", host, art.Digest), name.Insecure)
+	ref, err := name.ParseReference(fmt.Sprintf("%s/default/untagged@%s", host, art.Digest), name.Insecure)
 	if err != nil {
 		t.Fatalf("parsing: %v", err)
 	}
@@ -391,11 +390,11 @@ func TestDigestOnlyPublishing(t *testing.T) {
 func TestTagListingWorks(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("listing", urlLayer("core", url, digest, "/core"))
-	r, host := servingReconciler(t, obj)
+	r, host := registryReconciler(t, obj)
 
 	art := build(t, r, obj, "reconcile")
 
-	repo, err := name.NewRepository(host+"/listing", name.Insecure)
+	repo, err := name.NewRepository(host+"/default/listing", name.Insecure)
 	if err != nil {
 		t.Fatalf("parsing repo: %v", err)
 	}

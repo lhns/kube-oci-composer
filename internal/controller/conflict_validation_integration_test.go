@@ -110,8 +110,7 @@ func TestIntegrationOnConflictIsValidatedOnCompositionsToo(t *testing.T) {
 				Fetch: &ociv1alpha1.FetchSource{URL: "https://example.com/a.tgz", Digest: validDigest},
 				To:    "/x",
 			}},
-			Publish: &ociv1alpha1.Publish{
-				Name:       "app",
+			Push: &ociv1alpha1.Push{
 				Tags:       []string{"v1"},
 				OnConflict: ociv1alpha1.ConflictOverwrite,
 				Immutable:  ptr.To(true),

@@ -72,146 +72,17 @@ type LocalObjectReference struct {
 	Name string `json:"name"`
 }
 
-// +kubebuilder:validation:XValidation:rule="!(has(self.immutable) && has(self.onConflict)) || (self.immutable && self.onConflict == 'Fail') || (!self.immutable && self.onConflict == 'Overwrite')",message="immutable and onConflict contradict each other: immutable true means onConflict Fail, immutable false means onConflict Overwrite. immutable is deprecated; prefer setting onConflict alone."
-// Publish describes where the artifact is made available when no external registry is used.
-//
-// This is the DEFAULT mode and it requires no registry, no credentials and no node
-// configuration: the controller serves the artifact from its own read-only OCI distribution
-// endpoint. Deterministic assembly is what makes this cheap — the controller holds no durable
-// state, because it can always re-assemble the artifact from the spec.
-type Publish struct {
-	// Name is the repository path the artifact is served under, e.g. "kafka-tiered-storage"
-	// results in <serving-host>/kafka-tiered-storage.
-	// +required
-	Name string `json:"name"`
-
-	// Tags are the tags this build is published under, in order. Optional, and defaulted to
-	// nothing: with no tags the artifact is published by digest alone, which is all a workload
-	// pinned by image automation needs.
-	//
-	// The intended use is a SPEC-HASH tag — a hash of the build-determining part of this spec,
-	// computed by whatever templates it, written into both this field and the consuming
-	// workload's image reference. Because assembly is deterministic (ADR 0016), such a tag
-	// identifies the output as precisely as its digest does, and both sides derive it from one
-	// source with nothing observing anything at runtime. See ADR 0017.
-	//
-	// A list, so one build can carry several: a spec-hash tag alongside a readable pointer, or
-	// the same hash under more than one algorithm.
-	// +kubebuilder:validation:MaxItems=32
-	// +kubebuilder:validation:items:MaxLength=128
-	// +kubebuilder:validation:items:Pattern=`^[a-zA-Z0-9_][a-zA-Z0-9._-]*$`
-	// +optional
-	Tags []string `json:"tags,omitempty"`
-
-	// Ref is a full image reference whose TAG is added to Tags. The host and repository path are
-	// parsed and then ignored: the controller already knows its own serving address, and the
-	// repository comes from Name.
-	//
-	// It exists so the tag can be set by whatever already rewrites image references, rather than
-	// needing a second mechanism. kustomize's images transformer, for one, rewrites a scalar
-	// image field wherever a fieldSpec points at it — so one entry can retag this artifact AND
-	// the workload that consumes it, keeping them in step by construction:
-	//
-	//   images:
-	//     - name: my-artifact                       # matches this field and the consumer's
-	//       newName: registry.example/my-artifact
-	//       newTag: s1a2b3c4d5e6f7890
-	//
-	// A ref with NO tag contributes nothing rather than failing. That is what an untemplated
-	// manifest looks like, and it degrades to publishing by digest alone — which is supported.
-	// The consumer's reference would be equally unrewritten, so the mistake surfaces at the pod
-	// rather than being hidden here.
-	// +kubebuilder:validation:MaxLength=512
-	// +optional
-	Ref string `json:"ref,omitempty"`
-
-	// Immutable is DEPRECATED; use OnConflict. true means Fail, false means Overwrite, and there
-	// was no way to spell Keep at all.
-	//
-	// Honoured when OnConflict is unset, so objects written before the enum existed keep behaving
-	// as they did. Setting both to values that CONTRADICT each other is refused; setting both to
-	// values that agree is allowed, because every object stored before this release already has
-	// `immutable: true` materialised under it and would otherwise be unable to adopt the new field
-	// without a separate edit.
-	//
-	// Its schema default was REMOVED with this change. Keeping it would materialise `immutable`
-	// under every new object, which makes an explicit setting indistinguishable from a defaulted
-	// one and so leaves no rule able to catch a contradiction. Removing it changes nothing for
-	// stored objects, whose value is already written, and nothing for new ones, which resolve to
-	// Fail either way.
-	//
-	// A pointer because the zero value is meaningful: a plain bool with omitempty would drop an
-	// explicit `false` on the wire and let the default quietly win.
-	// +optional
-	Immutable *bool `json:"immutable,omitempty"`
-
-	// OnConflict decides what happens when a tag already resolves to different content: Fail
-	// (refuse and stall), Overwrite (move the tag), or Keep (leave it, drop this build, stay
-	// Ready). Defaults to Fail.
-	//
-	// Republishing IDENTICAL content is a no-op regardless of this field, so a steady reconcile
-	// loop never reaches it -- only a real change of meaning does.
-	//
-	// Deliberately carries NO schema default, unlike the `immutable` field it replaces. Structural
-	// defaults are applied when an object is read back from storage, so defaulting this would
-	// rewrite every existing `immutable: false` object into a refusing one the moment the CRD was
-	// upgraded -- a silent reversal of a setting its author chose on purpose. The effective default
-	// lives in ResolveConflictPolicy instead, where it can consult `immutable` first.
-	// +optional
-	OnConflict TagConflictPolicy `json:"onConflict,omitempty"`
-
-	// History is how many past builds to keep before garbage collection reclaims their blobs.
-	// Defaults to the controller's --keep-builds.
-	//
-	// Old builds are worth keeping for three independent reasons: reverting a commit must find
-	// the old reference still pullable; a pod pinned to one that gets rescheduled must be able
-	// to pull it again; and with spec-hash tags a rollback names a tag from an earlier build,
-	// which only resolves while that build is retained. Layers are shared between builds, so a
-	// generous value costs far less than the count suggests. See ADR 0011.
-	// +kubebuilder:validation:Minimum=1
-	// +optional
-	History *int32 `json:"history,omitempty"`
-}
-
-// GetTags is nil-safe, because spec.publish may be omitted entirely while the controller still
-// has a serving endpoint to publish to.
-func (p *Publish) GetTags() []string {
-	if p == nil {
-		return nil
-	}
-	return p.Tags
-}
-
-// GetRef is nil-safe, for the same reason as GetTags. Parsing lives in the controller rather than
-// here so this package keeps its dependency surface small for anyone importing the types.
-func (p *Publish) GetRef() string {
-	if p == nil {
-		return ""
-	}
-	return p.Ref
-}
 
 // ResolveConflictPolicy returns the effective policy for a tag that already resolves to something
-// else, reconciling the new three-valued field with the deprecated two-valued one.
+// else, reconciling the three-valued field with the deprecated two-valued one.
 //
 // Precedence is onConflict, then immutable, then Fail. That order is what makes the upgrade
 // non-breaking in both directions: an object written before onConflict existed still has its
-// `immutable` honoured, and an object that sets onConflict is not second-guessed by an `immutable`
-// the API server materialised under it years earlier. A spec setting both to contradictory values
-// is refused by CEL before it is ever stored, so this never has to arbitrate a real disagreement.
+// `immutable` honoured, and one that sets onConflict is not second-guessed by an `immutable` the
+// API server materialised under it. Contradictions are refused by CEL before they are stored.
 //
-// Nil is Fail rather than Overwrite: a struct built in a test, or a spec with no publish block at
-// all, must not end up with unprotected tags by omission.
-func (p *Publish) ResolveConflictPolicy() TagConflictPolicy {
-	if p == nil {
-		return ConflictFail
-	}
-	return resolveConflict(p.OnConflict, p.Immutable)
-}
-
-// ResolveConflictPolicy is the Push equivalent, deliberately identical to Publish's. Both kinds
-// answer this question the same way, so an operator moving between them does not have to learn a
-// second set of semantics.
+// Nil is Fail rather than Overwrite: a struct built in a test, or a spec with no push block at all,
+// must not end up with unprotected tags by omission.
 func (p *Push) ResolveConflictPolicy() TagConflictPolicy {
 	if p == nil {
 		return ConflictFail
@@ -229,9 +100,8 @@ func resolveConflict(explicit TagConflictPolicy, deprecated *bool) TagConflictPo
 	return ConflictFail
 }
 
-// GetTags and GetRef are the Push equivalents, deliberately identical to Publish's. Both kinds
-// resolve their tag list the same way, so the retagging pattern documented for one works on the
-// other without a second code path to keep in step.
+// GetTags is nil-safe, because spec.push may be omitted entirely -- an object that names no
+// repository and no tags publishes by digest to the operator's default registry.
 func (p *Push) GetTags() []string {
 	if p == nil {
 		return nil

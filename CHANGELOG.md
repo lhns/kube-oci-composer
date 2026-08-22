@@ -6,6 +6,49 @@ may change between minor versions.
 ## [Unreleased]
 
 ### Added
+- **Provenance travels with the artifact (threat R1).** Composed images carry OCI manifest
+  annotations naming what produced them: `de.lhns.oci-composer.sources` (each layer as
+  `name=digest`, or `name=revision` where the revision is what identifies the content), plus the
+  assembly version and the base image's digest.
+
+  `status.history[].sources` already answered this, but only while the object existed -- delete the
+  ImageComposition and the answer went with it while the image kept running. Annotations rather
+  than config labels: a label is part of the image config, so writing one changes what every
+  consumer's `docker inspect` reports as the application's own metadata. Nothing written is
+  time-dependent, because `output digest = f(spec)` outranks the feature -- which is why
+  `org.opencontainers.image.created` is deliberately absent.
+
+  **BREAKING in effect: every artifact rebuilds once.** The manifest changed, so `AssemblyVersion`
+  is bumped to 2 and every input hash moves with it. Nothing is deleted and no tag moves that
+  `onConflict` would not already refuse; expect one rebuild per object on upgrade. Both pinned-hash
+  guards caught this before it left the machine, which is what they are for.
+
+- **`--require-pinned-sources` (threat T1).** Refuses any `sourceRef` -- or `ImageBuild` context --
+  that names no revision, on both controllers, as `imageComposition.requirePinnedSources` and
+  `imageBuild.requirePinnedSources`. Off by default: pinning is optional by design (ADR 0026),
+  since tracking a branch is a legitimate thing to want. What was missing was an operator's ability
+  to decide otherwise for a whole cluster. Objects that omit `revision:` go Stalled naming the flag.
+
+- **SSRF controls on `fetch.url` (threat I6, ADR 0036).** Link-local addresses are now refused
+  unconditionally -- `169.254.169.254` is the cloud metadata endpoint on every major provider and
+  hands credentials to anything that asks. Other private ranges (RFC1918, loopback, unique-local,
+  CGNAT) are refused only under `--fetch-deny-private` / `operator.fetchDenyPrivate`, because an
+  artifact server on a private address is an ordinary layer source and a guard that refuses those
+  is one people turn off.
+
+  Enforced in the dialer, after resolution and immediately before `connect(2)`, so a hostname
+  pointing at the metadata IP, a redirect to it, and a DNS rebind are all caught -- none of them is
+  visible in the URL. Until now this decision existed only in a commit message, while the threat
+  model still said "NOT mitigated".
+
+- **The chart refuses a retention margin too thin to be a guarantee (threat D7).** `helm install`
+  fails when `registry.retention.window` is less than 24x a controller's refresh interval, or when
+  refreshing is disabled while a window is set. The two numbers used to live in different systems
+  -- a controller flag and a registry's config -- so nothing could compare them; one chart renders
+  both. It fails the render rather than warning because the symptom otherwise arrives one window
+  later, as a deleted image.
+
+### Added
 - **One chart, one namespace, three toggleable components.** `kube-oci-builder` is folded into
   `kube-oci-composer` as `imageBuild.enabled`, alongside `imageComposition.enabled` and
   `registry.enabled` -- all on by default, so one install gives a working, entirely local system.
@@ -119,7 +162,82 @@ may change between minor versions.
   guard reads both and fails on any field present in one and not the other, unless the difference is
   recorded with the reason the destination makes it meaningless. Verified to fail on drift.
 
+### Fixed
+- **E1 is measured rather than cited.** An e2e probe runs a pod with `hostUsers: false` and reports
+  what the cluster actually does. On Kubernetes 1.36 the API server **accepts** the field -- that
+  half has moved since ADR 0027 -- and the sandbox then fails to start, because a user namespace
+  nested inside kind's own container cannot mount `sysfs`. That rules out shipping it on the
+  strength of CI and rules nothing else out; a real node may well manage it. The probe reports on
+  every run, and fails loudly if `hostUsers` is ever accepted and silently ignored.
+
+- **The composer could not push to a plain-HTTP registry at all.** Removing the serving endpoint
+  removed the only plaintext push path it had -- pushes were previously either loopback, always
+  HTTP, or to a real registry over HTTPS, so there was no third case and the controller never read
+  `--insecure-registry`. The default case is now a bundled registry on a Service or a NodePort,
+  neither of which has a certificate, so every publish failed with `server gave HTTP response to
+  HTTPS client`.
+
+  The whole unit suite stayed green through it, because go-containerregistry treats localhost and
+  127.0.0.1 as insecure on its own and every unit test's registry is an httptest server on
+  loopback. The e2e found it. The regression test now checks the DECISION rather than the
+  transport, which is the only form of it a unit test can make.
+
+  `insecureHost` also existed in three copies -- composing, building, refreshing -- and is now one
+  function in `internal/reconciler`. Three copies of a security-relevant host comparison is two
+  too many.
+
 ### Changed
+- **BREAKING: the embedded serving endpoint is removed. A registry is the only publication path.**
+
+  `spec.publish` no longer exists. `spec.push` is the only publication block, and it does what
+  `publish` did -- the two were the same operation to two destinations, and there is one destination
+  left. Migration is field-for-field:
+
+  ```yaml
+  # before                              # after
+  publish:                              push:
+    name: kafka-tiered-storage            repository: oci.example.com/default/kafka-tiered-storage
+    tags: [v1]                            tags: [v1]
+    onConflict: Keep                      onConflict: Keep
+    history: 5                            history: 5
+  ```
+
+  ...or drop `repository` entirely and let it publish to `<default-registry>/<namespace>/<name>`,
+  which is what the bundled registry is for.
+
+  **Do this before upgrading, and check.** The chart now upgrades its CRDs with the release, so
+  `helm upgrade` installs a schema with no `publish` field. An object still carrying one is rejected
+  loudly at that point -- which is the good outcome. The bad one is upgrading the controller without
+  the CRD: an object with `publish` and no `push` then publishes *nowhere*, reports no error worth
+  noticing, and its images stop being refreshed. Find them first:
+
+  ```console
+  kubectl get imagecomposition -A -o json | jq -r '.items[] | select(.spec.publish) | "\(.metadata.namespace)/\(.metadata.name)"'
+  ```
+
+  Everything already published stays where it is; nothing is deleted or re-tagged.
+
+  **If you were running without a registry, you now need one, and the chart installs it.**
+  `registry.enabled` is on by default. What you lose is the one thing the embedded endpoint was
+  genuinely better at: it needed no node configuration at all. A registry reached over a NodePort
+  needs a `hosts.toml` drop-in per node, because containerd resolves image references with the
+  node's resolver. Front it with an ingress and a real certificate and that goes away. See
+  `docs/registry.md`.
+
+  Removed with it: `internal/serve`, the served blob/manifest store, replay, active/standby and
+  `internal/gc`. Flags gone: `--serving-host`, `--serving-bind-address`, `--shared-storage`,
+  `--standby-replay-interval`, `--gc-interval`, `--gc-grace`, `--gc-dry-run`. Chart values gone:
+  `operator.servingHost`, `ingress.*`, and the OCI `Service` -- `registry.host` is now what
+  `status.artifact.ref` reports.
+
+  The layer **cache** is untouched: `--cache-dir` and the S3 settings are input caching and have
+  nothing to do with serving.
+
+  This also means multi-replica is no longer a storage question, readiness no longer waits for a
+  warm store, and the four defect classes that lived in the serving stack -- per-replica tag
+  divergence, a Ready-but-empty replica, `416` on resumed pulls, and an unauthenticated write path
+  -- are gone with the code. See ADR 0035, which supersedes ADR 0006 and ADR 0032.
+
 - **BREAKING: `charts/kube-oci-builder` is removed.** Upgrading from two releases:
 
   ```console

@@ -35,9 +35,20 @@ type Fetcher struct {
 	Client *http.Client
 }
 
-// NewFetcher returns a Fetcher with sane timeouts.
+// NewFetcher returns a Fetcher with sane timeouts and the SSRF dial guard installed.
+//
+// The guard is in the default constructor rather than an option, because a fetcher built without
+// it is one an attacker-supplied URL can point at a metadata endpoint (I6), and that should not be
+// the thing a caller has to remember.
 func NewFetcher() *Fetcher {
-	return &Fetcher{Client: &http.Client{Timeout: DefaultFetchTimeout}}
+	return NewFetcherWithGuard(DialGuard{})
+}
+
+// NewFetcherWithGuard returns a Fetcher whose transport applies g.
+func NewFetcherWithGuard(g DialGuard) *Fetcher {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DialContext = g.DialContext
+	return &Fetcher{Client: &http.Client{Timeout: DefaultFetchTimeout, Transport: tr}}
 }
 
 // FetchURL downloads url into a temporary file, verifying that its content matches wantDigest.

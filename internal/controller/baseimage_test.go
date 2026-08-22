@@ -69,7 +69,7 @@ func TestBaseImageLayersAreContributed(t *testing.T) {
 	origin := newCountingOrigin(t, map[string]string{"plugins/core.jar": "jar"})
 
 	obj := composition("layered")
-	r, host := servingReconciler(t, obj)
+	r, host := registryReconciler(t, obj)
 
 	baseRepo, baseDigest := publishBaseImage(t, host, "kafka", 3, nil)
 	withBase(obj, baseRepo, baseDigest)
@@ -79,7 +79,7 @@ func TestBaseImageLayersAreContributed(t *testing.T) {
 
 	art := build(t, r, obj, "compose over a base image")
 
-	ref, err := name.ParseReference(host+"/layered@"+art.Digest, name.Insecure)
+	ref, err := name.ParseReference(art.Ref, name.Insecure)
 	if err != nil {
 		t.Fatalf("parsing: %v", err)
 	}
@@ -123,14 +123,14 @@ func TestBaseAlwaysComesFirst(t *testing.T) {
 	origin := newCountingOrigin(t, map[string]string{"a.txt": "a"})
 
 	obj := composition("order")
-	r, host := servingReconciler(t, obj)
+	r, host := registryReconciler(t, obj)
 	baseRepo, baseDigest := publishBaseImage(t, host, "base", 2, nil)
 
 	withBase(obj, baseRepo, baseDigest)
 	obj.Spec.Layers = []ociv1alpha1.Layer{urlLayer("files", origin.url, origin.digest, "/files")}
 	art := build(t, r, obj, "build")
 
-	img, err := remote.Image(mustRef(t, host+"/order@"+art.Digest))
+	img, err := remote.Image(mustRef(t, art.Ref))
 	if err != nil {
 		t.Fatalf("pulling: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestConfigFromInheritsTheBase(t *testing.T) {
 	origin := newCountingOrigin(t, map[string]string{"plugins/core.jar": "jar"})
 
 	obj := composition("runnable")
-	r, host := servingReconciler(t, obj)
+	r, host := registryReconciler(t, obj)
 
 	baseRepo, baseDigest := publishBaseImage(t, host, "kafka", 2, &v1.Config{
 		Entrypoint: []string{"/opt/kafka/bin/kafka-server-start.sh"},
@@ -179,7 +179,7 @@ func TestConfigFromInheritsTheBase(t *testing.T) {
 
 	art := build(t, r, obj, "compose with inherited config")
 
-	img, err := remote.Image(mustRef(t, host+"/runnable@"+art.Digest))
+	img, err := remote.Image(mustRef(t, art.Ref))
 	if err != nil {
 		t.Fatalf("pulling: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestConfigFromInheritsTheBase(t *testing.T) {
 // mounted, silently adopting a base's entrypoint would be surprising.
 func TestWithoutConfigFromTheConfigStaysEmpty(t *testing.T) {
 	obj := composition("bundle")
-	r, host := servingReconciler(t, obj)
+	r, host := registryReconciler(t, obj)
 
 	baseRepo, baseDigest := publishBaseImage(t, host, "kafka", 1, &v1.Config{
 		Entrypoint: []string{"/entrypoint.sh"},
@@ -218,7 +218,7 @@ func TestWithoutConfigFromTheConfigStaysEmpty(t *testing.T) {
 
 	art := build(t, r, obj, "compose without inherit")
 
-	img, err := remote.Image(mustRef(t, host+"/bundle@"+art.Digest))
+	img, err := remote.Image(mustRef(t, art.Ref))
 	if err != nil {
 		t.Fatalf("pulling: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestInheritWithoutABaseIsRejected(t *testing.T) {
 	origin := newCountingOrigin(t, map[string]string{"a": "1"})
 	obj := composition("noinherit", urlLayer("files", origin.url, origin.digest, "/files"))
 	obj.Spec.Config = &ociv1alpha1.ImageConfig{Inherit: true}
-	r, _ := servingReconciler(t, obj)
+	r, _ := registryReconciler(t, obj)
 
 	_, err := r.reconcileArtifact(context.Background(), obj)
 	if err == nil || !strings.Contains(err.Error(), "no base to inherit from") {
@@ -249,7 +249,7 @@ func TestInheritWithoutABaseIsRejected(t *testing.T) {
 // every interval would mean a registry round trip per base image.
 func TestBaseImageIsNotPulledWhenNothingChanged(t *testing.T) {
 	obj := composition("steady-base")
-	r, host := servingReconciler(t, obj)
+	r, host := registryReconciler(t, obj)
 	baseRepo, baseDigest := publishBaseImage(t, host, "kafka", 1, nil)
 	withBase(obj, baseRepo, baseDigest)
 	obj.Spec.Layers = []ociv1alpha1.Layer{removeLayer("noop", "/nonexistent-placeholder")}
@@ -272,7 +272,7 @@ func TestBaseImageIsNotPulledWhenNothingChanged(t *testing.T) {
 // spec, so the same object could produce different output on different builds.
 func TestMultiArchIndexIsRejected(t *testing.T) {
 	obj := composition("multiarch")
-	r, host := servingReconciler(t, obj)
+	r, host := registryReconciler(t, obj)
 
 	idx, err := random.Index(512, 1, 2)
 	if err != nil {

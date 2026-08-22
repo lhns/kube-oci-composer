@@ -501,7 +501,7 @@ func TestSourceRefHashesTheRevisionNotTheTarball(t *testing.T) {
 func TestHistoryRecordsWhereEachLayerCameFrom(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("provenance", urlLayer("core", url, digest, "/core"))
-	r, _ := servingReconciler(t, obj)
+	r, _ := registryReconciler(t, obj)
 
 	if _, err := reconcileOnce(t, r, obj); err != nil {
 		t.Fatalf("reconcile: %v", err)

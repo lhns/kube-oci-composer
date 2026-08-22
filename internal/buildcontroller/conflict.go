@@ -61,7 +61,7 @@ func (r *ImageBuildReconciler) checkTagConflict(
 		return false, nil, err
 	}
 	var refOpts []name.Option
-	if insecureHost(repo, r.JobConfig.InsecureRegistries) {
+	if recon.InsecureHost(repo, r.JobConfig.InsecureRegistries) {
 		refOpts = append(refOpts, name.Insecure)
 	}
 
@@ -168,7 +168,7 @@ func (r *ImageBuildReconciler) cacheAvailable(ctx context.Context, obj *ociv1alp
 		return false
 	}
 	var refOpts []name.Option
-	if insecureHost(cacheRef, r.JobConfig.InsecureRegistries) {
+	if recon.InsecureHost(cacheRef, r.JobConfig.InsecureRegistries) {
 		refOpts = append(refOpts, name.Insecure)
 	}
 

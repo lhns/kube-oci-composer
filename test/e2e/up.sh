@@ -14,10 +14,22 @@ IMG="${IMG:-ghcr.io/lhns/kube-oci-composer:e2e}"
 # is also where the build Jobs appear.
 BUILD_NS="${BUILD_NS:-oci-builder-e2e}"
 
-# The registry host baked into every composed reference, and the NodePort the node actually
-# reaches it on. They differ on purpose: the host is what appears in image references and resolves
-# nowhere; the port is where containerd is told to go. Same split as the real deployment.
-SERVING_HOST="${SERVING_HOST:-kube-oci-composer.oci-composer.svc.cluster.local:5000}"
+# The registry host baked into every published reference, and the NodePort the node actually reaches
+# it on.
+#
+# ONE name has to work from TWO places, and that is the whole difficulty:
+#
+#   * the CONTROLLERS resolve it through cluster DNS, to push and to refresh
+#   * the KUBELET resolves it with the node's resolver, to pull
+#
+# status.artifact.ref holds one string, so one name has to satisfy both. Below, a containerd
+# certs.d drop-in gives the nodes their answer and a CoreDNS hosts entry gives the cluster its own.
+# A real deployment does the same thing with ordinary DNS, which is why registry.host is documented
+# as "a name your nodes resolve" AND has to be resolvable in-cluster.
+#
+# Getting this wrong is not subtle: the first registry-only e2e run set the node half and not the
+# cluster half, and every composition failed with `lookup oci.e2e on 10.96.0.10:53: no such host`.
+REGISTRY_HOST="${REGISTRY_HOST:-oci.e2e:5000}"
 NODE_PORT="${NODE_PORT:-30500}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,8 +46,8 @@ fi
 # Written after the node exists rather than baked in: certs.d is read per-pull, so no containerd
 # restart is needed. Only `config_path` (in kind-config.yaml) has to be set at startup.
 for node in $(kind get nodes --name "$CLUSTER"); do
-  docker exec "$node" mkdir -p "/etc/containerd/certs.d/${SERVING_HOST}"
-  docker exec -i "$node" tee "/etc/containerd/certs.d/${SERVING_HOST}/hosts.toml" >/dev/null <<EOF
+  docker exec "$node" mkdir -p "/etc/containerd/certs.d/${REGISTRY_HOST}"
+  docker exec -i "$node" tee "/etc/containerd/certs.d/${REGISTRY_HOST}/hosts.toml" >/dev/null <<EOF
 # Plain HTTP: this is a NodePort on the node itself, and containerd defaults to HTTPS for any
 # host:port, so without the scheme here the pull dies in the TLS handshake.
 [host."http://localhost:${NODE_PORT}"]
@@ -45,14 +57,10 @@ done
 
 BUILDER_IMG="${BUILDER_IMG:-ghcr.io/lhns/kube-oci-builder:e2e}"
 
-# The registry builds publish to, addressed by its own in-cluster Service.
-#
-# Deliberately NOT $SERVING_HOST: that name is already mapped by the containerd drop-in to the
-# composer's NodePort, so sharing it would route registry pulls to the serving endpoint. Nothing in
-# the suite pulls a BUILT image with a Pod -- the assertions curl the registry from inside the
-# cluster -- so the Service name is all that is needed, and it is plain HTTP, which the chart marks
-# insecure automatically.
-E2E_REGISTRY="kube-oci-composer-registry.oci-composer.svc.cluster.local:5000"
+# Everything publishes here now: compositions and builds alike (ADR 0035). The drop-in above points
+# this name at the registry's NodePort, so a Pod can actually pull what gets published -- which is
+# what the image-volume tests exercise.
+E2E_REGISTRY="$REGISTRY_HOST"
 
 # BOTH images, before the single install that references them. imagePullPolicy is Never in the e2e,
 # so an image that is not loaded is ErrImageNeverPull rather than a pull attempt.
@@ -69,10 +77,15 @@ kind load docker-image "$BUILDER_IMG" --name "$CLUSTER"
 # publishes to -- no hand-rolled fixture registry any more, so the e2e exercises the deployment an
 # operator actually gets.
 #
-# The retention policy is compressed to a 30s window against a 5s refresh -- a margin of 6, where a
-# deployment runs 30 days against 1h for 720. It is SCOPED to keepalive-* repositories, because a
-# repository matching no policy is never collected: that keeps every other test's images safe from a
-# window measured in seconds while the retention tests still get to watch something expire.
+# The retention policy is compressed to a 30s window against a 1s refresh -- a margin of 30, where a
+# deployment runs 30 days against 1h for 720. PROPORTIONATE, not merely small: the chart refuses to
+# render a margin below 24 (threat D7), and it is right to, because the margin is the guarantee.
+# Compressing the window without compressing the interval with it would be exactly the misconfigured
+# state that check exists to catch, so the e2e must not be the first thing to work around it.
+#
+# SCOPED to keepalive-* repositories, because a repository matching no policy is never collected:
+# that keeps every other test's images safe from a window measured in seconds while the retention
+# tests still get to watch something expire.
 helm upgrade --install kube-oci-composer charts/kube-oci-composer \
   --namespace oci-composer --create-namespace \
   --set image.repository="${IMG%:*}" \
@@ -81,9 +94,8 @@ helm upgrade --install kube-oci-composer charts/kube-oci-composer \
   --set imageBuild.image.repository="${BUILDER_IMG%:*}" \
   --set imageBuild.image.tag="${BUILDER_IMG##*:}" \
   --set imageBuild.image.pullPolicy=Never \
-  --set operator.servingHost="$SERVING_HOST" \
-  --set service.type=NodePort \
-  --set service.nodePort="$NODE_PORT" \
+  --set registry.service.type=NodePort \
+  --set registry.service.nodePort="$NODE_PORT" \
   --set registry.host="$E2E_REGISTRY" \
   --set defaultRegistry.insecure="$E2E_REGISTRY" \
   --set 'registry.retention.repositories={keepalive-*,keepalive-**}' \
@@ -91,9 +103,33 @@ helm upgrade --install kube-oci-composer charts/kube-oci-composer \
   --set registry.retention.gcInterval=5s \
   --set registry.retention.gcDelay=1s \
   --set registry.logLevel=debug \
-  --set operator.retention.refreshInterval=5s \
-  --set imageBuild.retention.refreshInterval=5s \
+  --set operator.retention.refreshInterval=1s \
+  --set imageBuild.retention.refreshInterval=1s \
   --wait --timeout 5m
+
+# The cluster half of the name. The controllers push and refresh over cluster DNS, which has never
+# heard of oci.e2e, so CoreDNS is told the registry Service's address for it. Applied after the
+# install because the ClusterIP does not exist until the Service does.
+REGISTRY_IP="$(kubectl -n oci-composer get svc kube-oci-composer-registry -o jsonpath='{.spec.clusterIP}')"
+REGISTRY_NAME="${REGISTRY_HOST%%:*}"
+echo "mapping ${REGISTRY_NAME} -> ${REGISTRY_IP} in CoreDNS"
+kubectl -n kube-system get configmap coredns -o jsonpath='{.data.Corefile}' > /tmp/Corefile.orig
+if ! grep -q "$REGISTRY_NAME" /tmp/Corefile.orig; then
+  # Inserted before `kubernetes`, so the static answer wins over the cluster-domain plugin.
+  awk -v ip="$REGISTRY_IP" -v name="$REGISTRY_NAME" '
+    /kubernetes cluster.local/ && !done {
+      print "    hosts {"
+      print "        " ip " " name
+      print "        fallthrough"
+      print "    }"
+      done = 1
+    }
+    { print }
+  ' /tmp/Corefile.orig > /tmp/Corefile.new
+  kubectl -n kube-system create configmap coredns --from-file=Corefile=/tmp/Corefile.new     --dry-run=client -o yaml | kubectl apply -f -
+  kubectl -n kube-system rollout restart deploy/coredns
+  kubectl -n kube-system rollout status deploy/coredns --timeout=2m
+fi
 
 kubectl -n oci-composer rollout status deploy/kube-oci-composer --timeout=5m
 kubectl -n oci-composer rollout status deploy/kube-oci-composer-builder --timeout=5m

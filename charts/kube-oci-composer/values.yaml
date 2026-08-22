@@ -2,10 +2,9 @@
 
 # replicaCount is deliberately 1, and raising it does NOT scale throughput.
 #
-# The serving endpoint runs under leader election and its blob store is node-local unless S3 backs
-# it, so a standby replica neither reconciles nor listens. It stays out of the Service because it
-# never reports ready, which makes failover work without a second mechanism. Two replicas buy a
-# warm standby, not more capacity. See ADR 0006 and ADR 0007.
+# Reconciling runs under leader election, so a second replica is a warm standby that reconciles
+# nothing until it wins the lease. It is no longer a STORAGE question -- the registry holds the
+# images now (ADR 0035) -- so extra replicas are merely idle rather than dangerous.
 replicaCount: 1
 
 image:
@@ -24,58 +23,16 @@ serviceAccount:
   annotations: {}
 
 operator:
-  # servingHost is the externally reachable name workloads pull artifacts from.
-  #
-  # REQUIRED unless every ImageComposition sets spec.push. It is what status.artifact.ref is built
-  # from, so it must match how the Service below is actually exposed — get it wrong and the
-  # controller publishes references nothing can resolve.
-  servingHost: ""
-
   metricsBindAddress: ":8080"
   healthProbeBindAddress: ":8081"
-  servingBindAddress: ":5000"
-
-  # Leader election. On by default because the serving endpoint and the garbage collector are both
-  # leader-scoped, and running two of either would mean two processes issuing deletes.
+  # Leader election. On by default: two controllers reconciling the same object would push and
+  # re-tag concurrently, which the tag-conflict policy would then read as a genuine conflict.
   leaderElect: true
 
   storage:
-    # Where served blobs live: "disk" or "s3".
-    #
-    # This only moves the BLOBS. Manifests are held in memory by the embedded registry and are
-    # replayed from the store at startup either way, so "s3" saves re-uploading layers after a
-    # restart rather than removing the rebuild. See ADR 0012 and ADR 0013.
-    backend: disk
-
-    # Directory backing served blobs when backend is "disk".
-    dir: /var/lib/oci-composer
-
     # Directory holding fetched layer sources, keyed by digest. Always used, even when S3 is
     # configured behind it, because assembly reads local files.
     cacheDir: /var/cache/oci-composer
-
-    # Assert that `dir` is reachable by EVERY replica — an RWX volume. This is what turns
-    # replicaCount > 1 from a warm standby into real availability: with it, non-leader replicas
-    # serve pulls too, so losing the leader does not stop artifacts being pullable.
-    #
-    # It has to be asserted rather than detected: handed a directory, the process cannot tell
-    # whether it is node-local or a shared mount. Setting it wrongly with a node-local directory
-    # and several replicas means standbys answer 404 for artifacts they do not have.
-    #
-    # Implied by backend: s3, which is shared by construction. Serving is read-only, so several
-    # replicas answering is safe; publishing, garbage collection and status writes stay on the
-    # leader regardless.
-    #
-    # Worth turning on whenever pulls are frequent. With spec-hash tags they are: every change to
-    # a composition produces a new tag, and therefore a new pull on every node running the
-    # workload.
-    shared: false
-
-    # How often a replica refreshes its manifest map from the shared store. Manifests live in the
-    # registry's in-memory map rather than in the store, so this is what lets a non-leader learn
-    # about builds the leader published — and it bounds how long a non-leader can 404 something
-    # that was just built.
-    standbyReplayInterval: 1m
 
   # Object storage for the layer cache, and optionally for served blobs.
   #
@@ -113,45 +70,45 @@ operator:
   # not seen used recently; this re-pulls every image a live ImageComposition still references, which
   # is what tells the registry they are still in use. Refreshing only READS -- it needs no write or
   # delete permission and can destroy nothing. See ADR 0031.
+  # How many past builds stay pullable per ImageComposition, unless the object overrides it via
+  # spec.push.history.
+  #
+  # Retention is the ONLY thing keeping an older digest resolvable: reverting a commit, and a pod
+  # pinned to a previous digest being rescheduled, both depend on it. Layers are shared between
+  # builds, so a generous value costs far less than the count suggests.
+  keepBuilds: 10
+
+  # Refuse any sourceRef that names no revision (threat T1).
+  #
+  # Pinning is optional by design -- a composition tracking a branch is a legitimate thing to want
+  # (ADR 0026) -- so this is how an operator decides otherwise for a whole cluster. Objects that
+  # omit `revision:` go Stalled with a message saying so.
+  requirePinnedSources: false
+
+  # Refuse `fetch` URLs resolving to private, loopback or CGNAT addresses (threat I6).
+  #
+  # Cloud metadata endpoints on link-local addresses are refused ALWAYS, whatever this says: they
+  # hand out credentials and no layer source lives there. This covers the rest, and is off by
+  # default because an artifact server on a private address is an ordinary layer source -- refusing
+  # those would make this a guard people turn off. Set it if all your sources are external.
+  # See ADR 0036.
+  fetchDenyPrivate: false
+
   retention:
     # Must stay MUCH shorter than the registry's retention window. The RATIO is the guarantee, not
     # either number: the default assumes a window of 30 days, which is a margin of 720. Anyone
     # shortening the window has to shorten this with it.
     #
-    # Zero disables refreshing entirely. Correct only when serving from the built-in endpoint, or
-    # when the registry has no expiry policy at all.
+    # Zero disables refreshing entirely. Correct only when the registry has no expiry policy at
+    # all -- and the chart refuses to render it while registry.retention.window is set, because
+    # that combination guarantees the deletion ADR 0031 exists to prevent.
     refreshInterval: 1h
 
-  gc:
-    # How often to reclaim blobs, manifests and cache entries nothing references. Zero disables it,
-    # and storage then grows without bound.
-    interval: 1h
-    # Never reclaim anything written more recently than this. A build writes its blobs before
-    # recording them in status, so a sweep landing in that window would delete content moments from
-    # being referenced.
-    grace: 1h
-    # How many past builds stay pullable per ImageComposition, unless the object overrides it via
-    # spec.publish.history.
-    #
-    # Retention is the ONLY thing keeping an older digest resolvable. Reverting a commit, and a pod
-    # pinned to a previous digest being rescheduled, both depend on it. Layers are shared between
-    # builds, so a generous value costs far less than the count suggests. See ADR 0011.
-    keepBuilds: 10
-    # Log what would be reclaimed without deleting anything. Worth running once after changing
-    # keepBuilds.
-    dryRun: false
-
-# Service exposing the OCI endpoint that workloads pull from.
+# The bundled registry (zot), ON by default.
 #
-# Note who the client is: image pulls are performed by the KUBELET on each node, never by the pod
-# that mounts the result. A ClusterIP *name* is therefore unusable — nodes resolve with the host
-# resolver, which knows nothing of cluster DNS — so this must be exposed somewhere the nodes can
-# actually reach: a LoadBalancer address, a NodePort, or an Ingress.
-# An optional bundled registry (zot), OFF by default.
-#
-# ADR 0030 makes a real registry the serving surface for both kinds. Without this, that would turn
-# "helm install and you are done" into "helm install, then go and run a registry". Turn it on if you
-# have not already got one; leave it off if you have, and point spec.push.repository at yours.
+# A registry is now the only way an artifact becomes pullable (ADR 0035), so shipping this enabled
+# is what keeps "helm install and you are done" true. Turn it off if you already run one, point
+# defaultRegistry.host at yours, and give it defaultRegistry.existingPushSecret.
 #
 # Deliberately plain: no HA, no object storage, no TLS termination. If you need any of those, run
 # zot's own chart or Harbor instead of this.
@@ -206,6 +163,11 @@ imageBuild:
   keepBuilds: 10
   leaderElect: true
   serviceAccountName: ""
+
+  # Refuse an ImageBuild whose spec.context names no revision (threat T1). It matters more here
+  # than on the composer: an unpinned context builds whatever the branch is at now, and a build's
+  # output cannot be reproduced from its spec (ADR 0025).
+  requirePinnedSources: false
 
   retention:
     refreshInterval: 1h
@@ -266,9 +228,10 @@ registry:
 
   # Anonymous read, authenticated WRITE, enforced by the registry itself with no proxy in front.
   #
-  # Reads are open in the cluster, exactly as the embedded serving endpoint's were: a kubelet pulls
-  # without credentials, so anything else breaks image pulls. Restricting who may pull is a
-  # NetworkPolicy question, not this registry's.
+  # Reads are open in the cluster because a kubelet pulls without credentials, so anything else
+  # breaks image pulls unless every workload carries an imagePullSecret. Unlike what came before
+  # this, that IS now a choice: zot can require authentication for reads. Restricting merely who
+  # can reach the registry is a NetworkPolicy question, not this registry's.
   #
   # The password is GENERATED at install and reused on upgrade. Nothing to create by hand: the chart
   # writes both halves -- the htpasswd zot authenticates against, and the dockerconfigjson both
@@ -311,29 +274,6 @@ registry:
   resources:
     requests: {cpu: 50m, memory: 128Mi}
     limits: {memory: 1Gi}
-
-service:
-  type: ClusterIP
-  port: 5000
-  # Pin the NodePort when type is NodePort. Effectively required rather than optional: whatever
-  # configures the pulling client names a port (containerd's hosts.toml, for one), and a port
-  # allocated at random cannot be referenced and would change on recreate.
-  nodePort: ""
-  annotations: {}
-
-# Ingress for the serving endpoint.
-#
-# containerd needs a valid certificate and HTTPS. With those, no node configuration is required at
-# all — no hosts.toml, no DaemonSet, no containerd socket.
-ingress:
-  enabled: false
-  className: ""
-  annotations: {}
-  # Should match operator.servingHost.
-  host: ""
-  tls:
-    enabled: true
-    secretName: ""
 
 # Persistence for the blob store and layer cache.
 #

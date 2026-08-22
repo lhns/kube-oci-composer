@@ -42,7 +42,7 @@ func TestReadyAndObservedGeneration(t *testing.T) {
 	obj := composition("ready", urlLayer("core", url, digest, "/core"))
 	obj.Generation = 4
 	obj.Spec.Interval = &metav1.Duration{Duration: 30 * time.Minute}
-	r, _ := servingReconciler(t, obj)
+	r, _ := registryReconciler(t, obj)
 
 	res, err := reconcileOnce(t, r, obj)
 	if err != nil {
@@ -72,7 +72,7 @@ func TestReadyAndObservedGeneration(t *testing.T) {
 func TestFinalizerIsAdded(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("finalizer", urlLayer("core", url, digest, "/core"))
-	r, _ := servingReconciler(t, obj)
+	r, _ := registryReconciler(t, obj)
 
 	if _, err := reconcileOnce(t, r, obj); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -89,7 +89,7 @@ func TestFinalizerIsAdded(t *testing.T) {
 func TestStalledDoesNotRequeue(t *testing.T) {
 	url, _ := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("stalled", urlLayer("core", url, "sha256:"+strings.Repeat("0", 64), "/core"))
-	r, _ := servingReconciler(t, obj)
+	r, _ := registryReconciler(t, obj)
 
 	res, err := reconcileOnce(t, r, obj)
 	if err != nil {
@@ -124,7 +124,7 @@ func TestTransientFailureRequeuesWithBackoff(t *testing.T) {
 	// Port 1 on loopback refuses connections immediately, so this fails fast and locally.
 	obj := composition("transient", urlLayer("core", "http://127.0.0.1:1/missing.tgz",
 		"sha256:"+strings.Repeat("a", 64), "/core"))
-	r, _ := servingReconciler(t, obj)
+	r, _ := registryReconciler(t, obj)
 
 	if _, err := reconcileOnce(t, r, obj); err == nil {
 		t.Fatal("a transient failure must be returned so controller-runtime backs off")
@@ -145,7 +145,7 @@ func TestSuspendHaltsReconciliation(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("suspended", urlLayer("core", url, digest, "/core"))
 	obj.Spec.Suspend = true
-	r, _ := servingReconciler(t, obj)
+	r, _ := registryReconciler(t, obj)
 
 	res, err := reconcileOnce(t, r, obj)
 	if err != nil {
@@ -171,7 +171,7 @@ func TestReconcileRequestAnnotationIsEchoed(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("annotated", urlLayer("core", url, digest, "/core"))
 	obj.Annotations = map[string]string{ociv1alpha1.ReconcileRequestAnnotation: "2026-01-01T00:00:00Z"}
-	r, _ := servingReconciler(t, obj)
+	r, _ := registryReconciler(t, obj)
 
 	if _, err := reconcileOnce(t, r, obj); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -192,7 +192,7 @@ func TestFailedReconcileStillEchoesAndObserves(t *testing.T) {
 	url, _ := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("failed-echo", urlLayer("core", url, "sha256:"+strings.Repeat("0", 64), "/core"))
 	obj.Annotations = map[string]string{ociv1alpha1.ReconcileRequestAnnotation: "2026-01-01T00:00:00Z"}
-	r, _ := servingReconciler(t, obj)
+	r, _ := registryReconciler(t, obj)
 
 	if _, err := reconcileOnce(t, r, obj); err != nil {
 		t.Fatalf("a terminal error must not be returned to the queue: %v", err)
@@ -218,7 +218,7 @@ func TestFailedReconcileStillEchoesAndObserves(t *testing.T) {
 func TestDeletionRemovesTheFinalizer(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("deleted", urlLayer("core", url, digest, "/core"))
-	r, _ := servingReconciler(t, obj)
+	r, _ := registryReconciler(t, obj)
 
 	if _, err := reconcileOnce(t, r, obj); err != nil {
 		t.Fatalf("reconcile: %v", err)

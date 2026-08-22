@@ -105,12 +105,10 @@ func TestChartNeverGrantsSecretListOrWatch(t *testing.T) {
 // crash-loops on an unknown flag with no other warning.
 func TestChartFlagsMatchTheBinary(t *testing.T) {
 	out := render(t,
-		"--set", "operator.servingHost=oci.test",
 		"--set", "operator.s3.endpoint=https://s3.test",
 		"--set", "operator.s3.bucket=artifacts",
 		"--set", "operator.s3.prefix=composer",
 		"--set", "operator.s3.presignBlobs=true",
-		"--set", "operator.gc.dryRun=true",
 	)
 
 	known := knownFlags(t, "../../cmd/oci-composer")
@@ -144,21 +142,13 @@ func TestChartRejectsIncoherentValues(t *testing.T) {
 		args []string
 		want string
 	}{
-		"s3 backend without an endpoint": {
-			[]string{"--set", "operator.servingHost=oci.test", "--set", "operator.storage.backend=s3"},
-			"requires operator.s3.endpoint",
-		},
 		"presign without an endpoint": {
-			[]string{"--set", "operator.servingHost=oci.test", "--set", "operator.s3.presignBlobs=true"},
+			[]string{"--set", "operator.s3.presignBlobs=true"},
 			"requires operator.s3.endpoint",
 		},
 		"endpoint without a bucket": {
-			[]string{"--set", "operator.servingHost=oci.test", "--set", "operator.s3.endpoint=https://s3.test"},
+			[]string{"--set", "operator.s3.endpoint=https://s3.test"},
 			"requires operator.s3.bucket",
-		},
-		"ingress without a host": {
-			[]string{"--set", "operator.servingHost=oci.test", "--set", "ingress.enabled=true"},
-			"requires ingress.host",
 		},
 	}
 
@@ -172,20 +162,17 @@ func TestChartRejectsIncoherentValues(t *testing.T) {
 	}
 }
 
-// TestChartUsesRecreateStrategy — a rolling update would briefly run two pods contending for a
-// ReadWriteOnce volume, and the new one would not be the leader so it would serve nothing.
-func TestChartUsesRecreateStrategy(t *testing.T) {
-	out := render(t, "--set", "operator.servingHost=oci.test")
-	if !strings.Contains(out, "type: Recreate") {
-		t.Fatal("deployment does not use the Recreate strategy")
-	}
-}
+// The Recreate-strategy and ingress-narrowing guards are gone with the serving endpoint (ADR 0035).
+// Recreate existed because a rolling update briefly ran two pods contending for one ReadWriteOnce
+// blob store; there is no blob store, the volume left is a per-pod cache, and losing it costs a
+// refetch. The ingress guard existed to keep metrics and probes off a public listener that no longer
+// exists.
 
-// TestChartMountsWritablePaths — the root filesystem is read-only, so assembly's temp directory
-// and both storage directories must be explicitly writable or every build fails.
+// TestChartMountsWritablePaths — the root filesystem is read-only, so assembly's temp directory and
+// the layer cache must be explicitly writable or every build fails.
 func TestChartMountsWritablePaths(t *testing.T) {
-	out := render(t, "--set", "operator.servingHost=oci.test")
-	for _, path := range []string{"/tmp", "/var/lib/oci-composer", "/var/cache/oci-composer"} {
+	out := render(t)
+	for _, path := range []string{"/tmp", "/var/cache/oci-composer"} {
 		if !strings.Contains(out, "mountPath: "+path) {
 			t.Errorf("no writable mount for %s, but the root filesystem is read-only", path)
 		}
@@ -195,21 +182,10 @@ func TestChartMountsWritablePaths(t *testing.T) {
 	}
 }
 
-// TestChartServiceExposesOnlyTheOCIPort — metrics and probes must not land on the public listener.
-func TestChartServiceExposesOnlyTheOCIPort(t *testing.T) {
-	out := render(t, "--set", "operator.servingHost=oci.test",
-		"--set", "ingress.enabled=true", "--set", "ingress.host=oci.test")
-
-	if !strings.Contains(out, "path: /v2/") {
-		t.Error("ingress does not narrow to /v2/, so probes and metrics would be publicly exposed")
-	}
-}
-
 // TestChartCredentialsAreNotFlags — a credential in argv is visible in ps, in the pod spec, and in
 // every kubectl describe.
 func TestChartCredentialsAreNotFlags(t *testing.T) {
 	out := render(t,
-		"--set", "operator.servingHost=oci.test",
 		"--set", "operator.s3.endpoint=https://s3.test",
 		"--set", "operator.s3.bucket=artifacts",
 		"--set", "operator.s3.existingSecret=composer-s3-creds",
@@ -330,25 +306,10 @@ func knownFlags(t *testing.T, cmdPath string) map[string]struct{} {
 	return flags
 }
 
-// TestChartRefusesSharedStorageOnEmptyDir — "shared" is an assertion the chart cannot verify, so
-// the one combination that provably contradicts it has to be refused at template time.
-//
-// replicaCount>1 with storage.shared=true and persistence.enabled=false gives every pod its own
-// emptyDir while telling the operator they are shared. Each replica then restores nothing, reports
-// ready anyway (readiness is observed on attempt, deliberately), joins the Service, and 404s every
-// pull routed to it. That is worse than not serving: it is intermittent, and it looks like the
-// registry losing images.
-func TestChartRefusesSharedStorageOnEmptyDir(t *testing.T) {
-	out := renderExpectingFailure(t,
-		"--set", "replicaCount=2",
-		"--set", "operator.storage.shared=true",
-		"--set", "persistence.enabled=false",
-		"--set", "operator.servingHost=oci.test")
-
-	if !strings.Contains(out, "its own emptyDir") {
-		t.Errorf("the failure does not explain that the replicas would not share anything:\n%s", out)
-	}
-}
+// The shared-storage guards are gone with the serving endpoint (ADR 0035). They refused
+// replicaCount > 1 without a genuinely shared blob store, because a standby would join the Service
+// and 404 every pull routed to it. There is no Service and no blob store; the volume that remains is
+// a per-pod layer cache, where a second replica costs a refetch rather than a failed pull.
 
 // The same shape must still render once storage is genuinely shared, or the guard is just a ban on
 // running more than one replica.

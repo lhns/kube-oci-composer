@@ -65,7 +65,7 @@ func publishIndex(t *testing.T, host, repo string, idx v1.ImageIndex) string {
 // The two tests together are what make that refusal conditional rather than absolute.
 func TestIndexBaseIsAcceptedWithPlatforms(t *testing.T) {
 	obj := composition("indexbase")
-	r, host := servingReconciler(t, obj)
+	r, host := registryReconciler(t, obj)
 
 	idx := platformIndex(t,
 		v1.Platform{OS: "linux", Architecture: "amd64"},
@@ -96,7 +96,7 @@ func TestMultiPlatformPublishesAnIndex(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("multiout", urlLayer("core", url, digest, "/core"))
 	obj.Spec.Platforms = []string{"linux/amd64", "linux/arm64"}
-	r, _ := servingReconciler(t, obj)
+	r, _ := registryReconciler(t, obj)
 
 	res, err := r.reconcileArtifact(context.Background(), obj)
 	if err != nil {
@@ -131,7 +131,7 @@ func TestSinglePlatformStaysAnImage(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("singleplat", urlLayer("core", url, digest, "/core"))
 	obj.Spec.Platforms = []string{"linux/amd64"}
-	r, _ := servingReconciler(t, obj)
+	r, _ := registryReconciler(t, obj)
 
 	res, err := r.reconcileArtifact(context.Background(), obj)
 	if err != nil {
@@ -153,7 +153,7 @@ func TestExplicitAmd64MatchesTheDefault(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 
 	unset := composition("plat-unset", urlLayer("core", url, digest, "/core"))
-	r1, _ := servingReconciler(t, unset)
+	r1, _ := registryReconciler(t, unset)
 	res1, err := r1.reconcileArtifact(context.Background(), unset)
 	if err != nil {
 		t.Fatalf("unset: %v", err)
@@ -161,7 +161,7 @@ func TestExplicitAmd64MatchesTheDefault(t *testing.T) {
 
 	explicit := composition("plat-explicit", urlLayer("core", url, digest, "/core"))
 	explicit.Spec.Platforms = []string{"linux/" + hostArch()}
-	r2, _ := servingReconciler(t, explicit)
+	r2, _ := registryReconciler(t, explicit)
 	res2, err := r2.reconcileArtifact(context.Background(), explicit)
 	if err != nil {
 		t.Fatalf("explicit: %v", err)
@@ -178,7 +178,7 @@ func TestExplicitAmd64MatchesTheDefault(t *testing.T) {
 // ends up on an arm node.
 func TestUnknownPlatformIsTerminal(t *testing.T) {
 	obj := composition("badplat")
-	r, host := servingReconciler(t, obj)
+	r, host := registryReconciler(t, obj)
 
 	idx := platformIndex(t, v1.Platform{OS: "linux", Architecture: "amd64"})
 	digest := publishIndex(t, host, "someindex", idx)
@@ -206,7 +206,7 @@ func TestDuplicatePlatformIsTerminal(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("dupplat", urlLayer("core", url, digest, "/core"))
 	obj.Spec.Platforms = []string{"linux/amd64", "linux/amd64"}
-	r, _ := servingReconciler(t, obj)
+	r, _ := registryReconciler(t, obj)
 
 	_, err := r.reconcileArtifact(context.Background(), obj)
 	if err == nil {
@@ -223,7 +223,7 @@ func TestDuplicatePlatformIsTerminal(t *testing.T) {
 // was never built.
 func TestBaseDigestChangeRebuilds(t *testing.T) {
 	obj := composition("baseswap")
-	r, host := servingReconciler(t, obj)
+	r, host := registryReconciler(t, obj)
 	obj.Spec.Layers = []ociv1alpha1.Layer{removeLayer("noop", "/placeholder")}
 
 	first, err := random.Image(128, 1)

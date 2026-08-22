@@ -53,6 +53,12 @@ type ImageBuildReconciler struct {
 
 	// HistoryLimit is how many past builds are retained in status.
 	HistoryLimit int
+
+	// RequirePinnedSources refuses a spec.context that names no revision (threat T1). Off by
+	// default, and it matters more here than on the composer: an unpinned context means the build
+	// runs whatever code the branch happens to be at, and a build's output cannot be reproduced
+	// from its spec (ADR 0025), so there is nothing to check it against afterwards.
+	RequirePinnedSources bool
 }
 
 // +kubebuilder:rbac:groups=oci.lhns.de,resources=imagebuilds,verbs=get;list;watch
@@ -186,6 +192,17 @@ func (r *ImageBuildReconciler) resolveInputs(ctx context.Context, obj *ociv1alph
 			"build context %s/%s is in namespace %q: a context must be in the same namespace as the "+
 				"ImageBuild that consumes it", spec.Context.Kind, spec.Context.Name, spec.Context.Namespace)
 	}
+	// Threat-model gap T1, and the sharper half of it: an unpinned context builds whatever the
+	// branch is at now, and an ImageBuild's output is an observation rather than a function of its
+	// spec (ADR 0025) -- so nothing afterwards can tell you what went in. Terminal, because
+	// editing this spec is what fixes it.
+	if r.RequirePinnedSources && spec.Context.Revision == "" {
+		return build.Inputs{}, "", recon.Terminal(
+			"build context %s/%s names no revision, and this controller runs with "+
+				"--require-pinned-sources: add `revision:` to pin the code this build runs",
+			spec.Context.Kind, spec.Context.Name)
+	}
+
 	art, err := source.FluxSource(ctx, r.Client, spec.Context.Kind, ns, spec.Context.Name)
 	if err != nil {
 		var nf *source.ErrNotFound

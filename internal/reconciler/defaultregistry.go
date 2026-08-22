@@ -83,3 +83,21 @@ func hostOf(reference string) string {
 	host, _, _ := strings.Cut(reference, "/")
 	return host
 }
+
+// InsecureHost reports whether a repository's host is in the operator's plain-HTTP list.
+//
+// Matched on HOST, not on prefix: naming one internal registry must not downgrade every other
+// request, and a prefix match on "oci.internal" would also match "oci.internal.evil.example".
+//
+// Lives here rather than in each controller because all three call sites -- composing, building and
+// refreshing -- have to agree. They were three copies of this function, and three copies of a
+// security-relevant comparison is two too many.
+func InsecureHost(repository string, insecure []string) bool {
+	host, _, _ := strings.Cut(repository, "/")
+	for _, h := range insecure {
+		if h == host {
+			return true
+		}
+	}
+	return false
+}

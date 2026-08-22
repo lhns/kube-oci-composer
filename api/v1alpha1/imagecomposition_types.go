@@ -388,8 +388,6 @@ type ImageConfig struct {
 // pure function of its inputs, which is what makes the output digest predictable, the reconcile
 // loop convergent, and the provenance exact rather than scanned. Anything needing a compiler
 // belongs in ordinary CI. See ADR 0001 and ADR 0016.
-//
-// +kubebuilder:validation:XValidation:rule="!has(self.push) || !has(self.publish)",message="set at most one of push or publish"
 // +kubebuilder:validation:XValidation:rule="!has(self.config) || !self.config.inherit || has(self.base)",message="config.inherit requires a base to inherit from"
 type ImageCompositionSpec struct {
 	// Interval at which to reconcile. Reconciling is nearly free when nothing has changed: the
@@ -444,13 +442,13 @@ type ImageCompositionSpec struct {
 	// +optional
 	Config *ImageConfig `json:"config,omitempty"`
 
-	// Publish serves the artifact from the controller's own read-only OCI endpoint. The default
-	// mode, needing no registry and no credentials.
-	// +optional
-	Publish *Publish `json:"publish,omitempty"`
-
-	// Push publishes to an external registry instead. Use it when the artifact must outlive the
-	// cluster, be consumed from outside it, or carry registry-native attestations.
+	// Push is where the artifact goes: tags, retention, and the tag-conflict policy.
+	//
+	// Optional in full. Omitted, the artifact publishes to the operator's default registry as
+	// <namespace>/<name>, which is what a default install configures -- so an ImageComposition
+	// usually names nothing here at all. Set `repository` to publish somewhere else, and pair it
+	// with `secretRef`: the operator's credential is only ever sent to the operator's own registry
+	// (ADR 0034).
 	// +optional
 	Push *Push `json:"push,omitempty"`
 }

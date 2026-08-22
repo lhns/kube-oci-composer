@@ -200,6 +200,20 @@ func (r *ImageCompositionReconciler) resolveFluxSource(ctx context.Context, obj 
 	// create an ImageComposition could name any namespace's source and bake its content into an
 	// image they control and can read — the one tenancy boundary a spec could cross on its own.
 	// Terminal because editing THIS spec is what fixes it.
+	// Threat-model gap T1. `sourceRef.revision` is optional by design (ADR 0026:121): pinning every
+	// source would make a composition that tracks a branch impossible, and that is a legitimate
+	// thing to want. What was missing was the operator's ability to decide otherwise for a whole
+	// cluster -- so an unpinned source was an unreviewable gap rather than a choice.
+	//
+	// Terminal, unlike the revision MISMATCH below: what fixes an absent pin is editing this spec,
+	// which bumps the generation. What fixes a mismatch is the source catching up, which does not.
+	if r.RequirePinnedSources && ref.Revision == "" {
+		return source.FluxArtifact{}, recon.Terminal(
+			"layer source %s/%s names no revision, and this controller runs with "+
+				"--require-pinned-sources: add `revision:` to pin what this layer consumes",
+			ref.Kind, ref.Name)
+	}
+
 	ns := obj.Namespace
 	if ref.Namespace != "" && ref.Namespace != obj.Namespace {
 		return source.FluxArtifact{}, recon.Terminal(

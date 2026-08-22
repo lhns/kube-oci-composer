@@ -2,35 +2,6 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "kube-oci-composer.fullname" . }}
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "kube-oci-composer.labels" . | nindent 4 }}
-  {{- with .Values.service.annotations }}
-  annotations:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
-spec:
-  type: {{ .Values.service.type }}
-  ports:
-    # The OCI endpoint workloads pull from. Only the read path is exposed; the controller writes
-    # to itself over loopback.
-    - name: oci
-      port: {{ .Values.service.port }}
-      targetPort: oci
-      protocol: TCP
-      {{- if and (eq .Values.service.type "NodePort") .Values.service.nodePort }}
-      # Fixed, because whatever configures the pulling client has to name a port —
-      # containerd's hosts.toml, for one. An allocated-at-random port could not be
-      # referenced, and would change on recreate.
-      nodePort: {{ .Values.service.nodePort }}
-      {{- end }}
-  selector:
-    {{- include "kube-oci-composer.componentSelectorLabels" (dict "ctx" . "component" "composer") | nindent 4 }}
----
-apiVersion: v1
-kind: Service
-metadata:
   name: {{ include "kube-oci-composer.fullname" . }}-metrics
   namespace: {{ .Release.Namespace }}
   labels:

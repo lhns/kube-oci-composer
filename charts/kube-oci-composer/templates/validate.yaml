@@ -1,0 +1,11 @@
+{{- /*
+Renders nothing. It exists to RUN the validations, which is not something a _partials file can do:
+Helm loads files starting with an underscore as definitions only and never renders them, so an
+`include` at the bottom of one is dead code. That is exactly how the first version of this check
+passed every one of its own falsification cases -- eight configurations that should have failed the
+render, all of them rendering cleanly, because the check was never invoked at all.
+
+Helm drops a template whose output is only whitespace, so nothing lands in the release; `fail`
+inside the include still aborts `helm template`, `helm install` and `helm upgrade` alike.
+*/}}
+{{- include "kube-oci-composer.checkRetention" . -}}

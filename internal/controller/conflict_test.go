@@ -20,14 +20,14 @@ func TestKeepLeavesTheExistingTagAndRecordsWhatWasDropped(t *testing.T) {
 	urlB, digestB := contentServer(t, map[string]string{"lib/a.jar": "bbb"})
 
 	obj := composition("kept", urlLayer("core", urlA, digestA, "/core"))
-	obj.Spec.Publish = &ociv1alpha1.Publish{Name: "kept", Tags: []string{"v1"}}
-	r, _ := servingReconciler(t, obj)
+	obj.Spec.Push = &ociv1alpha1.Push{Tags: []string{"v1"}}
+	r, _ := registryReconciler(t, obj)
 
 	first := build(t, r, obj, "first")
 
 	// Same tag, different content -- and now the tag is to be kept rather than refused.
 	obj.Spec.Layers[0] = urlLayer("core", urlB, digestB, "/core")
-	obj.Spec.Publish.OnConflict = ociv1alpha1.ConflictKeep
+	obj.Spec.Push.OnConflict = ociv1alpha1.ConflictKeep
 
 	res, err := r.reconcileArtifact(t.Context(), obj)
 	if err != nil {
@@ -68,10 +68,8 @@ func TestAPublishThatDoesNotConflictClearsTheRecord(t *testing.T) {
 	urlB, digestB := contentServer(t, map[string]string{"lib/a.jar": "bbb"})
 
 	obj := composition("cleared", urlLayer("core", urlA, digestA, "/core"))
-	obj.Spec.Publish = &ociv1alpha1.Publish{
-		Name: "cleared", Tags: []string{"v1"}, OnConflict: ociv1alpha1.ConflictKeep,
-	}
-	r, _ := servingReconciler(t, obj)
+	obj.Spec.Push = &ociv1alpha1.Push{Tags: []string{"v1"}, OnConflict: ociv1alpha1.ConflictKeep}
+	r, _ := registryReconciler(t, obj)
 
 	build(t, r, obj, "first")
 
@@ -85,7 +83,7 @@ func TestAPublishThatDoesNotConflictClearsTheRecord(t *testing.T) {
 	}
 
 	// Moving to a fresh tag removes the conflict entirely.
-	obj.Spec.Publish.Tags = []string{"v2"}
+	obj.Spec.Push.Tags = []string{"v2"}
 	res, err = r.reconcileArtifact(t.Context(), obj)
 	if err != nil {
 		t.Fatalf("publishing under a fresh tag: %v", err)
@@ -105,8 +103,8 @@ func TestFailIsTheDefaultWhenNothingIsSaid(t *testing.T) {
 	obj := composition("default", urlLayer("core", urlA, digestA, "/core"))
 	// Neither onConflict nor immutable set: the safe answer must not depend on a schema default,
 	// because onConflict deliberately has none.
-	obj.Spec.Publish = &ociv1alpha1.Publish{Name: "default", Tags: []string{"v1"}}
-	r, _ := servingReconciler(t, obj)
+	obj.Spec.Push = &ociv1alpha1.Push{Tags: []string{"v1"}}
+	r, _ := registryReconciler(t, obj)
 
 	build(t, r, obj, "first")
 
