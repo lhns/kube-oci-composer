@@ -5,386 +5,210 @@ may change between minor versions.
 
 ## [Unreleased]
 
-### Added
-- **SBOM, provenance and signing, for both kinds, all off by default (ADR 0040, closing ADR 0020).**
+## [0.5.0] - 2026-08-23
 
-  `operator.supplyChain` and `imageBuild.supplyChain` turn on an SPDX SBOM, SLSA provenance, and a
-  cosign signature. For an `ImageComposition` the SBOM is **derived** from the digest-pinned inputs
+**A registry is now the only publication path, and there is a second kind.**
+
+Two changes account for most of this release. The controller no longer serves artifacts itself —
+it pushes them to a registry, and the chart bundles one so that is still a single `helm install`.
+And `ImageBuild` joins `ImageComposition`: a second kind, and a second controller, that runs a
+Dockerfile.
+
+Everything else follows from those two, or from the gaps they exposed.
+
+**Upgrading from 0.4.0 needs edits.** The `Changed` section below is the list; the short version is
+that `spec.publish` becomes `spec.push`, `registry.publish.mode` must be set, and a `sourceRef`
+must name a source in its own namespace.
+
+### Added
+
+- **`ImageBuild`, a second kind, in alpha.** It runs a Dockerfile in a rootless BuildKit Job and
+  pushes the result. Deliberately a weaker promise than `ImageComposition`: its idempotence is a
+  hash of its inputs recorded in status, not `output = f(spec)`, and it is not bit-reproducible —
+  so its output is an *observation*, and the registry holding it is a system of record rather than
+  a cache ([ADR 0025](docs/adr/0025-dockerfile-builds-as-a-second-kind.md),
+  [ADR 0028](docs/adr/0028-the-kind-is-called-imagebuild.md)).
+
+  Separate binary, separate ServiceAccount, separate RBAC. Its controller can create Jobs — that
+  is, run arbitrary containers — so `imageBuild.enabled=false` removes the controller **and** its
+  RBAC together. Every `FROM` must be digest-pinned, and the build runs under a service account
+  bound to nothing.
+
+  Build pods permit privilege escalation and add `SETUID`/`SETGID`, with seccomp and AppArmor
+  unconfined. All four were measured as necessary for rootless BuildKit rather than chosen for
+  convenience ([ADR 0027](docs/adr/0027-what-rootless-buildkit-actually-needs.md)); the residual
+  risk is stated in `docs/threat-model.md` under E1.
+
+- **A bundled registry, enabled by default, with credentials the chart generates.** zot, its
+  htpasswd, and the `dockerconfigjson` both controllers push with, all rendered from one password
+  that is reused on upgrade rather than rotated. Anonymous read, authenticated write, enforced by
+  the registry itself with no proxy in front.
+
+  It exists so that removing the serving endpoint does not turn "one command" into "one command,
+  then go and run a registry". Turn it off with `registry.enabled=false` and point
+  `defaultRegistry.host` at your own ([ADR 0030](docs/adr/0030-a-real-registry-serves-both-kinds.md)).
+
+- **A default registry, so `push.repository` is optional.** Objects that name no repository publish
+  to `<default-registry>/<namespace>/<name>` — configured once by the operator instead of pasted
+  into every spec. Namespace-qualified deliberately: one registry is shared cluster-wide, so a bare
+  object name would collide the moment two namespaces both contain an `app`, silently, and the tag
+  policy would read the collision as a legitimate conflict.
+
+  **The operator's credential goes to the operator's registry and nowhere else**, keyed on the
+  HOST. An object may name its own path inside that registry and still authenticate; an object
+  naming a different host uses its own `secretRef` or nothing. The credential is named by
+  `--default-push-secret` and read from the CONTROLLER's namespace, never the object's. Otherwise
+  anyone able to create an
+  `ImageComposition` could point it at a host they control and be handed the operator's password
+  ([ADR 0034](docs/adr/0034-a-default-registry.md)).
+
+- **The retention guarantee: images a live object still references are never reclaimed.** A
+  registry with an expiry policy deletes what it has not seen pulled — including images your
+  workloads are running. Both controllers re-pull every image a live object references, on
+  `--retention-refresh-interval` (default `1h`).
+
+  It only ever reads: no write permission, no delete permission, so no bug in it can destroy an
+  image. **The ratio is the guarantee**, not either number — the default assumes a 30-day window,
+  a margin of 720 — and the chart now refuses to install a margin below 24×. An object Stalled on a
+  spec error keeps refreshing what it already published, because those images may be running right
+  now; sustained failure raises `RetentionDegraded`, because this design fails *unsafe*: the
+  symptom of silence is deletion, one window later
+  ([ADR 0031](docs/adr/0031-the-retention-guarantee.md)).
+
+- **SBOM, provenance and signing, for both kinds, all off by default**
+  ([ADR 0040](docs/adr/0040-the-supply-chain-work-is-worth-building.md), closing ADR 0020).
+
+  `operator.supplyChain` and `imageBuild.supplyChain` (`--sbom`, `--provenance`,
+  `--signing-key-secret`) attach an SPDX SBOM, SLSA provenance, and a cosign signature, and record
+  what was attached in `status.attestations` so a converged reconcile costs no extra registry
+  requests. For an `ImageComposition` the SBOM is **derived** from the digest-pinned inputs
   and is exact rather than scanned; for an `ImageBuild` it comes from BuildKit, because only the
   build can see what it installed.
 
-  Attestations attach as OCI **referrers**. Signatures use cosign's `sha256-<hex>.sig` **tag**,
-  which amends ADR 0008 for the reason 0008 itself gives: the verifiers that exist read that tag,
-  and a signature on the elegant rail is a signature nothing checks.
+  Attestations attach as OCI **referrers**; signatures use cosign's `sha256-<hex>.sig` **tag**,
+  which amends [ADR 0008](docs/adr/0008-supply-chain.md) for the reason 0008 itself gives — the
+  verifiers that exist read that tag, and a signature on a rail nothing reads is a signature
+  nothing checks.
 
   **Signing is inert until something verifies it.** This chart ships no admission policy; example
-  Kyverno and policy-controller policies are in `docs/examples/verify`, along with the rollout order
-  that will not take out a `CronJob` a month later.
+  Kyverno and policy-controller policies are in `docs/examples/verify`, with the rollout order that
+  will not take out a `CronJob` a month later.
 
-  A converged reconcile costs **zero** extra registry requests: `status.attestations` records what
-  is attached, checked after the input-hash and published-digest checks a reconcile already
-  performs. That works only because the payloads are pure functions of the artifact's own inputs —
-  no timestamps, no UUIDs, no controller version — and there are tests pinning each of those.
-
-  The retention refresher now pulls each artifact's **referrers** too. Without that, an SBOM would
-  have been reclaimed one window after it was written, silently, while the image it describes lived
-  on — threat D6 on a new object type. Signatures need nothing, because a `.sig` is a tag.
-
-  **Enabling attestations on an `ImageBuild` changes its published digest**: BuildKit attaches them
+  Enabling attestations on an `ImageBuild` **changes its published digest**: BuildKit attaches them
   as extra manifests in an index, so a single-platform build's artifact becomes an index. Existing
   pins keep resolving; anything assuming the digest named a manifest now finds an index. It is in
   the input hash, so it happens once, visibly.
 
-- **zot scale-out clustering, configurable in values — and it shards rather than replicates.**
-  `registry.cluster.enabled=true` runs several members; zot hashes each repository name and exactly
-  one member owns it, so a member that is down makes roughly 1/N of repositories unavailable, and
-  zot's own docs say the cluster is not self-healing. What it buys is throughput and a proxy layer
-  that survives a rolling update. The value is called `cluster`, not `ha`, for that reason.
+- **Provenance in the artifact itself, not only in status** (threat R1). Composed images carry OCI
+  manifest annotations naming every source that went into them — `de.lhns.oci-composer.sources`,
+  plus the assembly version and the base digest — so the record survives the object that produced
+  it. Annotations rather than config labels, because a label is part of the image config and would
+  present provenance as the application's own metadata. Nothing written is time-dependent, so
+  `output digest = f(spec)` still holds.
+
+- **TLS on the bundled registry, opt-in** ([ADR 0038](docs/adr/0038-tls-in-the-cluster.md), closing
+  threat I7). `registry.tls.enabled=true` makes zot terminate TLS itself, with the certificate from
+  cert-manager, a Secret you supply, or a CA the chart generates. The CA reaches both controllers
+  via `--registry-ca-file` — additive to the system roots, never replacing them — and, through the
+  same short-lived owned Secret the push credential uses, each build Job.
+
+  Without it the generated push password crosses the pod network in an HTTP Basic header, readable
+  by anything positioned to watch and leaving no trace in any log — and that credential is the whole
+  of the "only the controllers can push" guarantee.
+
+  **Off by default**, because zot has one listener and cannot serve HTTP and HTTPS at once: enabling
+  it invalidates the containerd drop-in on every node. `docs/registry.md` has the exact edit.
+  Self-signed certificates do not renew, and the chart refuses to render once one is close to
+  expiring rather than warning — an expired certificate stops the retention refresh, and that is a
+  deletion one window later rather than an outage.
+
+- **Registry clustering, opt-in — and it shards rather than replicates**
+  ([ADR 0039](docs/adr/0039-zot-clustering-is-sharding.md)). zot hashes each repository name and
+  exactly one member owns it, so a member that is down makes roughly 1/N of repositories
+  unavailable, and zot's own documentation says the cluster is not self-healing. What it buys is
+  throughput and a proxy layer that survives a rolling update. The value is `registry.cluster`, not
+  `registry.ha`, for that reason.
 
   Prerequisites the chart wires but does not install: S3-compatible storage, a shared cache driver
-  (**redis** or dynamodb), and TLS. Five combinations are refused rather than rendered, including
-  clustering with the ReadWriteOnce PVC still enabled — refused instead of silently dropped,
-  because that volume may hold the only copy of an `ImageBuild`'s output.
+  (**redis** or dynamodb), and TLS. Five combinations are refused rather than rendered.
 
   **Use persistent redis.** `extensions.search` records the pull timestamps retention depends on,
   and clustering moves that metadata into the cache driver. A redis restart without persistence
   loses every timestamp, every image looks unpulled, and the next GC reclaims images live objects
-  still reference — ADR 0031's failure mode arriving through a component this chart does not
-  manage. See ADR 0039.
-
-- **TLS on the bundled registry, closing threat I7.** `registry.tls.enabled=true` makes zot
-  terminate TLS itself, with the certificate from `certManager`, a Secret you supply, or a
-  chart-generated self-signed CA. The CA is distributed to both controllers (`--registry-ca-file`,
-  additive to the system roots) and to build Jobs, through the same owned, short-lived,
-  cross-namespace Secret the push credential already uses.
-
-  Without it, the generated push password crosses the pod network in an HTTP Basic header,
-  readable by anything positioned to watch and leaving no trace in any log — and that credential is
-  the whole of the "only the controllers can push" guarantee.
-
-  **Off by default**, because zot has one listener and cannot serve HTTP and HTTPS at once:
-  enabling it invalidates the containerd drop-in on every node, which must move from `http://` to
-  `https://` and, in self-signed mode, learn the CA. `docs/registry.md` has the exact edit.
-  Terminating at an ingress instead avoids all of it.
-
-  **Self-signed certificates do not renew**, and the chart refuses to render once one is close to
-  expiring rather than warning. An expired certificate here stops the retention refresh, and that
-  is not an outage but a deletion one window later (ADR 0031). Use `mode: certManager` if you would
-  rather not rotate by hand. See ADR 0038.
+  still reference.
 
 - **A NetworkPolicy for the registry, enabled by default.** Build Jobs run in their object's
-  namespace, not the release's, so every build crosses a namespace boundary to reach the registry
-  and a default-deny cluster blocks it. The policy admits every namespace on the registry port,
-  which is deliberate: reads are anonymous by design and writes need the password, so a namespace
-  boundary in front of that adds no authority. It is a connectivity guarantee, not a security
-  control, and it says so.
+  namespace, not the release's, so every build crosses a namespace boundary to push and a
+  default-deny cluster blocks it. The policy admits every namespace on the registry port, which is
+  deliberate: reads are anonymous by design and writes need the password, so a namespace boundary
+  adds no authority. It is a connectivity guarantee, not a security control, and it says so.
 
-  Narrow it with `registry.networkPolicy.allowedNamespaces` (the release namespace is always kept
-  — losing it would stop the retention refresh, whose silence deletes images a window later), and
-  add `nodeCIDRs` where kubelet pulls need admitting explicitly. Turn it off entirely with
-  `registry.networkPolicy.enabled=false`.
+- **An Ingress for the registry**, which is the only publish mode needing nothing on the nodes —
+  your ingress already has a name your DNS serves and a certificate your nodes trust. That was the
+  one genuinely good property of the serving endpoint, and it was never about the endpoint.
 
-  **Build pods now carry labels.** They had none but the `job-name` Kubernetes adds itself, so
-  nothing outside their namespace could select them as a class — a policy, a quota, an admission
-  rule all had to match every pod instead.
+- **An `image` layer verb, and `base.ref`.** An image can now be a layer source, flattened into the
+  artifact, and a base can be named by a full reference rather than image-plus-digest
+  ([ADR 0024](docs/adr/0024-images-as-layer-sources.md)).
 
-- **Provenance travels with the artifact (threat R1).** Composed images carry OCI manifest
-  annotations naming what produced them: `de.lhns.oci-composer.sources` (each layer as
-  `name=digest`, or `name=revision` where the revision is what identifies the content), plus the
-  assembly version and the base image's digest.
+- **`unpack: zip`, plus `tar.xz`, `tar.zst`, `tar.bz2` and single-file `gz`.** A great deal of
+  published content is not a gzipped tar, and until now none of it could enter an artifact
+  ([ADR 0023](docs/adr/0023-more-archive-formats.md)).
 
-  `status.history[].sources` already answered this, but only while the object existed -- delete the
-  ImageComposition and the answer went with it while the image kept running. Annotations rather
-  than config labels: a label is part of the image config, so writing one changes what every
-  consumer's `docker inspect` reports as the application's own metadata. Nothing written is
-  time-dependent, because `output digest = f(spec)` outranks the feature -- which is why
-  `org.opencontainers.image.created` is deliberately absent.
+- **`onConflict`, a three-valued tag policy**, replacing the two-valued `immutable` on both kinds:
+  `Fail` (refuse and stall), `Overwrite` (move the tag deliberately, for a pointer like `main`),
+  and `Keep` (leave the existing tag and publish nothing, which is usually what you want with a
+  spec-hash tag). A divergence `Keep` left in place is recorded in `status.conflict`, so it is
+  visible rather than inferred. `immutable` still works and is deprecated
+  ([ADR 0029](docs/adr/0029-three-valued-tag-conflict-policy.md)).
 
-  **BREAKING in effect: every artifact rebuilds once.** The manifest changed, so `AssemblyVersion`
-  is bumped to 2 and every input hash moves with it. Nothing is deleted and no tag moves that
-  `onConflict` would not already refuse; expect one rebuild per object on upgrade. Both pinned-hash
-  guards caught this before it left the machine, which is what they are for.
+- **`push.history` and `push.ref`.** `history` overrides `--keep-builds` per object, which matters
+  most on `ImageBuild`, where the only copy of an output is the one in the registry. `ref` takes a
+  full image reference and uses its *tag*, so anything that already rewrites image references —
+  kustomize's `images` transformer, for one — can retag the artifact and its consumer together.
 
-- **`--require-pinned-sources` (threat T1).** Refuses any `sourceRef` -- or `ImageBuild` context --
-  that names no revision, on both controllers, as `imageComposition.requirePinnedSources` and
-  `imageBuild.requirePinnedSources`. Off by default: pinning is optional by design (ADR 0026),
-  since tracking a branch is a legitimate thing to want. What was missing was an operator's ability
-  to decide otherwise for a whole cluster. Objects that omit `revision:` go Stalled naming the flag.
+- **`sourceRef.revision`** pins the revision a layer expects. Optional by design — a composition
+  that tracks a branch is a legitimate thing to want — and `--require-pinned-sources` now lets an
+  operator refuse unpinned sources for a whole cluster, on both kinds (threat T1).
 
-- **SSRF controls on `fetch.url` (threat I6, ADR 0036).** Link-local addresses are now refused
-  unconditionally -- `169.254.169.254` is the cloud metadata endpoint on every major provider and
-  hands credentials to anything that asks. Other private ranges (RFC1918, loopback, unique-local,
-  CGNAT) are refused only under `--fetch-deny-private` / `operator.fetchDenyPrivate`, because an
-  artifact server on a private address is an ordinary layer source and a guard that refuses those
-  is one people turn off.
+- **`status.history[].sources`** records where each layer came from: its name, the resolved digest,
+  and the revision. This is what ADR 0026's incident needed and did not have — it had to be
+  diagnosed by extracting a layer and reading its payload.
 
-  Enforced in the dialer, after resolution and immediately before `connect(2)`, so a hostname
-  pointing at the metadata IP, a redirect to it, and a DNS rebind are all caught -- none of them is
-  visible in the URL. Until now this decision existed only in a commit message, while the threat
-  model still said "NOT mitigated".
+- **SSRF controls on `fetch.url`** ([ADR 0036](docs/adr/0036-ssrf-on-fetch-urls.md), threat I6).
+  Link-local addresses are refused unconditionally — `169.254.169.254` is the cloud metadata
+  endpoint on every major provider and hands credentials to anything that asks. Other private
+  ranges are refused only under `--fetch-deny-private`, because an artifact server on a private
+  address is an ordinary layer source and a guard that refuses those is one people turn off.
 
-- **The chart refuses a retention margin too thin to be a guarantee (threat D7).** `helm install`
-  fails when `registry.retention.window` is less than 24x a controller's refresh interval, or when
-  refreshing is disabled while a window is set. The two numbers used to live in different systems
-  -- a controller flag and a registry's config -- so nothing could compare them; one chart renders
-  both. It fails the render rather than warning because the symptom otherwise arrives one window
-  later, as a deleted image.
+  Enforced in the dialer, after resolution and before `connect(2)`, so a hostname pointing at the
+  metadata IP, a redirect to it, and a DNS rebind are all caught.
 
-### Added
-- **One chart, one namespace, three toggleable components.** `kube-oci-builder` is folded into
-  `kube-oci-composer` as `imageBuild.enabled`, alongside `imageComposition.enabled` and
-  `registry.enabled` -- all on by default, so one install gives a working, entirely local system.
-
-  The runtime separation is unchanged: two Deployments, two ServiceAccounts, two ClusterRoles, and
-  the composer's role still cannot create a single object. **`imageBuild.enabled=false` removes the
-  RBAC, not just the controller**, so the toggle is a real security control rather than one that
-  looks like one. See ADR 0033.
-
-- **A bundled registry, enabled by default, with generated credentials.** zot, its htpasswd, and the
-  `dockerconfigjson` both controllers push with -- all rendered by the chart from one password that
-  is reused on upgrade rather than rotated. Anonymous read, authenticated write, enforced by the
-  registry itself.
-
-- **A default registry: `push.repository` is now optional.** Objects that name no repository publish
-  to `<default-registry>/<namespace>/<name>`, configured once by the operator instead of pasted into
-  every spec. On `ImageBuild`, `push` itself is optional too.
-
-  Namespace-qualified deliberately: one registry is shared cluster-wide, so a bare object name would
-  collide the moment two namespaces both contain an `app` -- silently, and read by the tag policy as
-  a legitimate conflict.
-
-  **The operator's credential is sent to the operator's registry and nowhere else**, keyed on the
-  HOST. An object may name its own path inside that registry and still authenticate; an object naming
-  a different host uses its own `secretRef` or nothing. Otherwise anyone able to create an
-  `ImageComposition` could point it at a host they control and be handed the operator's registry
-  password. See ADR 0034.
-
-  For `ImageBuild`, BuildKit pushes from inside a Job and a pod can only mount Secrets from its own
-  namespace -- so the controller copies the credential into the build's namespace, owned by the
-  `ImageBuild` and named after the Job, so it lives as long as the build and no longer. The builder
-  therefore gains `create` and `update` on Secrets (still never `list` or `watch`). While a build
-  runs, anyone who can read Secrets in that namespace can read the credential -- tolerable only
-  because such a namespace can already push whatever it likes through an `ImageBuild`.
-
-- **The retention guarantee: images a live object still references are never reclaimed** (ADR 0031),
-  and a `retention` refresher on both controllers that enforces it.
-
-  Handing retention to a registry hands it a delete button pointed at content your workloads are
-  running. The refresher periodically re-PULLS every image a live object still names, under both its
-  digest and its tags; a registry with a recency-based expiry policy keeps what has been used
-  recently. "Still referenced" becomes a lease the object renews, not something inferred from a scan.
-
-  **The refresh only reads.** It needs no write and no delete permission, so no bug in it can destroy
-  an image. Two objects publishing the same digest need no coordination — both refresh it, and it
-  survives while either lives. Eviction needs no action at all: a record falling out of
-  `status.history` simply stops being refreshed, and the expiry window doubles as an undo period.
-
-  It is driven by `status.history` and never by a successful reconcile, so an object **Stalled on a
-  spec error keeps refreshing what it already published** — those images may be running right now.
-  A partial view refreshes nothing rather than most things, because under-refreshing is invisible
-  until the window elapses.
-
-  Configured by `--retention-refresh-interval` (default `1h`) on both controllers. **The ratio to the
-  registry's window is the guarantee, not either number**; the default assumes 30 days, a margin of
-  720. Anyone shortening the window has to shorten this with it. Sustained failure raises a
-  `RetentionDegraded` event, because this design fails *unsafe*: the symptom of silence is deletion.
-
-- **An optional bundled registry in the composer chart** (`registry.enabled`, off by default), so
-  that "a registry becomes the recommended path" does not turn `helm install` into `helm install,
-  then go and run a registry`. It ships the retention policy the guarantee needs, and CI asserts that
-  the policy actually protects something -- every one of those settings fails by silently protecting
-  nothing rather than by erroring.
-
-  Deliberately plain: one replica, one volume, no TLS termination. Anyone needing more should turn it
-  off and run zot's own chart or Harbor. Persistence defaults ON, unlike most optional components
-  here, because an `ImageBuild`'s output cannot be reproduced from its spec and an `emptyDir` would
-  turn every restart into permanent loss.
-
-- **`onConflict` on both kinds**, replacing the two-valued `immutable` with `Fail` (refuse and
-  stall, the default), `Overwrite` (move the tag) and `Keep` (leave it, publish nothing, report
-  Ready).
-
-  Two values were the wrong shape for the pattern this project actually recommends. With a tag
-  derived from a hash of the spec, a tag that already exists means the content is *already published
-  and correct*: refusing stalls over a non-problem, and overwriting rewrites bytes that were already
-  right. `Keep` is the missing third answer.
-
-  `Keep` records what it kept in `status.conflict` -- the tag, what it resolves to, what was
-  dropped, and when. Without that the object reads Ready while not having published what its spec
-  produces, and nothing anywhere says so, which is the shape of the incident behind ADR 0026. The
-  record is cleared as soon as a reconcile publishes cleanly.
-
-  `immutable` still works and is honoured when `onConflict` is unset (`true` is `Fail`, `false` is
-  `Overwrite`), so existing charts need no edit. Setting both to contradictory values is refused at
-  admission; setting both to values that agree is fine. See ADR 0029.
-
-- **`push.history` and `push.ref` on `ImageBuild`**, closing the two gaps that mattered most in the
-  drift between `publish` and `push`.
-
-  `history` caps how many past builds are retained. It had existed only on `publish` -- that is, only
-  on the kind that can rebuild any artifact from its spec, where retention is a convenience. An
-  `ImageBuild` cannot (ADR 0025), so retention there is how much of the ONLY copy is kept, and that
-  was the kind without the knob.
-
-  `ref` appends a reference's TAG to the tag list, which is what makes the documented spec-hash tag
-  pattern usable from a Helm chart or a kustomize images transformer. Without it the pattern could
-  not be used from `ImageBuild` at all -- the place it is wanted most, since a build's tag is the
-  only thing identifying which inputs produced it.
-
-- **`status.history[].sources` is now populated for builds.** The field was in the CRD for both kinds
-  and only ever written by the composer, so a build record carried a digest with no way to learn
-  which revision produced it. That is the exact question ADR 0026's incident was stuck on. Each
-  record now names the build context, its resolved revision and its artifact digest.
-
-  The revision is deliberately not part of the input hash: the digest already identifies the content,
-  so hashing both would rebuild on a repack that changed nothing. A test holds that line.
-
-- **A parity guard over `Publish` and `Push`** (`kindparity_test.go`). Both divergences above were
-  oversights rather than decisions, and they survived because nothing compared the two structs. The
-  guard reads both and fails on any field present in one and not the other, unless the difference is
-  recorded with the reason the destination makes it meaningless. Verified to fail on drift.
-
-### Fixed
-- **The builder's metrics were unscrapable.** It had no Service at all, while the composer's was
-  scraped — an asymmetry with no reason behind it, and the kind that survives because nobody
-  notices a metric that was never there. The builder is the component that creates Jobs; its
-  reconcile errors are exactly what you want when builds stop happening.
-
-  The ServiceMonitor now selects both controllers, and by expression rather than by dropping the
-  component label: the registry's Service carries the same chart labels, so a looser selector
-  would have Prometheus scrape `/metrics` on a port serving the OCI API — a scrape that fails
-  quietly, from a ServiceMonitor that looks like monitoring that works.
-
-- **`imageBuild.insecureRegistry` was read by nothing.** Removed; `operator.insecureRegistry` and
-  `defaultRegistry.insecure` are the live values.
-
-- **The builder pod carried a narrower label set than the composer's.** Harmless until something
-  selects on labels — which the new NetworkPolicy and metrics Service both do.
-
-- **A registry pod that wedged on a Secret the chart declined to create.** Setting
-  `defaultRegistry.existingPushSecret` while leaving `registry.enabled` and `registry.auth.enabled`
-  on skipped **both** generated Secrets, but the registry Deployment mounts the htpasswd Secret on
-  `registry.auth.enabled` alone -- so the pod referenced a Secret that render did not produce and
-  never started. It rendered cleanly and failed only in a cluster.
-
-  The two Secrets now have independent conditions, and the combination that caused it is **refused
-  at render time** with the three ways out named: pin `registry.auth.password` to the credential
-  inside your Secret, supply `registry.auth.existingHtpasswdSecret` (new), or set
-  `registry.auth.enabled=false`.
-
-  Refusing rather than repairing is deliberate, and the tempting repair is the trap: gating the
-  htpasswd Secret on `registry.auth.enabled` alone leaves the password helper with no `-push`
-  Secret to read the previous value back out of, so every `helm upgrade` would mint a fresh random
-  password and the registry would demand one that exists nowhere -- including in the credential you
-  supplied. That configuration renders forever and never works.
-
-  Added with it: a structural guard asserting that **every chart-generated Secret or ConfigMap a
-  workload mounts is actually rendered**, across the toggle matrix. It reproduces this bug exactly
-  when the old condition is restored, and it is the test that was missing -- a mount and the object
-  it mounts live in different files, under different conditions, edited by different changes.
-
-- **E1 is measured rather than cited.** An e2e probe runs a pod with `hostUsers: false` and reports
-  what the cluster actually does. On Kubernetes 1.36 the API server **accepts** the field -- that
-  half has moved since ADR 0027 -- and the sandbox then fails to start, because a user namespace
-  nested inside kind's own container cannot mount `sysfs`. That rules out shipping it on the
-  strength of CI and rules nothing else out; a real node may well manage it. The probe reports on
-  every run, and fails loudly if `hostUsers` is ever accepted and silently ignored.
-
-- **The composer could not push to a plain-HTTP registry at all.** Removing the serving endpoint
-  removed the only plaintext push path it had -- pushes were previously either loopback, always
-  HTTP, or to a real registry over HTTPS, so there was no third case and the controller never read
-  `--insecure-registry`. The default case is now a bundled registry on a Service or a NodePort,
-  neither of which has a certificate, so every publish failed with `server gave HTTP response to
-  HTTPS client`.
-
-  The whole unit suite stayed green through it, because go-containerregistry treats localhost and
-  127.0.0.1 as insecure on its own and every unit test's registry is an httptest server on
-  loopback. The e2e found it. The regression test now checks the DECISION rather than the
-  transport, which is the only form of it a unit test can make.
-
-  `insecureHost` also existed in three copies -- composing, building, refreshing -- and is now one
-  function in `internal/reconciler`. Three copies of a security-relevant host comparison is two
-  too many.
+- **`--insecure-registry`**, a list of hosts reachable over plain HTTP, matched on host so that
+  naming one internal registry does not downgrade every other request.
 
 ### Changed
-- **BREAKING: the registry is a StatefulSet, not a Deployment.** Delete the old one before
-  upgrading:
 
-  ```console
-  kubectl -n <namespace> delete deployment <release>-kube-oci-composer-registry
-  helm upgrade ...
-  ```
-
-  The chart refuses to render until you do, with that command in the message. **Your images are not
-  affected**: the PVC carries `helm.sh/resource-policy: keep` and was never owned by the Deployment,
-  so the new pod mounts the same volume.
-
-  Unconditional rather than only when clustering is on, deliberately: a kind switch hidden behind
-  `cluster.enabled=true` would have Helm create the StatefulSet while the Deployment's ReplicaSet
-  still owned a pod matching the same selector, and the two would fight over one ReadWriteOnce
-  volume — on the day the operator is changing storage, cache and TLS at once.
-
-  It also removes a wart: a StatefulSet terminates pod-0 before creating its replacement, so the
-  RWO deadlock that forced `strategy: Recreate` no longer exists.
-
-- **BREAKING: `registry.publish.mode` is required, and the default install no longer publishes
-  images nothing can pull.**
-
-  `status.artifact.ref` is one string that two resolvers have to understand: the controllers reach
-  the registry through cluster DNS, the kubelet reaches it with the NODE's resolver. `registry.host`
-  fed both, so there was **no correct setting** -- unset produced `ErrImagePull` on every workload,
-  set to a node-resolvable name produced `no such host` on every object before anything published.
-
-  The two are now separate. `--default-registry` is always the in-cluster Service; the public name
-  travels in a new `--public-registry-host` and reaches `status.artifact.ref` and nothing else.
-  `registry.host` keeps its name and now means only what people already thought it meant.
-
-  Because which public path is possible depends on your cluster rather than on this chart,
-  `registry.publish.mode` has **no default** and the chart refuses to install without it:
-
-  ```yaml
-  registry:
-    publish:
-      mode: ingress        # needs nothing on the nodes: your ingress already has DNS and a cert
-      # mode: nodePort     # one containerd certs.d file per node
-      # mode: external     # you run the registry; registry.enabled=false + defaultRegistry.host
-      # mode: internalOnly # nothing outside the cluster pulls these, deliberately
-  ```
-
-  Upgrading: add `registry.publish.mode`. If you already set `registry.host` to a node-resolvable
-  name, keep it and use `mode: nodePort` -- and you can delete any CoreDNS entry you added to make
-  the controllers resolve it, because they no longer do.
-
-  This also fixes a second failure hiding behind the first: setting `registry.host` used to drop
-  `--insecure-registry` entirely, so the controllers would have failed the TLS handshake against a
-  plain-HTTP registry even if they could have resolved the name.
-
-  An Ingress template returns, which is the only mode needing nothing on the nodes -- the property
-  ADR 0006 claimed for the serving endpoint, which was never about the endpoint. See ADR 0037.
-
-- **BREAKING: the embedded serving endpoint is removed. A registry is the only publication path.**
+- **BREAKING: the embedded serving endpoint is removed. A registry is the only publication path**
+  ([ADR 0035](docs/adr/0035-a-registry-is-the-only-publication-path.md), superseding ADR 0006).
 
   `spec.publish` no longer exists. `spec.push` is the only publication block, and it does what
-  `publish` did -- the two were the same operation to two destinations, and there is one destination
-  left. Migration is field-for-field:
+  `publish` did — the two were the same operation to two destinations, and there is one destination
+  left:
 
   ```yaml
   # before                              # after
   publish:                              push:
     name: kafka-tiered-storage            repository: oci.example.com/default/kafka-tiered-storage
     tags: [v1]                            tags: [v1]
-    onConflict: Keep                      onConflict: Keep
-    history: 5                            history: 5
   ```
 
-  ...or drop `repository` entirely and let it publish to `<default-registry>/<namespace>/<name>`,
-  which is what the bundled registry is for.
+  ...or drop `repository` entirely and publish to the bundled registry.
 
-  **Do this before upgrading, and check.** The chart now upgrades its CRDs with the release, so
-  `helm upgrade` installs a schema with no `publish` field. An object still carrying one is rejected
-  loudly at that point -- which is the good outcome. The bad one is upgrading the controller without
-  the CRD: an object with `publish` and no `push` then publishes *nowhere*, reports no error worth
-  noticing, and its images stop being refreshed. Find them first:
+  **Do this before upgrading, and check.** The chart now upgrades its CRDs with the release, so an
+  object still carrying `publish` is rejected loudly — which is the good outcome. The bad one is
+  upgrading the controller without the CRD: the object then publishes *nowhere*, reports nothing
+  worth noticing, and stops being refreshed. Find them first:
 
   ```console
   kubectl get imagecomposition -A -o json | jq -r '.items[] | select(.spec.publish) | "\(.metadata.namespace)/\(.metadata.name)"'
@@ -392,603 +216,95 @@ may change between minor versions.
 
   Everything already published stays where it is; nothing is deleted or re-tagged.
 
-  **If you were running without a registry, you now need one, and the chart installs it.**
-  `registry.enabled` is on by default. What you lose is the one thing the embedded endpoint was
-  genuinely better at: it needed no node configuration at all. A registry reached over a NodePort
-  needs a `hosts.toml` drop-in per node, because containerd resolves image references with the
-  node's resolver. Front it with an ingress and a real certificate and that goes away. See
-  `docs/registry.md`.
-
-  Removed with it: `internal/serve`, the served blob/manifest store, replay, active/standby and
+  Removed with it: `internal/serve`, the blob/manifest store, replay and active/standby, and
   `internal/gc`. Flags gone: `--serving-host`, `--serving-bind-address`, `--shared-storage`,
-  `--standby-replay-interval`, `--gc-interval`, `--gc-grace`, `--gc-dry-run`. Chart values gone:
-  `operator.servingHost`, `ingress.*`, and the OCI `Service` -- `registry.host` is now what
-  `status.artifact.ref` reports.
+  `--standby-replay-interval`, `--gc-interval`, `--gc-grace`, `--gc-dry-run`,
+  `--s3-presign-blobs`, `--storage-backend`, `--storage-dir`. Chart values gone:
+  `operator.servingHost`, `operator.servingBindAddress`, `operator.storage.*`, `operator.gc.*`,
+  `operator.s3.presignBlobs`, `ingress.*` and the OCI `service.*` block.
 
   The layer **cache** is untouched: `--cache-dir` and the S3 settings are input caching and have
   nothing to do with serving.
 
-  This also means multi-replica is no longer a storage question, readiness no longer waits for a
-  warm store, and the four defect classes that lived in the serving stack -- per-replica tag
-  divergence, a Ready-but-empty replica, `416` on resumed pulls, and an unauthenticated write path
-  -- are gone with the code. See ADR 0035, which supersedes ADR 0006 and ADR 0032.
+  **What is genuinely lost is node configuration.** The serving endpoint sat behind your ingress
+  and certificate, so containerd needed no `hosts.toml`. A bundled registry over a NodePort does.
+  Front it with an ingress and a real certificate and that goes away — `publish.mode: ingress`.
 
-- **BREAKING: `charts/kube-oci-builder` is removed.** Upgrading from two releases:
+- **BREAKING: `registry.publish.mode` is required, and there is no default**
+  ([ADR 0037](docs/adr/0037-one-host-cannot-satisfy-two-resolvers.md)).
 
-  ```console
-  helm uninstall kube-oci-builder --namespace oci-builder
-  helm upgrade kube-oci-composer oci://ghcr.io/lhns/charts/kube-oci-composer     --namespace oci-composer --set imageBuild.enabled=true
+  `status.artifact.ref` is one string that two resolvers must understand: the controllers reach the
+  registry through cluster DNS, the kubelet reaches it with the **node's** resolver. Which public
+  path is possible depends on your cluster rather than on this chart, so the chart asks:
+
+  ```yaml
+  registry:
+    publish:
+      mode: ingress        # needs nothing on the nodes
+      # mode: nodePort     # one containerd certs.d file per node
+      # mode: external     # your own registry
+      # mode: internalOnly # nothing outside the cluster pulls these, deliberately
   ```
 
-  The `ImageBuild` CRD survives the uninstall (`resource-policy: keep`), and your objects with it.
-  Values move from `builder.*` to `imageBuild.*`.
+  `helm install` with no arguments now fails with that message, which is the point: it previously
+  succeeded and produced images nothing could pull.
 
-- **`--gc-keep-builds` is renamed `--keep-builds`**, which is what the builder already called it. The
-  `gc-` prefix was misleading: the flag caps `status.history`, and collection merely honours that cap.
-  The old name keeps working as a deprecated alias, so a values file written against the previous
-  release does not become a crash-loop on an unknown flag. Setting both takes the new one.
+  Internally the two addresses are now separate — `--default-registry` is always the in-cluster
+  Service and the public name travels in `--public-registry-host`, reaching `status.artifact.ref`
+  and nothing else.
 
-- Schema parity fixes with no behaviour change: `platforms` items are length-limited on both kinds,
-  `buildSecret.secretRef` is a pointer like every other `secretRef`, and the status printcolumn
-  carries `priority=1` on both so `kubectl get` renders them alike. `SourceRefSource` and
-  `RevisionMatches` moved to `shared_types.go`, where both kinds' shared API surface lives.
+- **BREAKING: a `sourceRef` must name a source in the object's OWN namespace.** Both controllers
+  hold cluster-wide read on Flux sources, so without this rule a tenant who can create an
+  `ImageComposition` could bake any namespace's content into an image they control and can read.
+  It had to be enforced controller-side because a CEL rule cannot read `metadata.namespace`.
+
+- **BREAKING: `--gc-keep-builds` is renamed `--keep-builds`** (`operator.keepBuilds`), which is
+  what the builder already called it. The old flag still works and is deprecated: silently dropping
+  a flag someone set in a values file becomes a crash-loop on an unknown flag, which is a worse
+  upgrade than a rename.
+
+- **`sourceRef` layers hash the artifact's REVISION rather than its tarball digest.**
+  source-controller re-packs its artifacts on restart, so the digest changes while the revision it
+  describes does not — which rebuilt every composition for bytes that were identical.
+
+- **CRDs install from `templates/` rather than `crds/`.** Helm never upgrades anything in `crds/`,
+  which is why schema changes previously needed CRD surgery by hand. Both CRDs carry
+  `helm.sh/resource-policy: keep`, so `helm uninstall` cannot take your objects with it.
 
 ### Fixed
-- **Every Service in the chart selected every pod in the release.** All pods carried only the chart's
-  two selector labels, so the registry pod was already backing the composer's Service -- a pull
-  routed to the wrong container, from a Service reporting itself healthy. Harmless while the registry
-  was off by default; shipping it on would have made it everyone's default. Each workload now carries
-  a component label and each Service selects on it.
 
-  Found while writing the guard, along with a second one: the composer's own pod template was missing
-  the label its Service selected on, so it would have had no endpoints at all.
+Only defects that affected 0.4.0. Bugs introduced and fixed within this release cycle are not
+listed.
 
-- **CRDs are installed from `templates/` rather than `crds/`,** so `helm upgrade` applies CRD changes.
-  Helm installs `crds/` once and never touches it again, which is why the `DockerBuild` ->
-  `ImageBuild` rename needed CRD surgery by hand. Both carry `helm.sh/resource-policy: keep`:
-  deleting a CRD deletes every object of that kind.
+- **A composition could publish a new tag holding the PREVIOUS revision's content, permanently.**
+  An artifact whose status predated its own source's spec was consumed as current, and under
+  `immutable` the wrong content then held that tag forever — a tag's first publish has nothing for
+  the immutability guard to refuse. Sources whose `observedGeneration` lags are now refused as
+  Pending rather than consumed ([ADR 0026](docs/adr/0026-a-source-artifact-can-lag-its-own-spec.md)).
 
-- **A missing build cache failed the build.** BuildKit configures its registry cache importer eagerly
-  and treats a reference it cannot resolve as fatal rather than as a warning, so `--import-cache`
-  broke every *first* build against a registry that answers a missing manifest strictly. It is now
-  passed only when the cache actually resolves; export stays unconditional.
-
-- **Builds pushed Docker media types**, which an OCI-native registry may refuse with
-  `415 Unsupported Media Type` — after the image was built and the layers pushed. They now push OCI
-  types explicitly, which also stops the two kinds putting different media types into one registry.
-
-- **`push.immutable` did nothing on `ImageBuild`.** It was in the CRD from the day that kind
-  shipped, defaulted to `true`, and nothing in the build controller read it -- BuildKit pushed over
-  whatever the tag held. Anyone who set it, or who simply accepted the default, believed a tag could
-  not be silently remeaned, and it could.
-
-  The check now runs **before the Job is created**, which is the whole substance of the fix: BuildKit
-  pushes from inside the Job, so a conflict noticed afterwards is a conflict that has already
-  happened.
-
-  **This changes behaviour on upgrade.** An `ImageBuild` whose tags already hold content it did not
-  publish now goes `Stalled` instead of quietly overwriting. If that is deliberate, set
-  `onConflict: Overwrite`; if the content is already correct, `onConflict: Keep`.
-
-### Added
-- **Tests for the class of mistake that produced most of this release's bugs**: an assertion written
-  alongside the code, describing what it does rather than what it should do. Three shipped that way
-  -- a security context demanding a value that stops BuildKit starting, a test asserting a failed
-  Job was deleted while that was the bug, and a CI check asserting the broken chart config must
-  render. All three passed continuously.
-
-  They share a shape: each was a claim about how an EXTERNAL system reacts -- the kernel, watch
-  delivery, helm at install time -- in an environment that could not falsify it. So an assertion
-  about an environment the test does not have is a belief, not a test. Two mechanisms follow.
-
-  **envtest for `internal/buildcontroller`.** The fake client cannot deliver watch events, which is
-  exactly why the hot retry loop was invisible: deleting an owned Job woke the controller through
-  its own watch. A real manager makes the watch real, and the assertion is a rate. Reinstating the
-  bug produces 251 reconciles in 15 seconds against a tolerance of 12.
-
-  **Parity tests across the two kinds** (`internal/controller/kindparity_test.go`), applying
-  `unpackparity_test.go`'s argument to the controllers: a property held in two hand-maintained places
-  needs something that reads both. They cover the namespace scope, the revision pin, event recording
-  and the shared helpers -- each verified to fail when one kind drifts from the other.
-
-  The `GitRepository` stand-in moved to `test/crds/` so the e2e cluster and envtest load the same
-  file rather than keeping two.
-
-- **An envtest suite for the builder, and parity tests across the two kinds** -- both aimed at one
-  failure mode: a test that passes while being wrong about what it checks. Three of those shipped
-  this cycle.
-
-  The fake client cannot deliver WATCH events, so a reconcile provoked by the controller's own
-  writes is invisible to the unit suite. That is exactly how the retry hot loop survived: deleting a
-  failed Job woke the controller through its own `Owns()` watch, the backoff never applied, and
-  every unit test passed. `TestAFailingBuildDoesNotSpinTheQueue` runs a real manager and asserts a
-  RATE -- with the defect reinstated it observes **251 reconciles in 15 seconds** against a
-  tolerance of 12.
-
-  The parity tests apply `unpackparity_test.go`'s argument to the controllers: a property held in
-  two hand-maintained places needs something that reads both. They check that both kinds scope
-  references to their own namespace, both honour a pinned revision, neither keeps a private copy of
-  the shared helpers, and both record events through the helper that applies the length limit --
-  the last being a difference that already shipped.
-
-  The `GitRepository` stand-in moved to `test/crds/` so the e2e cluster and envtest load the same
-  one; envtest loads CRDs by directory, so a directory of only CRDs is what makes it shareable.
-
-- **`sourceRef.revision` pins the revision a layer expects.** Optional; unset keeps today's
-  behaviour of consuming whatever the source publishes.
-
-  It is the only way to make a `sourceRef` layer a pure function of the spec. A branch or a semver
-  range moves with no edit to anything, so the staleness check in
-  [ADR 0026](docs/adr/0026-a-source-artifact-can-lag-its-own-spec.md) cannot see it — that compares
-  `generation` against `observedGeneration`, which is the source reporting on itself. This is the
-  assertion from the consuming side, and holds even if that bookkeeping is wrong.
-
-  Matched against Flux's `<ref>@<algo>:<hash>` by whichever half you give: `v0.6.8` matches
-  `v0.6.8@sha1:<anything>`, `v0.6.8@sha1:b739efb5` matches only that commit. The short form exists
-  because a generator usually knows the tag it asked for and not the commit it resolved to, and the
-  check should not require the half it cannot supply.
-
-  A mismatch is **pending, not stalled**: what fixes it is the source catching up, which raises no
-  generation bump here, so stalling would wait for an event that cannot come. Honoured by
-  `DockerBuild.spec.context` too.
-
-- **`status.history[].sources` records where each layer came from** — its name, the resolved digest,
-  and the revision for a source that has one. Answering "which commit is in this image?" previously
-  meant pulling the manifest, fetching the layer and reading its payload, which is exactly how the
-  incident behind [ADR 0026](docs/adr/0026-a-source-artifact-can-lag-its-own-spec.md) had to be
-  diagnosed, and why a wrong artifact sat unnoticed until a tag conflict surfaced it.
-
-- **`--insecure-registry`** on the builder: registry hosts to push to over plain HTTP,
-  comma-separated. Opt-in **per host** rather than a global switch -- an internal or air-gapped
-  registry without TLS is a real deployment, but naming one must not quietly downgrade every other
-  push the same controller makes. Deliberately not part of the build input hash: how bytes are
-  transported does not change what they are, so flipping it rebuilds nothing.
-- **`DockerBuild` (alpha).** The kind ADR 0025 describes, now implemented: a second controller,
-  a second binary (`cmd/oci-builder`), a second chart (`charts/kube-oci-builder`) carrying its own
-  CRD, and its own RBAC.
-
-  **Installing the composer does not install this.** That is the whole shape of the thing. The
-  composer's role cannot create a single object; this one creates Jobs, which is the ability to run
-  arbitrary containers, and ADR 0004 rejected a feature flag because "a flag set to `false` is a
-  weaker guarantee than a component that does not exist".
-
-  How it works: the context comes from a Flux source, so its digest is resolved rather than
-  declared; that digest, the spec, and **the pinned digests of BuildKit and the Dockerfile
-  frontend** form an input hash. An unchanged hash skips the build entirely, which answers ADR
-  0001's objection that the loop "would have to rebuild to discover whether a rebuild was needed".
-  The builder digests are hashed because for this kind the algorithm is not in this binary; the
-  controller **refuses to start** if either is unpinned, and the chart refuses to render.
-
-  Each build is one Kubernetes Job, rootless, in the object's own namespace, under a service
-  account that is deliberately bound to nothing — a pod running code from a git repository must not
-  carry the token of the thing that created it. Privileged is not offered at any setting. The Job
-  name is derived from the input hash, so a controller restart adopts the running build instead of
-  starting a second one. Secrets are passed via BuildKit's secret mount, never as build args, and
-  only their `name`/`resourceVersion` reach the input hash — a hash of a low-entropy secret in a
-  world-readable status field would be an oracle. The build cache is always per-object; a shared
-  one is a channel between whoever can write their Dockerfiles.
-
-  A floating `FROM` is refused before a Job is created. It is the single largest source of "same
-  commit, different image", and it is the one rule about a Dockerfile's *content* this controller
-  enforces.
-
-  **Read [ADR 0025](docs/adr/0025-dockerfile-builds-as-a-second-kind.md) before using it.** The
-  promise is deliberately weaker: the output digest is an observation recorded in status, not a
-  function of the spec. The record lists the consequences, is candid that ADR 0016's load-bearing
-  objection is unmet by the motivating use cases, and says what would make it right to abandon
-  this. The README's "it will never run a Dockerfile" is rewritten accordingly — `ImageComposition`
-  never will, and that is unchanged.
-
-  Alpha limits: `push` only (a Job in another pod cannot write to the loopback-only serving
-  endpoint), no GC integration, no attestations.
-- **An `image` layer verb, and `base.ref`.** An image can now be a layer source, and a base can be
-  named as one conventional `repo:tag@sha256:…` string.
-
-  The gap this closes is not "it cannot run a Dockerfile" — it is that **this tool ate tarballs and
-  half the world ships images**. A CI pipeline's natural output is an image, and until now one could
-  enter a composition only as `spec.base`: one per artifact, always underneath everything, always at
-  `/`, with no `to`, `subpath`, `owner` or `mode`. "Put the contents of this image at `/plugins`"
-  was not expressible, and the workaround — unpack it in CI and republish a tarball — discards the
-  digest that made it trustworthy.
-
-  **The image is flattened to exactly one layer**, with its whiteouts applied, so what lands is the
-  filesystem a runtime would see — a constraint rather than an implementation detail, for the reason
-  ADR 0024 gives. Everything downstream — `subpath`, rebasing, mode normalisation, symlink handling,
-  traversal refusal, deterministic ordering — is the existing tar path unchanged, so an image and a
-  tarball of the same content produce the same layer.
-
-  The cost is blob sharing. `spec.base` reuses a base's layers verbatim so two artifacts on one base
-  share blobs; flattening re-packs the bytes. Use `base` to build *on* an image and `image` to take
-  files *from* one. Config is inherited only from the base, never from an `image` layer.
-
-  `base.ref` settles a job ADR 0017 left open — the split `image` + `digest` pair is invisible to
-  the two things that keep pins fresh, a Renovate regex and kustomize's `images` transformer, which
-  both expect one string. Both spellings are supported, exactly one may be set, and they resolve and
-  **hash** identically, so rewriting a spec from one to the other republishes nothing. The tag in a
-  ref is decoration: what is pulled is always the digest.
-
-  The scope line does not move. Nothing is executed; the input is a digest-pinned image, which is
-  content-addressed more strictly than a `fetch` whose digest is merely declared. See
-  [ADR 0024](docs/adr/0024-images-as-layer-sources.md).
-
-  The README now also carries the recipe it was missing — CI → `crane digest --platform` → `ref` →
-  spec-hash tag — and states plainly that `unpack: deb` resolves no dependencies.
-
-- **`unpack: zip`**, plus `tar.xz`, `tar.zst`, `tar.bz2` and single-file `gz`. A great deal of
-  software is published only as a `.zip` — Kafka Connect plugin bundles, JVM distributions,
-  Terraform providers — and none of it could enter an artifact. The workaround was to repack the
-  zip as a tarball and host that, which discards the upstream URL and digest and replaces them with
-  "we repacked this once".
-
-  `subpath`, rebasing, mode normalisation, symlink handling, deterministic ordering and traversal
-  refusal are the same code the tar path uses, now extracted so there is exactly one implementation
-  of where an entry is allowed to land. A zip and a tarball of the same content produce the same
-  layer.
-
-  **A zip records unix permissions only if whoever wrote it did.** An archive produced on Windows
-  carries FAT attributes instead, so every file arrives non-executable and a binary needs
-  `mode: {file: "0755"}` to be runnable. The output is still reproducible — the input is
-  digest-pinned — but the same release zipped on Linux and on Windows gives two different
-  artifacts, and nothing here can tell which you have. Guessing from content was rejected: it would
-  make the output depend on something other than the spec.
-
-  Symlinks are recovered properly, which is the part worth stating: a zip has no typeflag, so a
-  symlink is an ordinary entry whose body is the link target. Reading entries as files would turn
-  each one into a small text file containing a path, with a stable digest and a green build,
-  failing later as a linker error in whatever mounts the artifact. Encrypted entries, compression
-  methods beyond store and deflate, duplicated names and names that are not valid UTF-8 are refused
-  rather than guessed at.
-
-  `gz` unpacks a single compressed file, so `to` must name a file and `subpath` is invalid. The name
-  comes from `to` alone — not from the URL, and not from the filename gzip stores in its header —
-  because both are excluded from the input hash, and using either would let two mirrors of
-  identical bytes produce different layers under one hash.
-
-  The compressed-tar variants were nearly free: `unpack: deb` already needed xz, zstd and bzip2
-  readers, since dpkg picks the compressor for `data.tar.*`. That table is now shared, so a spec can
-  use xz on its own and not only inside a `.deb`. No new dependency. `tar.bz2` has no round-trip
-  test because the standard library decodes bzip2 but cannot write it — the same two lines of stdlib
-  the deb path has shipped since 0.4.0.
-
-  **`AssemblyVersion` is unchanged, deliberately.** It covers output changing for *identical*
-  inputs, and no existing spec can name any of these modes — the CRD's enum rejected them at
-  admission. Bumping it would invalidate every recorded input hash in every cluster and force a
-  full rebuild of byte-for-byte identical content.
-
-  **Upgrading the chart is not enough.** Helm installs the CRDs under `crds/` on install and never
-  touches them on upgrade, so a chart upgrade alone leaves the old enum in place and the API server
-  rejects `unpack: zip` at apply time. Apply the CRD (`make install`, or
-  `kubectl apply -f config/crd/bases`). Anyone validating manifests with kubeconform against a
-  pinned `schemas/` URL needs to move that pin too, or valid manifests will fail their CI.
-
-  See [ADR 0023](docs/adr/0023-more-archive-formats.md). RPM is still not included
-  ([#9](https://github.com/lhns/kube-oci-composer/issues/9)); Alpine `.apk` still needs nothing.
-
-- **An e2e test that answers ADR 0025's first spike question.** The alpha shipped without measuring
-  whether `SOURCE_DATE_EPOCH=0` plus `rewrite-timestamp=true` actually gives byte-identical output
-  across two runs of the same context, and that measurement is the difference between two readings
-  of `status.inputHash`: whether it identifies the OUTPUT, or only the INPUTS.
-
-  If rebuilds reproduce, the immutable-tag guard can never fire on an unchanged spec. If they do
-  not, ADR 0025's concession stands -- losing status or the store means a rebuild can produce a
-  digest that permanently conflicts with an already-published tag under the default
-  `immutable: true`.
-
-  **The measurement passed:** two independent builds of the same context, caches disabled, produce
-  the same digest. Narrowly, though -- it shows the machinery does not inject nondeterminism, not
-  that an arbitrary Dockerfile reproduces. A `RUN` that installs packages, resolves DNS or reads the
-  clock can still differ, so the immutable-tag guard stays load-bearing.
-
-  The test builds the same context under two names rather than deleting and recreating one object,
-  because a deterministic Job name means a recreated object can *adopt* the first build's finished
-  Job and read its digest back without building anything -- passing while proving nothing. The
-  cache is disabled on both for the same reason: a cache hit would make the digests match by reuse
-  rather than by reproducibility.
-
-### Changed
-- **BREAKING: `DockerBuild` is renamed `ImageBuild`.** Nothing in the implementation uses Docker --
-  the build runs rootless BuildKit driven by `buildctl`, and what the kind consumes is a *Dockerfile*.
-  [ADR 0028](docs/adr/0028-the-kind-is-called-imagebuild.md) records why this reverses
-  [0025](docs/adr/0025-dockerfile-builds-as-a-second-kind.md)'s naming.
-
-  **Upgrading requires manual action; existing objects are not migrated.** Kubernetes cannot rename
-  a CRD's `spec.names`, so `imagebuilds.oci.lhns.de` is a different resource and nothing carries
-  objects across:
-
-  ```
-  kubectl get dockerbuilds -A -o yaml > builds.yaml
-  # rewrite `kind: DockerBuild` to `kind: ImageBuild`
-  kubectl apply -f builds.yaml
-  kubectl delete crd dockerbuilds.oci.lhns.de
-  ```
-
-  Helm never upgrades or deletes `crds/`, so a chart upgrade leaves the old CRD in place and adds
-  the new one -- delete the old one by hand, and note that doing so deletes anything still under it.
-
-  Status is lost with the objects, so every build runs once more. That is harmless today only
-  because `push.immutable` is inert on this kind; it is why the rename lands before the tag policy
-  is made real.
-
-  The short name becomes `ibuild`. **The component keeps its name** -- the binary is still
-  `oci-builder`, the chart still `kube-oci-builder` -- because neither ever contained "docker".
-- **A `sourceRef` must now name a source in the object's OWN namespace.** Both controllers read Flux
-  sources cluster-wide, so honouring `sourceRef.namespace` let anyone who could create an
-  `ImageComposition` or `DockerBuild` pull another namespace's content into an image they control
-  and can read — the one tenancy boundary a spec could cross on its own. A source elsewhere is now a
-  terminal error naming the reason. The field is kept so an explicit same-namespace value is not a
-  schema error. **Breaking** for anyone who genuinely relied on a shared source namespace: copy the
-  source into the consuming namespace, or publish it to a registry and consume it as an image.
-- **`sourceRef` layers hash the artifact's REVISION rather than its tarball digest.** Source
-  controller re-packs artifacts on restart, so the digest moved while the content did not, and every
-  composition consuming that source rebuilt for bytes that were identical. The digest is still what
-  the fetch is verified against. One-time effect: input hashes for `sourceRef` layers change once,
-  so those objects rebuild — and because composition is deterministic they reproduce the same digest,
-  so no tag conflicts.
-
-- The `DockerBuild` reconcile loop has tests: coverage of `internal/buildcontroller` goes from
-  **23.6% to 82.9%**. The whole state machine was previously unexercised — only the pure Job
-  rendering was covered — which is how the three defects above shipped. The new suite drives the
-  loop over a fake client: job creation, adoption on repeat reconciles, the input-hash
-  short-circuit, success recording the artifact, failure not stalling, suspend, a missing source
-  being pending rather than terminal, and an unpinned `FROM` being refused before any Job exists.
-- ADR 0025 corrected: it said `BuildRecord.inputHash` lets a controller that lost `status.artifact`
-  re-verify rather than rebuild. The field is recorded but the read path is not implemented, and
-  the record now says so.
-
-- **`DockerBuild` has an e2e.** The first thing that runs the builder end to end, and it exists
-  because two pieces could not be verified any other way: the built digest comes back through the
-  pod's termination message, which needs a real kubelet to populate, and the `FROM` check reads a
-  real context over HTTP. Both were previously tested only against fakes -- which is how a digest
-  readback from a message nothing wrote got as far as it did.
-
-  It also answers ADR 0025's second spike question, whether rootless BuildKit runs on the target
-  nodes at all. The ADR lists "it does not" as grounds to abandon, so the failure is loud rather
-  than skipped.
-
-  Four cases: a build produces an image and the recorded digest resolves **in the registry** (not
-  merely in status); an unchanged reconcile does not rebuild, with the input hash, the digest and
-  the Job count all holding still; and an unpinned `FROM` is refused with **no Job created**.
-
-  The fixtures are the interesting part. A build needs a registry, so one runs in the cluster over
-  plain HTTP. The context must come from a Flux source, and the e2e cluster does not run Flux -- so
-  a minimal `GitRepository` CRD stands in, deliberately without a status subresource so the harness
-  can publish `status.artifact` itself, pointing at a tarball served from a ConfigMap. That tests
-  this controller's reading of the contract rather than testing Flux.
-- **The builder chart is now drift-guarded like the composer's.** `config/rbac-builder/role.yaml`
-  was generated and read by nothing, so the chart's hand-written rules — the ones granting
-  `jobs: create`, which is the ability to run arbitrary containers — could diverge from the
-  kubebuilder markers unnoticed. Four guards mirror the composer's, reusing its helpers rather than
-  copying them: RBAC matches the generated role, secrets are never `list`/`watch`, every rendered
-  flag exists in the binary, and an unpinned builder image is refused. A fifth checks the shipped
-  digests are not placeholders, which is the specific failure that got through.
-- The `DockerBuild` reconcile loop has tests: coverage of `internal/buildcontroller` goes from
-  **23.6% to 82.9%**. The whole state machine was previously unexercised — only the pure Job
-  rendering was covered — which is how the three defects above shipped. The new suite drives the
-  loop over a fake client: job creation, adoption on repeat reconciles, the input-hash
-  short-circuit, success recording the artifact, failure not stalling, suspend, a missing source
-  being pending rather than terminal, and an unpinned `FROM` being refused before any Job exists.
-- ADR 0025 corrected: it said `BuildRecord.inputHash` lets a controller that lost `status.artifact`
-  re-verify rather than rebuild. The field is recorded but the read path is not implemented, and
-  the record now says so.
-
-- **Build pods permit privilege escalation and add two capabilities.** Measured, not chosen: the
-  first end-to-end run against a real cluster showed rootless BuildKit could not start under the
-  previous posture, and [ADR 0027](docs/adr/0027-what-rootless-buildkit-actually-needs.md) records
-  the six configurations tried.
-
-  "Rootless" means no root on the *host*, not that no privilege is needed to start. Building an
-  image means creating files owned by many UIDs, which needs a user namespace mapping a *range* of
-  them -- and the kernel lets an unprivileged process map only one by itself, so the image ships
-  setuid-root `newuidmap` to do that single write. `allowPrivilegeEscalation: false` made the kernel
-  ignore the setuid bit, and `drop: ALL` emptied the bounding set so `CAP_SETUID` was unobtainable
-  regardless. buildkitd never started and every build failed in seconds.
-
-  Build containers now run with escalation permitted, all capabilities dropped, and exactly `SETUID`
-  and `SETGID` added. Unchanged: uid 1000, `runAsNonRoot`, `privileged: false` (still not offered at
-  any setting), no host namespaces, no devices, no host mounts. The controller's own posture is
-  untouched.
-
-  The cost, stated plainly: a setuid binary inside a build image can acquire those two capabilities
-  within the container. That is not host root, and the blast radius ADR 0001 refused is not
-  reinstated -- but it is a real loosening, and it is another reason the builder is a separate
-  component with its own chart rather than a flag on the composer. Kubernetes user namespaces would
-  have cost nothing and kept the old posture; all four variants failed to start on kind, so that
-  remains the destination rather than the current state.
-
-### Fixed
-- **Anything in the cluster could push to the serving endpoint.** `--serving-bind-address` defaults
-  to `:5000` -- every interface -- the chart exposes that as a Service, and the Ingress routes
-  `/v2/`, a prefix that includes `PUT`. There is no authentication in that package. So any pod able
-  to reach the Service could publish a manifest or repoint a mutable tag, and a test confirms an
-  arbitrary pod's `PUT` returned **201 Created**.
-
-  Writes are now refused unless the TCP peer is loopback, which means the controller itself. Reads
-  stay anonymous, which is the point of the endpoint and unchanged.
-
-  The uncomfortable part is how long it was written down without being true: `internal/serve`'s
-  package doc has always claimed writes arrive only over loopback, and `Handler` said "the chart
-  binds the write path to localhost". Neither was implemented, nothing tested it, and
-  [ADR 0025](docs/adr/0025-dockerfile-builds-as-a-second-kind.md):87-90 built a design decision on
-  the same false premise.
-- **Long event messages were dropped by the API server.** The two controllers each had their own
-  `event` helper and they were not the same: the builder truncated to the API server's limit, the
-  composer did not, so an over-long message was rejected outright rather than shortened. The cases
-  that produce one -- a build's stderr, a list of every unpinned `FROM` -- are exactly the failures
-  worth seeing. One shared helper now, which is also how the difference was noticed.
-- **An interrupted layer pull could never resume.** containerd asks for `Range: bytes=<offset>-`
-  when continuing a download, which is valid per RFC 9110; the upstream registry handler parses the
-  header with `fmt.Sscanf(h, "bytes=%d-%d")` and answered **416 BLOB_UNKNOWN**, so an interrupted
-  pull failed permanently instead of continuing. The open-ended form is now closed to
-  `bytes=<offset>-<size-1>` before the handler sees it -- wrapped rather than forked, since the size
-  is only knowable from our blob store. Suffix ranges are deliberately left alone: upstream rejects
-  those too, but containerd does not send them.
-- **A standby replica could serve 404 for one tag forever.** Replay skipped a build when its
-  *digest* was already present, but tag restores happen afterwards and only log on failure. One
-  failed tag PUT therefore became permanent: the digest stayed present, the build was skipped on
-  every later pass, and that tag 404'd on that replica for the life of the process while another
-  replica served it -- which from a client is indistinguishable from a registry intermittently
-  losing images. The skip now requires the digest **and** every tag.
-- **The chart could template a replica that reports ready and serves nothing.** `replicaCount > 1`
-  with `storage.shared=true` and `persistence.enabled=false` gave every pod its own `emptyDir` while
-  asserting they were shared. Each replica then restored nothing, reported ready anyway (readiness
-  is observed on attempt, deliberately), joined the Service and 404'd every pull routed to it.
-  Refused at template time.
-
-### Added
-- **A golden-digest test for assembly.** `AssemblyVersion` exists so a controller that assembles
-  differently cannot serve old-algorithm artifacts under an unchanged input hash -- but it is a
-  constant a human must remember to bump, and the determinism test cannot help because it runs the
-  algorithm twice in one process, where any change agrees with itself. The golden test pins the
-  actual bytes, so a change to the tar writer, the config, the ordering or the toolchain's flate
-  output fails loudly and prompts the decision.
-- **`DockerBuild` history duplicated entries a rebuild reproduced.** It rotated `status.history`
-  with its own copy of the logic, missing the composer's rule that a rebuild reproducing an earlier
-  digest MOVES that entry to the front rather than adding a second one. Now that rebuilds are known
-  to reproduce ([ADR 0027](docs/adr/0027-what-rootless-buildkit-actually-needs.md)) that was no
-  longer theoretical: a reverted change, or any input-hash move that leaves the output identical,
-  burned two retention slots on one artifact and evicted a genuinely distinct older build. Both
-  kinds now share one rotation.
-- **`flux reconcile` timed out instead of reporting a failure.** `status.lastHandledReconcileAt` and
-  `status.observedGeneration` describe a reconcile pass, not its outcome, and Flux writes them that
-  way -- the composer set both only on success. So a failing object never echoed the request the CLI
-  was waiting for, and a stale `observedGeneration` reads to kstatus as "still working" rather than
-  "failed". Both are worst exactly when someone is debugging. They are now set on every status
-  write. `DockerBuild` never implemented the annotation at all despite declaring the field and
-  [ADR 0009](docs/adr/0009-flux-conventions-without-dependency.md) committing to it; it does now.
-- **The builder no longer requests `pods/log`.** Nothing read pod logs -- the digest comes back
-  through the termination message and a failure's detail from container status -- so the grant was
-  permission held for nothing.
-- **A composition could publish a new tag holding the PREVIOUS revision's content**, permanently.
-  A generator bumped a `GitRepository`'s `ref.tag` and rotated the composition's spec-hash publish
-  tag in one apply; the composition reconciled instantly, the source had not cloned the new tag
-  yet, and its `status.artifact` still described the old revision while reporting `Ready=True`.
-  The controller believed it, the layer cache served the old tarball from disk without a network
-  call, and the new tag was published pointing at old content. The immutable-tag guard could not
-  catch it — a tag's *first* publish has nothing to conflict with — and could only refuse to
-  correct it afterwards, which is how it was found.
-
-  A Flux source's `status` is now only believed when it describes the source's current spec:
-  `metadata.generation` must equal `status.observedGeneration`, and `Ready` must not be `False`.
-  Otherwise the composition waits with `Reconciling`/`DependencyNotReady` instead of building.
-  Flux source kinds are also watched now, so a source catching up rebuilds within seconds rather
-  than at the next `spec.interval` — tolerating a cluster with no Flux installed, where the kinds
-  simply are not watched. This does **not** cover a source tracking a branch or a semver range,
-  which produces a new revision with no generation bump at all; see ADR 0026 for the
-  `sourceRef.revision` follow-up that would.
-- **`DockerBuild`: three things that were shipped wrong.** Found by analysing the merged alpha
-  rather than the branch it came from.
-
-  The chart's `buildkitImage` and `dockerfileFrontend` were pinned to **all-zero placeholder
-  digests**. The guard checks for `@sha256:` — form, not substance — so the chart installed
-  happily and every build then failed to pull. Both now carry real digests.
-
-  **`spec.timeout` was never read.** A documented field with a 30m default that did nothing, so a
-  hung build ran until something else killed it. It becomes the Job's `activeDeadlineSeconds`, so
-  Kubernetes enforces it and marks the Job `DeadlineExceeded` — a controller-side timer would have
-  had to survive a leader change to mean anything.
-
-  **Build pods carried an API token.** `spec.serviceAccountName` defaulted to empty, so pods ran as
-  the namespace's `default` account with its token mounted, while the chart created a purpose-built
-  empty account that nothing could reference and `NOTES.txt` printed a line claiming builds used it.
-  The account could never have worked: a ServiceAccount is namespaced and builds run in their own
-  object's namespace. The guarantee was never "a special account", it was "no credentials in the
-  build pod" — so the controller now sets `automountServiceAccountToken: false` on every build pod
-  that does not name an account, which works in every namespace and needs no chart coordination.
-  Naming an account is opting the token back in, for a build that genuinely needs an identity.
-
-- **A suspended `DockerBuild` said nothing**, so it looked stalled. It now reports `Ready=False`
-  with reason `Suspended`, matching `ImageComposition`.
-- **No Events were emitted** despite the RBAC granting them. Build failures and invalid specs now
-  raise Warnings — a build's detail lives in pod logs that vanish with the pod, so the Event is
-  often the only durable trace.
-- **`spec.resources` reached only the build container**, leaving the context fetch as the one
-  unbounded container in the pod — the wrong one to leave unbounded, since it downloads somebody
-  else's tarball.
-
-- **`DockerBuild`: every build failed to find its own Dockerfile.** The two halves of the context
-  contract disagreed, and each half was individually right.
-
-  A source-controller artifact wraps the tree in a single top-level directory whose name is not
-  predictable. The controller's pinned-`FROM` check strips that wrapper, so an unpinned base was
-  correctly refused -- and then every build that PASSED the check died inside BuildKit with
-  `failed to read dockerfile: open Dockerfile: no such file or directory`, because the init
-  container extracted the archive verbatim and left the Dockerfile one directory below where
-  `buildctl` looks.
-
-  The init container now applies the same rule the controller does: strip one level only when the
-  archive really is a single wrapper directory, so a tarball whose files sit at the root still
-  builds rather than being silently emptied. The test runs the actual script against both shapes,
-  because no assertion over the rendered pod spec could have caught this -- both halves looked
-  correct in isolation, and only running them together showed the mismatch.
-
-- **`DockerBuild`: a failing build retried in a hot loop and destroyed its own evidence.** Found by
-  the first end-to-end run against a real cluster, which is the only place it could have been found:
-  the reconcile loop was correct against a fake client, because a fake client has no watches.
-
-  The failure path deleted the failed Job immediately, so that the next attempt would not adopt it.
-  But deleting an owned Job wakes this controller through its own Job watch, and that reconcile
-  finds no Job and starts another — so the `RequeueAfter` backoff never applied and the build
-  retried every few seconds indefinitely. Each retry also deleted the previous pod, and the pod is
-  the only place the reason a build failed is written down, so no one could ever read why.
-
-  The failed Job is now kept until its backoff has actually elapsed and deleted only when the next
-  attempt is due, which makes the delete the trigger for the retry rather than a race against it.
-  A failure is counted once however many times it is observed.
-
-  Relatedly, a failed build reported only `BackoffLimitExceeded` — the mechanism, not the cause.
-  Status now carries the build container's exit code, termination reason and message, plus the
-  `kubectl logs` line that shows the rest.
-- **The e2e harness could not report its own failures.** `make e2e-test` ran `go test -timeout 15m`
-  while the in-test deadline was also 15 minutes, so the test binary panicked on the global timeout
-  at the same instant and the diagnostic dump never ran. The in-test deadline is now strictly
-  shorter than the binary's, so the harness always outlives the assertion it is reporting on.
-- **`DockerBuild`: three things that were shipped wrong.** Found by analysing the merged alpha
-  rather than the branch it came from.
-
-  The chart's `buildkitImage` and `dockerfileFrontend` were pinned to **all-zero placeholder
-  digests**. The guard checks for `@sha256:` — form, not substance — so the chart installed
-  happily and every build then failed to pull. Both now carry real digests.
-
-  **`spec.timeout` was never read.** A documented field with a 30m default that did nothing, so a
-  hung build ran until something else killed it. It becomes the Job's `activeDeadlineSeconds`, so
-  Kubernetes enforces it and marks the Job `DeadlineExceeded` — a controller-side timer would have
-  had to survive a leader change to mean anything.
-
-  **Build pods carried an API token.** `spec.serviceAccountName` defaulted to empty, so pods ran as
-  the namespace's `default` account with its token mounted, while the chart created a purpose-built
-  empty account that nothing could reference and `NOTES.txt` printed a line claiming builds used it.
-  The account could never have worked: a ServiceAccount is namespaced and builds run in their own
-  object's namespace. The guarantee was never "a special account", it was "no credentials in the
-  build pod" — so the controller now sets `automountServiceAccountToken: false` on every build pod
-  that does not name an account, which works in every namespace and needs no chart coordination.
-  Naming an account is opting the token back in, for a build that genuinely needs an identity.
-
-- **A suspended `DockerBuild` said nothing**, so it looked stalled. It now reports `Ready=False`
-  with reason `Suspended`, matching `ImageComposition`.
-- **No Events were emitted** despite the RBAC granting them. Build failures and invalid specs now
-  raise Warnings — a build's detail lives in pod logs that vanish with the pod, so the Event is
-  often the only durable trace.
-- **`spec.resources` reached only the build container**, leaving the context fetch as the one
-  unbounded container in the pod — the wrong one to leave unbounded, since it downloads somebody
-  else's tarball.
+- **`flux reconcile` timed out instead of reporting a failure.** `status.lastHandledReconcileAt`
+  was never echoed, so Flux waited for an acknowledgement that never came.
 
 - **An archive entry named exactly `..` escaped its target directory.** The traversal guard tested
-  for it in one condition and then only raised an error on a `../` prefix, which `..` does not have,
-  so the entry survived and landed one level above where the layer was confined. The impact was a
-  stray directory entry rather than overwritten content, and no legitimate archive contains such an
-  entry — but it was a hole in the check whose entire job is to be the escape guard, and there was
-  no test covering traversal at all. There is now, for every format.
-- **Entries sharing a name were resolved by an unstable sort.** Two entries with the same name
-  compare equal, so which one survived deduplication was decided by the sort's internal
-  partitioning rather than by the archive. The result was deterministic for a given Go toolchain and
-  undefined in principle, meaning a Go upgrade could silently move digests that immutable tags then
-  refuse to republish. The sort is now stable, so archive order is the tiebreak. This is not an
-  `AssemblyVersion` change: it only affects archives whose output was never well defined, and a
-  version bump cannot repair a hash that had no single correct value.
-- **An unpack mode the controller does not implement now stalls instead of retrying forever.** It
-  was an ordinary error, so the object sat `Ready=False` and requeued with exponential backoff
-  indefinitely, never setting `Stalled` and never saying why. It is reachable in practice precisely
-  because Helm does not upgrade CRDs: a schema newer than its controller is an ordinary situation.
+  for a `../` prefix, which a bare `..` does not have.
+
+- **Entries sharing a name were resolved by an unstable sort**, so two entries with the same name
+  could produce different bytes on different runs — in a system whose whole promise is that they
+  cannot.
+
+- **Long event messages were dropped by the API server** rather than truncated, so the failures
+  worth reading were the ones that vanished.
+
+### Security
+
+- **0.4.0's serving endpoint accepted writes from anything that could reach it.**
+  `--serving-bind-address` defaulted to every interface, the chart exposed it as a Service, and the
+  Ingress routed `/v2/` including `PUT` — with no authentication. A test confirmed an arbitrary
+  pod's `PUT` returned `201 Created`. Both the package documentation and ADR 0025 asserted the
+  write path was loopback-only; that was false.
+
+  The endpoint is removed entirely in this release, so the exposure is gone with it. Anyone still
+  running 0.4.0 should treat their serving endpoint as writable by anything on the pod network.
 
 ## [0.4.0] - 2026-08-14
 
