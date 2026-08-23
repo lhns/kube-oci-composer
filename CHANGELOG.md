@@ -187,6 +187,22 @@ must name a source in its own namespace.
 - **`--insecure-registry`**, a list of hosts reachable over plain HTTP, matched on host so that
   naming one internal registry does not downgrade every other request.
 
+- **The registry can be placed, and is no longer evicted alongside its own consumers.**
+  `registry.nodeSelector`, `registry.tolerations`, `registry.affinity`,
+  `registry.topologySpreadConstraints`, `registry.priorityClassName` and
+  `registry.terminationGracePeriodSeconds`. Until now the registry pod spec carried no scheduling
+  fields at all — while both controllers honoured the top-level ones — so there was no supported
+  way to keep it off the nodes being cordoned. It was rescheduled in the same batch as the
+  workloads that pull from it, which then sat in `ErrImagePull` waiting for it.
+
+  Deliberately registry-scoped rather than reusing the top-level keys: the usual reason to steer
+  the registry is that it should *not* be where the controllers are, and one shared set of keys
+  could not express that.
+
+  A `PodDisruptionBudget` comes with them (`registry.podDisruptionBudget`), rendered **only above
+  one replica** — a floor of one against a single replica can never be satisfied, so it would block
+  every drain forever with nothing in the events saying why.
+
 ### Changed
 
 - **BREAKING: the embedded serving endpoint is removed. A registry is the only publication path**
@@ -275,6 +291,11 @@ must name a source in its own namespace.
 
 Only defects that affected 0.4.0. Bugs introduced and fixed within this release cycle are not
 listed.
+
+- **The builder could never use an image pull secret.** `builder-deployment.yaml` read
+  `.Values.imagePullSecrets`, which is not a key this chart has — so the block silently rendered
+  nothing and a private builder image was unpullable with no indication why. It reads
+  `image.pullSecrets` now, like the composer, and the registry pod gained the block it never had.
 
 - **A composition could publish a new tag holding the PREVIOUS revision's content, permanently.**
   An artifact whose status predated its own source's spec was consumed as current, and under

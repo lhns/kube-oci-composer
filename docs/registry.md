@@ -332,6 +332,32 @@ kubectl get events -A --field-selector reason=RetentionDegraded
 **Keeping the two numbers in step.** Nothing enforces the relationship between the registry's window
 and the refresh interval; they live in different systems. Write them down together.
 
+**Where the registry runs during maintenance.** Left unplaced, the registry is an ordinary pod at
+default priority, so a drain can evict it in the same batch as the workloads that pull from it —
+and then those workloads sit in `ErrImagePull` while the only thing that could serve them is itself
+being rescheduled. Two things make the gap longer than the move: a ReadWriteOnce volume has to
+detach from the cordoned node and reattach elsewhere, and the kubelet backs `ErrImagePull` off
+exponentially to about five minutes, so consumers stay broken well after the registry is healthy.
+
+The registry has its own placement keys, deliberately separate from the top-level ones that place
+the controllers — the usual reason to steer the registry is that it should *not* be where they are:
+
+```yaml
+registry:
+  nodeSelector: {kubernetes.io/hostname: storage-1}   # or a label on your infra pool
+  priorityClassName: infra                            # decides who gets a node back first
+  tolerations: []
+  terminationGracePeriodSeconds: 30
+```
+
+`priorityClassName` does not prevent an eviction — a drain evicts regardless of priority — but it
+decides who is scheduled first when the remaining nodes are tight, which is exactly the situation
+during a cordon.
+
+A `PodDisruptionBudget` is rendered too, but **only above one replica**: a floor of one against a
+single replica can never be satisfied, so it would block every drain forever with nothing in the
+events explaining why.
+
 ## One repository per object
 
 `ImageBuild`'s `push.repository` is yours to choose, so several objects can share one. Nothing

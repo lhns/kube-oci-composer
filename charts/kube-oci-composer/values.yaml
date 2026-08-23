@@ -482,6 +482,39 @@ registry:
     requests: {cpu: 50m, memory: 128Mi}
     limits: {memory: 1Gi}
 
+  # WHERE THE REGISTRY RUNS. Separate from the top-level nodeSelector/tolerations/affinity/
+  # priorityClassName, which place the CONTROLLERS, and separate on purpose.
+  #
+  # The reason to steer the registry is usually that it should NOT be where the controllers are.
+  # The controllers are stateless and cheap to move; the registry holds the store every pull in the
+  # cluster depends on. One shared set of keys would make "keep the controllers off the storage
+  # nodes" and "keep the registry ON them" the same setting.
+  #
+  # Until these existed there was no supported way to keep the registry off the nodes you are about
+  # to drain, so it was rescheduled alongside the very pods that needed to pull from it.
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+
+  # Worth setting to something above your workloads. It does not stop an eviction -- a drain evicts
+  # regardless of priority -- but it decides who gets a node back first when the remaining ones are
+  # tight, which is exactly the case during a cordon.
+  priorityClassName: ""
+
+  # How long zot gets to finish in-flight requests when it is told to stop.
+  terminationGracePeriodSeconds: 30
+
+  podDisruptionBudget:
+    # NOT rendered while there is only one replica, and that is not an oversight: a budget of
+    # 1-of-1 can never be satisfied, so it blocks every drain forever -- the node never cordons,
+    # the cluster upgrade stalls, and nothing in the events explains why. A budget that cannot be
+    # met is worse than no budget.
+    enabled: true
+    # A floor rather than a ceiling, because "at least one registry is serving" is the sentence
+    # anyone actually wants.
+    minAvailable: 1
+
 # Persistence for the layer cache.
 #
 # Not a system of record -- it holds fetched layer SOURCES, so anything lost is refetched from

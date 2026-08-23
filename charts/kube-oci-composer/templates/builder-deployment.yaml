@@ -31,7 +31,9 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: {{ include "kube-oci-composer.builderServiceAccountName" . }}
-      {{- with .Values.imagePullSecrets }}
+      {{- /* image.pullSecrets, not imagePullSecrets -- the latter is not a key this chart has, so
+      this block silently rendered nothing and the builder could never use a pull secret. */}}
+      {{- with .Values.image.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}

@@ -63,6 +63,35 @@ spec:
       labels:
         {{- include "kube-oci-composer.componentSelectorLabels" (dict "ctx" . "component" "registry") | nindent 8 }}
     spec:
+      terminationGracePeriodSeconds: {{ .Values.registry.terminationGracePeriodSeconds }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- /*
+      Placement is registry-scoped, NOT the top-level values the controllers use. The point of
+      steering the registry is usually to put it somewhere the controllers are not -- one shared
+      set of keys could not express "controllers off the storage nodes, registry on them".
+      */}}
+      {{- with .Values.registry.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.registry.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.registry.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.registry.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.registry.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
