@@ -1,0 +1,49 @@
+# Three zot instances over ONE directory, with a shared Redis metadata store.
+#
+# This is the cheapest environment that can falsify replication, and the ordering principle is that
+# a failure HERE is conclusive: a shared Docker volume gives all three containers one inode
+# namespace, one page cache and real POSIX locks -- the most forgiving conditions replication will
+# ever see. Anything that breaks here breaks on every real filesystem too, and on S3.
+#
+# What it therefore does NOT cover: cross-client coherence and distributed locking. Those are
+# properties of the actual RWX filesystem and need a real multi-node cluster. See the plan.
+#
+# Auth is off. The probes are about the storage layer, and htpasswd would only add noise.
+services:
+  redis:
+    image: redis:7-alpine
+    # Persistent, because a Redis that forgets is the documented way to make retention delete live
+    # images (threat D9). The probes must not be measuring that by accident.
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+
+  zot-0: &zot
+    image: ghcr.io/project-zot/zot:v2.1.20@sha256:542e25be4d32e7879c0cfad93492a93c81b1e059cbd2d30d485d4bd567318234
+    # Root only because this is a throwaway local volume; the chart runs 65532.
+    user: "0:0"
+    command: ["serve", "/etc/zot/config.json"]
+    depends_on: [redis]
+    volumes:
+      - ./conf-writer:/etc/zot:ro
+      - store:/var/lib/registry
+    ports: ["5001:5000"]
+
+  zot-1:
+    <<: *zot
+    volumes:
+      - ./conf-reader:/etc/zot:ro
+      - store:/var/lib/registry
+    ports: ["5002:5000"]
+
+  zot-2:
+    <<: *zot
+    volumes:
+      - ./conf-reader:/etc/zot:ro
+      - store:/var/lib/registry
+    ports: ["5003:5000"]
+
+volumes:
+  # One volume, three writers. This is the whole point of the harness.
+  store:
+  redis-data:

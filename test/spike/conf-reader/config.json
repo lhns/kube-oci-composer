@@ -1,0 +1,27 @@
+{
+  "distSpecVersion": "1.1.0",
+  "storage": {
+    "rootDirectory": "/var/lib/registry",
+    "remoteCache": true,
+    "cacheDriver": {
+      "name": "redis",
+      "url": "redis://redis:6379",
+      "keyprefix": "zot"
+    },
+    "gc": false,
+    "gcDelay": "1s",
+    "gcInterval": "5s"
+  },
+  "http": {
+    "address": "0.0.0.0",
+    "port": "5000"
+  },
+  "extensions": {
+    "search": {
+      "enable": true
+    }
+  },
+  "log": {
+    "level": "info"
+  }
+}
