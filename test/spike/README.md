@@ -45,7 +45,20 @@ one member, so exactly one process ever owned a repo. Replication removes that i
 | Sequential writes across three instances | nothing lost |
 | Read-after-write across instances, 200 iterations | 0 stale, by tag or by digest |
 | Refreshed content vs. **collectors on every instance** | 1 image in 793 reclaimed **despite being actively pulled**; 0 blobs lost or corrupt |
-| Refreshed content vs. **one collector**, writes to one instance | 0 lost in 348, across 4,881 refresh pulls |
+| Refreshed content vs. **one collector**, writes to one instance | 0 lost in 348, across 4,841 refresh pulls |
+| Pulls while a **read replica** is stopped | 40/40 served, 0 missing |
+| Pulls while the **writer** is stopped | 40/40 served, 0 missing |
+| Control: pulls while the **only** instance is stopped | 0 served, 10 unreachable |
+
+The last three are the feature working: any surviving instance serves every image, including when
+the single writer is the one that went away. The control is what makes them mean anything — a
+survival test that passes with one instance is measuring nothing.
+
+**Note on reproducing the multi-collector result.** `compose.yaml` now ships the *fixed* layout
+(5001 writes and collects, 5002/5003 serve only), so re-running today gives a pass. To see the
+failure again, set `"gc": true` in `conf-reader/config.json` and re-run
+`TestARefreshedImageSurvivesEveryInstancesCollector`: three collectors over one store reclaim
+content that is being actively pulled.
 
 Two things follow.
 
@@ -81,10 +94,14 @@ reconcile, which is safe because the reconcile is idempotent.
 ## Reproducing the failure
 
 `TestOnlyOneMutatorMakesTheRestSafe` passes only because of the constraint, not because of anything
-else about the environment. The proof is that `TestConcurrentTagPushesIntoOneRepositoryAreNotLost`
-still fails against the same running stack — it routes writes to two instances and loses tags again.
-Run both; if the second ever passes, the harness has stopped detecting the fault and its results are
-void.
+else about the environment. The proof is `TestTwoMutatorsLoseContent`, which runs against the same
+stack and **asserts that loss happens** — it routes writes to two instances and expects tags to go
+missing.
+
+That inversion is deliberate. The measurement is the entire justification for ADR 0041, so what is
+worth guarding is that the justification still holds. If that test ever fails, either the harness has
+stopped exercising the race — in which case every other result here is void — or zot has learned to
+coordinate writes across processes and the design should be revisited.
 
 ## Clean up
 

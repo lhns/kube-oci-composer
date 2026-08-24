@@ -29,6 +29,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -168,15 +169,21 @@ func headManifest(endpoint, repo, ref string) (int, error) {
 	return resp.StatusCode, nil
 }
 
-// P1 — the lost update.
+// P1 — the lost update, and this test ASSERTS THAT IT HAPPENS.
 //
 // Two writers push distinct tags into ONE repository through DIFFERENT instances, concurrently.
 // Each push is a read-modify-write of the same index.json guarded only by a per-process mutex, so
-// if replication is unsafe this is where it shows: a tag that returned 201 is simply absent
-// afterwards, and every replica agrees it was never there.
+// tags that returned 201 simply vanish, and every instance then agrees they were never written.
 //
-// This is the probe that can end the feature. It is storage-agnostic — the same race exists on S3.
-func TestConcurrentTagPushesIntoOneRepositoryAreNotLost(t *testing.T) {
+// The assertion is inverted on purpose. This measurement is the entire justification for ADR 0041
+// — one writer, N read-only replicas — so the thing worth guarding is that the justification still
+// holds. If this ever PASSES, one of two things is true: the harness has stopped exercising the
+// race and every other result here is void, or zot has learned to coordinate writes across
+// processes and the design should be revisited. Both are worth a failing test.
+//
+// Storage-agnostic: the same race exists on S3, because it is between processes rather than
+// between clients of a disk.
+func TestTwoMutatorsLoseContent(t *testing.T) {
 	// A fresh repository per run. Reusing one would let each run start with the previous run's
 	// tags, changing the contention profile and making the failure rate meaningless.
 	repo := fmt.Sprintf("spike/lost-update-%d", time.Now().UnixNano())
@@ -209,7 +216,7 @@ func TestConcurrentTagPushesIntoOneRepositoryAreNotLost(t *testing.T) {
 		for _, err := range errs[i] {
 			rejected++
 			if rejected <= 3 {
-				t.Errorf("push rejected: %v", err)
+				t.Logf("push rejected: %v", err)
 			}
 		}
 		for tag := range pushed[i] {
@@ -221,6 +228,7 @@ func TestConcurrentTagPushesIntoOneRepositoryAreNotLost(t *testing.T) {
 	// Give any rename-vs-cache lag a chance; on one volume there should be none.
 	time.Sleep(2 * time.Second)
 
+	lost := false
 	for _, ep := range endpoints {
 		got, err := listTags(ep, repo)
 		if err != nil {
@@ -233,10 +241,19 @@ func TestConcurrentTagPushesIntoOneRepositoryAreNotLost(t *testing.T) {
 			}
 		}
 		if len(missing) > 0 {
-			t.Errorf("%s LOST %d of %d accepted tags (e.g. %v)",
+			t.Logf("%s lost %d of %d accepted tags (e.g. %v)",
 				ep, len(missing), len(accepted), missing[:min(5, len(missing))])
+			lost = true
 		}
 	}
+
+	if !lost && rejected == 0 {
+		t.Fatalf("two instances wrote %d tags into one repository concurrently and NOTHING was lost "+
+			"or rejected. Either this harness has stopped exercising the race -- in which case every "+
+			"other result here is void -- or zot now coordinates writes across processes, and ADR 0041 "+
+			"should be revisited.", len(accepted))
+	}
+	t.Logf("as expected: content was lost or rejected, which is why only one pod may write")
 }
 
 // TestSequentialPushesAreNotLost is P1's negative control.
@@ -605,4 +622,163 @@ func TestOnlyOneMutatorMakesTheRestSafe(t *testing.T) {
 	}
 	t.Logf("with a single mutator: %d gone by digest, %d gone by tag, %d layers bad",
 		goneByDigest, goneByTag, badLayer)
+}
+
+// stopInstance stops one container and returns a function that starts it again.
+func stopInstance(t *testing.T, service string) func() {
+	t.Helper()
+	run := func(args ...string) {
+		cmd := exec.Command("docker", append([]string{"compose", "-f", "compose.yaml"}, args...)...)
+		cmd.Dir = "."
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("docker compose %v: %v\n%s", args, err, out)
+		}
+	}
+	run("stop", service)
+	return func() {
+		run("start", service)
+		// Wait for it to serve again. Without this the next test pushes into an instance that is
+		// still starting and fails for a reason that has nothing to do with what it is testing.
+		waitServing(t, serviceEndpoint[service])
+	}
+}
+
+// serviceEndpoint maps a compose service to the address it publishes.
+var serviceEndpoint = map[string]string{
+	"zot-0": "http://localhost:5001",
+	"zot-1": "http://localhost:5002",
+	"zot-2": "http://localhost:5003",
+}
+
+func waitServing(t *testing.T, endpoint string) {
+	t.Helper()
+	client := &http.Client{Timeout: time.Second}
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if resp, err := client.Get(endpoint + "/v2/"); err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return
+			}
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	t.Fatalf("%s did not come back within 30s", endpoint)
+}
+
+// pullAll fetches every image through the given endpoints, round-robin, and classifies what came
+// back. A 404 means content is MISSING, which is the failure this design exists to prevent; a
+// connection error means that instance is gone, which is expected and survivable.
+func pullAll(endpoints []string, refs []struct{ repo, tag string }) (ok, missing, unreachable int) {
+	client := &http.Client{Timeout: 3 * time.Second}
+	for i, r := range refs {
+		ep := endpoints[i%len(endpoints)]
+		resp, err := client.Get(fmt.Sprintf("%s/v2/%s/manifests/%s", ep, r.repo, r.tag))
+		if err != nil {
+			unreachable++
+			continue
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		switch resp.StatusCode {
+		case http.StatusOK:
+			ok++
+		case http.StatusNotFound:
+			missing++
+		default:
+			unreachable++
+		}
+	}
+	return
+}
+
+// TestPullsSurviveAnInstanceGoingAway is the whole point of the feature.
+//
+// The failure that started this work: nodes were cordoned, the registry was rescheduled alongside
+// the pods that pull from it, and those pods sat in ErrImagePull. So the claim to test is that any
+// SURVIVING instance serves EVERY image.
+//
+// Two cases, and the second is the one that matters. Losing a read replica is the easy case. Losing
+// the WRITER must still leave every image pullable, because the writer is the single point the
+// design deliberately keeps — if pulls died with it, replication would have bought nothing.
+//
+// A 404 is the failure. A connection error against the instance that was deliberately stopped is
+// not: that is what a Service removing an endpoint looks like from the outside, and any client
+// retries it.
+func TestPullsSurviveAnInstanceGoingAway(t *testing.T) {
+	const writer = "http://localhost:5001"
+	repo := fmt.Sprintf("keep-drain-%d", time.Now().UnixNano())
+
+	var refs []struct{ repo, tag string }
+	for n := 0; n < 40; n++ {
+		tag := fmt.Sprintf("d%03d", n)
+		if _, err := pushImage(writer, repo, tag, []byte(fmt.Sprintf("drain-%s-%d", repo, n))); err != nil {
+			t.Fatalf("seeding %s: %v", tag, err)
+		}
+		refs = append(refs, struct{ repo, tag string }{repo, tag})
+	}
+
+	if ok, missing, unreachable := pullAll(endpoints, refs); missing > 0 || ok != len(refs) {
+		t.Fatalf("baseline is not clean: %d ok, %d missing, %d unreachable", ok, missing, unreachable)
+	}
+
+	t.Run("a read replica goes away", func(t *testing.T) {
+		restore := stopInstance(t, "zot-2")
+		defer restore()
+
+		survivors := endpoints[:2]
+		ok, missing, unreachable := pullAll(survivors, refs)
+		t.Logf("survivors served %d, missing %d, unreachable %d", ok, missing, unreachable)
+		if missing > 0 {
+			t.Errorf("%d images 404ed while a read replica was down; a surviving instance must serve every image", missing)
+		}
+		if ok != len(refs) {
+			t.Errorf("only %d of %d pulls succeeded against the survivors", ok, len(refs))
+		}
+	})
+
+	// Let the replica rejoin before the next case.
+	time.Sleep(3 * time.Second)
+
+	t.Run("the writer goes away", func(t *testing.T) {
+		restore := stopInstance(t, "zot-0")
+		defer restore()
+
+		readers := endpoints[1:]
+		ok, missing, unreachable := pullAll(readers, refs)
+		t.Logf("read replicas served %d, missing %d, unreachable %d", ok, missing, unreachable)
+		if missing > 0 {
+			t.Errorf("%d images 404ed while the WRITER was down — replication bought nothing if pulls "+
+				"die with the single writer", missing)
+		}
+		if ok != len(refs) {
+			t.Errorf("only %d of %d pulls succeeded against the read replicas", ok, len(refs))
+		}
+	})
+}
+
+// TestASingleInstanceDoesNotSurviveGoingAway is the negative control, and it is what makes the test
+// above mean anything. A drain test that passes on a single instance is measuring nothing.
+func TestASingleInstanceDoesNotSurviveGoingAway(t *testing.T) {
+	const only = "http://localhost:5001"
+	repo := fmt.Sprintf("keep-control-%d", time.Now().UnixNano())
+
+	var refs []struct{ repo, tag string }
+	for n := 0; n < 10; n++ {
+		tag := fmt.Sprintf("c%03d", n)
+		if _, err := pushImage(only, repo, tag, []byte(fmt.Sprintf("ctl-%s-%d", repo, n))); err != nil {
+			t.Fatalf("seeding: %v", err)
+		}
+		refs = append(refs, struct{ repo, tag string }{repo, tag})
+	}
+
+	restore := stopInstance(t, "zot-0")
+	defer restore()
+
+	ok, missing, unreachable := pullAll([]string{only}, refs)
+	t.Logf("single instance down: %d ok, %d missing, %d unreachable", ok, missing, unreachable)
+	if ok > 0 {
+		t.Fatalf("%d pulls succeeded against an instance that was stopped — the harness is not "+
+			"actually taking it down, so the survival test above proves nothing", ok)
+	}
 }
