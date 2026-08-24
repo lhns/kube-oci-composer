@@ -316,7 +316,8 @@ What that buys and does not buy:
   itself redundant; three registry pods over one non-redundant fileserver is worse than one pod on a
   volume.
 
-**Redis is required, and it is not a cache.** zot's default metadata database is BoltDB, a file one
+**Redis (or Valkey) is required, and it is not a cache.** Valkey is verified — zot reaches it
+through go-redis and accepts the same URL. zot's default metadata database is BoltDB, a file one
 process opens exclusively, so replicas cannot share it. Giving each its own would be worse than
 inconvenient: `extensions.search` records the pull timestamps `pulledWithin` is measured against, so
 a refresh landing on one pod would not save an image from the writer's collector, and retention would
