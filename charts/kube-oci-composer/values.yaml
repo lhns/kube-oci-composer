@@ -297,31 +297,42 @@ registry:
     #                    a default: useful when another system copies them onward.
     mode: ""
 
-  # SCALE-OUT CLUSTERING. Read the next paragraph before turning it on.
+  # READ REPLICAS, in addition to the single registry pod. 0 means just the one.
   #
-  # It is NOT replication. zot shards by repository-name hash and proxies each request to the member
-  # that owns that repository, so N members means each repository lives on exactly one of them: a
-  # member that is down makes roughly 1/N of your repositories unavailable, and zot's own
-  # documentation says the cluster is not self-healing. What this buys is throughput and a proxy
-  # layer that survives a rolling update. It does not buy availability, which is why the value is
-  # called `cluster` and not `ha`.
+  # These serve PULLS. They do not accept pushes and they do not garbage-collect, and that
+  # restriction is the entire design rather than a simplification -- see ADR 0041.
   #
-  # It also has hard prerequisites the chart does not install: S3-compatible object storage and a
-  # shared cache driver (redis or dynamodb). BoltDB cannot be shared, so there is no "just add
-  # replicas to the PVC" path, and the chart refuses the combinations that look like one.
+  # zot serialises repository writes with an IN-PROCESS mutex. A push is a read-modify-write of
+  # <repo>/index.json and nothing coordinates two processes doing it at once, so three instances
+  # over one store measurably lost 2-4% of tags that had returned 201 (test/spike reproduces it in
+  # about two minutes). Collection rewrites index.json too, so an instance that only serves pulls
+  # is still a mutator if it collects. Confining every mutation to one pod is what makes the rest
+  # safe, and it holds on object storage exactly as much as on a filesystem -- the race is between
+  # processes, not between clients of a disk.
   #
-  # Worth saying plainly: anyone who already runs S3 and redis could equally run a registry of
-  # their own and set publish.mode=external. This exists so the bundled registry is not a FORCED
-  # single point of failure -- not because this chart is the right way to run a registry estate.
-  cluster:
-    enabled: false
-    replicaCount: 3
-    # Exactly 16 characters -- siphash-2-4 takes a 128-bit key. Generated and kept stable if empty.
-    # Changing it reshuffles every repository onto a different member; survivable with shared
-    # storage, but it is a cluster-wide reshuffle, so stability is the default.
-    hashKey: ""
+  # WHAT THIS BUYS: a node drain stops taking pulls down with it. That is the failure people
+  # actually see -- ErrImagePull on workloads while the registry is being rescheduled.
+  #
+  # WHAT IT DOES NOT BUY, plainly:
+  #   * Write availability. While the writer is moving, pushes fail. Tolerable only because the
+  #     reconcile is idempotent and retries, so a failed push is a delayed publish, not a lost one.
+  #   * Write throughput. Every push still goes through one process.
+  #   * Removal of the single point of failure. It MOVES from the pod to the shared store, which
+  #     is now the availability floor for every pull in the cluster. Only worth it where that store
+  #     is itself redundant.
+  #
+  # Two prerequisites, both refused at render time if missing: one store every pod can see
+  # (storage.driver=s3, or persistence.accessMode=ReadWriteMany), and a shared metadata database
+  # (cache.driver, because BoltDB is a file one process opens exclusively).
+  readReplicas: 0
 
-  # Where the registry keeps blobs. `local` is the PVC below; `s3` is required for clustering.
+  # Resources for a read replica. They serve blobs and hold no write buffers, so they are cheaper
+  # than the writer.
+  readerResources:
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {memory: 512Mi}
+
+  # Where the registry keeps blobs. `local` is the PVC below.
   storage:
     driver: local
     s3:
@@ -334,10 +345,11 @@ registry:
       # Secret, never from the config file -- a ConfigMap is visible in every `kubectl describe`.
       existingSecret: ""
 
-  # The metadata cache. `none` is BoltDB on local disk, which cannot be shared between members.
+  # The metadata database. `none` is BoltDB on local disk, which is a file ONE process opens
+  # exclusively and therefore cannot be shared -- which is why readReplicas>0 requires this.
   #
   # WARNING, and it is the one most likely to bite: `extensions.search` records the pull timestamps
-  # that the retention policy's `pulledWithin` depends on. In clustered mode that metadata lives
+  # that the retention policy's `pulledWithin` depends on. With read replicas that metadata lives
   # HERE rather than in per-pod BoltDB -- so if redis is not persistent, a redis restart loses every
   # pull timestamp, every image looks unpulled, and the next GC pass reclaims images your live
   # objects still reference. That is ADR 0031's failure mode reintroduced by a component this chart
@@ -475,6 +487,18 @@ registry:
     enabled: true
     size: 20Gi
     storageClass: ""
+    # ReadWriteMany is what lets read replicas mount the same store. Required for readReplicas>0
+    # unless storage.driver is s3.
+    #
+    # The chart checks that you ASKED for it. It cannot check that you got it: accessModes on a
+    # claim is a request, and a provisioner that does not support ReadWriteMany either leaves the
+    # claim Pending (loud, fine) or binds it anyway and backs it per-node (silent, and the pods then
+    # serve different content behind one Service name). Confirm with `kubectl get pvc` before
+    # scaling up.
+    #
+    # NOT CHANGEABLE on an existing claim -- accessModes is immutable once bound, so the API server
+    # rejects the upgrade. See docs/registry.md for the migration.
+    accessMode: ReadWriteOnce
 
   logLevel: info
 

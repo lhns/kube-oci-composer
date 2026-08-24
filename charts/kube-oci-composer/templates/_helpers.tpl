@@ -62,6 +62,18 @@ it cannot be changed on a live release without recreating the Deployment -- sele
 app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 
+{{- /*
+Selects everything that SERVES the registry API: the writer and every read replica.
+
+A separate label rather than a component, because the two roles must stay distinguishable --
+component=registry is the writer's StatefulSet selector and is immutable, so readers cannot share
+it. This is what the read Service, the Ingress and the NetworkPolicy select on.
+*/}}
+{{- define "kube-oci-composer.registryServeSelectorLabels" -}}
+{{ include "kube-oci-composer.selectorLabels" . }}
+oci-composer.lhns.de/registry-role: serve
+{{- end -}}
+
 {{- define "kube-oci-composer.componentLabels" -}}
 {{ include "kube-oci-composer.labels" .ctx }}
 app.kubernetes.io/component: {{ .component }}

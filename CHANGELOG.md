@@ -122,21 +122,6 @@ must name a source in its own namespace.
   expiring rather than warning — an expired certificate stops the retention refresh, and that is a
   deletion one window later rather than an outage.
 
-- **Registry clustering, opt-in — and it shards rather than replicates**
-  ([ADR 0039](docs/adr/0039-zot-clustering-is-sharding.md)). zot hashes each repository name and
-  exactly one member owns it, so a member that is down makes roughly 1/N of repositories
-  unavailable, and zot's own documentation says the cluster is not self-healing. What it buys is
-  throughput and a proxy layer that survives a rolling update. The value is `registry.cluster`, not
-  `registry.ha`, for that reason.
-
-  Prerequisites the chart wires but does not install: S3-compatible storage, a shared cache driver
-  (**redis** or dynamodb), and TLS. Five combinations are refused rather than rendered.
-
-  **Use persistent redis.** `extensions.search` records the pull timestamps retention depends on,
-  and clustering moves that metadata into the cache driver. A redis restart without persistence
-  loses every timestamp, every image looks unpulled, and the next GC reclaims images live objects
-  still reference.
-
 - **A NetworkPolicy for the registry, enabled by default.** Build Jobs run in their object's
   namespace, not the release's, so every build crosses a namespace boundary to push and a
   default-deny cluster blocks it. The policy admits every namespace on the registry port, which is
@@ -187,6 +172,23 @@ must name a source in its own namespace.
 - **`--insecure-registry`**, a list of hosts reachable over plain HTTP, matched on host so that
   naming one internal registry does not downgrade every other request.
 
+- **Read replicas for the registry** (`registry.readReplicas`,
+  [ADR 0041](docs/adr/0041-one-writer-many-readers.md)). Extra registry pods that serve pulls, so a
+  node drain stops taking image pulls down with it. Needs one store every pod can see
+  (`persistence.accessMode: ReadWriteMany`, or S3) and a shared metadata database
+  (`cache.driver`); the chart refuses to render without both.
+
+  **Exactly one pod ever writes**, and that is the design rather than a simplification. zot
+  serialises repository writes with an in-process lock, so two instances writing one repository
+  lose tags that returned `201` — measured at 2–4%, with every instance then agreeing they were
+  never written. Collection rewrites the same index, so a replica that garbage-collects is a second
+  writer; content being actively refreshed still went missing. `test/spike` reproduces both in about
+  two minutes and is kept as the evidence.
+
+  So: pulls survive a drain, pushes do not — while the writer moves, publishing fails and retries on
+  the next reconcile, which is safe because the reconcile is idempotent. Push throughput is
+  unchanged. And the single point of failure moves to the shared store rather than disappearing.
+
 - **The registry can be placed, and is no longer evicted alongside its own consumers.**
   `registry.nodeSelector`, `registry.tolerations`, `registry.affinity`,
   `registry.topologySpreadConstraints`, `registry.priorityClassName` and
@@ -204,6 +206,14 @@ must name a source in its own namespace.
   every drain forever with nothing in the events saying why.
 
 ### Changed
+
+- **`registry.cluster` never shipped.** It briefly existed on `main` as zot's scale-out mode, which
+  **shards** — each repository lived on exactly one member, so a member going down took ~1/N of the
+  registry with it. That is throughput, not availability, and availability was what it was reached
+  for. `registry.readReplicas` replaces it, and the chart **fails** if `registry.cluster` is still
+  set rather than ignoring it, because Helm drops unknown `--set` paths in silence and the result
+  would be a quiet scale-down to one pod. [ADR 0039](docs/adr/0039-zot-clustering-is-sharding.md) is
+  superseded by [0041](docs/adr/0041-one-writer-many-readers.md).
 
 - **BREAKING: the embedded serving endpoint is removed. A registry is the only publication path**
   ([ADR 0035](docs/adr/0035-a-registry-is-the-only-publication-path.md), superseding ADR 0006).

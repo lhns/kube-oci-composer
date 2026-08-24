@@ -187,48 +187,57 @@ Refusals about clustering.
 Every one of these is a combination that RENDERS and then does not work, mostly by losing data
 rather than by erroring -- which is why they fail the install instead of warning in NOTES.
 */}}
-{{- define "kube-oci-composer.checkRegistryCluster" -}}
+{{- /*
+Whether zot's config has to be a Secret rather than a ConfigMap.
+
+zot's redis driver takes credentials only inside the URL -- redis://user:pass@host -- so a
+credentialed cache URL puts a password in the rendered config. A ConfigMap is readable in every
+`kubectl describe`, which is the rule TestChartCredentialsAreNotFlags already enforces for the
+composer's own S3, so in that case the whole config moves to a Secret.
+
+Kept conditional rather than always-Secret so the ordinary install still has an inspectable
+ConfigMap; nothing is hidden unless there is something to hide.
+*/}}
+{{- define "kube-oci-composer.registryConfigIsSecret" -}}
+{{- if and (eq .Values.registry.cache.driver "redis") (contains "@" .Values.registry.cache.redis.url) -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{- define "kube-oci-composer.checkRegistryReplicas" -}}
 {{- $r := .Values.registry -}}
 
-{{- if and $r.enabled $r.cluster.enabled -}}
-
-{{- if ne $r.storage.driver "s3" -}}
-{{- fail "registry.cluster.enabled requires registry.storage.driver=s3. Members share one store, and zot's local driver keeps its metadata in BoltDB, which cannot be shared -- two members on one volume disagree about what exists rather than failing cleanly." -}}
+{{- /*
+registry.cluster is gone. Helm ignores unknown --set paths in silence, so without this an operator
+carrying `--set registry.cluster.enabled=true` from 0.5.0-rc would get a working install with
+one pod and no indication that their replica count had evaporated.
+*/}}
+{{- if $r.cluster -}}
+{{- fail "registry.cluster no longer exists. It ran zot's scale-out mode, which SHARDS: each repository lived on exactly one member, so a member going down took ~1/N of the registry with it. The replacement is registry.readReplicas, which replicates reads instead -- see docs/adr/0041-one-writer-many-readers.md." -}}
 {{- end -}}
+
+{{- if and $r.enabled (lt (int $r.readReplicas) 0) -}}
+{{- fail (printf "registry.readReplicas is %d. It counts replicas IN ADDITION to the single writer, so the smallest meaningful value is 0." (int $r.readReplicas)) -}}
+{{- end -}}
+
+{{- if and $r.enabled (gt (int $r.readReplicas) 0) -}}
 
 {{- if eq $r.cache.driver "none" -}}
-{{- fail "registry.cluster.enabled requires a shared registry.cache.driver (redis or dynamodb). Without one each member caches separately, so they disagree about which blobs exist, and the disagreement surfaces as intermittent 404s rather than as an error." -}}
+{{- fail "registry.readReplicas > 0 requires registry.cache.driver (redis or dynamodb). The default metadata store is BoltDB, a file one process opens exclusively, so replicas cannot share it. Worse than the sharing failure: per-pod metadata would mean `extensions.search` records a pull only on the pod that served it, so a refresh landing on one pod would not save the image from the writer's collector, and retention would delete content that is still in use (ADR 0031)." -}}
 {{- end -}}
 
-{{- if and (eq $r.cache.driver "redis") (ne $r.storage.driver "s3") -}}
-{{- fail "zot supports the redis cache driver for clustering only with S3 storage." -}}
+{{- if and $r.persistence.enabled (ne $r.persistence.accessMode "ReadWriteMany") -}}
+{{- fail (printf "registry.readReplicas > 0 needs registry.persistence.accessMode=ReadWriteMany; it is %q. A second pod cannot mount a ReadWriteOnce volume and will sit in Multi-Attach error indefinitely. Note the chart can only check what you ASKED for -- whether the StorageClass really provides multi-writer access is not visible here, so confirm the claim with `kubectl get pvc` before relying on the replicas." $r.persistence.accessMode) -}}
 {{- end -}}
 
-{{- if $r.persistence.enabled -}}
-{{- /*
-Refused rather than silently ignored. The PVC is ReadWriteOnce so a second member cannot mount it
-anyway -- but quietly dropping a volume that holds ImageBuild's only copy (its output cannot be
-rebuilt from its spec, ADR 0025) is the worst available behaviour, so the operator has to say it.
-*/}}
-{{- fail "registry.cluster.enabled needs registry.persistence.enabled=false: the PVC is ReadWriteOnce and a second member cannot mount it. Set it explicitly -- this is not dropped silently, because that PVC may hold the only copy of an ImageBuild's output." -}}
-{{- end -}}
-
-{{- if not $r.tls.enabled -}}
-{{- /*
-Members proxy authenticated requests to each other, so without TLS those internal hops carry the
-Basic header in the clear -- reopening threat I7 on the inside of the thing that closed it.
-*/}}
-{{- fail "registry.cluster.enabled requires registry.tls.enabled=true. Members proxy authenticated requests to each other, so without TLS the registry password crosses the pod network on every proxied write (threat I7)." -}}
-{{- end -}}
-
-{{- if and $r.cluster.hashKey (ne (len $r.cluster.hashKey) 16) -}}
-{{- fail (printf "registry.cluster.hashKey must be exactly 16 characters (siphash-2-4 takes a 128-bit key); got %d. Leave it empty to have one generated and kept stable." (len $r.cluster.hashKey)) -}}
+{{- if and (eq $r.storage.driver "local") (not $r.persistence.enabled) -}}
+{{- fail "registry.readReplicas > 0 with registry.storage.driver=local needs registry.persistence.enabled=true. An emptyDir is per-pod, so the replicas would be unrelated registries behind one Service name and a pull would 404 or not depending which one it reached -- and every restart would lose an ImageBuild's only copy (ADR 0025)." -}}
 {{- end -}}
 
 {{- end -}}
 
 {{- /*
-These two apply whether or not clustering is on: an operator may use S3 alone.
+These apply whether or not there are replicas: an operator may use S3 with a single pod.
 */}}
 {{- if and $r.enabled (eq $r.storage.driver "s3") (not $r.storage.s3.bucket) -}}
 {{- fail "registry.storage.driver=s3 needs registry.storage.s3.bucket." -}}
@@ -236,35 +245,12 @@ These two apply whether or not clustering is on: an operator may use S3 alone.
 {{- if and $r.enabled (eq $r.cache.driver "redis") (not $r.cache.redis.url) -}}
 {{- fail "registry.cache.driver=redis needs registry.cache.redis.url." -}}
 {{- end -}}
+{{- if and $r.enabled (eq $r.cache.driver "dynamodb") (ne $r.storage.driver "s3") -}}
+{{- fail "registry.cache.driver=dynamodb is only supported with registry.storage.driver=s3. zot refuses local storage with a non-redis remote database at startup, so this would crashloop rather than degrade." -}}
+{{- end -}}
 
 {{- end -}}
 
-{{- /*
-The cluster hash key: generated once, then reused, exactly like the registry password.
-*/}}
-{{- define "kube-oci-composer.registryHashKey" -}}
-{{- if .Values.registry.cluster.hashKey -}}
-{{- .Values.registry.cluster.hashKey -}}
-{{- else -}}
-{{- $existing := lookup "v1" "Secret" .Release.Namespace (printf "%s-cluster" (include "kube-oci-composer.registryFullname" .)) -}}
-{{- if and $existing $existing.data (index $existing.data "hashKey") -}}
-{{- index $existing.data "hashKey" | b64dec -}}
-{{- else -}}
-{{- randAlphaNum 16 -}}
-{{- end -}}
-{{- end -}}
-{{- end -}}
-
-{{- /*
-The Deployment -> StatefulSet migration.
-
-Helm will happily create a StatefulSet while the old Deployment's ReplicaSet still owns pods
-matching the same selector, and the two controllers then fight over one pod on a ReadWriteOnce
-volume. The symptom is a registry that flaps, and nothing in the events says why.
-
-Deleting the Deployment leaves the PVC alone -- it has helm.sh/resource-policy: keep and is not
-owned by the Deployment -- so no images are lost.
-*/}}
 {{- define "kube-oci-composer.checkRegistryMigration" -}}
 {{- if .Values.registry.enabled -}}
 {{- $name := include "kube-oci-composer.registryFullname" . -}}

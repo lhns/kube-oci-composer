@@ -90,22 +90,18 @@ func TestTheRegistrysPlacementIsNotTheControllers(t *testing.T) {
 // and nothing in the events names a PodDisruptionBudget as the cause.
 func TestABudgetThatCannotBeMetIsNeverRendered(t *testing.T) {
 	if pdb, ok := registryPDB(t, render(t)); ok {
-		t.Errorf("a PodDisruptionBudget rendered at one replica (%s); it would block every drain", pdb.Name)
+		t.Errorf("a PodDisruptionBudget rendered with a single pod (%s); it would block every drain", pdb.Name)
 	}
 
 	out := render(t,
-		"--set", "registry.cluster.enabled=true",
-		"--set", "registry.cluster.replicaCount=3",
-		"--set", "registry.storage.driver=s3",
-		"--set", "registry.storage.s3.bucket=zot",
+		"--set", "registry.readReplicas=2",
+		"--set", "registry.persistence.accessMode=ReadWriteMany",
 		"--set", "registry.cache.driver=redis",
 		"--set", "registry.cache.redis.url=redis://redis:6379",
-		"--set", "registry.persistence.enabled=false",
-		"--set", "registry.tls.enabled=true",
 	)
 	pdb, ok := registryPDB(t, out)
 	if !ok {
-		t.Fatal("no PodDisruptionBudget at more than one replica, so a drain can evict them all at once")
+		t.Fatal("no PodDisruptionBudget with read replicas, so a drain can evict them all at once")
 	}
 	if pdb.Spec.MinAvailable == nil || pdb.Spec.MinAvailable.IntValue() != 1 {
 		t.Error("the budget must guarantee a floor of at least one serving registry")

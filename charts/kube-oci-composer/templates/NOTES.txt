@@ -44,20 +44,37 @@ insecure would force plaintext on the deployment that took the trouble to set it
 See docs/registry.md.
 {{- end }}
 
-{{- if .Values.registry.cluster.enabled }}
+{{- if gt (int .Values.registry.readReplicas) 0 }}
 
-The registry is CLUSTERED, which shards rather than replicates.
+The registry has {{ .Values.registry.readReplicas }} READ REPLICA(S) alongside one writer.
 
-zot hashes each repository name and one member owns it. A member that is down makes roughly 1/{{ .Values.registry.cluster.replicaCount }}
-of your repositories unavailable, and zot's own documentation says the cluster is not self-healing.
-What this buys is throughput and a proxy layer that survives a rolling update -- not availability.
+Pulls fan out across all of them, so a node drain no longer takes image pulls down with it. Pushes
+still go to the single writer: while that pod is moving, publishing pauses and the controllers retry
+on the next reconcile. Nothing is lost, but it is not instant.
 
+Replicas may only read. zot serialises repository writes with an in-process lock, so a second
+writer -- including one that merely garbage-collects -- silently loses content. See
+docs/adr/0041-one-writer-many-readers.md.
+
+The replicas are spread across nodes on a PREFERRED rule, so if the scheduler could not place them
+apart they may share a node, and then a node failure still takes them all. Check with:
+
+  kubectl -n {{ .Release.Namespace }} get pods -l oci-composer.lhns.de/registry-role=serve -o wide
+
+{{- if eq .Values.registry.storage.driver "local" }}
+
+The replicas share one volume. The chart checked that you ASKED for ReadWriteMany; it cannot check
+that your StorageClass delivers it. A provisioner that binds the claim and backs it per-node instead
+gives you pods serving different content behind one Service name. Confirm before relying on it:
+
+  kubectl -n {{ .Release.Namespace }} get pvc {{ include "kube-oci-composer.registryFullname" . }}
+{{- end }}
 {{- if eq .Values.registry.cache.driver "redis" }}
 
 If that redis is not persistent, READ THIS. extensions.search records the pull timestamps the
-retention policy depends on, and in clustered mode that metadata lives in redis rather than on
-each pod. A redis restart loses every timestamp, every image then looks unpulled, and the next GC
-pass reclaims images your live objects still reference -- on a gcDelay fuse, not a retention window.
+retention policy depends on, and with replicas that metadata lives in redis rather than on each pod.
+A redis restart loses every timestamp, every image then looks unpulled, and the next GC pass
+reclaims images your live objects still reference -- on a gcDelay fuse, not a retention window.
 {{- end }}
 {{- end }}
 
