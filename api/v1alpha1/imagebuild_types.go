@@ -20,34 +20,28 @@ import (
 type BuildContext struct {
 	// SourceRef takes the context from a Flux source's artifact.
 	//
-	// The one to reach for when the content moves: source-controller tracks the revision, so the
-	// context follows the repository without anything here being edited. Sources that need that
-	// kind of tracking are delegated to it rather than reimplemented (ADR 0042).
+	// The one to reach for when the content moves: source-controller tracks the revision. ADR 0042
+	// says which sources are delegated to it and why.
 	// +optional
 	SourceRef *SourceRefSource `json:"sourceRef,omitempty"`
 
 	// Fetch retrieves the context as an archive over HTTP(S), at a declared digest.
 	//
-	// For a context that is a release tarball rather than a checkout. The digest is DECLARED rather
-	// than resolved, because nothing else addresses an arbitrary URL -- so a mismatch means the URL
-	// served something other than what this spec says, and it is refused rather than built.
+	// For a release tarball rather than a checkout. The digest is declared, not resolved: a
+	// mismatch means the URL served something other than what this spec names, and is refused.
 	//
-	// Only the archive unpack modes apply: a context is a tree, and `none` or `gz` place a single
-	// file. The CEL rule above says so rather than letting it fail later as a frontend error nobody
-	// can map back to this field.
+	// Only the archive unpack modes apply, since a context is a tree.
 	// +optional
 	Fetch *FetchSource `json:"fetch,omitempty"`
 
 	// Image takes the flattened filesystem of a digest-pinned image as the context.
 	//
-	// For building on what CI already published without that image having to be the base. It costs
-	// a pull and a flatten in the build pod on every cache miss, so it is not the thing to reach for
-	// when a sourceRef would do.
+	// For building on what CI already published. Costs a pull and a flatten in the build pod on
+	// every cache miss, so prefer sourceRef where it would do.
 	//
-	// Worth knowing before choosing it: `FROM <image>@sha256:… AS ctx` plus `COPY --from=ctx` does
-	// much the same with no context at all. This exists for when the image IS the tree the build
-	// reads, rather than one it copies out of -- notably an ImageComposition's own output, which is
-	// how "compose the workdir, then build it" is spelled without a build step inside composition.
+	// `FROM <image>@sha256:… AS ctx` plus `COPY --from=ctx` does much the same with no context at
+	// all. Reach for this when the image IS the tree the build reads -- notably an
+	// ImageComposition's output, which is how "compose the workdir, then build it" is spelled.
 	// +optional
 	Image *ImageSource `json:"image,omitempty"`
 }
@@ -62,8 +56,7 @@ func (c *BuildContext) GetImage() *ImageSource {
 
 // GetSourceRef returns the Flux source this context names, or nil when it names none.
 //
-// Nil-safe on the receiver so callers do not each repeat the "no context is legal" check, which is
-// where a nil dereference would otherwise be one forgotten guard away.
+// Nil-safe on the receiver, because no context at all is legal.
 func (c *BuildContext) GetSourceRef() *SourceRefSource {
 	if c == nil {
 		return nil
@@ -73,39 +66,32 @@ func (c *BuildContext) GetSourceRef() *SourceRefSource {
 
 // DockerfileSource says where the Dockerfile comes from.
 //
-// `path` is the original and the common case — the recipe lives in the thing being built. `inline`
-// puts it in this spec, which is what you want when the Dockerfile is four lines and inventing a
-// git repository to hold them is the entire cost of the feature. `configMapRef` puts it in an
-// object a platform team can own separately from the ImageBuild an application team writes, and
-// share between several of them.
+// `path` is the common case: the recipe lives in the thing being built. `inline` puts it in this
+// spec. `configMapRef` puts it in an object a platform team can own separately and share between
+// several ImageBuilds.
 //
-// NO field here carries a schema default, and that is deliberate. A structural default is
-// materialised into the stored object, so a defaulted `path` would make has(self.path) true for
-// every object that ever existed and the exactly-one rule below could never fire. The effective
-// default lives in EffectiveDockerfile instead — the same arrangement, for the same reason, as
-// Push.OnConflict.
+// No field here carries a schema default, deliberately: a structural default is materialised into
+// the stored object, so a defaulted `path` would make has(self.path) true for every object and the
+// exactly-one rule below could never fire. EffectiveDockerfile holds it instead, the same
+// arrangement as Push.OnConflict.
 //
 // +kubebuilder:validation:XValidation:rule="(has(self.path)?1:0) + (has(self.inline)?1:0) + (has(self.configMapRef)?1:0) == 1",message="set exactly one of path, inline or configMapRef"
 type DockerfileSource struct {
 	// Path to the Dockerfile inside the build context, resolved against the context subpath.
-	// Meaningless without a context, which the rule on ImageBuildSpec refuses rather than leaving
-	// to fail later as a frontend error nobody can map back to this field.
+	// Refused without a context by the rule on ImageBuildSpec.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=4096
 	// +optional
 	Path string `json:"path,omitempty"`
 
-	// Inline is the Dockerfile itself, verbatim.
+	// Inline is the Dockerfile itself, verbatim. Plaintext in etcd and in `kubectl get -o yaml`.
 	//
-	// Plaintext in etcd and in `kubectl get -o yaml`, like args — but unlike args it is code, and
-	// unlike every other input to this kind it is fully determined by this spec. That is what makes
-	// an unpinned FROM here TERMINAL rather than a retry: the fix is an edit to this field, and the
-	// generation change it raises is the event that wakes the object back up. A `path` Dockerfile
-	// gets no such event, which is why the same check is not terminal there.
+	// An unpinned FROM here is terminal rather than retried: the fix is an edit to this field, and
+	// the generation change it raises is what wakes the object. A `path` Dockerfile gets no such
+	// event, so the same check is not terminal there.
 	//
-	// Capped well below what etcd would take. A Dockerfile is kilobytes; anything larger is a
-	// generator writing a program into a CRD, and every watcher of every ImageBuild pays for it on
-	// every update.
+	// Capped well below what etcd would take: every watcher of every ImageBuild pays for the size
+	// on every update.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=65536
 	// +optional
@@ -113,22 +99,19 @@ type DockerfileSource struct {
 
 	// ConfigMapRef reads the Dockerfile from one key of a ConfigMap in this object's namespace.
 	//
-	// The CONTENT is hashed, not the ConfigMap's resourceVersion, so an edit rebuilds and a no-op
-	// write does not. The ConfigMap is watched, so that happens promptly rather than at the next
-	// interval.
+	// The content is hashed, not the resourceVersion, so an edit rebuilds and a no-op write does
+	// not. The ConfigMap is watched, so that happens promptly rather than at the next interval.
 	//
-	// Unlike a composition's configMap layer there is no `optional`: a missing layer can contribute
-	// nothing, but a missing Dockerfile cannot produce an empty build. Offering it would only let
-	// someone configure an object that can never become Ready.
+	// No `optional`, unlike a composition's configMap layer: a missing Dockerfile cannot produce an
+	// empty build, only an object that can never become Ready.
 	// +optional
 	ConfigMapRef *ConfigMapKeyReference `json:"configMapRef,omitempty"`
 }
 
 // EffectiveDockerfile returns the path to use when the spec names none.
 //
-// Kept here rather than as a schema default because a default is materialised into the object and
-// would defeat the exactly-one rule on DockerfileSource — see the type comment. The consequence is
-// that spec.dockerfile.path is empty for most objects, so nothing may read it directly.
+// Not a schema default -- see the DockerfileSource comment. The consequence is that
+// spec.dockerfile.path is empty for most objects, so nothing may read it directly.
 func (s *DockerfileSource) EffectiveDockerfile() string {
 	if s == nil || s.Path == "" {
 		return "Dockerfile"
@@ -165,11 +148,8 @@ type ImageBuildSpec struct {
 
 	// Context is the tree the Dockerfile's COPY and ADD read from.
 	//
-	// OPTIONAL. A Dockerfile that only declares a pinned FROM and runs commands reads no files, and
-	// requiring a context for it meant pointing a Flux source at an empty directory — the whole
-	// cost of the feature, paid to satisfy a field. Omitted, the build sees an EMPTY context, which
-	// is addressed by construction; a COPY then fails inside BuildKit, which is the correct failure
-	// and not a silent one.
+	// Optional: a Dockerfile that only declares a pinned FROM and runs commands reads no files.
+	// Omitted, the build sees an empty context and any COPY fails inside BuildKit.
 	// +optional
 	Context *BuildContext `json:"context,omitempty"`
 

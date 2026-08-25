@@ -15,16 +15,15 @@ import (
 
 // runFetchContext is the init container: it puts an ImageBuild's context on disk for buildctl.
 //
-// Its own flag set, not the controller's. The two share a binary so that one image covers both and
-// the fetcher's digest is the operator's own, but they share no configuration -- this process has no
-// cluster access and needs none.
+// Its own flag set, not the controller's: one binary so one image covers both and the fetcher's
+// digest is the operator's own, but no shared configuration -- this process has no cluster access.
 //
-// Flags rather than a serialised plan, so the pod is self-documenting: `kubectl describe pod` shows
-// exactly what this build was told to fetch. Nothing secret is ever passed here.
+// Flags rather than a serialised plan, so `kubectl describe pod` shows exactly what this build was
+// told to fetch. Nothing secret is ever passed here.
 func runFetchContext(args []string) {
 	fs := flag.NewFlagSet("fetch-context", flag.ExitOnError)
 	var opts fetchcontext.Options
-	fs.StringVar(&opts.Kind, "kind", "", "Which context member this is: sourceRef or fetch.")
+	fs.StringVar(&opts.Kind, "kind", "", "Which context member this is: sourceRef, fetch or image.")
 	fs.StringVar(&opts.URL, "url", "", "Archive to fetch.")
 	fs.StringVar(&opts.Digest, "digest", "", "sha256 the fetched bytes must have. Required.")
 	fs.StringVar(&opts.Unpack, "unpack", "tar.gz", "Archive mode: tar or tar.gz.")
@@ -51,9 +50,9 @@ func runFetchContext(args []string) {
 // guardedClient is the HTTP client the CONTROLLER uses to read a Dockerfile out of a context.
 //
 // Link-local is refused unconditionally -- that is where every major cloud serves credentials --
-// and the rest of the private ranges only under --fetch-deny-private, which is the composer's
-// balance and made for the composer's reason: an artifact server on a private address is an
-// ordinary source, so a guard that refuses those is a guard people switch off. See ADR 0036.
+// and the rest of the private ranges only under --fetch-deny-private. Same balance as the composer:
+// an artifact server on a private address is an ordinary source, and a guard that refuses those is
+// a guard people switch off. See ADR 0036.
 //
 // Enforced in the dialer rather than by inspecting the URL, so a hostname resolving to a blocked
 // address, a redirect to one, and a DNS rebind are all caught. None of those is visible in the URL.

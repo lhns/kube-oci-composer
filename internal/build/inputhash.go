@@ -1,10 +1,7 @@
 // Package build turns an ImageBuild spec into a build, and decides when one is needed.
 //
-// Deliberately separate from internal/oci. Nothing here assembles a tar or fetches a blob by
-// digest, and nothing there executes anything; sharing a package would let a refactor of one
-// silently change the other, when the whole point of the second kind is that its promise is
-// different. ADR 0025 records that internal/oci contributes nothing to a build, which is itself
-// evidence that this sits beside the composer rather than extending it.
+// Deliberately separate from internal/oci, which assembles layers and executes nothing. ADR 0025
+// records that internal/oci contributes nothing to a build.
 package build
 
 import (
@@ -16,59 +13,49 @@ import (
 
 // RecipeVersion identifies how this controller turns a spec into a build.
 //
-// The exact counterpart of oci.AssemblyVersion, and load-bearing for the same reason: an upgraded
-// controller that invokes BuildKit differently must not look at an unchanged input hash and keep
-// serving an artifact produced by the old invocation. BUMP THIS whenever the argv, the exporter
-// attributes, the frontend options or the default SOURCE_DATE_EPOCH change.
+// The counterpart of oci.AssemblyVersion: an upgraded controller that invokes BuildKit differently
+// must not look at an unchanged input hash and keep serving an artifact from the old invocation.
+// BUMP THIS whenever the argv, the exporter attributes, the frontend options or the default
+// SOURCE_DATE_EPOCH change. Unlike AssemblyVersion it is not the whole story, because the tool is
+// not in this binary -- that is BuilderDigest.
 //
-// Unlike AssemblyVersion this is NOT the whole story, because the tool is not in this binary. That
-// is what BuilderDigest is for.
-//
-// v2: a Dockerfile that does not live in the context is delivered to buildctl as its own
-// `--local dockerfile=` mount rather than as a path inside the context mount, and a build with no
-// context gets a synthesised empty one. Both change the invocation, which is exactly what this
-// constant exists to track.
+// v2: a Dockerfile outside the context gets its own `--local dockerfile=` mount, and a build with
+// no context gets a synthesised empty one.
 const RecipeVersion = 2
 
 // Inputs is everything that determines a build's output, as far as anything here can determine it.
 //
-// The qualifier is the whole difference from oci.InputHash: there the hash is a short-circuit and
-// the output digest remains the identity, here the hash IS the identity. Two builds with the same
+// The qualifier is the difference from oci.InputHash: there the hash is a short-circuit and the
+// output digest is the identity; here the hash IS the identity, and two builds with the same
 // Inputs may still produce different bytes. See ADR 0025.
 type Inputs struct {
 	// BuilderDigest pins the BuildKit image, and FrontendDigest the Dockerfile frontend.
 	//
-	// Hashed because for this kind the algorithm is not in this binary — BuildKit is. Upgrading
-	// the builder therefore rebuilds every object in the cluster, which is accepted rather than
-	// worked around. See RecipeVersion above and ADR 0025.
+	// Hashed because the algorithm is not in this binary -- BuildKit is. Upgrading the builder
+	// therefore rebuilds every object in the cluster, which is accepted rather than worked around.
 	BuilderDigest  string
 	FrontendDigest string
 
 	// FetcherDigest pins the image that fetches and unpacks the context.
 	//
-	// Hashed for the same reason as BuilderDigest, and the argument that it need not be is worth
-	// answering: every context is digest-addressed, so a correct fetcher has exactly one possible
-	// output. That holds for the DOWNLOAD and fails for the UNPACK -- a fixed symlink or wrapper
-	// bug changes the tree under an unchanged digest, which is exactly the failure BuilderDigest
-	// exists to prevent.
+	// Hashed for the same reason as BuilderDigest. Digest-addressing the context does not make it
+	// redundant: that pins the download, not the unpack, and a fixed symlink or wrapper bug changes
+	// the tree under an unchanged digest.
 	FetcherDigest string
 
-	// ContextKind is which member of the context union was resolved -- "sourceRef", or "" when the
-	// build has no context at all.
+	// ContextKind is which member of the context union was resolved -- "sourceRef", "fetch",
+	// "image", or "" for no context at all.
 	//
-	// Hashed, and hashed BEFORE the digest, because a digest alone no longer says what it
-	// addresses. It also distinguishes "no context" from "a context whose digest is not yet
-	// resolved", which are the same empty string in ContextDigest and very much not the same input.
+	// Hashed before the digest, because a digest alone no longer says what it addresses. It also
+	// separates "no context" from "a context not yet resolved", which share an empty ContextDigest.
 	ContextKind string
 
-	// ContextDigest is what addresses the context content -- for a Flux source, the artifact's
-	// digest, RESOLVED rather than declared. Empty when there is no context; ContextKind is what
-	// tells those apart.
+	// ContextDigest addresses the context content. Empty when there is no context; ContextKind is
+	// what tells those apart.
 	ContextDigest string
-	// ContextRevision is what the artifact digest DESCRIBES — "v0.6.8@sha1:b739efb5". Recorded so
-	// a built image can be traced back to a revision without pulling it apart, which is the gap
-	// ADR 0026's incident was diagnosed through. Not hashed: the digest already identifies the
-	// content, and hashing both would rebuild on a repack that changed nothing.
+	// ContextRevision is what the artifact digest describes -- "v0.6.8@sha1:b739efb5". Recorded so
+	// a built image traces back to a revision without being pulled apart. Not hashed: the digest
+	// already identifies the content, and hashing both would rebuild on a no-op repack.
 	ContextRevision string
 	ContextSubpath  string
 
@@ -76,26 +63,22 @@ type Inputs struct {
 	// different trees under different modes, and the tree is what the build sees.
 	ContextUnpack string
 
-	// DockerfileKind is "path" or "inline".
+	// DockerfileKind is "path", "inline" or "configMap".
 	//
-	// Hashed for the same reason as ContextKind, and for a sharper one: the two forms carry their
-	// meaning in DIFFERENT fields, so without this a path of "" and an inline of "" would hash the
-	// same.
+	// Hashed for the same reason as ContextKind, and a sharper one: the forms carry their meaning
+	// in different fields, so without it a path of "" and an inline of "" would hash the same.
 	DockerfileKind string
 
-	// Dockerfile is the PATH, and only for the path form. It stays a path there for the reason it
-	// always was: the content lives inside the context, which ContextDigest addresses, so an edit
-	// to it already moves this hash and nothing has to be fetched to compute one.
+	// Dockerfile is the path, and only for the path form: the content lives inside the context,
+	// which ContextDigest already addresses, so nothing has to be fetched to compute a hash.
 	Dockerfile string
 
-	// DockerfileDigest is a sha256 over the Dockerfile's BYTES, for the forms that do not ride
+	// DockerfileDigest is a sha256 over the Dockerfile's bytes, for the forms that do not ride
 	// inside the context. Empty for the path form.
 	//
-	// CONTENT, not an identity -- the opposite of SecretIdentities below, and the contrast is
-	// deliberate. That field hashes name/resourceVersion because status.inputHash is readable by
-	// anyone with get and a hash of a low-entropy secret is an oracle. Neither half holds here: a
-	// Dockerfile is not low-entropy and is not meant to be unknowable, and it is precisely the
-	// content that decides what gets built.
+	// Content, not an identity -- deliberately the opposite of SecretIdentities below, which hashes
+	// name/resourceVersion because status.inputHash is world-readable and a hash of a low-entropy
+	// secret is an oracle. A Dockerfile is neither low-entropy nor meant to be unknowable.
 	DockerfileDigest string
 
 	Target    string

@@ -39,14 +39,11 @@ func TestHashIsStable(t *testing.T) {
 	}
 }
 
-// hashMutations is the one list of "change this, and the hash must move".
-//
-// Extracted so TestEveryFieldIsAccountedFor can check it covers every field, rather than the two
-// drifting apart — which is the failure a hand-maintained list always eventually has.
+// hashMutations is the one list of "change this, and the hash must move", extracted so
+// TestEveryFieldIsAccountedFor can check it covers every field.
 type hashMutation struct {
 	// field names the Inputs field this case exercises. Explicit rather than parsed out of the
-	// description: TestEveryFieldIsAccountedFor matches on it, and a heuristic over prose is a
-	// guard that silently stops covering things.
+	// description, which would be a guard that silently stops covering things.
 	field  string
 	name   string
 	mutate func(*Inputs)
@@ -72,8 +69,7 @@ func hashMutations() []hashMutation {
 		{"CacheRef", "cache ref", func(in *Inputs) { in.CacheRef = "elsewhere" }},
 		{"SourceDateEpoch", "epoch", func(in *Inputs) { in.SourceDateEpoch = "1700000000" }},
 		// Missing until TestEveryFieldIsAccountedFor was written, which is the point of that test:
-		// Attestations reached the hash and nothing proved it, so a refactor dropping it would have
-		// left every existing object converged at a digest with no attestations and no record why.
+		// Attestations reached the hash and nothing proved it.
 		{"Attestations", "attestations", func(in *Inputs) { in.Attestations = "sbom+provenance" }},
 		{"Platforms", "platform added", func(in *Inputs) { in.Platforms = append(in.Platforms, "linux/arm/v7") }},
 		{"Platforms", "platform order", func(in *Inputs) { in.Platforms = []string{"linux/arm64", "linux/amd64"} }},
@@ -114,14 +110,12 @@ func TestArgOrderDoesNotMatter(t *testing.T) {
 	}
 }
 
-// TestSecretValuesAreNotHashed is a security property, not a correctness one.
-//
-// status.inputHash is readable by anyone with get on the object. If the value were hashed, that
-// field would be an offline oracle against a low-entropy secret. Identity plus resourceVersion
-// gives the rebuild-on-rotation behaviour without the oracle.
+// TestSecretValuesAreNotHashed is a security property: status.inputHash is readable by anyone with
+// get, so hashing the value would make it an offline oracle against a low-entropy secret. Identity
+// plus resourceVersion rebuilds on rotation without the oracle.
 func TestSecretValuesAreNotHashed(t *testing.T) {
-	// The struct offers nowhere to put a value, which is the real enforcement — a field carrying
-	// one would not compile here. What is asserted is the behaviour that depends on it.
+	// The struct offers nowhere to put a value, which is the real enforcement. What is asserted
+	// here is the behaviour that depends on it.
 	rotated := sampleInputs()
 	rotated.SecretIdentities = []string{"npmrc/1235"}
 	if rotated.Hash() == sampleInputs().Hash() {
@@ -129,15 +123,12 @@ func TestSecretValuesAreNotHashed(t *testing.T) {
 	}
 }
 
-// TestEveryFieldIsAccountedFor closes the hole the list above leaves open.
+// TestEveryFieldIsAccountedFor closes the hole the hand-written list above leaves open: a field
+// added to Inputs and never hashed still passes it. For this kind the input hash IS the identity,
+// so an unhashed input means a changed build quietly reusing an old artifact forever.
 //
-// TestEveryFieldMovesTheHash enumerates cases by hand, so a field added to Inputs and never hashed
-// still passes it — the test says nothing about fields nobody thought to list. That is exactly the
-// failure this type cannot afford: for this kind the input hash IS the identity, so an unhashed
-// input means a changed build quietly reusing an old artifact forever.
-//
-// Reflection over the struct instead. Adding a field to Inputs now fails here until someone decides,
-// in writing, whether it belongs in the hash.
+// Reflection over the struct instead, so adding a field fails here until someone decides in writing
+// whether it belongs in the hash.
 func TestEveryFieldIsAccountedFor(t *testing.T) {
 	// Deliberately not hashed, each with the reason recorded on the field itself.
 	notHashed := map[string]string{

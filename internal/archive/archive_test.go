@@ -117,6 +117,32 @@ func TestSubpathStripsThePrefix(t *testing.T) {
 	}
 }
 
+// TestASubpathThatMatchesNothingIsRefused — otherwise a typo hands BuildKit an empty context and
+// the build fails somewhere unrelated. The composer refuses the same thing in collector.done.
+func TestASubpathThatMatchesNothingIsRefused(t *testing.T) {
+	dest := t.TempDir()
+	blob := tarball(t, false, entry{name: "app/Dockerfile", body: "FROM scratch\n"})
+
+	err := Extract(bytes.NewReader(blob), ModeTar, dest, "aap", false)
+	if err == nil {
+		t.Fatal("a subpath present in no entry extracted cleanly")
+	}
+	if !strings.Contains(err.Error(), "aap") {
+		t.Errorf("the error does not name the subpath: %v", err)
+	}
+}
+
+// TestASubpathPresentButEmptyIsAccepted — the directory entry alone proves the subpath exists, so
+// this must not be confused with a typo.
+func TestASubpathPresentButEmptyIsAccepted(t *testing.T) {
+	dest := t.TempDir()
+	blob := tarball(t, false, entry{name: "app/", typeflag: tar.TypeDir})
+
+	if err := Extract(bytes.NewReader(blob), ModeTar, dest, "app", false); err != nil {
+		t.Fatalf("an empty but present subpath was refused: %v", err)
+	}
+}
+
 // TestStripWrapperOnlyStripsARealWrapper.
 //
 // The rule that has to match build.MatchesContextPath. When the two disagreed, an unpinned FROM was

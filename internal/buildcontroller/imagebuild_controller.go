@@ -210,72 +210,9 @@ func (r *ImageBuildReconciler) resolveInputs(ctx context.Context, obj *ociv1alph
 		return build.Inputs{}, "", err
 	}
 
-	// An absent context is a legal, empty tree. It is addressed by construction -- there is nothing
-	// to resolve and nothing to hash beyond the kind itself -- which is why the "unaddressed
-	// context" objection never applied to it. CEL has already refused the one combination that
-	// cannot work: no context and a Dockerfile that is a path into one.
-	var (
-		art         source.FluxArtifact
-		contextKind string
-		subpath     string
-		unpack      string
-	)
-	if img := spec.Context.GetImage(); img != nil {
-		// The digest IS the reference, so there is nothing to resolve and nothing to declare
-		// separately. Split out rather than hashing the whole ref: the tag is decorative, exactly as
-		// it is for spec.base.ref, and hashing it would rebuild on a retag that pulls the same bytes.
-		_, digest, _ := strings.Cut(img.Ref, "@")
-		contextKind, subpath = "image", img.Subpath
-		art = source.FluxArtifact{URL: img.Ref, Digest: digest}
-	}
-	if f := spec.Context.GetFetch(); f != nil {
-		// Nothing to resolve: the digest is DECLARED, which is what makes an arbitrary URL a legal
-		// build input at all. The bytes are verified against it in the build pod, before anything is
-		// unpacked -- see internal/fetchcontext.
-		contextKind, subpath, unpack = "fetch", f.Subpath, string(f.Unpack)
-		art = source.FluxArtifact{URL: f.URL, Digest: f.Digest}
-	}
-	if ref := spec.Context.GetSourceRef(); ref != nil {
-		contextKind = "sourceRef"
-		subpath = ref.Subpath
-
-		// Same namespace only, for the reason the composer refuses it: the RBAC is cluster-wide, so
-		// naming another namespace's source would let anyone who can create an ImageBuild read
-		// content they have no access to.
-		if ref.Namespace != "" && ref.Namespace != obj.Namespace {
-			return build.Inputs{}, "", recon.Terminal(
-				"build context %s/%s is in namespace %q: a context must be in the same namespace as "+
-					"the ImageBuild that consumes it", ref.Kind, ref.Name, ref.Namespace)
-		}
-		// Threat-model gap T1, and the sharper half of it: an unpinned context builds whatever the
-		// branch is at now, and an ImageBuild's output is an observation rather than a function of
-		// its spec (ADR 0025) -- so nothing afterwards can tell you what went in. Terminal, because
-		// editing this spec is what fixes it.
-		if r.RequirePinnedSources && ref.Revision == "" {
-			return build.Inputs{}, "", recon.Terminal(
-				"build context %s/%s names no revision, and this controller runs with "+
-					"--require-pinned-sources: add `revision:` to pin the code this build runs",
-				ref.Kind, ref.Name)
-		}
-
-		var err error
-		art, err = source.FluxSource(ctx, r.Client, ref.Kind, obj.Namespace, ref.Name)
-		if err != nil {
-			var nf *source.ErrNotFound
-			if errors.As(err, &nf) {
-				// Creating the source fixes this, not editing this object.
-				return build.Inputs{}, "", recon.Pending("build context: %s", err)
-			}
-			return build.Inputs{}, "", fmt.Errorf("build context: %w", err)
-		}
-
-		// Same rule as the composer's layers: an explicit revision waits for the source to reach it
-		// rather than building from whatever is currently published.
-		if !ociv1alpha1.RevisionMatches(ref.Revision, art.Revision) {
-			return build.Inputs{}, "", recon.Pending(
-				"build context %s/%s is at revision %q, waiting for %q",
-				ref.Kind, ref.Name, art.Revision, ref.Revision)
-		}
+	resolved, err := r.resolveContext(ctx, obj)
+	if err != nil {
+		return build.Inputs{}, "", err
 	}
 
 	// Secret identities, never values. status.inputHash is world-readable to anyone with get, and
@@ -303,49 +240,24 @@ func (r *ImageBuildReconciler) resolveInputs(ctx context.Context, obj *ociv1alph
 		cacheMode = spec.Cache.Mode
 	}
 
-	// The Dockerfile's identity, which depends on where it comes from.
-	//
-	// For a path the CONTENT needs no hashing: it lives inside the context, which ContextDigest
-	// addresses, so an edit moves the hash already -- and that is why this stays cheap, with no
-	// fetch on a reconcile that is about to short-circuit. For an inline Dockerfile there is no
-	// tarball to ride in, so its bytes are hashed directly.
-	dockerfileKind, dockerfilePath, dockerfileDigest := "path", spec.Dockerfile.EffectiveDockerfile(), ""
-	switch {
-	case spec.Dockerfile != nil && spec.Dockerfile.Inline != "":
-		sum := sha256.Sum256([]byte(spec.Dockerfile.Inline))
-		dockerfileKind, dockerfilePath, dockerfileDigest = "inline", "", "sha256:"+hex.EncodeToString(sum[:])
-
-	case spec.Dockerfile != nil && spec.Dockerfile.ConfigMapRef != nil:
-		// A ConfigMap is mutable by construction, so it can never satisfy the pinning flag. Refused
-		// rather than ignored: a flag that silently does not apply to one source is worse than one
-		// that says so.
-		if r.RequirePinnedSources {
-			return build.Inputs{}, "", recon.Terminal(
-				"spec.dockerfile.configMapRef cannot be pinned and this controller runs with " +
-					"--require-pinned-sources: put the Dockerfile in the context or in " +
-					"spec.dockerfile.inline, where the spec itself pins it")
-		}
-		content, err := r.dockerfileFromConfigMap(ctx, obj)
-		if err != nil {
-			return build.Inputs{}, "", err
-		}
-		sum := sha256.Sum256(content)
-		dockerfileKind, dockerfilePath, dockerfileDigest = "configMap", "", "sha256:"+hex.EncodeToString(sum[:])
+	dockerfile, err := r.resolveDockerfile(ctx, obj)
+	if err != nil {
+		return build.Inputs{}, "", err
 	}
 
 	return build.Inputs{
 		BuilderDigest:    r.JobConfig.BuilderImage,
 		FrontendDigest:   r.JobConfig.FrontendImage,
 		FetcherDigest:    r.JobConfig.FetcherImage,
-		ContextKind:      contextKind,
-		ContextDigest:    art.Digest,
-		ContextRevision:  art.Revision,
+		ContextKind:      resolved.kind,
+		ContextDigest:    resolved.art.Digest,
+		ContextRevision:  resolved.art.Revision,
 		Attestations:     attestationMode(r.JobConfig),
-		ContextSubpath:   subpath,
-		ContextUnpack:    unpack,
-		DockerfileKind:   dockerfileKind,
-		Dockerfile:       dockerfilePath,
-		DockerfileDigest: dockerfileDigest,
+		ContextSubpath:   resolved.subpath,
+		ContextUnpack:    resolved.unpack,
+		DockerfileKind:   dockerfile.kind,
+		Dockerfile:       dockerfile.path,
+		DockerfileDigest: dockerfile.digest,
 		Target:           spec.Target,
 		Network:          spec.Network,
 		CacheMode:        cacheMode,
@@ -354,7 +266,132 @@ func (r *ImageBuildReconciler) resolveInputs(ctx context.Context, obj *ociv1alph
 		Platforms:        spec.Platforms,
 		Args:             args,
 		SecretIdentities: ids,
-	}, art.URL, nil
+	}, resolved.art.URL, nil
+}
+
+// contextInputs is what a resolved context contributes to the input hash.
+type contextInputs struct {
+	kind    string
+	subpath string
+	unpack  string
+	art     source.FluxArtifact
+}
+
+// resolveContext resolves whichever member spec.context names.
+//
+// No context is a legal, empty tree: addressed by construction, so the "unaddressed context"
+// objection never applied to it. CEL has already refused the one combination that cannot work --
+// no context and a Dockerfile that is a path into one.
+func (r *ImageBuildReconciler) resolveContext(ctx context.Context, obj *ociv1alpha1.ImageBuild) (contextInputs, error) {
+	switch c := obj.Spec.Context; {
+	case c.GetImage() != nil:
+		img := c.GetImage()
+		// The digest IS the reference, so there is nothing to resolve. Split out rather than
+		// hashing the whole ref: the tag is decorative, as it is for spec.base.ref, and hashing it
+		// would rebuild on a retag that pulls the same bytes.
+		_, digest, _ := strings.Cut(img.Ref, "@")
+		return contextInputs{kind: "image", subpath: img.Subpath,
+			art: source.FluxArtifact{URL: img.Ref, Digest: digest}}, nil
+
+	case c.GetFetch() != nil:
+		f := c.GetFetch()
+		// Nothing to resolve: the digest is DECLARED, which is what makes an arbitrary URL a legal
+		// build input. The bytes are verified against it in the build pod, before anything is
+		// unpacked -- see internal/fetchcontext.
+		return contextInputs{kind: "fetch", subpath: f.Subpath, unpack: string(f.Unpack),
+			art: source.FluxArtifact{URL: f.URL, Digest: f.Digest}}, nil
+
+	case c.GetSourceRef() != nil:
+		return r.resolveSourceRef(ctx, obj, c.GetSourceRef())
+
+	default:
+		return contextInputs{}, nil
+	}
+}
+
+func (r *ImageBuildReconciler) resolveSourceRef(ctx context.Context, obj *ociv1alpha1.ImageBuild,
+	ref *ociv1alpha1.SourceRefSource) (contextInputs, error) {
+	// Same namespace only, for the reason the composer refuses it: the RBAC is cluster-wide, so
+	// naming another namespace's source would let anyone who can create an ImageBuild read content
+	// they have no access to.
+	if ref.Namespace != "" && ref.Namespace != obj.Namespace {
+		return contextInputs{}, recon.Terminal(
+			"build context %s/%s is in namespace %q: a context must be in the same namespace as "+
+				"the ImageBuild that consumes it", ref.Kind, ref.Name, ref.Namespace)
+	}
+	// Threat-model gap T1: an unpinned context builds whatever the branch is at now, and an
+	// ImageBuild's output is an observation rather than a function of its spec (ADR 0025), so
+	// nothing afterwards can tell you what went in. Terminal -- editing this spec is the fix.
+	if r.RequirePinnedSources && ref.Revision == "" {
+		return contextInputs{}, recon.Terminal(
+			"build context %s/%s names no revision, and this controller runs with "+
+				"--require-pinned-sources: add `revision:` to pin the code this build runs",
+			ref.Kind, ref.Name)
+	}
+
+	art, err := source.FluxSource(ctx, r.Client, ref.Kind, obj.Namespace, ref.Name)
+	if err != nil {
+		var nf *source.ErrNotFound
+		if errors.As(err, &nf) {
+			// Creating the source fixes this, not editing this object.
+			return contextInputs{}, recon.Pending("build context: %s", err)
+		}
+		return contextInputs{}, fmt.Errorf("build context: %w", err)
+	}
+
+	// Same rule as the composer's layers: an explicit revision waits for the source to reach it
+	// rather than building from whatever is currently published.
+	if !ociv1alpha1.RevisionMatches(ref.Revision, art.Revision) {
+		return contextInputs{}, recon.Pending(
+			"build context %s/%s is at revision %q, waiting for %q",
+			ref.Kind, ref.Name, art.Revision, ref.Revision)
+	}
+	return contextInputs{kind: "sourceRef", subpath: ref.Subpath, art: art}, nil
+}
+
+// dockerfileInputs is the Dockerfile's identity, which depends on where it comes from.
+type dockerfileInputs struct {
+	kind   string
+	path   string
+	digest string
+}
+
+// resolveDockerfile decides what identifies the recipe.
+//
+// A path needs no content hashing: it lives inside the context, which ContextDigest already
+// addresses, so an edit moves the hash and no fetch happens on a reconcile about to short-circuit.
+// The other two forms ride in no tarball, so their bytes are hashed directly.
+func (r *ImageBuildReconciler) resolveDockerfile(ctx context.Context, obj *ociv1alpha1.ImageBuild) (dockerfileInputs, error) {
+	df := obj.Spec.Dockerfile
+
+	switch {
+	case df != nil && df.Inline != "":
+		return dockerfileInputs{kind: "inline", digest: sha256Hex([]byte(df.Inline))}, nil
+
+	case df != nil && df.ConfigMapRef != nil:
+		// A ConfigMap is mutable by construction, so it can never satisfy the pinning flag. Refused
+		// rather than ignored: a flag that silently does not apply to one source is worse than one
+		// that says so.
+		if r.RequirePinnedSources {
+			return dockerfileInputs{}, recon.Terminal(
+				"spec.dockerfile.configMapRef cannot be pinned and this controller runs with " +
+					"--require-pinned-sources: put the Dockerfile in the context or in " +
+					"spec.dockerfile.inline, where the spec itself pins it")
+		}
+		content, err := r.dockerfileFromConfigMap(ctx, obj)
+		if err != nil {
+			return dockerfileInputs{}, err
+		}
+		return dockerfileInputs{kind: "configMap", digest: sha256Hex(content)}, nil
+
+	default:
+		return dockerfileInputs{kind: "path", path: df.EffectiveDockerfile()}, nil
+	}
+}
+
+func sha256Hex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // currentJob returns the Job for these inputs, adopting one left behind by a previous leader.
@@ -382,22 +419,18 @@ func (r *ImageBuildReconciler) dockerfileBytes(ctx context.Context, obj *ociv1al
 		return []byte(df.Inline), true, nil
 	}
 	if df := obj.Spec.Dockerfile; df != nil && df.ConfigMapRef != nil {
-		// Read again rather than threaded down from resolveInputs. The two reads are one informer
-		// hit apart and the second is what the Job actually gets, so if the ConfigMap changed in
-		// between the input hash and the built bytes still describe the same content -- the hash
-		// simply moves on the next pass. Threading it would save nothing and add a parameter whose
-		// only job is to be kept in step.
+		// Read again rather than threaded down from resolveInputs: the second read is what the Job
+		// gets, so a ConfigMap edit in between just moves the hash on the next pass. Threading it
+		// would add a parameter whose only job is to be kept in step.
 		content, err := r.dockerfileFromConfigMap(ctx, obj)
 		// Not inline: the fix for an unpinned FROM here is editing the ConfigMap, which raises no
 		// generation change on this object, exactly like a Dockerfile in the context.
 		return content, false, err
 	}
 
-	// An IMAGE context is checked by the fetcher instead. Reading one file out of an image here
-	// would mean giving this controller -- shared by every namespace -- registry credentials for
-	// arbitrary user-named repositories, and pulling potentially gigabytes through it. The guard is
-	// not skipped, it moves: the fetcher runs CheckPinnedBases on the extracted tree before BuildKit
-	// starts, and it is our binary rather than user code. See internal/fetchcontext.
+	// An image context is checked by the fetcher instead -- reading one file out of an image here
+	// would mean registry credentials for arbitrary user-named repositories in a controller shared
+	// by every namespace. The guard moves rather than being skipped; see internal/fetchcontext.
 	if obj.Spec.Context.GetImage() != nil {
 		return nil, false, nil
 	}
@@ -408,9 +441,8 @@ func (r *ImageBuildReconciler) dockerfileBytes(ctx context.Context, obj *ociv1al
 		subpath = ref.Subpath
 	}
 	if f := obj.Spec.Context.GetFetch(); f != nil {
-		// A fetched archive is whatever the publisher made it, so there is no unpredictable wrapper
-		// to strip -- `subpath` is how a version-named one is named. Stripping anyway would look
-		// past the real top-level directory and report the Dockerfile missing.
+		// No unpredictable wrapper to strip in a fetched archive -- `subpath` names a version-named
+		// one. Stripping anyway would look past the real top-level directory.
 		subpath, stripWrapper = f.Subpath, false
 	}
 	content, err = build.FetchDockerfile(ctx, r.httpClient(), contextURL,
@@ -425,27 +457,24 @@ func (r *ImageBuildReconciler) dockerfileBytes(ctx context.Context, obj *ociv1al
 func (r *ImageBuildReconciler) startBuild(ctx context.Context, obj *ociv1alpha1.ImageBuild,
 	inputs build.Inputs, inputHash, contextURL string) error {
 
-	// The FROM check happens here rather than inside the Job, so an unpinned base is refused BEFORE
-	// anything executes. For a path that costs one fetch of the context — but only on the path
-	// where a build is about to run anyway, never on the cheap reconcile that finds an unchanged
-	// hash. An inline Dockerfile costs nothing: the bytes are already in the spec.
+	// The FROM check happens here rather than inside the Job, so an unpinned base is refused before
+	// anything executes. For a path that costs one fetch of the context, but only where a build is
+	// about to run anyway -- never on the reconcile that finds an unchanged hash.
 	dockerfile, inline, err := r.dockerfileBytes(ctx, obj, contextURL)
 	if err != nil {
 		return err
 	}
-	// Nil means the FETCHER checks it -- an image context, which this process cannot read cheaply.
-	// The guard is not skipped, it moves; see dockerfileBytes.
-	if err := checkIfRead(dockerfile); err != nil {
-		if inline {
-			// Terminal, and this is the one place the two forms differ. The Dockerfile IS this
-			// spec, so editing it is the fix, and the generation change that raises is the event
-			// that wakes the object back up. Stalling something a spec edit resolves is the whole
-			// point of Stalled.
-			return recon.Terminal("%s", err)
+	// Nil is not "skip the guard": it is an image context, which the fetcher checks instead.
+	if dockerfile != nil {
+		if err := build.CheckPinnedBases(bytes.NewReader(dockerfile)); err != nil {
+			if inline {
+				// Terminal only here: the Dockerfile IS this spec, so the fix is an edit, and the
+				// generation change it raises is what wakes the object. A Dockerfile in another
+				// object raises no such event.
+				return recon.Terminal("%s", err)
+			}
+			return fmt.Errorf("%w", err)
 		}
-		// Not terminal: the Dockerfile lives in the Flux source, so pushing a fix there is what
-		// resolves this, and that raises no generation change on this object to wake it.
-		return fmt.Errorf("%w", err)
 	}
 
 	// The credential exists before the pod that mounts it. Both names come from jobName, so there is
@@ -940,16 +969,4 @@ func (r *ImageBuildReconciler) buildsForConfigMap(ctx context.Context, obj clien
 		})
 	}
 	return out
-}
-
-// checkIfRead runs the unpinned-FROM guard on bytes the controller was able to read.
-//
-// Nil is not "no Dockerfile" and not "skip the guard": it is "this controller cannot read it
-// cheaply, and the fetcher checks it instead" -- an image context. Split out so the nil case is a
-// named decision at the call site rather than a bare condition somebody later reads as an oversight.
-func checkIfRead(dockerfile []byte) error {
-	if dockerfile == nil {
-		return nil
-	}
-	return build.CheckPinnedBases(bytes.NewReader(dockerfile))
 }

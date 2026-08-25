@@ -13,11 +13,6 @@ import (
 const pinnedBase = "busybox:1.37@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0"
 
 // A Dockerfile that does not live in the build context, against a real cluster.
-//
-// The unpinned-FROM guard is the thing worth running here. It is the only content guard this
-// controller has, and a source that skips it is the one real security regression this feature could
-// introduce — so it is asserted once PER SOURCE rather than once, which is what makes "the guard
-// runs whatever the Dockerfile came from" a tested claim instead of a design intention.
 
 // TestAnInlineDockerfileBuilds — the motivating case: an upstream project that ships no Dockerfile,
 // built without forking it to add one.
@@ -55,10 +50,8 @@ spec:
 	})
 }
 
-// TestAContextlessInlineBuildNeedsNoSource.
-//
-// The friction the feature exists to remove: a build that reads no files used to need a Flux source
-// pointed at an empty directory, purely to satisfy a required field.
+// TestAContextlessInlineBuildNeedsNoSource — a build that reads no files used to need a Flux
+// source pointed at an empty directory, purely to satisfy a required field.
 func TestAContextlessInlineBuildNeedsNoSource(t *testing.T) {
 	name := "e2e-nocontext"
 	applyStdin(t, fmt.Sprintf(`
@@ -89,11 +82,8 @@ spec:
 	})
 }
 
-// TestADockerfileFromAConfigMapBuildsAndRebuildsOnEdit.
-//
-// Two claims in one run, because the second is what makes the source usable: the content is hashed,
-// so an edit rebuilds; and the ConfigMap is watched, so it happens promptly rather than at the next
-// interval an hour later.
+// TestADockerfileFromAConfigMapBuildsAndRebuildsOnEdit — two claims: the content is hashed, so an
+// edit rebuilds, and the ConfigMap is watched, so it happens before the next interval an hour on.
 func TestADockerfileFromAConfigMapBuildsAndRebuildsOnEdit(t *testing.T) {
 	name := "e2e-configmap"
 	apply := func(marker string) {
@@ -139,8 +129,8 @@ spec:
 		return nil
 	})
 
-	// Only the ConfigMap changes. Nothing touches the ImageBuild, so if the hash covered the
-	// reference rather than the content, or nothing watched the ConfigMap, this would never finish.
+	// Only the ConfigMap changes. If the hash covered the reference rather than the content, or
+	// nothing watched the ConfigMap, this would never finish.
 	apply("second")
 	buildEventually(t, "the edit to move the input hash", func() error {
 		st := buildStatus(t, name)
@@ -151,12 +141,11 @@ spec:
 	})
 }
 
-// TestTheFromGuardRunsWhateverTheDockerfileCameFrom is the most important test in this file.
+// TestTheFromGuardRunsWhateverTheDockerfileCameFrom is the most important test in this file: a
+// source that skips the only content guard this controller has is a security regression.
 //
-// The guard runs in different places depending on the source — in the controller for a path, an
-// inline or a ConfigMap; in the build pod's fetcher for an image context, which the controller
-// cannot read cheaply. A table rather than three tests, so adding a fourth source without a case
-// here is visibly missing rather than quietly absent.
+// The guard runs in the controller for a path, an inline or a ConfigMap, and in the build pod's
+// fetcher for an image context. A table, so a fourth source with no case here is visibly missing.
 func TestTheFromGuardRunsWhateverTheDockerfileCameFrom(t *testing.T) {
 	unpinned := "FROM golang:1.26\n"
 
@@ -170,8 +159,7 @@ func TestTheFromGuardRunsWhateverTheDockerfileCameFrom(t *testing.T) {
   dockerfile: {path: Dockerfile.unpinned}`,
 		},
 		{
-			// Terminal here, unlike the others: the Dockerfile IS this spec, so a spec edit is the
-			// fix and the generation change is what wakes the object.
+			// Terminal here, unlike the others: the Dockerfile IS this spec.
 			name: "inline",
 			spec: `
   dockerfile:

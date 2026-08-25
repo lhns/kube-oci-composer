@@ -158,13 +158,8 @@ func rootlessSecurityContext() *corev1.SecurityContext {
 	}
 }
 
-// fetchContextArgs is what the init container is told to fetch.
-//
-// This replaced a shell script doing `wget -qO- URL | tar -xzf -`, which verified nothing -- not
-// even the Flux artifact digest the controller already held -- and carried a second copy of the
-// wrapper-stripping rule that once disagreed with build.MatchesContextPath, so an unpinned FROM was
-// correctly refused and every build that passed the check then failed inside BuildKit. See
-// internal/fetchcontext.
+// fetchContextArgs is what the init container is told to fetch. See internal/fetchcontext for why
+// this is our own binary rather than the shell script it replaced.
 func fetchContextArgs(obj *ociv1alpha1.ImageBuild, contextURL, contextDigest string) []string {
 	args := []string{
 		"fetch-context",
@@ -172,9 +167,8 @@ func fetchContextArgs(obj *ociv1alpha1.ImageBuild, contextURL, contextDigest str
 		"--url=" + contextURL,
 		"--digest=" + contextDigest,
 	}
-	// The FROM check runs again on the extracted tree, which is the bytes actually built. Empty
-	// when the Dockerfile comes from outside the context: the controller checked those before this
-	// pod existed, and there is nothing in the tree to point at.
+	// Re-checked on the extracted tree, which is the bytes actually built. Empty when the
+	// Dockerfile comes from outside the context: there is nothing in the tree to point at.
 	if !projectedDockerfile(obj) {
 		args = append(args, "--dockerfile="+obj.Spec.Dockerfile.EffectiveDockerfile())
 	}
@@ -194,12 +188,11 @@ func fetchContextArgs(obj *ociv1alpha1.ImageBuild, contextURL, contextDigest str
 // what gets built, and the only part the argv tests read.
 func buildctlArgs(obj *ociv1alpha1.ImageBuild, cfg JobConfig, repo string, cacheAvailable bool) []string {
 	spec := obj.Spec
-	// `context` and `dockerfile` are two independent BuildKit locals, and always were -- they only
-	// coincided because the Dockerfile happened to live in the context tarball. A Dockerfile that
-	// does not points the second local at its own volume and leaves the first alone.
+	// `context` and `dockerfile` are two independent BuildKit locals; they only ever coincided
+	// because the Dockerfile happened to live in the context tarball.
 	//
 	// Deliberately NOT unified by copying the projected Dockerfile into the context: that would
-	// silently overwrite one already present there and make the two forms interact invisibly.
+	// silently overwrite one already there.
 	dockerfileLocal, filename := path.Join(contextPath, path.Dir(spec.Dockerfile.EffectiveDockerfile())),
 		path.Base(spec.Dockerfile.EffectiveDockerfile())
 	if projectedDockerfile(obj) {
@@ -312,17 +305,11 @@ func insecureAttr(repository string, insecure []string) string {
 	return ",registry.insecure=true"
 }
 
-// insecureHost reports whether a repository's host is on the operator's allow-list for plain HTTP.
-//
-// Shared with the controller's own registry reads, so a host it can push to insecurely is one it
-// can also HEAD insecurely. Diverging would leave onConflict unenforceable against exactly the
-// registries an e2e or air-gapped setup runs.
 // projectedDockerfile reports whether the Dockerfile has to be carried into the pod rather than
 // found inside the context.
 //
-// One predicate, used by both the volume list and the buildctl argv, because a mount without the
-// matching `--local` is a build that reads the wrong file and a `--local` without the mount is one
-// that reads nothing.
+// One predicate for both the volume list and the buildctl argv: a mount without the matching
+// `--local` reads the wrong file, and a `--local` without the mount reads nothing.
 func projectedDockerfile(obj *ociv1alpha1.ImageBuild) bool {
 	df := obj.Spec.Dockerfile
 	return df != nil && (df.Inline != "" || df.ConfigMapRef != nil)
@@ -346,14 +333,13 @@ func buildVolumes(obj *ociv1alpha1.ImageBuild, pushSecret, dockerfileSecret stri
 	add(contextVolume, empty, contextPath, false)
 	add(resultVolume, empty, resultPath, false)
 
-	// A Dockerfile that does not live in the context, projected from the Secret the controller
-	// wrote after checking it.
+	// A Dockerfile from outside the context, projected from the Secret the controller wrote after
+	// checking it.
 	//
-	// subPath, so this is a plain regular file. A Secret volume is normally a `..data` symlink farm,
-	// and `--local` hands the whole directory to BuildKit's fsutil, which walks symlinks rather than
-	// flattening them. It may well work; it is not something to rest the unpinned-FROM guard on.
-	// Losing updates is the usual cost of subPath and here it is a second lock on the invariant:
-	// the pod builds the bytes the controller checked, and nothing re-resolves at pod start.
+	// subPath, so this is a plain regular file: a Secret volume is otherwise a `..data` symlink farm
+	// and `--local` hands the directory to fsutil, which walks symlinks rather than flattening them.
+	// Losing updates is subPath's usual cost and here a second lock -- the pod builds the bytes the
+	// controller checked, and nothing re-resolves at pod start.
 	if projectedDockerfile(obj) {
 		volumes = append(volumes, corev1.Volume{
 			Name: dockerfileVolume,
@@ -518,9 +504,8 @@ cat %s > /dev/termination-log
 			TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 		}
 		if spec.Resources != nil {
-			// The same limits as the build container. Without this the fetch is the one unbounded
-			// container in the pod, which is the wrong thing to leave unbounded when it is the part
-			// downloading somebody else's tarball.
+			// The same limits as the build container: otherwise the one container downloading
+			// somebody else's tarball is the one that is unbounded.
 			fetch.Resources = *spec.Resources
 		}
 		initContainers = append(initContainers, fetch)
