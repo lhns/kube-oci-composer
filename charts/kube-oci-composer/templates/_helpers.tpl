@@ -69,9 +69,29 @@ A separate label rather than a component, because the two roles must stay distin
 component=registry is the writer's StatefulSet selector and is immutable, so readers cannot share
 it. This is what the read Service, the Ingress and the NetworkPolicy select on.
 */}}
+{{- define "kube-oci-composer.registryServeRoleLabel" -}}
+oci-composer.lhns.de/registry-role: serve
+{{- end -}}
+
 {{- define "kube-oci-composer.registryServeSelectorLabels" -}}
 {{ include "kube-oci-composer.selectorLabels" . }}
-oci-composer.lhns.de/registry-role: serve
+{{ include "kube-oci-composer.registryServeRoleLabel" . }}
+{{- end -}}
+
+{{/*
+Labels for a registry POD -- writer or read replica.
+
+One helper rather than two includes side by side, and that is the whole point of it. Pairing
+componentSelectorLabels with registryServeSelectorLabels emits name and instance TWICE, which is
+valid text and invalid YAML: helm template exits 0, helm lint passes, and Flux's post-renderer
+rejects the release with "mapping key already defined". Because the CRDs live in templates/ and a
+release is atomic, that failure blocks the whole upgrade, CRDs included.
+
+Takes the same (dict "ctx" ... "component" ...) shape as componentSelectorLabels.
+*/}}
+{{- define "kube-oci-composer.registryPodLabels" -}}
+{{ include "kube-oci-composer.componentSelectorLabels" . }}
+{{ include "kube-oci-composer.registryServeRoleLabel" . }}
 {{- end -}}
 
 {{- define "kube-oci-composer.componentLabels" -}}
