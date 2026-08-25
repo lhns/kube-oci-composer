@@ -15,7 +15,7 @@ import (
 //
 // Still no inline or bare-URL form: those are the two that genuinely fail the test.
 //
-// +kubebuilder:validation:XValidation:rule="(has(self.sourceRef)?1:0) + (has(self.fetch)?1:0) == 1",message="set exactly one of sourceRef or fetch"
+// +kubebuilder:validation:XValidation:rule="(has(self.sourceRef)?1:0) + (has(self.fetch)?1:0) + (has(self.image)?1:0) == 1",message="set exactly one of sourceRef, fetch or image"
 // +kubebuilder:validation:XValidation:rule="!has(self.fetch) || self.fetch.unpack == 'tar' || self.fetch.unpack == 'tar.gz'",message="a build context is a directory tree, so fetch.unpack must be tar or tar.gz. unpack defaults to 'none', which places a single file, so this has to be set explicitly"
 type BuildContext struct {
 	// SourceRef takes the context from a Flux source's artifact.
@@ -37,6 +37,27 @@ type BuildContext struct {
 	// can map back to this field.
 	// +optional
 	Fetch *FetchSource `json:"fetch,omitempty"`
+
+	// Image takes the flattened filesystem of a digest-pinned image as the context.
+	//
+	// For building on what CI already published without that image having to be the base. It costs
+	// a pull and a flatten in the build pod on every cache miss, so it is not the thing to reach for
+	// when a sourceRef would do.
+	//
+	// Worth knowing before choosing it: `FROM <image>@sha256:… AS ctx` plus `COPY --from=ctx` does
+	// much the same with no context at all. This exists for when the image IS the tree the build
+	// reads, rather than one it copies out of -- notably an ImageComposition's own output, which is
+	// how "compose the workdir, then build it" is spelled without a build step inside composition.
+	// +optional
+	Image *ImageSource `json:"image,omitempty"`
+}
+
+// GetImage returns the image source this context names, or nil when it names none.
+func (c *BuildContext) GetImage() *ImageSource {
+	if c == nil {
+		return nil
+	}
+	return c.Image
 }
 
 // GetSourceRef returns the Flux source this context names, or nil when it names none.

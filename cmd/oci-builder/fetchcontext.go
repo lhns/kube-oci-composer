@@ -30,6 +30,9 @@ func runFetchContext(args []string) {
 	fs.StringVar(&opts.Unpack, "unpack", "tar.gz", "Archive mode: tar or tar.gz.")
 	fs.StringVar(&opts.Subpath, "subpath", "", "Directory inside the archive to take as the context.")
 	fs.StringVar(&opts.Dest, "dest", "", "Where to write the tree.")
+	fs.StringVar(&opts.Dockerfile, "dockerfile", "",
+		"Path inside the context whose FROM lines must be digest-pinned. Empty skips the check, "+
+			"which is what a Dockerfile from outside the context means.")
 	_ = fs.Parse(args)
 
 	if err := fetchcontext.Run(context.Background(), opts); err != nil {

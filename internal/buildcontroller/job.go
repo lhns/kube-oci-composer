@@ -172,8 +172,19 @@ func fetchContextArgs(obj *ociv1alpha1.ImageBuild, contextURL, contextDigest str
 		"--url=" + contextURL,
 		"--digest=" + contextDigest,
 	}
+	// The FROM check runs again on the extracted tree, which is the bytes actually built. Empty
+	// when the Dockerfile comes from outside the context: the controller checked those before this
+	// pod existed, and there is nothing in the tree to point at.
+	if !projectedDockerfile(obj) {
+		args = append(args, "--dockerfile="+obj.Spec.Dockerfile.EffectiveDockerfile())
+	}
 	if ref := obj.Spec.Context.GetSourceRef(); ref != nil {
 		return append(args, "--kind=sourceRef", "--unpack=tar.gz", "--subpath="+ref.Subpath)
+	}
+	if img := obj.Spec.Context.GetImage(); img != nil {
+		// No unpack mode: an image is layers, not an archive, and it is flattened rather than
+		// extracted. --url carries the pinned reference, which is also its digest.
+		return append(args, "--kind=image", "--subpath="+img.Subpath)
 	}
 	f := obj.Spec.Context.GetFetch()
 	return append(args, "--kind=fetch", "--unpack="+string(f.Unpack), "--subpath="+f.Subpath)

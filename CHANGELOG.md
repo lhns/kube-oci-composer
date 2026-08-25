@@ -166,6 +166,14 @@ must name a source in its own namespace.
   with a fetch context the controller now GETs a **user-supplied** URL to read the Dockerfile. The
   fetch inside the build pod is deliberately unguarded — that pod runs arbitrary code already.
 
+  `spec.context.image` takes the flattened filesystem of a digest-pinned image, applying whiteouts —
+  which is how "compose the workdir, then build it" is spelled without putting a build step inside
+  `ImageComposition` ([ADR 0042](docs/adr/0042-content-addressed-not-flux.md)). For that kind alone
+  the unpinned-`FROM` check runs in the build pod's fetcher rather than in the controller: reading
+  one file out of an image controller-side would mean giving a process shared by every namespace
+  registry credentials for arbitrary repositories. The guard moves rather than being skipped, and
+  the fetcher is our binary running before BuildKit, not user code.
+
   The Dockerfile's bytes join the input hash and `RecipeVersion` moves to 2. Previously the content
   needed no hashing because it rode inside the content-addressed context tarball — true then, and
   false the moment the recipe can come from anywhere else.

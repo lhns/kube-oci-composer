@@ -178,6 +178,49 @@ spec:
                     - digest
                     - url
                     type: object
+                  image:
+                    description: |-
+                      Image takes the flattened filesystem of a digest-pinned image as the context.
+
+                      For building on what CI already published without that image having to be the base. It costs
+                      a pull and a flatten in the build pod on every cache miss, so it is not the thing to reach for
+                      when a sourceRef would do.
+
+                      Worth knowing before choosing it: `FROM <image>@sha256:… AS ctx` plus `COPY --from=ctx` does
+                      much the same with no context at all. This exists for when the image IS the tree the build
+                      reads, rather than one it copies out of -- notably an ImageComposition's own output, which is
+                      how "compose the workdir, then build it" is spelled without a build step inside composition.
+                    properties:
+                      ref:
+                        description: |-
+                          Ref is the image to read, pinned by digest: "repo:tag@sha256:…" or "repo@sha256:…".
+
+                          The tag is decorative — it is recorded for humans and ignored when pulling, exactly as it
+                          is for spec.base.ref. What is pulled is the digest, which is what ADR 0002 requires of
+                          every input.
+                        maxLength: 1024
+                        pattern: ^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*(:[a-zA-Z0-9._-]+)?@sha256:[a-f0-9]{64}$
+                        type: string
+                      secretRef:
+                        description: |-
+                          SecretRef names a kubernetes.io/dockerconfigjson Secret for pulling, when the image is
+                          private. Same arrangement as spec.base.secretRef.
+                        properties:
+                          name:
+                            description: Name of the referent.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      subpath:
+                        description: |-
+                          Subpath selects one directory from the flattened filesystem and strips the prefix, so
+                          "/usr/local/bin" from the image can land directly at the target.
+                        maxLength: 4096
+                        type: string
+                    required:
+                    - ref
+                    type: object
                   sourceRef:
                     description: |-
                       SourceRef takes the context from a Flux source's artifact.
@@ -235,8 +278,9 @@ spec:
                     type: object
                 type: object
                 x-kubernetes-validations:
-                - message: set exactly one of sourceRef or fetch
-                  rule: (has(self.sourceRef)?1:0) + (has(self.fetch)?1:0) == 1
+                - message: set exactly one of sourceRef, fetch or image
+                  rule: (has(self.sourceRef)?1:0) + (has(self.fetch)?1:0) + (has(self.image)?1:0)
+                    == 1
                 - message: a build context is a directory tree, so fetch.unpack must
                     be tar or tar.gz. unpack defaults to 'none', which places a single
                     file, so this has to be set explicitly

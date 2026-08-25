@@ -329,6 +329,26 @@ The digest is **declared**, because nothing else addresses an arbitrary URL, and
 the build pod **before** anything is unpacked. `unpack` must be an archive mode: a context is a tree,
 and the single-file modes cannot describe one.
 
+Or the flattened filesystem of a digest-pinned image — which is how **compose the workdir, then
+build it** is spelled, without a build step inside `ImageComposition`:
+
+```yaml
+spec:
+  context:
+    image: {ref: ghcr.io/me/workdir@sha256:…}
+  dockerfile:
+    inline: |
+      FROM golang:1.24@sha256:…
+      COPY . /src
+```
+
+Worth knowing before reaching for it: `FROM <image>@sha256:… AS ctx` plus `COPY --from=ctx` does
+much the same with no context at all. This is for when the image **is** the tree the build reads.
+
+For an image context the unpinned-`FROM` check runs in the build pod's fetcher rather than in the
+controller — reading one file out of an image controller-side would mean giving a process shared by
+every namespace registry credentials for arbitrary repositories. The guard moves; it is not skipped.
+
 ### Where sources come from
 
 Two rules, and [ADR 0042](docs/adr/0042-content-addressed-not-flux.md) is the record:

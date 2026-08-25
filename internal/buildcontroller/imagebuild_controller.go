@@ -220,6 +220,14 @@ func (r *ImageBuildReconciler) resolveInputs(ctx context.Context, obj *ociv1alph
 		subpath     string
 		unpack      string
 	)
+	if img := spec.Context.GetImage(); img != nil {
+		// The digest IS the reference, so there is nothing to resolve and nothing to declare
+		// separately. Split out rather than hashing the whole ref: the tag is decorative, exactly as
+		// it is for spec.base.ref, and hashing it would rebuild on a retag that pulls the same bytes.
+		_, digest, _ := strings.Cut(img.Ref, "@")
+		contextKind, subpath = "image", img.Subpath
+		art = source.FluxArtifact{URL: img.Ref, Digest: digest}
+	}
 	if f := spec.Context.GetFetch(); f != nil {
 		// Nothing to resolve: the digest is DECLARED, which is what makes an arbitrary URL a legal
 		// build input at all. The bytes are verified against it in the build pod, before anything is
@@ -385,6 +393,15 @@ func (r *ImageBuildReconciler) dockerfileBytes(ctx context.Context, obj *ociv1al
 		return content, false, err
 	}
 
+	// An IMAGE context is checked by the fetcher instead. Reading one file out of an image here
+	// would mean giving this controller -- shared by every namespace -- registry credentials for
+	// arbitrary user-named repositories, and pulling potentially gigabytes through it. The guard is
+	// not skipped, it moves: the fetcher runs CheckPinnedBases on the extracted tree before BuildKit
+	// starts, and it is our binary rather than user code. See internal/fetchcontext.
+	if obj.Spec.Context.GetImage() != nil {
+		return nil, false, nil
+	}
+
 	var subpath string
 	stripWrapper := true
 	if ref := obj.Spec.Context.GetSourceRef(); ref != nil {
@@ -416,7 +433,9 @@ func (r *ImageBuildReconciler) startBuild(ctx context.Context, obj *ociv1alpha1.
 	if err != nil {
 		return err
 	}
-	if err := build.CheckPinnedBases(bytes.NewReader(dockerfile)); err != nil {
+	// Nil means the FETCHER checks it -- an image context, which this process cannot read cheaply.
+	// The guard is not skipped, it moves; see dockerfileBytes.
+	if err := checkIfRead(dockerfile); err != nil {
 		if inline {
 			// Terminal, and this is the one place the two forms differ. The Dockerfile IS this
 			// spec, so editing it is the fix, and the generation change that raises is the event
@@ -921,4 +940,16 @@ func (r *ImageBuildReconciler) buildsForConfigMap(ctx context.Context, obj clien
 		})
 	}
 	return out
+}
+
+// checkIfRead runs the unpinned-FROM guard on bytes the controller was able to read.
+//
+// Nil is not "no Dockerfile" and not "skip the guard": it is "this controller cannot read it
+// cheaply, and the fetcher checks it instead" -- an image context. Split out so the nil case is a
+// named decision at the call site rather than a bare condition somebody later reads as an oversight.
+func checkIfRead(dockerfile []byte) error {
+	if dockerfile == nil {
+		return nil
+	}
+	return build.CheckPinnedBases(bytes.NewReader(dockerfile))
 }

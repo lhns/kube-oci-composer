@@ -213,3 +213,63 @@ func TestAConfigMapEditEnqueuesOnlyTheBuildsThatReadIt(t *testing.T) {
 		t.Errorf("a ConfigMap in another namespace enqueued %d builds", len(got))
 	}
 }
+
+// TestAnImageContextDefersTheFromCheckToTheFetcher.
+//
+// The guard is not skipped, it moves. Reading one file out of an image controller-side would mean
+// giving a process shared by every namespace registry credentials for arbitrary user-named
+// repositories, and pulling gigabytes through it. Refusing the combination was the other option and
+// is worse: it would mean `path` — the default, and what most people want — silently not working
+// with one context kind.
+func TestAnImageContextDefersTheFromCheckToTheFetcher(t *testing.T) {
+	obj := buildOf(t, func(o *ociv1alpha1.ImageBuild) {
+		o.Spec.Context = &ociv1alpha1.BuildContext{Image: &ociv1alpha1.ImageSource{
+			Ref: "ghcr.io/me/ctx@sha256:" + strings.Repeat("a", 64),
+		}}
+	})
+	// The harness serves an UNPINNED Dockerfile. If the controller were reading it, this would be
+	// refused and no Job would exist.
+	r := harness(t, "FROM golang:1.26\n", obj)
+
+	if _, err := reconcileOnce(t, r, obj); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	jobs := jobsIn(t, r, obj.Namespace)
+	if len(jobs) != 1 {
+		t.Fatalf("want one Job, got %d", len(jobs))
+	}
+
+	// And the fetcher must be told to run the check, or the guard is genuinely gone rather than
+	// moved. This assertion is the whole safety of the arrangement.
+	args := strings.Join(jobs[0].Spec.Template.Spec.InitContainers[0].Args, " ")
+	if !strings.Contains(args, "--dockerfile=Dockerfile") {
+		t.Errorf("the fetcher was not told which Dockerfile to check, so an unpinned FROM would "+
+			"reach BuildKit\ngot: %s", args)
+	}
+	if !strings.Contains(args, "--kind=image") {
+		t.Errorf("the fetcher was not told this is an image context\ngot: %s", args)
+	}
+}
+
+// TestAProjectedDockerfileIsNotCheckedTwice — a Dockerfile from the spec or a ConfigMap is not in
+// the tree, so pointing the fetcher at a path there would fail on a file that does not exist.
+func TestAProjectedDockerfileIsNotCheckedTwice(t *testing.T) {
+	obj := buildOf(t, func(o *ociv1alpha1.ImageBuild) {
+		o.Spec.Dockerfile = &ociv1alpha1.DockerfileSource{
+			Inline: "FROM scratch@sha256:" + strings.Repeat("a", 64) + "\n",
+		}
+	})
+	r := harness(t, "", obj)
+
+	if _, err := reconcileOnce(t, r, obj); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	jobs := jobsIn(t, r, obj.Namespace)
+	if len(jobs) != 1 {
+		t.Fatalf("want one Job, got %d", len(jobs))
+	}
+	args := strings.Join(jobs[0].Spec.Template.Spec.InitContainers[0].Args, " ")
+	if strings.Contains(args, "--dockerfile=") {
+		t.Errorf("the fetcher was pointed at a Dockerfile that is not in the context\ngot: %s", args)
+	}
+}
