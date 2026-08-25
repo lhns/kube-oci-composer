@@ -113,6 +113,26 @@
         "dockerfile": {
           "description": "Dockerfile says where the recipe comes from. Omitted, it is \"Dockerfile\" at the context root\n— see EffectiveDockerfile, and see DockerfileSource for why that default is not in the schema.",
           "properties": {
+            "configMapRef": {
+              "description": "ConfigMapRef reads the Dockerfile from one key of a ConfigMap in this object's namespace.\n\nThe CONTENT is hashed, not the ConfigMap's resourceVersion, so an edit rebuilds and a no-op\nwrite does not. The ConfigMap is watched, so that happens promptly rather than at the next\ninterval.\n\nUnlike a composition's configMap layer there is no `optional`: a missing layer can contribute\nnothing, but a missing Dockerfile cannot produce an empty build. Offering it would only let\nsomeone configure an object that can never become Ready.",
+              "properties": {
+                "key": {
+                  "default": "Dockerfile",
+                  "description": "Key within it. Data is read first and BinaryData second.\n\nThis default IS in the schema, unlike the ones on DockerfileSource, and the difference is the\npoint: no CEL rule tests has(self.key), so materialising it costs nothing and buys a value\nvisible in `kubectl get -o yaml`.",
+                  "maxLength": 253,
+                  "type": "string"
+                },
+                "name": {
+                  "description": "Name of the ConfigMap.",
+                  "maxLength": 253,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "type": "object"
+            },
             "inline": {
               "description": "Inline is the Dockerfile itself, verbatim.\n\nPlaintext in etcd and in `kubectl get -o yaml`, like args — but unlike args it is code, and\nunlike every other input to this kind it is fully determined by this spec. That is what makes\nan unpinned FROM here TERMINAL rather than a retry: the fix is an edit to this field, and the\ngeneration change it raises is the event that wakes the object back up. A `path` Dockerfile\ngets no such event, which is why the same check is not terminal there.\n\nCapped well below what etcd would take. A Dockerfile is kilobytes; anything larger is a\ngenerator writing a program into a CRD, and every watcher of every ImageBuild pays for it on\nevery update.",
               "maxLength": 65536,
@@ -129,8 +149,8 @@
           "type": "object",
           "x-kubernetes-validations": [
             {
-              "message": "set exactly one of path or inline",
-              "rule": "(has(self.path)?1:0) + (has(self.inline)?1:0) == 1"
+              "message": "set exactly one of path, inline or configMapRef",
+              "rule": "(has(self.path)?1:0) + (has(self.inline)?1:0) + (has(self.configMapRef)?1:0) == 1"
             }
           ]
         },
@@ -351,8 +371,8 @@
       "type": "object",
       "x-kubernetes-validations": [
         {
-          "message": "with no context there is no tree to find a Dockerfile in: set spec.context, or give the Dockerfile directly with spec.dockerfile.inline",
-          "rule": "has(self.context) || (has(self.dockerfile) \u0026\u0026 has(self.dockerfile.inline))"
+          "message": "with no context there is no tree to find a Dockerfile in: set spec.context, or give the Dockerfile directly with spec.dockerfile.inline or spec.dockerfile.configMapRef",
+          "rule": "has(self.context) || (has(self.dockerfile) \u0026\u0026 (has(self.dockerfile.inline) || has(self.dockerfile.configMapRef)))"
         }
       ]
     },

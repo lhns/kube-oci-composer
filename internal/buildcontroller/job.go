@@ -314,7 +314,7 @@ func insecureAttr(repository string, insecure []string) string {
 // that reads nothing.
 func projectedDockerfile(obj *ociv1alpha1.ImageBuild) bool {
 	df := obj.Spec.Dockerfile
-	return df != nil && df.Inline != ""
+	return df != nil && (df.Inline != "" || df.ConfigMapRef != nil)
 }
 
 // buildVolumes returns the pod's volumes and the build container's mounts.

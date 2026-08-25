@@ -191,6 +191,35 @@ spec:
                   Dockerfile says where the recipe comes from. Omitted, it is "Dockerfile" at the context root
                   — see EffectiveDockerfile, and see DockerfileSource for why that default is not in the schema.
                 properties:
+                  configMapRef:
+                    description: |-
+                      ConfigMapRef reads the Dockerfile from one key of a ConfigMap in this object's namespace.
+
+                      The CONTENT is hashed, not the ConfigMap's resourceVersion, so an edit rebuilds and a no-op
+                      write does not. The ConfigMap is watched, so that happens promptly rather than at the next
+                      interval.
+
+                      Unlike a composition's configMap layer there is no `optional`: a missing layer can contribute
+                      nothing, but a missing Dockerfile cannot produce an empty build. Offering it would only let
+                      someone configure an object that can never become Ready.
+                    properties:
+                      key:
+                        default: Dockerfile
+                        description: |-
+                          Key within it. Data is read first and BinaryData second.
+
+                          This default IS in the schema, unlike the ones on DockerfileSource, and the difference is the
+                          point: no CEL rule tests has(self.key), so materialising it costs nothing and buys a value
+                          visible in `kubectl get -o yaml`.
+                        maxLength: 253
+                        type: string
+                      name:
+                        description: Name of the ConfigMap.
+                        maxLength: 253
+                        type: string
+                    required:
+                    - name
+                    type: object
                   inline:
                     description: |-
                       Inline is the Dockerfile itself, verbatim.
@@ -217,8 +246,9 @@ spec:
                     type: string
                 type: object
                 x-kubernetes-validations:
-                - message: set exactly one of path or inline
-                  rule: (has(self.path)?1:0) + (has(self.inline)?1:0) == 1
+                - message: set exactly one of path, inline or configMapRef
+                  rule: (has(self.path)?1:0) + (has(self.inline)?1:0) + (has(self.configMapRef)?1:0)
+                    == 1
               interval:
                 default: 1h
                 description: |-
@@ -483,8 +513,10 @@ spec:
             type: object
             x-kubernetes-validations:
             - message: 'with no context there is no tree to find a Dockerfile in:
-                set spec.context, or give the Dockerfile directly with spec.dockerfile.inline'
-              rule: has(self.context) || (has(self.dockerfile) && has(self.dockerfile.inline))
+                set spec.context, or give the Dockerfile directly with spec.dockerfile.inline
+                or spec.dockerfile.configMapRef'
+              rule: has(self.context) || (has(self.dockerfile) && (has(self.dockerfile.inline)
+                || has(self.dockerfile.configMapRef)))
           status:
             description: ImageBuildStatus is the observed state.
             properties:

@@ -299,6 +299,15 @@ spec:
       RUN cd /src && npm ci && npm run build
 ```
 
+Or keep the recipe in a ConfigMap a platform team owns, shared between several builds — it is
+watched, so an edit rebuilds promptly rather than at the next interval:
+
+```yaml
+spec:
+  dockerfile:
+    configMapRef: {name: node-recipes, key: Dockerfile}
+```
+
 An unpinned `FROM` in an **inline** Dockerfile stalls the object, because editing this spec is what
 fixes it. One in a Dockerfile that lives in the source does not: the fix is a push there, which
 raises no change here to wake the object, so it retries instead.

@@ -21,7 +21,9 @@ import (
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 	"github.com/lhns/kube-oci-composer/internal/attest"
@@ -92,6 +94,16 @@ type ImageBuildReconciler struct {
 // So this controller can create a Secret in any namespace, and update ones it names. What it still
 // cannot do is LIST or WATCH them -- it can only touch Secrets whose names it already knows.
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;update
+//
+// ConfigMaps ARE cached, unlike Secrets, because a Dockerfile can live in one and it is watched --
+// an edit must rebuild promptly rather than at the next interval, which defaults to an hour. That
+// costs an informer over every ConfigMap in the cluster; the composer already pays it for configMap
+// layers, for exactly this reason. The alternative is a controller that appears not to notice edits.
+//
+// get;list;watch and NOTHING else. Everything this controller WRITES into a tenant namespace is a
+// Secret -- the Dockerfile copy included -- so no create or update appears here, and that asymmetry
+// is deliberate rather than an oversight.
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=gitrepositories;ocirepositories;buckets,verbs=get;list;watch
 
@@ -282,9 +294,27 @@ func (r *ImageBuildReconciler) resolveInputs(ctx context.Context, obj *ociv1alph
 	// fetch on a reconcile that is about to short-circuit. For an inline Dockerfile there is no
 	// tarball to ride in, so its bytes are hashed directly.
 	dockerfileKind, dockerfilePath, dockerfileDigest := "path", spec.Dockerfile.EffectiveDockerfile(), ""
-	if spec.Dockerfile != nil && spec.Dockerfile.Inline != "" {
+	switch {
+	case spec.Dockerfile != nil && spec.Dockerfile.Inline != "":
 		sum := sha256.Sum256([]byte(spec.Dockerfile.Inline))
 		dockerfileKind, dockerfilePath, dockerfileDigest = "inline", "", "sha256:"+hex.EncodeToString(sum[:])
+
+	case spec.Dockerfile != nil && spec.Dockerfile.ConfigMapRef != nil:
+		// A ConfigMap is mutable by construction, so it can never satisfy the pinning flag. Refused
+		// rather than ignored: a flag that silently does not apply to one source is worse than one
+		// that says so.
+		if r.RequirePinnedSources {
+			return build.Inputs{}, "", recon.Terminal(
+				"spec.dockerfile.configMapRef cannot be pinned and this controller runs with " +
+					"--require-pinned-sources: put the Dockerfile in the context or in " +
+					"spec.dockerfile.inline, where the spec itself pins it")
+		}
+		content, err := r.dockerfileFromConfigMap(ctx, obj)
+		if err != nil {
+			return build.Inputs{}, "", err
+		}
+		sum := sha256.Sum256(content)
+		dockerfileKind, dockerfilePath, dockerfileDigest = "configMap", "", "sha256:"+hex.EncodeToString(sum[:])
 	}
 
 	return build.Inputs{
@@ -332,6 +362,17 @@ func (r *ImageBuildReconciler) dockerfileBytes(ctx context.Context, obj *ociv1al
 
 	if df := obj.Spec.Dockerfile; df != nil && df.Inline != "" {
 		return []byte(df.Inline), true, nil
+	}
+	if df := obj.Spec.Dockerfile; df != nil && df.ConfigMapRef != nil {
+		// Read again rather than threaded down from resolveInputs. The two reads are one informer
+		// hit apart and the second is what the Job actually gets, so if the ConfigMap changed in
+		// between the input hash and the built bytes still describe the same content -- the hash
+		// simply moves on the next pass. Threading it would save nothing and add a parameter whose
+		// only job is to be kept in step.
+		content, err := r.dockerfileFromConfigMap(ctx, obj)
+		// Not inline: the fix for an unpinned FROM here is editing the ConfigMap, which raises no
+		// generation change on this object, exactly like a Dockerfile in the context.
+		return content, false, err
 	}
 
 	var subpath string
@@ -384,8 +425,12 @@ func (r *ImageBuildReconciler) startBuild(ctx context.Context, obj *ociv1alpha1.
 	}
 	// Only when the Dockerfile does not ride inside the context. These are the exact bytes checked
 	// above, which is what stops the pod building something that was never checked.
+	//
+	// Keyed off the same predicate the Job rendering uses, not off `inline`: a ConfigMap Dockerfile
+	// is not inline but is still projected, and keying these two off different conditions is how a
+	// mount and its `--local` stop agreeing.
 	var dockerfileSecret string
-	if inline {
+	if projectedDockerfile(obj) {
 		dockerfileSecret, err = r.dockerfileSecretFor(ctx, obj, jobName(obj, inputHash), dockerfile)
 		if err != nil {
 			return err
@@ -726,6 +771,11 @@ func (r *ImageBuildReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&ociv1alpha1.ImageBuild{}).
 		Owns(&batchv1.Job{}).
+		// Without this a ConfigMap holding a Dockerfile would only be noticed at the next interval,
+		// an hour by default. Editing the recipe and watching nothing happen reads as the controller
+		// being broken. Same reasoning, and near enough the same code, as the composer's watch on
+		// configMap layers.
+		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.buildsForConfigMap)).
 		Complete(r)
 }
 
@@ -764,4 +814,87 @@ func attestationMode(cfg JobConfig) string {
 	default:
 		return ""
 	}
+}
+
+// maxDockerfileFromConfigMap bounds one key.
+//
+// The same bound build.FetchDockerfile applies to a Dockerfile pulled out of a context tarball, for
+// the same reason: a Dockerfile is kilobytes, and reading more than that into a controller shared by
+// every namespace is a way to make that controller someone else's problem. A whole ConfigMap is
+// capped near 1 MiB by etcd, so this is close to that ceiling rather than far below it -- the point
+// is a legible error rather than a surprising one.
+const maxDockerfileFromConfigMap = 1 << 20
+
+// dockerfileFromConfigMap reads the Dockerfile out of one ConfigMap key.
+//
+// Every failure here is Pending rather than Terminal, because every fix is in the OTHER object:
+// create the ConfigMap, add the key, shrink it. Terminal would wedge this object while the thing it
+// needs sits there waiting to be fixed, and ConfigMaps are watched, so the wait is usually over the
+// moment one appears.
+func (r *ImageBuildReconciler) dockerfileFromConfigMap(
+	ctx context.Context, obj *ociv1alpha1.ImageBuild,
+) ([]byte, error) {
+	ref := obj.Spec.Dockerfile.ConfigMapRef
+	key := ref.Key
+	if key == "" {
+		key = "Dockerfile"
+	}
+
+	// obj.Namespace, never a namespace from the spec. The reference carries none, and that is the
+	// whole of the boundary (threat-model I4).
+	var cm corev1.ConfigMap
+	if err := r.Get(ctx, types.NamespacedName{Namespace: obj.Namespace, Name: ref.Name}, &cm); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, recon.Pending("ConfigMap %s/%s not found", obj.Namespace, ref.Name)
+		}
+		return nil, fmt.Errorf("reading ConfigMap %s/%s: %w", obj.Namespace, ref.Name, err)
+	}
+
+	content, ok := cm.Data[key]
+	if !ok {
+		if raw, binary := cm.BinaryData[key]; binary {
+			return boundedDockerfile(raw, ref.Name, key)
+		}
+		return nil, recon.Pending("ConfigMap %s/%s has no key %q", obj.Namespace, ref.Name, key)
+	}
+	return boundedDockerfile([]byte(content), ref.Name, key)
+}
+
+func boundedDockerfile(content []byte, name, key string) ([]byte, error) {
+	if len(content) > maxDockerfileFromConfigMap {
+		return nil, recon.Pending("ConfigMap %s key %q is %d bytes, over the %d-byte limit for a "+
+			"Dockerfile", name, key, len(content), maxDockerfileFromConfigMap)
+	}
+	return content, nil
+}
+
+// buildsForConfigMap maps a changed ConfigMap to the builds that read a Dockerfile from it.
+//
+// Namespace-scoped: a configMapRef resolves in the object's own namespace, so a same-named ConfigMap
+// elsewhere is unrelated and must not trigger a rebuild. Contrast the composer's source mapping,
+// which lists cluster-wide because a sourceRef carries a namespace field.
+//
+// A linear scan rather than a field index, matching the composer: the list is namespace-scoped and
+// the comparison is one string, so an index would be machinery for a loop that is already small.
+func (r *ImageBuildReconciler) buildsForConfigMap(ctx context.Context, obj client.Object) []reconcile.Request {
+	var list ociv1alpha1.ImageBuildList
+	if err := r.List(ctx, &list, client.InNamespace(obj.GetNamespace())); err != nil {
+		log.FromContext(ctx).Error(err, "listing ImageBuilds for a ConfigMap change")
+		return nil
+	}
+
+	var out []reconcile.Request
+	for i := range list.Items {
+		df := list.Items[i].Spec.Dockerfile
+		if df == nil || df.ConfigMapRef == nil || df.ConfigMapRef.Name != obj.GetName() {
+			continue
+		}
+		out = append(out, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Namespace: list.Items[i].Namespace,
+				Name:      list.Items[i].Name,
+			},
+		})
+	}
+	return out
 }

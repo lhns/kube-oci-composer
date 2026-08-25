@@ -41,7 +41,9 @@ func (c *BuildContext) GetSourceRef() *SourceRefSource {
 //
 // `path` is the original and the common case — the recipe lives in the thing being built. `inline`
 // puts it in this spec, which is what you want when the Dockerfile is four lines and inventing a
-// git repository to hold them is the entire cost of the feature.
+// git repository to hold them is the entire cost of the feature. `configMapRef` puts it in an
+// object a platform team can own separately from the ImageBuild an application team writes, and
+// share between several of them.
 //
 // NO field here carries a schema default, and that is deliberate. A structural default is
 // materialised into the stored object, so a defaulted `path` would make has(self.path) true for
@@ -49,7 +51,7 @@ func (c *BuildContext) GetSourceRef() *SourceRefSource {
 // default lives in EffectiveDockerfile instead — the same arrangement, for the same reason, as
 // Push.OnConflict.
 //
-// +kubebuilder:validation:XValidation:rule="(has(self.path)?1:0) + (has(self.inline)?1:0) == 1",message="set exactly one of path or inline"
+// +kubebuilder:validation:XValidation:rule="(has(self.path)?1:0) + (has(self.inline)?1:0) + (has(self.configMapRef)?1:0) == 1",message="set exactly one of path, inline or configMapRef"
 type DockerfileSource struct {
 	// Path to the Dockerfile inside the build context, resolved against the context subpath.
 	// Meaningless without a context, which the rule on ImageBuildSpec refuses rather than leaving
@@ -74,6 +76,18 @@ type DockerfileSource struct {
 	// +kubebuilder:validation:MaxLength=65536
 	// +optional
 	Inline string `json:"inline,omitempty"`
+
+	// ConfigMapRef reads the Dockerfile from one key of a ConfigMap in this object's namespace.
+	//
+	// The CONTENT is hashed, not the ConfigMap's resourceVersion, so an edit rebuilds and a no-op
+	// write does not. The ConfigMap is watched, so that happens promptly rather than at the next
+	// interval.
+	//
+	// Unlike a composition's configMap layer there is no `optional`: a missing layer can contribute
+	// nothing, but a missing Dockerfile cannot produce an empty build. Offering it would only let
+	// someone configure an object that can never become Ready.
+	// +optional
+	ConfigMapRef *ConfigMapKeyReference `json:"configMapRef,omitempty"`
 }
 
 // EffectiveDockerfile returns the path to use when the spec names none.
@@ -99,7 +113,7 @@ func (s *DockerfileSource) EffectiveDockerfile() string {
 // is a strictly stronger tool, and since ADR 0024 it can take files out of an image your CI already
 // built. See ADR 0025 for what this kind costs.
 //
-// +kubebuilder:validation:XValidation:rule="has(self.context) || (has(self.dockerfile) && has(self.dockerfile.inline))",message="with no context there is no tree to find a Dockerfile in: set spec.context, or give the Dockerfile directly with spec.dockerfile.inline"
+// +kubebuilder:validation:XValidation:rule="has(self.context) || (has(self.dockerfile) && (has(self.dockerfile.inline) || has(self.dockerfile.configMapRef)))",message="with no context there is no tree to find a Dockerfile in: set spec.context, or give the Dockerfile directly with spec.dockerfile.inline or spec.dockerfile.configMapRef"
 type ImageBuildSpec struct {
 	// Interval at which to reconcile. Nearly free when nothing has changed: the controller
 	// compares a hash of the resolved inputs rather than building.

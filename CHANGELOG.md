@@ -139,6 +139,16 @@ must name a source in its own namespace.
   context still retries rather than stalling: the fix is a push to the source, which raises no
   change here.
 
+  `spec.dockerfile.configMapRef` is the modular form: a platform team owns the recipe, an
+  application team owns the `ImageBuild`, and one ConfigMap can serve several builds. The ConfigMap
+  is **watched**, so an edit rebuilds promptly rather than at the next interval — which for the
+  default hour would read as the controller being broken. Its **content** is hashed, not its name or
+  resourceVersion, so an edit rebuilds and repointing at an identical copy does not.
+
+  It cannot be pinned, so `--require-pinned-sources` **refuses** it rather than quietly exempting it.
+  The builder gains `configmaps: get;list;watch` for the watch, and nothing else: everything it
+  writes into a tenant namespace stays a Secret, the Dockerfile copy included.
+
   The Dockerfile's bytes join the input hash and `RecipeVersion` moves to 2. Previously the content
   needed no hashing because it rode inside the content-addressed context tarball — true then, and
   false the moment the recipe can come from anywhere else.
