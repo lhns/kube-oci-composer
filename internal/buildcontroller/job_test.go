@@ -1,10 +1,6 @@
 package buildcontroller
 
 import (
-	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -26,8 +22,8 @@ func sampleBuild() *ociv1alpha1.ImageBuild {
 	return &ociv1alpha1.ImageBuild{
 		ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: "team-a"},
 		Spec: ociv1alpha1.ImageBuildSpec{
-			Context:    ociv1alpha1.SourceRefSource{Kind: "GitRepository", Name: "src"},
-			Dockerfile: "Dockerfile",
+			Context:    &ociv1alpha1.BuildContext{SourceRef: &ociv1alpha1.SourceRefSource{Kind: "GitRepository", Name: "src"}},
+			Dockerfile: &ociv1alpha1.DockerfileSource{Path: "Dockerfile"},
 			Platforms:  []string{"linux/amd64"},
 			Push: &ociv1alpha1.Push{
 				Repository: "ghcr.io/me/app",
@@ -42,6 +38,7 @@ func sampleConfig() JobConfig {
 		BuilderImage:    "moby/buildkit:rootless@sha256:" + strings.Repeat("a", 64),
 		FrontendImage:   "docker/dockerfile:1@sha256:" + strings.Repeat("b", 64),
 		SourceDateEpoch: "0",
+		FetcherImage:    "ghcr.io/lhns/kube-oci-builder@sha256:" + strings.Repeat("c", 64),
 	}
 }
 
@@ -79,7 +76,7 @@ func TestJobNameStaysWithinLimit(t *testing.T) {
 // refusing to build at all. Rootless is the half of that this project accepts; privileged is not
 // offered at any setting, so nothing in the spec can reach these fields.
 func TestBuildJobRunsRootless(t *testing.T) {
-	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo, "", "", true)
+	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo, "", "", "", true)
 
 	pod := job.Spec.Template.Spec
 	if len(pod.Containers) != 1 {
@@ -155,7 +152,7 @@ func TestBuildJobRunsRootless(t *testing.T) {
 func TestBuildJobUsesTheObjectsServiceAccount(t *testing.T) {
 	obj := sampleBuild()
 	obj.Spec.ServiceAccountName = "builder"
-	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo, "", "", true)
+	job := buildJob(obj, testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo, "", "", "", true)
 
 	if got := job.Spec.Template.Spec.ServiceAccountName; got != "builder" {
 		t.Errorf("service account = %q, want %q", got, "builder")
@@ -170,7 +167,7 @@ func TestBuildJobArgs(t *testing.T) {
 	obj.Spec.Target = "runtime"
 	obj.Spec.Args = []ociv1alpha1.BuildArg{{Name: "VERSION", Value: "1.2.3"}}
 
-	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo, "", "", true)
+	job := buildJob(obj, testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo, "", "", "", true)
 	argv := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " ")
 
 	for _, want := range []string{
@@ -193,7 +190,7 @@ func TestBuildJobArgs(t *testing.T) {
 func TestNetworkNoneIsPassedThrough(t *testing.T) {
 	obj := sampleBuild()
 	obj.Spec.Network = "None"
-	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo, "", "", true)
+	job := buildJob(obj, testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo, "", "", "", true)
 
 	argv := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " ")
 	if !strings.Contains(argv, "no-network=true") {
@@ -232,7 +229,7 @@ func TestSecretsAreMountedNotInlined(t *testing.T) {
 		SecretRef: &ociv1alpha1.LocalObjectReference{Name: "npm-creds"},
 	}}
 
-	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo, "", "", true)
+	job := buildJob(obj, testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo, "", "", "", true)
 	argv := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " ")
 
 	if !strings.Contains(argv, "--secret id=npmrc") {
@@ -273,14 +270,14 @@ func TestInsecureRegistryIsOptInPerHost(t *testing.T) {
 	cfg := sampleConfig()
 	cfg.InsecureRegistries = []string{"registry.internal:5000"}
 
-	secure := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", cfg, sampleRepo, "", "", true)
+	secure := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", "sha256:ctx", cfg, sampleRepo, "", "", "", true)
 	if argv := strings.Join(secure.Spec.Template.Spec.Containers[0].Args, " "); strings.Contains(argv, "registry.insecure") {
 		t.Errorf("a non-listed host was pushed insecurely\ngot: %s", argv)
 	}
 
 	obj := sampleBuild()
 	obj.Spec.Push.Repository = "registry.internal:5000/team/app"
-	listed := buildJob(obj, testHash, "https://example/ctx.tgz", cfg, obj.Spec.Push.Repository, "", "", true)
+	listed := buildJob(obj, testHash, "https://example/ctx.tgz", "sha256:ctx", cfg, obj.Spec.Push.Repository, "", "", "", true)
 	if argv := strings.Join(listed.Spec.Template.Spec.Containers[0].Args, " "); !strings.Contains(argv, "registry.insecure=true") {
 		t.Errorf("a listed host was not allowed plain HTTP\ngot: %s", argv)
 	}
@@ -297,74 +294,76 @@ func TestInsecureRegistryIsNotInTheInputHash(t *testing.T) {
 	insecure.InsecureRegistries = []string{"registry.internal:5000"}
 
 	// The Job name is derived from the input hash, so identical names prove the hash did not move.
-	a := buildJob(obj, testHash, "https://example/ctx.tgz", plain, obj.Spec.Push.Repository, "", "", true)
-	b := buildJob(obj, testHash, "https://example/ctx.tgz", insecure, obj.Spec.Push.Repository, "", "", true)
+	a := buildJob(obj, testHash, "https://example/ctx.tgz", "sha256:ctx", plain, obj.Spec.Push.Repository, "", "", "", true)
+	b := buildJob(obj, testHash, "https://example/ctx.tgz", "sha256:ctx", insecure, obj.Spec.Push.Repository, "", "", "", true)
 	if a.Name != b.Name {
 		t.Errorf("the insecure list moved the input hash: %q vs %q", a.Name, b.Name)
 	}
 }
 
-// TestFetchContextUnwrapsTheSourceControllerDirectory runs the init container's script for real,
-// against both archive shapes, because the bug it guards was invisible to every unit test: the
-// controller-side check strips the wrapper directory and the pod-side extraction did not, so an
-// unpinned FROM was correctly refused while every build that PASSED that check then died inside
-// BuildKit with "failed to read dockerfile". Only an end-to-end run could see the disagreement.
+// TestTheFetcherIsToldWhatToFetch.
 //
-// Skipped where there is no POSIX shell, which is most Windows machines; CI runs it.
-func TestFetchContextUnwrapsTheSourceControllerDirectory(t *testing.T) {
-	// Skipping encodes a platform fact, not a hope about CI: "CI covers this" is an assertion the
-	// test cannot make, and if wget ever left the runner image this would skip green forever while
-	// the bug it guards went untested again.
-	if runtime.GOOS == "windows" {
-		t.Skip("no POSIX shell; the script is exercised on Linux")
-	}
-	sh, err := exec.LookPath("sh")
-	if err != nil {
-		t.Fatal("no sh; the script that ships in the pod cannot be exercised")
-	}
-	for _, bin := range []string{"tar", "wget"} {
-		if _, err := exec.LookPath(bin); err != nil {
-			t.Fatalf("no %s; the script calls it, and substituting it would test a paraphrase", bin)
+// This replaced a test that ran the init container's shell script for real. The script is gone: it
+// verified nothing, could not grow an unzip or an image pull, and carried a second copy of the
+// wrapper-strip rule that once disagreed with build.MatchesContextPath. What it did is now
+// internal/fetchcontext, tested there against real archives; what remains to assert here is the
+// contract between the two, which is the argv.
+func TestTheFetcherIsToldWhatToFetch(t *testing.T) {
+	t.Run("a Flux artifact", func(t *testing.T) {
+		obj := sampleBuild()
+		obj.Spec.Context.SourceRef.Subpath = "ui"
+		job := buildJob(obj, testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(),
+			sampleRepo, "", "", "", true)
+
+		init := job.Spec.Template.Spec.InitContainers
+		if len(init) != 1 {
+			t.Fatalf("want one init container, got %d", len(init))
 		}
-	}
-
-	for _, tc := range []struct {
-		name   string
-		prefix string // the wrapper directory, or "" for files at the archive root
-	}{
-		{"wrapped by source-controller", "src-abc123/"},
-		{"already at the root", ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			// Over HTTP, because that is what wget does in the pod.
-			srv := contextServer(t, contextTarball(t, tc.prefix, pinnedFrom))
-
-			workspace := filepath.Join(t.TempDir(), "workspace")
-			if err := os.MkdirAll(workspace, 0o755); err != nil {
-				t.Fatalf("creating workspace: %v", err)
+		if init[0].Image != sampleConfig().FetcherImage {
+			t.Errorf("the fetcher runs %q, not the fetcher image", init[0].Image)
+		}
+		args := strings.Join(init[0].Args, " ")
+		for _, want := range []string{
+			"fetch-context", "--kind=sourceRef", "--url=https://example/ctx.tgz",
+			// The digest is passed even for a Flux artifact. The old script verified NOTHING, not
+			// even this, which the controller already had in hand.
+			"--digest=sha256:ctx", "--subpath=ui",
+		} {
+			if !strings.Contains(args, want) {
+				t.Errorf("fetcher args are missing %q; got: %s", want, args)
 			}
+		}
+	})
 
-			// contextPath is absolute in the pod; rewrite it to the temp workspace to run here.
-			script := strings.ReplaceAll(fetchContextScript(srv.URL), contextPath, workspace)
-			out, err := exec.Command(sh, "-c", script).CombinedOutput()
-			if err != nil {
-				t.Fatalf("fetch script failed: %v\n%s", err, out)
-			}
+	t.Run("a fetched archive", func(t *testing.T) {
+		obj := sampleBuild()
+		obj.Spec.Context = &ociv1alpha1.BuildContext{Fetch: &ociv1alpha1.FetchSource{
+			URL: "https://example/app.tgz", Digest: "sha256:decl", Unpack: "tar.gz", Subpath: "app-1.2.3",
+		}}
+		job := buildJob(obj, testHash, "https://example/app.tgz", "sha256:decl", sampleConfig(),
+			sampleRepo, "", "", "", true)
 
-			// The Dockerfile must land where buildctl looks for it: the workspace root.
-			if _, err := os.Stat(filepath.Join(workspace, "Dockerfile")); err != nil {
-				got, _ := os.ReadDir(workspace)
-				var names []string
-				for _, e := range got {
-					names = append(names, e.Name())
-				}
-				t.Fatalf("Dockerfile is not at the context root, so buildctl cannot read it; workspace holds %v", names)
+		args := strings.Join(job.Spec.Template.Spec.InitContainers[0].Args, " ")
+		for _, want := range []string{"--kind=fetch", "--digest=sha256:decl", "--unpack=tar.gz",
+			"--subpath=app-1.2.3"} {
+			if !strings.Contains(args, want) {
+				t.Errorf("fetcher args are missing %q; got: %s", want, args)
 			}
-			if _, err := os.Stat(filepath.Join(workspace, ".staging")); !os.IsNotExist(err) {
-				t.Error("the staging directory was left behind, so it becomes part of the build context")
-			}
-		})
-	}
+		}
+	})
+
+	// A build with no context runs no fetcher: an empty tree is addressed by construction, and a
+	// fetcher with no URL would be a container whose only job is to succeed at nothing.
+	t.Run("no context", func(t *testing.T) {
+		obj := sampleBuild()
+		obj.Spec.Context = nil
+		obj.Spec.Dockerfile = &ociv1alpha1.DockerfileSource{Inline: "FROM scratch\n"}
+		job := buildJob(obj, testHash, "", "", sampleConfig(), sampleRepo, "", "", "df", true)
+
+		if got := len(job.Spec.Template.Spec.InitContainers); got != 0 {
+			t.Errorf("a context-less build runs %d init containers", got)
+		}
+	})
 }
 
 // TestBuildPodsAreSelectable covers a gap that only shows up from outside this package.
@@ -377,7 +376,7 @@ func TestFetchContextUnwrapsTheSourceControllerDirectory(t *testing.T) {
 //
 // Without pod labels the only way to write such a policy was to match every pod in the namespace.
 func TestBuildPodsAreSelectable(t *testing.T) {
-	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo, "", "", true)
+	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo, "", "", "", true)
 
 	labels := job.Spec.Template.Labels
 	if labels == nil {
@@ -406,8 +405,8 @@ func TestBuildPodsAreSelectable(t *testing.T) {
 // runtime behaviour. A `[ -f ... ]` check in the shell instead would silently no-op if a mount name
 // drifted.
 func TestTheBuildTrustsTheRegistryCA(t *testing.T) {
-	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo,
-		"", "build-registry-ca", true)
+	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo,
+		"", "build-registry-ca", "", true)
 	pod := job.Spec.Template.Spec
 	container := pod.Containers[0]
 
@@ -459,8 +458,8 @@ func TestTheBuildTrustsTheRegistryCA(t *testing.T) {
 // TestNoCAMeansNoCAPlumbing — the ordinary case must stay exactly as it was. An empty SSL_CERT_FILE
 // or a stray empty volume would be a change to every build for the benefit of none.
 func TestNoCAMeansNoCAPlumbing(t *testing.T) {
-	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo,
-		"", "", true)
+	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo,
+		"", "", "", true)
 	pod := job.Spec.Template.Spec
 
 	for _, v := range pod.Volumes {
@@ -476,4 +475,97 @@ func TestNoCAMeansNoCAPlumbing(t *testing.T) {
 	if strings.Contains(pod.Containers[0].Command[2], "ca-bundle") {
 		t.Error("the script must not merge a bundle that does not exist")
 	}
+}
+
+// TestAContextDockerfileStillComesFromTheContext is the regression guard on the untouched path.
+//
+// The common case did not change and must not: the recipe lives in the thing being built, and
+// `--local dockerfile=` points inside the context exactly as before.
+func TestAContextDockerfileStillComesFromTheContext(t *testing.T) {
+	obj := sampleBuild()
+	obj.Spec.Dockerfile = &ociv1alpha1.DockerfileSource{Path: "build/Dockerfile.prod"}
+	job := buildJob(obj, testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo, "", "", "", true)
+	args := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " ")
+
+	if !strings.Contains(args, "--local dockerfile=/workspace/build") {
+		t.Errorf("the dockerfile local must point inside the context:\n%s", args)
+	}
+	if !strings.Contains(args, "--opt filename=Dockerfile.prod") {
+		t.Errorf("filename must be the base name from the spec:\n%s", args)
+	}
+	for _, v := range job.Spec.Template.Spec.Volumes {
+		if v.Name == dockerfileVolume {
+			t.Error("a context Dockerfile must not project a volume; it is already in the context")
+		}
+	}
+}
+
+// TestAnInlineDockerfileIsProjectedAsItsOwnLocal.
+//
+// `context` and `dockerfile` were always two independent BuildKit locals — they only coincided
+// because the Dockerfile happened to live in the context. This is that separation being used.
+func TestAnInlineDockerfileIsProjectedAsItsOwnLocal(t *testing.T) {
+	obj := sampleBuild()
+	obj.Spec.Dockerfile = &ociv1alpha1.DockerfileSource{Inline: "FROM scratch\n"}
+	job := buildJob(obj, testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo,
+		"", "", "app-abc123-dockerfile", true)
+	args := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " ")
+
+	if !strings.Contains(args, "--local dockerfile=/dockerfile") {
+		t.Errorf("the dockerfile local must be its own mount:\n%s", args)
+	}
+	if !strings.Contains(args, "--opt filename=Dockerfile") {
+		t.Errorf("filename must be the fixed projected name:\n%s", args)
+	}
+	// The context local is untouched. Copying the Dockerfile into /workspace instead would silently
+	// overwrite one already present there.
+	if !strings.Contains(args, "--local context=/workspace") {
+		t.Errorf("the context local must be unchanged:\n%s", args)
+	}
+
+	var mount *corev1.VolumeMount
+	for i, m := range job.Spec.Template.Spec.Containers[0].VolumeMounts {
+		if m.Name == dockerfileVolume {
+			mount = &job.Spec.Template.Spec.Containers[0].VolumeMounts[i]
+		}
+	}
+	if mount == nil {
+		t.Fatal("no dockerfile volume mounted, so the local points at an empty directory")
+	}
+	// subPath, so the file is a plain regular file rather than the ..data symlink farm a Secret
+	// volume normally projects — BuildKit's fsutil walks symlinks rather than flattening them.
+	if mount.SubPath != dockerfileName {
+		t.Errorf("the dockerfile mount must use subPath, got %q", mount.SubPath)
+	}
+	if !mount.ReadOnly {
+		t.Error("the dockerfile mount must be read-only")
+	}
+}
+
+// TestTheProjectedDockerfileComesFromTheControllersOwnSecret.
+//
+// The pod must never name a user-supplied object for the Dockerfile. The kubelet resolves a volume
+// at pod start, reading whatever the source says THEN — not what the controller hashed and
+// FROM-checked a moment earlier — so projecting one directly would be a complete bypass of the
+// unpinned-base guard, reachable by anyone who can update that object.
+func TestTheProjectedDockerfileComesFromTheControllersOwnSecret(t *testing.T) {
+	obj := sampleBuild()
+	obj.Spec.Dockerfile = &ociv1alpha1.DockerfileSource{Inline: "FROM scratch\n"}
+	job := buildJob(obj, testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo,
+		"", "", "app-abc123-dockerfile", true)
+
+	for _, v := range job.Spec.Template.Spec.Volumes {
+		if v.Name != dockerfileVolume {
+			continue
+		}
+		if v.ConfigMap != nil {
+			t.Fatal("the Dockerfile is projected from a ConfigMap, which the kubelet re-reads at " +
+				"pod start; the pod could build bytes the controller never checked")
+		}
+		if v.Secret == nil || v.Secret.SecretName != "app-abc123-dockerfile" {
+			t.Fatalf("expected the controller's own Secret, got %+v", v.VolumeSource)
+		}
+		return
+	}
+	t.Fatal("no dockerfile volume rendered")
 }

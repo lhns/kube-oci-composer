@@ -24,7 +24,12 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      {{- include "kube-oci-composer.componentSelectorLabels" (dict "ctx" . "component" "registry") | nindent 6 }}
+      {{- /*
+      Every pod serving the registry API, writer and read replicas alike. Selecting only the writer
+      would leave the replicas with no policy at all -- which in a default-deny cluster means no
+      pulls reach them, and the Service would blackhole a share of every request.
+      */}}
+      {{- include "kube-oci-composer.registryServeSelectorLabels" . | nindent 6 }}
   policyTypes:
     - Ingress
   ingress:

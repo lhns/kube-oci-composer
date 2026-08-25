@@ -5,6 +5,120 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// BuildContext is the tree the Dockerfile's COPY and ADD read from.
+//
+// Every member is content-addressed, and THAT is the requirement — not that it comes from Flux.
+// This kind's input hash is its identity (ADR 0025), so a context nothing addresses would leave
+// nothing to hash and every reconcile would be a build. A Flux artifact resolves to a digest; the
+// members added later declare one. All of them satisfy the rule the earlier Flux-only shape was
+// written to enforce, which is why that shape was narrower than its own reason. See ADR 0042.
+//
+// Still no inline or bare-URL form: those are the two that genuinely fail the test.
+//
+// +kubebuilder:validation:XValidation:rule="(has(self.sourceRef)?1:0) + (has(self.fetch)?1:0) + (has(self.image)?1:0) == 1",message="set exactly one of sourceRef, fetch or image"
+// +kubebuilder:validation:XValidation:rule="!has(self.fetch) || self.fetch.unpack == 'tar' || self.fetch.unpack == 'tar.gz'",message="a build context is a directory tree, so fetch.unpack must be tar or tar.gz. unpack defaults to 'none', which places a single file, so this has to be set explicitly"
+type BuildContext struct {
+	// SourceRef takes the context from a Flux source's artifact.
+	//
+	// The one to reach for when the content moves: source-controller tracks the revision. ADR 0042
+	// says which sources are delegated to it and why.
+	// +optional
+	SourceRef *SourceRefSource `json:"sourceRef,omitempty"`
+
+	// Fetch retrieves the context as an archive over HTTP(S), at a declared digest.
+	//
+	// For a release tarball rather than a checkout. The digest is declared, not resolved: a
+	// mismatch means the URL served something other than what this spec names, and is refused.
+	//
+	// Only the archive unpack modes apply, since a context is a tree.
+	// +optional
+	Fetch *FetchSource `json:"fetch,omitempty"`
+
+	// Image takes the flattened filesystem of a digest-pinned image as the context.
+	//
+	// For building on what CI already published. Costs a pull and a flatten in the build pod on
+	// every cache miss, so prefer sourceRef where it would do.
+	//
+	// `FROM <image>@sha256:… AS ctx` plus `COPY --from=ctx` does much the same with no context at
+	// all. Reach for this when the image IS the tree the build reads -- notably an
+	// ImageComposition's output, which is how "compose the workdir, then build it" is spelled.
+	// +optional
+	Image *ImageSource `json:"image,omitempty"`
+}
+
+// GetImage returns the image source this context names, or nil when it names none.
+func (c *BuildContext) GetImage() *ImageSource {
+	if c == nil {
+		return nil
+	}
+	return c.Image
+}
+
+// GetSourceRef returns the Flux source this context names, or nil when it names none.
+//
+// Nil-safe on the receiver, because no context at all is legal.
+func (c *BuildContext) GetSourceRef() *SourceRefSource {
+	if c == nil {
+		return nil
+	}
+	return c.SourceRef
+}
+
+// DockerfileSource says where the Dockerfile comes from.
+//
+// `path` is the common case: the recipe lives in the thing being built. `inline` puts it in this
+// spec. `configMapRef` puts it in an object a platform team can own separately and share between
+// several ImageBuilds.
+//
+// No field here carries a schema default, deliberately: a structural default is materialised into
+// the stored object, so a defaulted `path` would make has(self.path) true for every object and the
+// exactly-one rule below could never fire. EffectiveDockerfile holds it instead, the same
+// arrangement as Push.OnConflict.
+//
+// +kubebuilder:validation:XValidation:rule="(has(self.path)?1:0) + (has(self.inline)?1:0) + (has(self.configMapRef)?1:0) == 1",message="set exactly one of path, inline or configMapRef"
+type DockerfileSource struct {
+	// Path to the Dockerfile inside the build context, resolved against the context subpath.
+	// Refused without a context by the rule on ImageBuildSpec.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=4096
+	// +optional
+	Path string `json:"path,omitempty"`
+
+	// Inline is the Dockerfile itself, verbatim. Plaintext in etcd and in `kubectl get -o yaml`.
+	//
+	// An unpinned FROM here is terminal rather than retried: the fix is an edit to this field, and
+	// the generation change it raises is what wakes the object. A `path` Dockerfile gets no such
+	// event, so the same check is not terminal there.
+	//
+	// Capped well below what etcd would take: every watcher of every ImageBuild pays for the size
+	// on every update.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=65536
+	// +optional
+	Inline string `json:"inline,omitempty"`
+
+	// ConfigMapRef reads the Dockerfile from one key of a ConfigMap in this object's namespace.
+	//
+	// The content is hashed, not the resourceVersion, so an edit rebuilds and a no-op write does
+	// not. The ConfigMap is watched, so that happens promptly rather than at the next interval.
+	//
+	// No `optional`, unlike a composition's configMap layer: a missing Dockerfile cannot produce an
+	// empty build, only an object that can never become Ready.
+	// +optional
+	ConfigMapRef *ConfigMapKeyReference `json:"configMapRef,omitempty"`
+}
+
+// EffectiveDockerfile returns the path to use when the spec names none.
+//
+// Not a schema default -- see the DockerfileSource comment. The consequence is that
+// spec.dockerfile.path is empty for most objects, so nothing may read it directly.
+func (s *DockerfileSource) EffectiveDockerfile() string {
+	if s == nil || s.Path == "" {
+		return "Dockerfile"
+	}
+	return s.Path
+}
+
 // ImageBuildSpec builds an OCI image by executing a Dockerfile.
 //
 // This kind executes arbitrary code, so its output digest is NOT a function of its spec — it is an
@@ -15,6 +129,8 @@ import (
 // If what you need is "take a released artifact and put it in an image", use ImageComposition — it
 // is a strictly stronger tool, and since ADR 0024 it can take files out of an image your CI already
 // built. See ADR 0025 for what this kind costs.
+//
+// +kubebuilder:validation:XValidation:rule="has(self.context) || (has(self.dockerfile) && (has(self.dockerfile.inline) || has(self.dockerfile.configMapRef)))",message="with no context there is no tree to find a Dockerfile in: set spec.context, or give the Dockerfile directly with spec.dockerfile.inline or spec.dockerfile.configMapRef"
 type ImageBuildSpec struct {
 	// Interval at which to reconcile. Nearly free when nothing has changed: the controller
 	// compares a hash of the resolved inputs rather than building.
@@ -30,19 +146,17 @@ type ImageBuildSpec struct {
 	// +optional
 	Suspend bool `json:"suspend,omitempty"`
 
-	// Context is the build context, taken from a Flux source's artifact.
+	// Context is the tree the Dockerfile's COPY and ADD read from.
 	//
-	// From a Flux source, so the revision is content-addressed and its digest is what makes the
-	// input hash meaningful. There is no inline or URL form: an unaddressed context would leave
-	// nothing to hash, and every reconcile would be a build.
-	// +required
-	Context SourceRefSource `json:"context"`
-
-	// Dockerfile is the path to the Dockerfile within the context.
-	// +kubebuilder:default="Dockerfile"
-	// +kubebuilder:validation:MaxLength=4096
+	// Optional: a Dockerfile that only declares a pinned FROM and runs commands reads no files.
+	// Omitted, the build sees an empty context and any COPY fails inside BuildKit.
 	// +optional
-	Dockerfile string `json:"dockerfile,omitempty"`
+	Context *BuildContext `json:"context,omitempty"`
+
+	// Dockerfile says where the recipe comes from. Omitted, it is "Dockerfile" at the context root
+	// — see EffectiveDockerfile, and see DockerfileSource for why that default is not in the schema.
+	// +optional
+	Dockerfile *DockerfileSource `json:"dockerfile,omitempty"`
 
 	// Target selects a stage in a multi-stage build. Empty builds the last stage.
 	// +kubebuilder:validation:MaxLength=253
@@ -286,4 +400,12 @@ type ImageBuildList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []ImageBuild `json:"items"`
+}
+
+// GetFetch returns the fetch source this context names, or nil when it names none.
+func (c *BuildContext) GetFetch() *FetchSource {
+	if c == nil {
+		return nil
+	}
+	return c.Fetch
 }

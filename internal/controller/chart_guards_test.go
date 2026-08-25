@@ -37,7 +37,11 @@ func TestEveryChartGuardIsActuallyReached(t *testing.T) {
 			args:  []string{"--set", "defaultRegistry.existingPushSecret=mine"},
 		},
 		{
-			guard: "clustering prerequisites",
+			guard: "read replica prerequisites",
+			args:  []string{"--set", "registry.readReplicas=2"},
+		},
+		{
+			guard: "registry.cluster is gone",
 			args:  []string{"--set", "registry.cluster.enabled=true"},
 		},
 	}

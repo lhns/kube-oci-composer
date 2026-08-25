@@ -65,7 +65,7 @@ func TestAFailingBuildDoesNotSpinTheQueue(t *testing.T) {
 
 	obj := sampleBuild()
 	obj.Namespace = "hotloop"
-	obj.Spec.Context.Name = "src"
+	obj.Spec.Context.SourceRef.Name = "src"
 	if err := k8s.Create(ctx, obj); err != nil {
 		t.Fatalf("creating ImageBuild: %v", err)
 	}

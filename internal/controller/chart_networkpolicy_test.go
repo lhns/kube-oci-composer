@@ -40,10 +40,16 @@ func TestTheRegistryPolicyAdmitsEveryNamespaceByDefault(t *testing.T) {
 		t.Fatal("no NetworkPolicy rendered; builds in other namespaces would be blocked in a default-deny cluster")
 	}
 
-	// It must select the registry and nothing else. A policy selecting more pods than it means to
-	// would silently restrict the controllers as well.
-	if got := np.Spec.PodSelector.MatchLabels["app.kubernetes.io/component"]; got != "registry" {
-		t.Fatalf("the policy selects component %q, not the registry", got)
+	// It must select every pod serving the registry API -- the writer and any read replica -- and
+	// nothing else. Selecting only the writer would leave replicas with no policy at all, which in
+	// a default-deny cluster means the read Service blackholes a share of every pull; selecting
+	// more than that would silently restrict the controllers too.
+	if got := np.Spec.PodSelector.MatchLabels["oci-composer.lhns.de/registry-role"]; got != "serve" {
+		t.Fatalf("the policy selects registry-role %q; it must cover every pod serving the API", got)
+	}
+	if _, ok := np.Spec.PodSelector.MatchLabels["app.kubernetes.io/component"]; ok {
+		t.Error("the policy selects a single component, so read replicas would be left unprotected " +
+			"and unreachable in a default-deny cluster")
 	}
 
 	if len(np.Spec.Ingress) != 1 {

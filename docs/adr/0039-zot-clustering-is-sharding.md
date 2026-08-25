@@ -4,8 +4,14 @@ Date: 2026-08-21
 
 ## Status
 
-Accepted. Revisits the "deliberately plain: no HA, no object storage, no TLS termination" position
-the chart has held since [0030](0030-a-real-registry-serves-both-kinds.md).
+**Superseded by [0041](0041-one-writer-many-readers.md).** Its reading of zot's cluster mode below is
+unchanged and is precisely why 0041 does not use it; what is reversed is the *decision* to ship that
+mode as `registry.cluster`, before 0.5.0 was ever tagged. The replacement is not the symmetric
+replication this record implies would be the alternative -- that was measured and found to lose
+content. See 0041.
+
+Originally: Accepted. Revisited the "deliberately plain: no HA, no object storage, no TLS
+termination" position the chart has held since [0030](0030-a-real-registry-serves-both-kinds.md).
 
 ## Context
 

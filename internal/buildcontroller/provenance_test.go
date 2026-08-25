@@ -16,7 +16,9 @@ import (
 // is never assigned is precisely the failure being fixed.
 func TestABuildRecordsWhereItsContentCameFrom(t *testing.T) {
 	obj := &ociv1alpha1.ImageBuild{}
-	obj.Spec.Context = ociv1alpha1.SourceRefSource{Kind: "GitRepository", Name: "app-src"}
+	obj.Spec.Context = &ociv1alpha1.BuildContext{
+		SourceRef: &ociv1alpha1.SourceRefSource{Kind: "GitRepository", Name: "app-src"},
+	}
 	obj.Spec.Push = &ociv1alpha1.Push{
 		Repository: "ghcr.io/example/app",
 		Tags:       []string{"v1"},
