@@ -42,7 +42,7 @@ func renderBuilder(t *testing.T, args ...string) string {
 	if err != nil {
 		t.Fatalf("helm template failed: %v\n%s", err, out)
 	}
-	return string(out)
+	return helmOut(out)
 }
 
 // TestBuilderChartRBACMatchesTheGeneratedRole — the drift guard that matters most, and the reason
@@ -144,7 +144,7 @@ func TestBuilderChartRefusesUnpinnedBuilderImages(t *testing.T) {
 			if err == nil {
 				t.Fatalf("an unpinned %s rendered successfully:\n%s", field, out)
 			}
-			if !strings.Contains(string(out), "must be pinned by digest") {
+			if !strings.Contains(helmOut(out), "must be pinned by digest") {
 				t.Errorf("the failure does not explain the rule:\n%s", out)
 			}
 		})
