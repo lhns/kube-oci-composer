@@ -29,7 +29,15 @@ const (
 
 	contextPath = "/workspace"
 	resultPath  = "/result"
-	secretPath  = "/secrets"
+
+	// Where a Dockerfile that does not live in the context is projected, and the name it always
+	// takes there regardless of what the spec called it -- the path only means something inside a
+	// context, and there is no context here.
+	dockerfileVolume = "dockerfile"
+	dockerfilePath   = "/dockerfile"
+	dockerfileName   = "Dockerfile"
+	dockerfileKey    = "Dockerfile"
+	secretPath       = "/secrets"
 	// Where the copied registry CA is mounted, and where the merged bundle is written. The bundle
 	// is an emptyDir because uid 1000 cannot write to the image's root-owned /etc/ssl/certs.
 	registryCAPath = "/registry-ca"
@@ -175,12 +183,24 @@ rm -rf "$staging"
 // what gets built, and the only part the argv tests read.
 func buildctlArgs(obj *ociv1alpha1.ImageBuild, cfg JobConfig, repo string, cacheAvailable bool) []string {
 	spec := obj.Spec
+	// `context` and `dockerfile` are two independent BuildKit locals, and always were -- they only
+	// coincided because the Dockerfile happened to live in the context tarball. A Dockerfile that
+	// does not points the second local at its own volume and leaves the first alone.
+	//
+	// Deliberately NOT unified by copying the projected Dockerfile into the context: that would
+	// silently overwrite one already present there and make the two forms interact invisibly.
+	dockerfileLocal, filename := path.Join(contextPath, path.Dir(spec.Dockerfile.EffectiveDockerfile())),
+		path.Base(spec.Dockerfile.EffectiveDockerfile())
+	if projectedDockerfile(obj) {
+		dockerfileLocal, filename = dockerfilePath, dockerfileName
+	}
+
 	args := []string{
 		"build",
 		"--frontend", "dockerfile.v0",
 		"--local", "context=" + contextPath,
-		"--local", "dockerfile=" + path.Join(contextPath, path.Dir(spec.Dockerfile)),
-		"--opt", "filename=" + path.Base(spec.Dockerfile),
+		"--local", "dockerfile=" + dockerfileLocal,
+		"--opt", "filename=" + filename,
 		"--opt", "build-arg:BUILDKIT_SYNTAX=" + cfg.FrontendImage,
 		"--metadata-file", path.Join(resultPath, metadataFile),
 	}
@@ -286,11 +306,23 @@ func insecureAttr(repository string, insecure []string) string {
 // Shared with the controller's own registry reads, so a host it can push to insecurely is one it
 // can also HEAD insecurely. Diverging would leave onConflict unenforceable against exactly the
 // registries an e2e or air-gapped setup runs.
+// projectedDockerfile reports whether the Dockerfile has to be carried into the pod rather than
+// found inside the context.
+//
+// One predicate, used by both the volume list and the buildctl argv, because a mount without the
+// matching `--local` is a build that reads the wrong file and a `--local` without the mount is one
+// that reads nothing.
+func projectedDockerfile(obj *ociv1alpha1.ImageBuild) bool {
+	df := obj.Spec.Dockerfile
+	return df != nil && df.Inline != ""
+}
+
 // buildVolumes returns the pod's volumes and the build container's mounts.
 //
 // Paired through one closure rather than two appends per source: a volume and the mount that names
 // it have to agree, and building them in separate lists is how they stop agreeing.
-func buildVolumes(spec ociv1alpha1.ImageBuildSpec, pushSecret string) ([]corev1.Volume, []corev1.VolumeMount) {
+func buildVolumes(obj *ociv1alpha1.ImageBuild, pushSecret, dockerfileSecret string) ([]corev1.Volume, []corev1.VolumeMount) {
+	spec := obj.Spec
 	var volumes []corev1.Volume
 	var mounts []corev1.VolumeMount
 
@@ -302,6 +334,32 @@ func buildVolumes(spec ociv1alpha1.ImageBuildSpec, pushSecret string) ([]corev1.
 
 	add(contextVolume, empty, contextPath, false)
 	add(resultVolume, empty, resultPath, false)
+
+	// A Dockerfile that does not live in the context, projected from the Secret the controller
+	// wrote after checking it.
+	//
+	// subPath, so this is a plain regular file. A Secret volume is normally a `..data` symlink farm,
+	// and `--local` hands the whole directory to BuildKit's fsutil, which walks symlinks rather than
+	// flattening them. It may well work; it is not something to rest the unpinned-FROM guard on.
+	// Losing updates is the usual cost of subPath and here it is a second lock on the invariant:
+	// the pod builds the bytes the controller checked, and nothing re-resolves at pod start.
+	if projectedDockerfile(obj) {
+		volumes = append(volumes, corev1.Volume{
+			Name: dockerfileVolume,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: dockerfileSecret,
+					Items:      []corev1.KeyToPath{{Key: dockerfileKey, Path: dockerfileName}},
+				},
+			},
+		})
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      dockerfileVolume,
+			MountPath: path.Join(dockerfilePath, dockerfileName),
+			SubPath:   dockerfileName,
+			ReadOnly:  true,
+		})
+	}
 
 	// Push credentials are projected into the build pod rather than read by the controller, which
 	// keeps registry tokens out of the controller's memory entirely for the push path.
@@ -354,11 +412,11 @@ func registryCAVolumes(caSecret string) ([]corev1.Volume, []corev1.VolumeMount) 
 
 // buildJob renders the Job for one build.
 func buildJob(obj *ociv1alpha1.ImageBuild, inputHash, contextURL string, cfg JobConfig,
-	repo, pushSecret, caSecret string, cacheAvailable bool) *batchv1.Job {
+	repo, pushSecret, caSecret, dockerfileSecret string, cacheAvailable bool) *batchv1.Job {
 
 	spec := obj.Spec
 	args := buildctlArgs(obj, cfg, repo, cacheAvailable)
-	volumes, mounts := buildVolumes(spec, pushSecret)
+	volumes, mounts := buildVolumes(obj, pushSecret, dockerfileSecret)
 	caVolumes, caMounts := registryCAVolumes(caSecret)
 	volumes = append(volumes, caVolumes...)
 	mounts = append(mounts, caMounts...)

@@ -26,8 +26,8 @@ func sampleBuild() *ociv1alpha1.ImageBuild {
 	return &ociv1alpha1.ImageBuild{
 		ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: "team-a"},
 		Spec: ociv1alpha1.ImageBuildSpec{
-			Context:    ociv1alpha1.SourceRefSource{Kind: "GitRepository", Name: "src"},
-			Dockerfile: "Dockerfile",
+			Context:    &ociv1alpha1.BuildContext{SourceRef: &ociv1alpha1.SourceRefSource{Kind: "GitRepository", Name: "src"}},
+			Dockerfile: &ociv1alpha1.DockerfileSource{Path: "Dockerfile"},
 			Platforms:  []string{"linux/amd64"},
 			Push: &ociv1alpha1.Push{
 				Repository: "ghcr.io/me/app",
@@ -79,7 +79,7 @@ func TestJobNameStaysWithinLimit(t *testing.T) {
 // refusing to build at all. Rootless is the half of that this project accepts; privileged is not
 // offered at any setting, so nothing in the spec can reach these fields.
 func TestBuildJobRunsRootless(t *testing.T) {
-	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo, "", "", true)
+	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo, "", "", "", true)
 
 	pod := job.Spec.Template.Spec
 	if len(pod.Containers) != 1 {
@@ -155,7 +155,7 @@ func TestBuildJobRunsRootless(t *testing.T) {
 func TestBuildJobUsesTheObjectsServiceAccount(t *testing.T) {
 	obj := sampleBuild()
 	obj.Spec.ServiceAccountName = "builder"
-	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo, "", "", true)
+	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo, "", "", "", true)
 
 	if got := job.Spec.Template.Spec.ServiceAccountName; got != "builder" {
 		t.Errorf("service account = %q, want %q", got, "builder")
@@ -170,7 +170,7 @@ func TestBuildJobArgs(t *testing.T) {
 	obj.Spec.Target = "runtime"
 	obj.Spec.Args = []ociv1alpha1.BuildArg{{Name: "VERSION", Value: "1.2.3"}}
 
-	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo, "", "", true)
+	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo, "", "", "", true)
 	argv := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " ")
 
 	for _, want := range []string{
@@ -193,7 +193,7 @@ func TestBuildJobArgs(t *testing.T) {
 func TestNetworkNoneIsPassedThrough(t *testing.T) {
 	obj := sampleBuild()
 	obj.Spec.Network = "None"
-	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo, "", "", true)
+	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo, "", "", "", true)
 
 	argv := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " ")
 	if !strings.Contains(argv, "no-network=true") {
@@ -232,7 +232,7 @@ func TestSecretsAreMountedNotInlined(t *testing.T) {
 		SecretRef: &ociv1alpha1.LocalObjectReference{Name: "npm-creds"},
 	}}
 
-	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo, "", "", true)
+	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo, "", "", "", true)
 	argv := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " ")
 
 	if !strings.Contains(argv, "--secret id=npmrc") {
@@ -273,14 +273,14 @@ func TestInsecureRegistryIsOptInPerHost(t *testing.T) {
 	cfg := sampleConfig()
 	cfg.InsecureRegistries = []string{"registry.internal:5000"}
 
-	secure := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", cfg, sampleRepo, "", "", true)
+	secure := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", cfg, sampleRepo, "", "", "", true)
 	if argv := strings.Join(secure.Spec.Template.Spec.Containers[0].Args, " "); strings.Contains(argv, "registry.insecure") {
 		t.Errorf("a non-listed host was pushed insecurely\ngot: %s", argv)
 	}
 
 	obj := sampleBuild()
 	obj.Spec.Push.Repository = "registry.internal:5000/team/app"
-	listed := buildJob(obj, testHash, "https://example/ctx.tgz", cfg, obj.Spec.Push.Repository, "", "", true)
+	listed := buildJob(obj, testHash, "https://example/ctx.tgz", cfg, obj.Spec.Push.Repository, "", "", "", true)
 	if argv := strings.Join(listed.Spec.Template.Spec.Containers[0].Args, " "); !strings.Contains(argv, "registry.insecure=true") {
 		t.Errorf("a listed host was not allowed plain HTTP\ngot: %s", argv)
 	}
@@ -297,8 +297,8 @@ func TestInsecureRegistryIsNotInTheInputHash(t *testing.T) {
 	insecure.InsecureRegistries = []string{"registry.internal:5000"}
 
 	// The Job name is derived from the input hash, so identical names prove the hash did not move.
-	a := buildJob(obj, testHash, "https://example/ctx.tgz", plain, obj.Spec.Push.Repository, "", "", true)
-	b := buildJob(obj, testHash, "https://example/ctx.tgz", insecure, obj.Spec.Push.Repository, "", "", true)
+	a := buildJob(obj, testHash, "https://example/ctx.tgz", plain, obj.Spec.Push.Repository, "", "", "", true)
+	b := buildJob(obj, testHash, "https://example/ctx.tgz", insecure, obj.Spec.Push.Repository, "", "", "", true)
 	if a.Name != b.Name {
 		t.Errorf("the insecure list moved the input hash: %q vs %q", a.Name, b.Name)
 	}
@@ -377,7 +377,7 @@ func TestFetchContextUnwrapsTheSourceControllerDirectory(t *testing.T) {
 //
 // Without pod labels the only way to write such a policy was to match every pod in the namespace.
 func TestBuildPodsAreSelectable(t *testing.T) {
-	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo, "", "", true)
+	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo, "", "", "", true)
 
 	labels := job.Spec.Template.Labels
 	if labels == nil {
@@ -407,7 +407,7 @@ func TestBuildPodsAreSelectable(t *testing.T) {
 // drifted.
 func TestTheBuildTrustsTheRegistryCA(t *testing.T) {
 	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo,
-		"", "build-registry-ca", true)
+		"", "build-registry-ca", "", true)
 	pod := job.Spec.Template.Spec
 	container := pod.Containers[0]
 
@@ -460,7 +460,7 @@ func TestTheBuildTrustsTheRegistryCA(t *testing.T) {
 // or a stray empty volume would be a change to every build for the benefit of none.
 func TestNoCAMeansNoCAPlumbing(t *testing.T) {
 	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo,
-		"", "", true)
+		"", "", "", true)
 	pod := job.Spec.Template.Spec
 
 	for _, v := range pod.Volumes {
@@ -476,4 +476,97 @@ func TestNoCAMeansNoCAPlumbing(t *testing.T) {
 	if strings.Contains(pod.Containers[0].Command[2], "ca-bundle") {
 		t.Error("the script must not merge a bundle that does not exist")
 	}
+}
+
+// TestAContextDockerfileStillComesFromTheContext is the regression guard on the untouched path.
+//
+// The common case did not change and must not: the recipe lives in the thing being built, and
+// `--local dockerfile=` points inside the context exactly as before.
+func TestAContextDockerfileStillComesFromTheContext(t *testing.T) {
+	obj := sampleBuild()
+	obj.Spec.Dockerfile = &ociv1alpha1.DockerfileSource{Path: "build/Dockerfile.prod"}
+	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo, "", "", "", true)
+	args := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " ")
+
+	if !strings.Contains(args, "--local dockerfile=/workspace/build") {
+		t.Errorf("the dockerfile local must point inside the context:\n%s", args)
+	}
+	if !strings.Contains(args, "--opt filename=Dockerfile.prod") {
+		t.Errorf("filename must be the base name from the spec:\n%s", args)
+	}
+	for _, v := range job.Spec.Template.Spec.Volumes {
+		if v.Name == dockerfileVolume {
+			t.Error("a context Dockerfile must not project a volume; it is already in the context")
+		}
+	}
+}
+
+// TestAnInlineDockerfileIsProjectedAsItsOwnLocal.
+//
+// `context` and `dockerfile` were always two independent BuildKit locals — they only coincided
+// because the Dockerfile happened to live in the context. This is that separation being used.
+func TestAnInlineDockerfileIsProjectedAsItsOwnLocal(t *testing.T) {
+	obj := sampleBuild()
+	obj.Spec.Dockerfile = &ociv1alpha1.DockerfileSource{Inline: "FROM scratch\n"}
+	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo,
+		"", "", "app-abc123-dockerfile", true)
+	args := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " ")
+
+	if !strings.Contains(args, "--local dockerfile=/dockerfile") {
+		t.Errorf("the dockerfile local must be its own mount:\n%s", args)
+	}
+	if !strings.Contains(args, "--opt filename=Dockerfile") {
+		t.Errorf("filename must be the fixed projected name:\n%s", args)
+	}
+	// The context local is untouched. Copying the Dockerfile into /workspace instead would silently
+	// overwrite one already present there.
+	if !strings.Contains(args, "--local context=/workspace") {
+		t.Errorf("the context local must be unchanged:\n%s", args)
+	}
+
+	var mount *corev1.VolumeMount
+	for i, m := range job.Spec.Template.Spec.Containers[0].VolumeMounts {
+		if m.Name == dockerfileVolume {
+			mount = &job.Spec.Template.Spec.Containers[0].VolumeMounts[i]
+		}
+	}
+	if mount == nil {
+		t.Fatal("no dockerfile volume mounted, so the local points at an empty directory")
+	}
+	// subPath, so the file is a plain regular file rather than the ..data symlink farm a Secret
+	// volume normally projects — BuildKit's fsutil walks symlinks rather than flattening them.
+	if mount.SubPath != dockerfileName {
+		t.Errorf("the dockerfile mount must use subPath, got %q", mount.SubPath)
+	}
+	if !mount.ReadOnly {
+		t.Error("the dockerfile mount must be read-only")
+	}
+}
+
+// TestTheProjectedDockerfileComesFromTheControllersOwnSecret.
+//
+// The pod must never name a user-supplied object for the Dockerfile. The kubelet resolves a volume
+// at pod start, reading whatever the source says THEN — not what the controller hashed and
+// FROM-checked a moment earlier — so projecting one directly would be a complete bypass of the
+// unpinned-base guard, reachable by anyone who can update that object.
+func TestTheProjectedDockerfileComesFromTheControllersOwnSecret(t *testing.T) {
+	obj := sampleBuild()
+	obj.Spec.Dockerfile = &ociv1alpha1.DockerfileSource{Inline: "FROM scratch\n"}
+	job := buildJob(obj, testHash, "https://example/ctx.tgz", sampleConfig(), sampleRepo,
+		"", "", "app-abc123-dockerfile", true)
+
+	for _, v := range job.Spec.Template.Spec.Volumes {
+		if v.Name != dockerfileVolume {
+			continue
+		}
+		if v.ConfigMap != nil {
+			t.Fatal("the Dockerfile is projected from a ConfigMap, which the kubelet re-reads at " +
+				"pod start; the pod could build bytes the controller never checked")
+		}
+		if v.Secret == nil || v.Secret.SecretName != "app-abc123-dockerfile" {
+			t.Fatalf("expected the controller's own Secret, got %+v", v.VolumeSource)
+		}
+		return
+	}
+	t.Fatal("no dockerfile volume rendered")
 }

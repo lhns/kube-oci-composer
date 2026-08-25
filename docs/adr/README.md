@@ -49,6 +49,8 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0039](0039-zot-clustering-is-sharding.md) | zot clustering is sharding, not replication | **Superseded by [0041](0041-one-writer-many-readers.md)** |
 | [0040](0040-the-supply-chain-work-is-worth-building.md) | The supply-chain work is worth building, and here is what it costs | Accepted, **closes 0020**, amends 0008 |
 | [0041](0041-one-writer-many-readers.md) | The registry has one writer and many readers | Accepted, **supersedes 0039** |
+| [0042](0042-content-addressed-not-flux.md) | Which sources we resolve, and which source-controller resolves | Accepted, narrows 0025's Flux-only rule |
+| [0043](0043-an-oci-artifact-is-a-source-we-own.md) | An OCI artifact is a source we own | **Accepted, not yet implemented** |
 
 ## Open questions
 

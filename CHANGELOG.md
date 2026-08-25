@@ -122,6 +122,27 @@ must name a source in its own namespace.
   expiring rather than warning — an expired certificate stops the retention refresh, and that is a
   deletion one window later rather than an outage.
 
+- **A Dockerfile can come from the spec, and a build can have no context**
+  ([ADR 0042](docs/adr/0042-content-addressed-not-flux.md)). `spec.dockerfile.inline` puts the recipe
+  in the object, so building an upstream project that ships no Dockerfile no longer means forking it
+  to add one file and carrying that fork forever. `spec.context` is now optional: a Dockerfile that
+  only declares a pinned `FROM` and runs commands reads no files, and requiring a context for it
+  meant pointing a Flux source at an empty directory.
+
+  `spec.context` is also a union now rather than a bare Flux reference — `context.sourceRef` today,
+  with room for the other content-addressed sources. The rule it enforces is **"every build input is
+  content-addressed"**, which is what the old Flux-only restriction's own reasoning actually
+  supported; requiring Flux specifically was narrower than the reason it gave.
+
+  An unpinned `FROM` in an **inline** Dockerfile now **stalls**, because editing this spec is what
+  fixes it and the generation change is what wakes the object. One in a Dockerfile that lives in the
+  context still retries rather than stalling: the fix is a push to the source, which raises no
+  change here.
+
+  The Dockerfile's bytes join the input hash and `RecipeVersion` moves to 2. Previously the content
+  needed no hashing because it rode inside the content-addressed context tarball — true then, and
+  false the moment the recipe can come from anywhere else.
+
 - **A NetworkPolicy for the registry, enabled by default.** Build Jobs run in their object's
   namespace, not the release's, so every build crosses a namespace boundary to push and a
   default-deny cluster blocks it. The policy admits every namespace on the registry port, which is
@@ -206,6 +227,17 @@ must name a source in its own namespace.
   every drain forever with nothing in the events saying why.
 
 ### Changed
+
+- **BREAKING (unreleased kind): `ImageBuild.spec.context` and `spec.dockerfile` change shape.**
+  `context: {kind: …, name: …}` becomes `context: {sourceRef: {kind: …, name: …}}`, and
+  `dockerfile: Dockerfile` becomes `dockerfile: {path: Dockerfile}` — or is omitted, which is the
+  same thing. `ImageBuild` has never appeared in a release, so nothing published depends on the old
+  shape; doing it now is what avoids a deprecation cycle later.
+
+  `dockerfile` lost its schema default. A structural default is written into the stored object, so a
+  defaulted `path` would make every object look like it had set one and the "exactly one of" rule
+  could never fire. The effective default moves to the controller, the same arrangement
+  `Push.OnConflict` already uses for the same reason.
 
 - **`registry.cluster` never shipped.** It briefly existed on `main` as zot's scale-out mode, which
   **shards** — each repository lived on exactly one member, so a member going down took ~1/N of the

@@ -23,7 +23,12 @@ import (
 //
 // Unlike AssemblyVersion this is NOT the whole story, because the tool is not in this binary. That
 // is what BuilderDigest is for.
-const RecipeVersion = 1
+//
+// v2: a Dockerfile that does not live in the context is delivered to buildctl as its own
+// `--local dockerfile=` mount rather than as a path inside the context mount, and a build with no
+// context gets a synthesised empty one. Both change the invocation, which is exactly what this
+// constant exists to track.
+const RecipeVersion = 2
 
 // Inputs is everything that determines a build's output, as far as anything here can determine it.
 //
@@ -39,11 +44,17 @@ type Inputs struct {
 	BuilderDigest  string
 	FrontendDigest string
 
-	// ContextDigest is the Flux artifact's digest, RESOLVED rather than declared.
+	// ContextKind is which member of the context union was resolved -- "sourceRef", or "" when the
+	// build has no context at all.
 	//
-	// The Dockerfile's own content needs no separate hashing: it lives inside the context tarball,
-	// which is content-addressed, so a change to it moves this. That is why the hash can be
-	// computed without fetching anything.
+	// Hashed, and hashed BEFORE the digest, because a digest alone no longer says what it
+	// addresses. It also distinguishes "no context" from "a context whose digest is not yet
+	// resolved", which are the same empty string in ContextDigest and very much not the same input.
+	ContextKind string
+
+	// ContextDigest is what addresses the context content -- for a Flux source, the artifact's
+	// digest, RESOLVED rather than declared. Empty when there is no context; ContextKind is what
+	// tells those apart.
 	ContextDigest string
 	// ContextRevision is what the artifact digest DESCRIBES — "v0.6.8@sha1:b739efb5". Recorded so
 	// a built image can be traced back to a revision without pulling it apart, which is the gap
@@ -52,11 +63,32 @@ type Inputs struct {
 	ContextRevision string
 	ContextSubpath  string
 
+	// DockerfileKind is "path" or "inline".
+	//
+	// Hashed for the same reason as ContextKind, and for a sharper one: the two forms carry their
+	// meaning in DIFFERENT fields, so without this a path of "" and an inline of "" would hash the
+	// same.
+	DockerfileKind string
+
+	// Dockerfile is the PATH, and only for the path form. It stays a path there for the reason it
+	// always was: the content lives inside the context, which ContextDigest addresses, so an edit
+	// to it already moves this hash and nothing has to be fetched to compute one.
 	Dockerfile string
-	Target     string
-	Network    string
-	CacheMode  string
-	CacheRef   string
+
+	// DockerfileDigest is a sha256 over the Dockerfile's BYTES, for the forms that do not ride
+	// inside the context. Empty for the path form.
+	//
+	// CONTENT, not an identity -- the opposite of SecretIdentities below, and the contrast is
+	// deliberate. That field hashes name/resourceVersion because status.inputHash is readable by
+	// anyone with get and a hash of a low-entropy secret is an oracle. Neither half holds here: a
+	// Dockerfile is not low-entropy and is not meant to be unknowable, and it is precisely the
+	// content that decides what gets built.
+	DockerfileDigest string
+
+	Target    string
+	Network   string
+	CacheMode string
+	CacheRef  string
 
 	// Attestations records whether BuildKit was asked for an SBOM and provenance.
 	//
@@ -96,9 +128,12 @@ func (in Inputs) Hash() string {
 	writeField(fmt.Sprintf("recipe-v%d", RecipeVersion))
 	writeField(in.BuilderDigest)
 	writeField(in.FrontendDigest)
+	writeField(in.ContextKind)
 	writeField(in.ContextDigest)
 	writeField(in.ContextSubpath)
+	writeField(in.DockerfileKind)
 	writeField(in.Dockerfile)
+	writeField(in.DockerfileDigest)
 	writeField(in.Target)
 	writeField(in.Network)
 	writeField(in.CacheMode)

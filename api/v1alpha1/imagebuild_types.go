@@ -5,6 +5,89 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// BuildContext is the tree the Dockerfile's COPY and ADD read from.
+//
+// Every member is content-addressed, and THAT is the requirement — not that it comes from Flux.
+// This kind's input hash is its identity (ADR 0025), so a context nothing addresses would leave
+// nothing to hash and every reconcile would be a build. A Flux artifact resolves to a digest; the
+// members added later declare one. All of them satisfy the rule the earlier Flux-only shape was
+// written to enforce, which is why that shape was narrower than its own reason. See ADR 0042.
+//
+// Still no inline or bare-URL form: those are the two that genuinely fail the test.
+//
+// +kubebuilder:validation:XValidation:rule="(has(self.sourceRef)?1:0) == 1",message="set sourceRef"
+type BuildContext struct {
+	// SourceRef takes the context from a Flux source's artifact.
+	//
+	// The one to reach for when the content moves: source-controller tracks the revision, so the
+	// context follows the repository without anything here being edited. Sources that need that
+	// kind of tracking are delegated to it rather than reimplemented (ADR 0042).
+	// +optional
+	SourceRef *SourceRefSource `json:"sourceRef,omitempty"`
+}
+
+// GetSourceRef returns the Flux source this context names, or nil when it names none.
+//
+// Nil-safe on the receiver so callers do not each repeat the "no context is legal" check, which is
+// where a nil dereference would otherwise be one forgotten guard away.
+func (c *BuildContext) GetSourceRef() *SourceRefSource {
+	if c == nil {
+		return nil
+	}
+	return c.SourceRef
+}
+
+// DockerfileSource says where the Dockerfile comes from.
+//
+// `path` is the original and the common case — the recipe lives in the thing being built. `inline`
+// puts it in this spec, which is what you want when the Dockerfile is four lines and inventing a
+// git repository to hold them is the entire cost of the feature.
+//
+// NO field here carries a schema default, and that is deliberate. A structural default is
+// materialised into the stored object, so a defaulted `path` would make has(self.path) true for
+// every object that ever existed and the exactly-one rule below could never fire. The effective
+// default lives in EffectiveDockerfile instead — the same arrangement, for the same reason, as
+// Push.OnConflict.
+//
+// +kubebuilder:validation:XValidation:rule="(has(self.path)?1:0) + (has(self.inline)?1:0) == 1",message="set exactly one of path or inline"
+type DockerfileSource struct {
+	// Path to the Dockerfile inside the build context, resolved against the context subpath.
+	// Meaningless without a context, which the rule on ImageBuildSpec refuses rather than leaving
+	// to fail later as a frontend error nobody can map back to this field.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=4096
+	// +optional
+	Path string `json:"path,omitempty"`
+
+	// Inline is the Dockerfile itself, verbatim.
+	//
+	// Plaintext in etcd and in `kubectl get -o yaml`, like args — but unlike args it is code, and
+	// unlike every other input to this kind it is fully determined by this spec. That is what makes
+	// an unpinned FROM here TERMINAL rather than a retry: the fix is an edit to this field, and the
+	// generation change it raises is the event that wakes the object back up. A `path` Dockerfile
+	// gets no such event, which is why the same check is not terminal there.
+	//
+	// Capped well below what etcd would take. A Dockerfile is kilobytes; anything larger is a
+	// generator writing a program into a CRD, and every watcher of every ImageBuild pays for it on
+	// every update.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=65536
+	// +optional
+	Inline string `json:"inline,omitempty"`
+}
+
+// EffectiveDockerfile returns the path to use when the spec names none.
+//
+// Kept here rather than as a schema default because a default is materialised into the object and
+// would defeat the exactly-one rule on DockerfileSource — see the type comment. The consequence is
+// that spec.dockerfile.path is empty for most objects, so nothing may read it directly.
+func (s *DockerfileSource) EffectiveDockerfile() string {
+	if s == nil || s.Path == "" {
+		return "Dockerfile"
+	}
+	return s.Path
+}
+
 // ImageBuildSpec builds an OCI image by executing a Dockerfile.
 //
 // This kind executes arbitrary code, so its output digest is NOT a function of its spec — it is an
@@ -15,6 +98,8 @@ import (
 // If what you need is "take a released artifact and put it in an image", use ImageComposition — it
 // is a strictly stronger tool, and since ADR 0024 it can take files out of an image your CI already
 // built. See ADR 0025 for what this kind costs.
+//
+// +kubebuilder:validation:XValidation:rule="has(self.context) || (has(self.dockerfile) && has(self.dockerfile.inline))",message="with no context there is no tree to find a Dockerfile in: set spec.context, or give the Dockerfile directly with spec.dockerfile.inline"
 type ImageBuildSpec struct {
 	// Interval at which to reconcile. Nearly free when nothing has changed: the controller
 	// compares a hash of the resolved inputs rather than building.
@@ -30,19 +115,20 @@ type ImageBuildSpec struct {
 	// +optional
 	Suspend bool `json:"suspend,omitempty"`
 
-	// Context is the build context, taken from a Flux source's artifact.
+	// Context is the tree the Dockerfile's COPY and ADD read from.
 	//
-	// From a Flux source, so the revision is content-addressed and its digest is what makes the
-	// input hash meaningful. There is no inline or URL form: an unaddressed context would leave
-	// nothing to hash, and every reconcile would be a build.
-	// +required
-	Context SourceRefSource `json:"context"`
-
-	// Dockerfile is the path to the Dockerfile within the context.
-	// +kubebuilder:default="Dockerfile"
-	// +kubebuilder:validation:MaxLength=4096
+	// OPTIONAL. A Dockerfile that only declares a pinned FROM and runs commands reads no files, and
+	// requiring a context for it meant pointing a Flux source at an empty directory — the whole
+	// cost of the feature, paid to satisfy a field. Omitted, the build sees an EMPTY context, which
+	// is addressed by construction; a COPY then fails inside BuildKit, which is the correct failure
+	// and not a silent one.
 	// +optional
-	Dockerfile string `json:"dockerfile,omitempty"`
+	Context *BuildContext `json:"context,omitempty"`
+
+	// Dockerfile says where the recipe comes from. Omitted, it is "Dockerfile" at the context root
+	// — see EffectiveDockerfile, and see DockerfileSource for why that default is not in the schema.
+	// +optional
+	Dockerfile *DockerfileSource `json:"dockerfile,omitempty"`
 
 	// Target selects a stage in a multi-stage build. Empty builds the last stage.
 	// +kubebuilder:validation:MaxLength=253

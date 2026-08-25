@@ -270,8 +270,9 @@ apiVersion: oci.lhns.de/v1alpha1
 kind: ImageBuild
 metadata: {name: app}
 spec:
-  context: {kind: GitRepository, name: app-src}   # digest resolved by source-controller
-  dockerfile: Dockerfile
+  context:
+    sourceRef: {kind: GitRepository, name: app-src}   # digest resolved by source-controller
+  dockerfile: {path: Dockerfile}                      # or omit entirely; the default is this
   platforms: [linux/amd64]
   # push is optional: omitted, this publishes to the operator's registry as
   # <default-registry>/<namespace>/app. Name a repository to publish elsewhere, and
@@ -282,6 +283,38 @@ spec:
 Every `FROM` must be pinned by digest, and the build runs rootless in its own Job under a service
 account bound to nothing. Anyone who can push to the referenced repository can run code in that
 namespace — that is the trade this component makes.
+
+**The recipe does not have to live in the source.** Building an upstream project that ships no
+Dockerfile used to mean forking it to add one file and carrying that fork forever. Put the
+Dockerfile in the spec instead, and drop `context` entirely when the build reads no files:
+
+```yaml
+spec:
+  context:
+    sourceRef: {kind: GitRepository, name: upstream, subpath: ui}
+  dockerfile:
+    inline: |
+      FROM node:22-alpine@sha256:…
+      COPY . /src
+      RUN cd /src && npm ci && npm run build
+```
+
+An unpinned `FROM` in an **inline** Dockerfile stalls the object, because editing this spec is what
+fixes it. One in a Dockerfile that lives in the source does not: the fix is a push there, which
+raises no change here to wake the object, so it retries instead.
+
+### Where sources come from
+
+Two rules, and [ADR 0042](docs/adr/0042-content-addressed-not-flux.md) is the record:
+
+- **If the spec names the exact content, this operator resolves it** — `fetch` with a digest, an
+  `image` with a digest, a `configMap`.
+- **If a mutable ref has to be tracked over time, Flux's source-controller resolves it** — a git
+  branch, a bucket prefix, a semver tag — and a `sourceRef` points at what it published.
+
+So git is source-controller's job, and it does not require running the rest of Flux:
+`flux install --components=source-controller` installs it alone. An OCI artifact ought to be ours
+rather than Flux's and is not implemented yet ([ADR 0043](docs/adr/0043-an-oci-artifact-is-a-source-we-own.md)).
 
 ### The shape
 
