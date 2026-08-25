@@ -79,15 +79,13 @@ oci-composer.lhns.de/registry-role: serve
 {{- end -}}
 
 {{/*
-Labels for a registry POD -- writer or read replica.
+Labels for a registry POD -- writer or read replica. Same (dict "ctx" ... "component" ...) shape as
+componentSelectorLabels.
 
-One helper rather than two includes side by side, and that is the whole point of it. Pairing
-componentSelectorLabels with registryServeSelectorLabels emits name and instance TWICE, which is
-valid text and invalid YAML: helm template exits 0, helm lint passes, and Flux's post-renderer
-rejects the release with "mapping key already defined". Because the CRDs live in templates/ and a
-release is atomic, that failure blocks the whole upgrade, CRDs included.
-
-Takes the same (dict "ctx" ... "component" ...) shape as componentSelectorLabels.
+ONE helper, not two includes side by side: componentSelectorLabels and registryServeSelectorLabels
+both carry name and instance, so pairing them emitted duplicate YAML keys. helm accepts that
+(last-wins); Flux's post-renderer refuses the release, and since the CRDs live in templates/ and a
+release is atomic, that blocked every upgrade.
 */}}
 {{- define "kube-oci-composer.registryPodLabels" -}}
 {{ include "kube-oci-composer.componentSelectorLabels" . }}
@@ -116,21 +114,6 @@ arbitrary containers -- and the composer's cannot create a single object. See AD
 {{- end -}}
 {{- end -}}
 
-{{/*
-The registry's names, and the host the controllers push to.
-
-defaultRegistry.host wins when set -- that is the bring-your-own case. Otherwise it is the bundled
-zot's in-cluster Service DNS, which is what the CONTROLLERS use. Workloads pulling need a
-node-resolvable name instead (registry.host); containerd resolves image references with the node's
-resolver, which cannot see cluster DNS.
-*/}}
-{{- /*
-ONE host string, used for both the push and the reference recorded in status.
-It has to be one string: the controller writes to it and a workload pulls the same reference back.
-registry.host wins when set, so status.artifact.ref names something a node can resolve; unset, it
-falls back to the Service DNS, which works for the controllers and NOT for pulls -- which is why the
-chart warns about it at install time.
-*/}}
 {{- define "kube-oci-composer.registryFullname" -}}
 {{- printf "%s-registry" (include "kube-oci-composer.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
@@ -152,12 +135,6 @@ cluster DNS. Setting it broke publishing; leaving it unset broke pulling. See pu
 {{- end -}}
 
 {{- /*
-What a WORKLOAD is told to pull from. Rendered into status.artifact.ref and nowhere else.
-
-Empty whenever it would equal the internal name -- an external registry is one name that already
-works from both places, and emitting it twice would only invite the two to drift.
-*/}}
-{{- /*
 registry.host with any port stripped.
 
 An Ingress rule and a certificate SAN are HOSTNAMES; registry.host is a registry reference and may
@@ -173,6 +150,12 @@ rule host produces an Ingress that matches nothing, silently.
 {{- end -}}
 {{- end -}}
 
+{{- /*
+What a WORKLOAD is told to pull from. Rendered into status.artifact.ref and nowhere else.
+
+Empty whenever it would equal the internal name -- an external registry is one name that already
+works from both places, and emitting it twice would only invite the two to drift.
+*/}}
 {{- define "kube-oci-composer.publicRegistry" -}}
 {{- if and .Values.registry.enabled .Values.registry.host -}}
 {{- .Values.registry.host -}}

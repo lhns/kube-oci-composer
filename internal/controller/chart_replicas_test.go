@@ -34,17 +34,15 @@ func withoutReplicaArg(t *testing.T, key string) []string {
 
 // docs parses a helm render into one map per document.
 //
-// A parse failure FAILS the test rather than skipping the document, which is what this did before.
-// Every assertion here is of the form "the document with property X also has Y", so a document that
-// will not parse vanishes from the search and the test passes having examined nothing.
+// A parse failure fails the test rather than skipping the document, which is what it did before.
+// Every assertion here reads "the document with property X also has Y", so an unparseable document
+// vanishes from the search and the test passes having examined nothing.
 //
-// Narrower than it first looks: helm rejects a syntax error before this sees it, so a render cannot
-// currently produce an unparseable document. It is the silent-skip SHAPE that is worth removing --
-// a guard whose failure mode is "found nothing, therefore fine" is the one that stops guarding
-// without saying so.
+// Narrow in practice -- helm rejects a syntax error before this sees it -- but "found nothing,
+// therefore fine" is the failure mode worth removing.
 //
-// A chunk that parses to nothing -- a comment-only block, trailing whitespace -- is still skipped.
-// That is absence of content, not failure to read it.
+// A chunk that parses to nothing (comments, trailing whitespace) is still skipped: that is absence
+// of content, not failure to read it.
 func docs(t *testing.T, out string) []map[string]any {
 	t.Helper()
 	var all []map[string]any

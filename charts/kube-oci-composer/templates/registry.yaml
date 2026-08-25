@@ -68,14 +68,9 @@ spec:
         checksum/config: {{ include (print $.Template.BasePath "/registry-config.yaml") . | sha256sum }}
       labels:
         {{- /*
-        registryPodLabels carries the registry-role label, which is added to the POD TEMPLATE only
-        and never to spec.selector above -- a StatefulSet's selector is immutable, so changing it
-        would need the object recreated. This is what puts the writer into the read Service
+        The registry-role label goes on the POD TEMPLATE only, never on spec.selector above: a
+        StatefulSet's selector is immutable. This is what puts the writer into the read Service
         alongside the replicas.
-
-        ONE include, not componentSelectorLabels followed by registryServeSelectorLabels: both of
-        those carry name and instance, so the pair emitted duplicate YAML keys and Flux refused
-        every upgrade. See the helper.
         */}}
         {{- include "kube-oci-composer.registryPodLabels" (dict "ctx" . "component" "registry") | nindent 8 }}
     spec:
