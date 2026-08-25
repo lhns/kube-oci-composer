@@ -169,6 +169,29 @@ imageBuild:
   buildkitImage: "moby/buildkit:v0.17.2-rootless@sha256:5b45405a38c579692f6fcd47ceef2002fe4fa61bb04ef0c2c644cf74cbbd57b8"
   dockerfileFrontend: "docker/dockerfile:1.12.1@sha256:93bfd3b68c109427185cd78b4779fc82b484b0b7618e36d0f104d4d801e66d25"
 
+  # The image that fetches, VERIFIES and unpacks each build's context, as the Job's init container.
+  #
+  # Empty means this operator's own builder image, which is what you want: the fetcher is a
+  # subcommand of the same binary, so the chart already knows a digest for it. Set it only to pin
+  # the fetcher separately from the controller.
+  #
+  # Its digest is in the build input hash, like the other two. The argument that it need not be is
+  # worth answering: every context is digest-addressed, so a correct fetcher has exactly one possible
+  # output -- true of the DOWNLOAD, false of the UNPACK, where a fixed symlink or wrapper bug changes
+  # the tree under an unchanged digest.
+  fetcherImage: ""
+
+  # Refuse a spec.context.fetch URL resolving to a private, loopback or CGNAT address.
+  #
+  # Link-local is refused whatever this says -- that is where cloud metadata endpoints serve
+  # credentials. Off by default for the same reason the composer's is: an artifact server on a
+  # private address is an ordinary source, and a guard people switch off is no guard. See ADR 0036.
+  #
+  # This governs the CONTROLLER's read of a Dockerfile out of a fetch context. The fetch inside the
+  # build pod is deliberately unguarded: that pod runs arbitrary code from a Dockerfile and can
+  # already reach whatever the pod network allows.
+  fetchDenyPrivate: false
+
   # Its own bind addresses: this is a second pod in the same namespace, not the composer.
   metricsBindAddress: ":8080"
   healthProbeBindAddress: ":8081"
@@ -297,31 +320,42 @@ registry:
     #                    a default: useful when another system copies them onward.
     mode: ""
 
-  # SCALE-OUT CLUSTERING. Read the next paragraph before turning it on.
+  # READ REPLICAS, in addition to the single registry pod. 0 means just the one.
   #
-  # It is NOT replication. zot shards by repository-name hash and proxies each request to the member
-  # that owns that repository, so N members means each repository lives on exactly one of them: a
-  # member that is down makes roughly 1/N of your repositories unavailable, and zot's own
-  # documentation says the cluster is not self-healing. What this buys is throughput and a proxy
-  # layer that survives a rolling update. It does not buy availability, which is why the value is
-  # called `cluster` and not `ha`.
+  # These serve PULLS. They do not accept pushes and they do not garbage-collect, and that
+  # restriction is the entire design rather than a simplification -- see ADR 0041.
   #
-  # It also has hard prerequisites the chart does not install: S3-compatible object storage and a
-  # shared cache driver (redis or dynamodb). BoltDB cannot be shared, so there is no "just add
-  # replicas to the PVC" path, and the chart refuses the combinations that look like one.
+  # zot serialises repository writes with an IN-PROCESS mutex. A push is a read-modify-write of
+  # <repo>/index.json and nothing coordinates two processes doing it at once, so three instances
+  # over one store measurably lost 2-4% of tags that had returned 201 (test/spike reproduces it in
+  # about two minutes). Collection rewrites index.json too, so an instance that only serves pulls
+  # is still a mutator if it collects. Confining every mutation to one pod is what makes the rest
+  # safe, and it holds on object storage exactly as much as on a filesystem -- the race is between
+  # processes, not between clients of a disk.
   #
-  # Worth saying plainly: anyone who already runs S3 and redis could equally run a registry of
-  # their own and set publish.mode=external. This exists so the bundled registry is not a FORCED
-  # single point of failure -- not because this chart is the right way to run a registry estate.
-  cluster:
-    enabled: false
-    replicaCount: 3
-    # Exactly 16 characters -- siphash-2-4 takes a 128-bit key. Generated and kept stable if empty.
-    # Changing it reshuffles every repository onto a different member; survivable with shared
-    # storage, but it is a cluster-wide reshuffle, so stability is the default.
-    hashKey: ""
+  # WHAT THIS BUYS: a node drain stops taking pulls down with it. That is the failure people
+  # actually see -- ErrImagePull on workloads while the registry is being rescheduled.
+  #
+  # WHAT IT DOES NOT BUY, plainly:
+  #   * Write availability. While the writer is moving, pushes fail. Tolerable only because the
+  #     reconcile is idempotent and retries, so a failed push is a delayed publish, not a lost one.
+  #   * Write throughput. Every push still goes through one process.
+  #   * Removal of the single point of failure. It MOVES from the pod to the shared store, which
+  #     is now the availability floor for every pull in the cluster. Only worth it where that store
+  #     is itself redundant.
+  #
+  # Two prerequisites, both refused at render time if missing: one store every pod can see
+  # (storage.driver=s3, or persistence.accessMode=ReadWriteMany), and a shared metadata database
+  # (cache.driver, because BoltDB is a file one process opens exclusively).
+  readReplicas: 0
 
-  # Where the registry keeps blobs. `local` is the PVC below; `s3` is required for clustering.
+  # Resources for a read replica. They serve blobs and hold no write buffers, so they are cheaper
+  # than the writer.
+  readerResources:
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {memory: 512Mi}
+
+  # Where the registry keeps blobs. `local` is the PVC below.
   storage:
     driver: local
     s3:
@@ -334,10 +368,11 @@ registry:
       # Secret, never from the config file -- a ConfigMap is visible in every `kubectl describe`.
       existingSecret: ""
 
-  # The metadata cache. `none` is BoltDB on local disk, which cannot be shared between members.
+  # The metadata database. `none` is BoltDB on local disk, which is a file ONE process opens
+  # exclusively and therefore cannot be shared -- which is why readReplicas>0 requires this.
   #
   # WARNING, and it is the one most likely to bite: `extensions.search` records the pull timestamps
-  # that the retention policy's `pulledWithin` depends on. In clustered mode that metadata lives
+  # that the retention policy's `pulledWithin` depends on. With read replicas that metadata lives
   # HERE rather than in per-pod BoltDB -- so if redis is not persistent, a redis restart loses every
   # pull timestamp, every image looks unpulled, and the next GC pass reclaims images your live
   # objects still reference. That is ADR 0031's failure mode reintroduced by a component this chart
@@ -345,6 +380,9 @@ registry:
   cache:
     driver: none
     redis:
+      # Valkey works and is verified: zot speaks the redis protocol through go-redis, and a
+      # valkey server accepts the same URL. Measured against valkey 8 with 5,057 refresh pulls
+      # fanned across three instances, nothing lost.
       url: ""
       keyprefix: zot
     dynamodb:
@@ -475,12 +513,57 @@ registry:
     enabled: true
     size: 20Gi
     storageClass: ""
+    # ReadWriteMany is what lets read replicas mount the same store. Required for readReplicas>0
+    # unless storage.driver is s3.
+    #
+    # The chart checks that you ASKED for it. It cannot check that you got it: accessModes on a
+    # claim is a request, and a provisioner that does not support ReadWriteMany either leaves the
+    # claim Pending (loud, fine) or binds it anyway and backs it per-node (silent, and the pods then
+    # serve different content behind one Service name). Confirm with `kubectl get pvc` before
+    # scaling up.
+    #
+    # NOT CHANGEABLE on an existing claim -- accessModes is immutable once bound, so the API server
+    # rejects the upgrade. See docs/registry.md for the migration.
+    accessMode: ReadWriteOnce
 
   logLevel: info
 
   resources:
     requests: {cpu: 50m, memory: 128Mi}
     limits: {memory: 1Gi}
+
+  # WHERE THE REGISTRY RUNS. Separate from the top-level nodeSelector/tolerations/affinity/
+  # priorityClassName, which place the CONTROLLERS, and separate on purpose.
+  #
+  # The reason to steer the registry is usually that it should NOT be where the controllers are.
+  # The controllers are stateless and cheap to move; the registry holds the store every pull in the
+  # cluster depends on. One shared set of keys would make "keep the controllers off the storage
+  # nodes" and "keep the registry ON them" the same setting.
+  #
+  # Until these existed there was no supported way to keep the registry off the nodes you are about
+  # to drain, so it was rescheduled alongside the very pods that needed to pull from it.
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+
+  # Worth setting to something above your workloads. It does not stop an eviction -- a drain evicts
+  # regardless of priority -- but it decides who gets a node back first when the remaining ones are
+  # tight, which is exactly the case during a cordon.
+  priorityClassName: ""
+
+  # How long zot gets to finish in-flight requests when it is told to stop.
+  terminationGracePeriodSeconds: 30
+
+  podDisruptionBudget:
+    # NOT rendered while there is only one replica, and that is not an oversight: a budget of
+    # 1-of-1 can never be satisfied, so it blocks every drain forever -- the node never cordons,
+    # the cluster upgrade stalls, and nothing in the events explains why. A budget that cannot be
+    # met is worse than no budget.
+    enabled: true
+    # A floor rather than a ceiling, because "at least one registry is serving" is the sentence
+    # anyone actually wants.
+    minAvailable: 1
 
 # Persistence for the layer cache.
 #

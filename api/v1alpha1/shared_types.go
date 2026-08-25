@@ -73,6 +73,34 @@ type LocalObjectReference struct {
 	Name string `json:"name"`
 }
 
+// ConfigMapKeyReference selects ONE entry of a ConfigMap in the same namespace.
+//
+// Distinct from ConfigMapSource, which turns EVERY entry into a file and therefore has no key.
+// Adding an optional `key` to that type instead was considered and rejected: it would put a field on
+// a composition type that silently changes how many files a layer contributes, to serve a caller
+// that wants exactly one file.
+//
+// No namespace field, for the reason on LocalObjectReference. A reference that could name another
+// namespace would let anyone with create on the consuming object read that namespace's ConfigMaps
+// (threat-model I4), and unlike sourceRef there is not even a cluster-wide read already happening
+// to reconcile it against.
+type ConfigMapKeyReference struct {
+	// Name of the ConfigMap.
+	// +kubebuilder:validation:MaxLength=253
+	// +required
+	Name string `json:"name"`
+
+	// Key within it. Data is read first and BinaryData second.
+	//
+	// This default IS in the schema, unlike the ones on DockerfileSource, and the difference is the
+	// point: no CEL rule tests has(self.key), so materialising it costs nothing and buys a value
+	// visible in `kubectl get -o yaml`.
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:default="Dockerfile"
+	// +optional
+	Key string `json:"key,omitempty"`
+}
+
 // ResolveConflictPolicy returns the effective policy for a tag that already resolves to something
 // else, reconciling the three-valued field with the deprecated two-valued one.
 //

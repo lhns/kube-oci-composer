@@ -1,0 +1,49 @@
+{
+  "distSpecVersion": "1.1.0",
+  "storage": {
+    "rootDirectory": "/var/lib/registry",
+    "remoteCache": true,
+    "cacheDriver": {
+      "name": "redis",
+      "url": "redis://redis:6379",
+      "keyprefix": "zot"
+    },
+    "gc": true,
+    "gcDelay": "1s",
+    "gcInterval": "5s",
+    "retention": {
+      "dryRun": false,
+      "policies": [
+        {
+          "repositories": [
+            "keep-**"
+          ],
+          "deleteUntagged": true,
+          "keepTags": [
+            {
+              "patterns": [
+                ".*"
+              ],
+              "pulledWithin": "30s"
+            }
+          ],
+          "keepUntagged": {
+            "pulledWithin": "30s"
+          }
+        }
+      ]
+    }
+  },
+  "http": {
+    "address": "0.0.0.0",
+    "port": "5000"
+  },
+  "extensions": {
+    "search": {
+      "enable": true
+    }
+  },
+  "log": {
+    "level": "info"
+  }
+}

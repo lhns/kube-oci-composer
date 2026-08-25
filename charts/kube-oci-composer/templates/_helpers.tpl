@@ -62,6 +62,18 @@ it cannot be changed on a live release without recreating the Deployment -- sele
 app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 
+{{- /*
+Selects everything that SERVES the registry API: the writer and every read replica.
+
+A separate label rather than a component, because the two roles must stay distinguishable --
+component=registry is the writer's StatefulSet selector and is immutable, so readers cannot share
+it. This is what the read Service, the Ingress and the NetworkPolicy select on.
+*/}}
+{{- define "kube-oci-composer.registryServeSelectorLabels" -}}
+{{ include "kube-oci-composer.selectorLabels" . }}
+oci-composer.lhns.de/registry-role: serve
+{{- end -}}
+
 {{- define "kube-oci-composer.componentLabels" -}}
 {{ include "kube-oci-composer.labels" .ctx }}
 app.kubernetes.io/component: {{ .component }}
@@ -213,4 +225,17 @@ looked fixed.
 {{- end -}}
 {{- with .Values.defaultRegistry.insecure }}{{- $hosts = concat $hosts (splitList "," .) -}}{{- end -}}
 {{- join "," (compact $hosts) -}}
+{{- end -}}
+
+{{- /*
+The image that runs `oci-builder fetch-context` as each build's init container.
+Defaults to the builder's own image: the fetcher is a subcommand of that binary, so one image
+covers both and the chart already knows a digest for it.
+*/}}
+{{- define "kube-oci-composer.fetcherImage" -}}
+{{- if .Values.imageBuild.fetcherImage -}}
+{{- .Values.imageBuild.fetcherImage -}}
+{{- else -}}
+{{- printf "%s:%s" .Values.imageBuild.image.repository (.Values.imageBuild.image.tag | default .Chart.AppVersion) -}}
+{{- end -}}
 {{- end -}}

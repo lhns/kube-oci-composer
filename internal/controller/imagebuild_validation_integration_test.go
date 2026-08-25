@@ -33,7 +33,9 @@ func applyBuild(t *testing.T, name string, spec ociv1alpha1.ImageBuildSpec) erro
 
 func validBuildSpec() ociv1alpha1.ImageBuildSpec {
 	return ociv1alpha1.ImageBuildSpec{
-		Context:   ociv1alpha1.SourceRefSource{Kind: "GitRepository", Name: "src"},
+		Context: &ociv1alpha1.BuildContext{
+			SourceRef: &ociv1alpha1.SourceRefSource{Kind: "GitRepository", Name: "src"},
+		},
 		Platforms: []string{"linux/amd64"},
 		Push:      &ociv1alpha1.Push{Repository: "ghcr.io/me/app", Tags: []string{"v1"}},
 	}
@@ -62,8 +64,15 @@ func TestIntegrationImageBuildDefaults(t *testing.T) {
 	if obj.Spec.Interval == nil || obj.Spec.Interval.Duration.Hours() != 1 {
 		t.Errorf("interval defaulted to %v, want 1h", obj.Spec.Interval)
 	}
-	if obj.Spec.Dockerfile != "Dockerfile" {
-		t.Errorf("dockerfile defaulted to %q, want %q", obj.Spec.Dockerfile, "Dockerfile")
+	// Deliberately NOT defaulted by the schema: a structural default is written into the stored
+	// object, which would make has(self.path) true for every object and the exactly-one rule on
+	// DockerfileSource unsatisfiable. The default lives in EffectiveDockerfile instead, so what is
+	// asserted is that the field stays absent AND still resolves.
+	if obj.Spec.Dockerfile != nil {
+		t.Errorf("dockerfile was defaulted into the object as %+v; it must stay absent", obj.Spec.Dockerfile)
+	}
+	if got := obj.Spec.Dockerfile.EffectiveDockerfile(); got != "Dockerfile" {
+		t.Errorf("the effective dockerfile is %q, want %q", got, "Dockerfile")
 	}
 	if obj.Spec.Network != "Sandbox" {
 		t.Errorf("network defaulted to %q, want Sandbox", obj.Spec.Network)
