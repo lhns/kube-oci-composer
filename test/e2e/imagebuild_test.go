@@ -129,9 +129,10 @@ metadata:
 spec:
   interval: 1h
   context:
-    kind: GitRepository
-    name: e2e-src
-  dockerfile: %s
+    sourceRef:
+      kind: GitRepository
+      name: e2e-src
+  dockerfile: {path: %s}
   platforms: [linux/amd64]
   timeout: 10m
   push:
@@ -157,9 +158,10 @@ metadata:
 spec:
   interval: 1h
   context:
-    kind: GitRepository
-    name: e2e-src
-  dockerfile: %s
+    sourceRef:
+      kind: GitRepository
+      name: e2e-src
+  dockerfile: {path: %s}
   platforms: [linux/amd64]
   timeout: 10m
   push:

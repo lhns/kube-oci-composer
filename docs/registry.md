@@ -281,38 +281,77 @@ timeout that looks exactly like a broken registry.
 the controllers get a write identity — give them a `dockerconfigjson` Secret and point
 `spec.push.secretRef` at it. The refresh path needs no more than *read*.
 
-## Scaling it out
+## Staying up while nodes move
 
-`registry.cluster.enabled=true` runs several zot members. **It shards, it does not replicate** —
-zot hashes each repository name and exactly one member owns it, so a member that is down makes
-roughly 1/N of your repositories unavailable, and zot's own docs say the cluster is not
-self-healing. What it buys is throughput and a proxy layer that survives a rolling update.
-
-Prerequisites the chart does **not** install, and refuses to render without:
+`registry.readReplicas` runs extra registry pods that serve **pulls**. Pulls are what fails visibly
+when a node is drained — `ErrImagePull` on every workload that needs an image while the registry is
+being rescheduled — so this is the half worth replicating.
 
 ```yaml
 registry:
-  cluster: {enabled: true, replicaCount: 3}
-  storage:
-    driver: s3
-    s3: {bucket: zot, region: eu-central-1, regionEndpoint: https://minio:9000, existingSecret: s3-creds}
+  readReplicas: 2
+  persistence: {accessMode: ReadWriteMany}   # or storage.driver: s3
   cache:
-    driver: redis                # or dynamodb
+    driver: redis                            # required; see below
     redis: {url: redis://redis:6379}
-  persistence: {enabled: false}  # the RWO volume cannot be mounted twice
-  tls: {enabled: true}           # members proxy authenticated writes to each other
 ```
 
-**Use persistent Redis, and this is the sharpest thing on the page.** `extensions.search` records
-the pull timestamps the retention policy depends on, and clustering moves that metadata out of each
-pod and into the cache driver. A Redis restart without persistence loses every timestamp, every
-image then looks unpulled, and the next GC pass reclaims images your live objects are still
-running — on a `gcDelay` fuse, not a retention window. That is the same failure the retention
-guarantee exists to prevent, arriving through a component this chart does not manage.
+**Only one pod ever writes, and that is the design rather than a simplification.** zot serialises
+repository writes with an in-process lock: a push is a read-modify-write of the repository's
+`index.json`, and nothing coordinates two processes doing it at once. Measured, two instances writing
+one repository lost 2–4% of the tags that had returned `201`, and every instance then agreed those
+tags were never written. Garbage collection rewrites `index.json` too, so a pod that merely collects
+is a second writer — content that was being actively pulled still went missing. The replicas
+therefore take no pushes and collect nothing. `test/spike` reproduces all of it in about two minutes,
+and [ADR 0041](adr/0041-one-writer-many-readers.md) records it.
 
-Worth saying plainly: if you already run S3 and Redis, you could equally run a registry of your own
-and set `publish.mode: external`. This exists so the bundled registry is not a *forced* single point
-of failure. See [ADR 0039](adr/0039-zot-clustering-is-sharding.md).
+What that buys and does not buy:
+
+- **Pulls survive a drain.** Any surviving pod serves every image.
+- **Pushes do not.** While the writer is moving, publishing fails and the controllers retry on the
+  next reconcile. Nothing is lost — the reconcile is idempotent — but it is not instantaneous.
+- **Push throughput is unchanged.** Every push still goes through one process.
+- **The single point of failure moves rather than disappears.** It is now the shared store, which
+  becomes the availability floor for every pull in the cluster. Worth doing only where that store is
+  itself redundant; three registry pods over one non-redundant fileserver is worse than one pod on a
+  volume.
+
+**Redis (or Valkey) is required, and it is not a cache.** Valkey is verified — zot reaches it
+through go-redis and accepts the same URL. zot's default metadata database is BoltDB, a file one
+process opens exclusively, so replicas cannot share it. Giving each its own would be worse than
+inconvenient: `extensions.search` records the pull timestamps `pulledWithin` is measured against, so
+a refresh landing on one pod would not save an image from the writer's collector, and retention would
+delete content that is still in use.
+
+**And it must be persistent.** A Redis restart without persistence loses every pull timestamp, every
+image then looks unpulled, and the next GC pass reclaims images your live objects still reference —
+on a `gcDelay` fuse, not a retention window. The chart cannot check this. It is the sharpest thing on
+this page.
+
+**The chart checks that you asked for `ReadWriteMany`; it cannot check that you got it.**
+`accessModes` on a claim is a request. A provisioner without multi-writer support either leaves the
+claim `Pending` — loud, and fine — or binds it anyway and backs it per node, which gives you pods
+serving different content behind one Service name. Confirm before relying on the replicas:
+
+```
+kubectl -n <ns> get pvc <release>-kube-oci-composer-registry
+```
+
+Any volume that genuinely supports multiple concurrent writers works. What it must provide is real
+multi-writer access, prompt visibility of one client's writes to the others, and working file
+locking; implementations differ, and a `ReadWriteMany` label on a StorageClass is not by itself proof
+of any of the three.
+
+`accessMode` is **immutable on a bound claim**, so it cannot be changed by `helm upgrade`. Moving an
+existing single-pod install onto shared storage means either switching to `storage.driver: s3` and
+copying the repositories across with `skopeo sync` or `oras cp` — verifiable before you cut over — or
+scaling to zero, setting the PV's reclaim policy to `Retain`, recreating the claim and copying the
+data by hand. There is deliberately no in-place version: for `ImageBuild` those bytes are the only
+copy.
+
+Two Services exist once this is on. `<release>-registry` is the write endpoint the controllers push
+to and selects the writer alone; `<release>-registry-read` selects every serving pod and is what an
+Ingress or NodePort exposes. At `readReplicas: 0` they both resolve to the same single pod.
 
 ## What you now own
 
@@ -331,6 +370,32 @@ kubectl get events -A --field-selector reason=RetentionDegraded
 
 **Keeping the two numbers in step.** Nothing enforces the relationship between the registry's window
 and the refresh interval; they live in different systems. Write them down together.
+
+**Where the registry runs during maintenance.** Left unplaced, the registry is an ordinary pod at
+default priority, so a drain can evict it in the same batch as the workloads that pull from it —
+and then those workloads sit in `ErrImagePull` while the only thing that could serve them is itself
+being rescheduled. Two things make the gap longer than the move: a ReadWriteOnce volume has to
+detach from the cordoned node and reattach elsewhere, and the kubelet backs `ErrImagePull` off
+exponentially to about five minutes, so consumers stay broken well after the registry is healthy.
+
+The registry has its own placement keys, deliberately separate from the top-level ones that place
+the controllers — the usual reason to steer the registry is that it should *not* be where they are:
+
+```yaml
+registry:
+  nodeSelector: {kubernetes.io/hostname: storage-1}   # or a label on your infra pool
+  priorityClassName: infra                            # decides who gets a node back first
+  tolerations: []
+  terminationGracePeriodSeconds: 30
+```
+
+`priorityClassName` does not prevent an eviction — a drain evicts regardless of priority — but it
+decides who is scheduled first when the remaining nodes are tight, which is exactly the situation
+during a cordon.
+
+A `PodDisruptionBudget` is rendered too, but **only above one replica**: a floor of one against a
+single replica can never be satisfied, so it would block every drain forever with nothing in the
+events explaining why.
 
 ## One repository per object
 

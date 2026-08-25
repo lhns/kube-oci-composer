@@ -47,7 +47,17 @@ func renderRaw(t *testing.T, args ...string) string {
 	if err != nil {
 		t.Fatalf("helm template failed: %v\n%s", err, out)
 	}
-	return string(out)
+	return helmOut(out)
+}
+
+// helmOut turns helm's bytes into a string the assertions can match.
+//
+// Normalises CRLF, because helm.exe emits Windows line endings. Every assertion written as
+// Contains(out, "…\n") therefore fails on Windows while passing on Linux CI -- so a real chart
+// guard reads as broken locally, and the reflex is to weaken the assertion rather than the
+// line ending. TestACredentialedCacheURLNeverLandsInAConfigMap is where that surfaced.
+func helmOut(b []byte) string {
+	return strings.ReplaceAll(string(b), "\r\n", "\n")
 }
 
 // renderExpectingFailure returns helm's output when the render is supposed to fail.
@@ -72,7 +82,7 @@ func renderRawExpectingFailure(t *testing.T, args ...string) string {
 	if err == nil {
 		t.Fatalf("expected the render to fail, but it succeeded:\n%s", out)
 	}
-	return string(out)
+	return helmOut(out)
 }
 
 // TestChartRBACMatchesTheGeneratedRole is the drift guard that matters most.

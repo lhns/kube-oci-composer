@@ -1,10 +1,7 @@
 // Package build turns an ImageBuild spec into a build, and decides when one is needed.
 //
-// Deliberately separate from internal/oci. Nothing here assembles a tar or fetches a blob by
-// digest, and nothing there executes anything; sharing a package would let a refactor of one
-// silently change the other, when the whole point of the second kind is that its promise is
-// different. ADR 0025 records that internal/oci contributes nothing to a build, which is itself
-// evidence that this sits beside the composer rather than extending it.
+// Deliberately separate from internal/oci, which assembles layers and executes nothing. ADR 0025
+// records that internal/oci contributes nothing to a build.
 package build
 
 import (
@@ -16,47 +13,78 @@ import (
 
 // RecipeVersion identifies how this controller turns a spec into a build.
 //
-// The exact counterpart of oci.AssemblyVersion, and load-bearing for the same reason: an upgraded
-// controller that invokes BuildKit differently must not look at an unchanged input hash and keep
-// serving an artifact produced by the old invocation. BUMP THIS whenever the argv, the exporter
-// attributes, the frontend options or the default SOURCE_DATE_EPOCH change.
+// The counterpart of oci.AssemblyVersion: an upgraded controller that invokes BuildKit differently
+// must not look at an unchanged input hash and keep serving an artifact from the old invocation.
+// BUMP THIS whenever the argv, the exporter attributes, the frontend options or the default
+// SOURCE_DATE_EPOCH change. Unlike AssemblyVersion it is not the whole story, because the tool is
+// not in this binary -- that is BuilderDigest.
 //
-// Unlike AssemblyVersion this is NOT the whole story, because the tool is not in this binary. That
-// is what BuilderDigest is for.
-const RecipeVersion = 1
+// v2: a Dockerfile outside the context gets its own `--local dockerfile=` mount, and a build with
+// no context gets a synthesised empty one.
+const RecipeVersion = 2
 
 // Inputs is everything that determines a build's output, as far as anything here can determine it.
 //
-// The qualifier is the whole difference from oci.InputHash: there the hash is a short-circuit and
-// the output digest remains the identity, here the hash IS the identity. Two builds with the same
+// The qualifier is the difference from oci.InputHash: there the hash is a short-circuit and the
+// output digest is the identity; here the hash IS the identity, and two builds with the same
 // Inputs may still produce different bytes. See ADR 0025.
 type Inputs struct {
 	// BuilderDigest pins the BuildKit image, and FrontendDigest the Dockerfile frontend.
 	//
-	// Hashed because for this kind the algorithm is not in this binary — BuildKit is. Upgrading
-	// the builder therefore rebuilds every object in the cluster, which is accepted rather than
-	// worked around. See RecipeVersion above and ADR 0025.
+	// Hashed because the algorithm is not in this binary -- BuildKit is. Upgrading the builder
+	// therefore rebuilds every object in the cluster, which is accepted rather than worked around.
 	BuilderDigest  string
 	FrontendDigest string
 
-	// ContextDigest is the Flux artifact's digest, RESOLVED rather than declared.
+	// FetcherDigest pins the image that fetches and unpacks the context.
 	//
-	// The Dockerfile's own content needs no separate hashing: it lives inside the context tarball,
-	// which is content-addressed, so a change to it moves this. That is why the hash can be
-	// computed without fetching anything.
+	// Hashed for the same reason as BuilderDigest. Digest-addressing the context does not make it
+	// redundant: that pins the download, not the unpack, and a fixed symlink or wrapper bug changes
+	// the tree under an unchanged digest.
+	FetcherDigest string
+
+	// ContextKind is which member of the context union was resolved -- "sourceRef", "fetch",
+	// "image", or "" for no context at all.
+	//
+	// Hashed before the digest, because a digest alone no longer says what it addresses. It also
+	// separates "no context" from "a context not yet resolved", which share an empty ContextDigest.
+	ContextKind string
+
+	// ContextDigest addresses the context content. Empty when there is no context; ContextKind is
+	// what tells those apart.
 	ContextDigest string
-	// ContextRevision is what the artifact digest DESCRIBES — "v0.6.8@sha1:b739efb5". Recorded so
-	// a built image can be traced back to a revision without pulling it apart, which is the gap
-	// ADR 0026's incident was diagnosed through. Not hashed: the digest already identifies the
-	// content, and hashing both would rebuild on a repack that changed nothing.
+	// ContextRevision is what the artifact digest describes -- "v0.6.8@sha1:b739efb5". Recorded so
+	// a built image traces back to a revision without being pulled apart. Not hashed: the digest
+	// already identifies the content, and hashing both would rebuild on a no-op repack.
 	ContextRevision string
 	ContextSubpath  string
 
+	// ContextUnpack is how the fetched archive becomes a tree. Hashed because the same bytes become
+	// different trees under different modes, and the tree is what the build sees.
+	ContextUnpack string
+
+	// DockerfileKind is "path", "inline" or "configMap".
+	//
+	// Hashed for the same reason as ContextKind, and a sharper one: the forms carry their meaning
+	// in different fields, so without it a path of "" and an inline of "" would hash the same.
+	DockerfileKind string
+
+	// Dockerfile is the path, and only for the path form: the content lives inside the context,
+	// which ContextDigest already addresses, so nothing has to be fetched to compute a hash.
 	Dockerfile string
-	Target     string
-	Network    string
-	CacheMode  string
-	CacheRef   string
+
+	// DockerfileDigest is a sha256 over the Dockerfile's bytes, for the forms that do not ride
+	// inside the context. Empty for the path form.
+	//
+	// Content, not an identity -- deliberately the opposite of SecretIdentities below, which hashes
+	// name/resourceVersion because status.inputHash is world-readable and a hash of a low-entropy
+	// secret is an oracle. A Dockerfile is neither low-entropy nor meant to be unknowable.
+	DockerfileDigest string
+
+	Target    string
+	Network   string
+	CacheMode string
+	CacheRef  string
 
 	// Attestations records whether BuildKit was asked for an SBOM and provenance.
 	//
@@ -96,9 +124,14 @@ func (in Inputs) Hash() string {
 	writeField(fmt.Sprintf("recipe-v%d", RecipeVersion))
 	writeField(in.BuilderDigest)
 	writeField(in.FrontendDigest)
+	writeField(in.FetcherDigest)
+	writeField(in.ContextKind)
 	writeField(in.ContextDigest)
 	writeField(in.ContextSubpath)
+	writeField(in.ContextUnpack)
+	writeField(in.DockerfileKind)
 	writeField(in.Dockerfile)
+	writeField(in.DockerfileDigest)
 	writeField(in.Target)
 	writeField(in.Network)
 	writeField(in.CacheMode)

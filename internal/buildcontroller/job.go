@@ -29,7 +29,15 @@ const (
 
 	contextPath = "/workspace"
 	resultPath  = "/result"
-	secretPath  = "/secrets"
+
+	// Where a Dockerfile that does not live in the context is projected, and the name it always
+	// takes there regardless of what the spec called it -- the path only means something inside a
+	// context, and there is no context here.
+	dockerfileVolume = "dockerfile"
+	dockerfilePath   = "/dockerfile"
+	dockerfileName   = "Dockerfile"
+	dockerfileKey    = "Dockerfile"
+	secretPath       = "/secrets"
 	// Where the copied registry CA is mounted, and where the merged bundle is written. The bundle
 	// is an emptyDir because uid 1000 cannot write to the image's root-owned /etc/ssl/certs.
 	registryCAPath = "/registry-ca"
@@ -56,6 +64,14 @@ type JobConfig struct {
 	// FrontendImage is the Dockerfile frontend, pinned by digest. BuildKit resolves `# syntax=`
 	// over the network unless told otherwise.
 	FrontendImage string
+	// FetcherImage runs `oci-builder fetch-context` as the init container -- this operator's own
+	// image, pinned by digest.
+	//
+	// In the input hash, and the argument that it need not be is worth answering: every context is
+	// digest-addressed, so a correct fetcher has exactly one possible output. That holds for the
+	// DOWNLOAD and fails for the UNPACK -- a fixed zip or symlink bug changes the tree under an
+	// unchanged digest. Which is precisely why BuilderDigest is hashed.
+	FetcherImage string
 	// SBOM and Provenance turn on BuildKit's own attestations.
 	//
 	// These DO belong in the input hash, unlike RegistryCA below: they change what is pushed. The
@@ -142,45 +158,53 @@ func rootlessSecurityContext() *corev1.SecurityContext {
 	}
 }
 
-// fetchContextScript downloads the build context and unwraps it to the directory buildctl reads.
-//
-// The unwrapping is the whole reason this is a script rather than one pipe. A source-controller
-// artifact wraps the tree in a single top-level directory whose name nobody can predict, so a plain
-// extraction leaves the Dockerfile one level below where buildctl looks for it.
-//
-// Deliberately the SAME rule as build.matchesContextPath, which strips that wrapper controller-side:
-// when the two disagreed, an unpinned FROM was correctly refused and every build that passed the
-// check then failed inside BuildKit. Strip one level only when the archive really is a single
-// wrapper directory, so a tarball whose files sit at the root still builds rather than being
-// silently emptied.
-func fetchContextScript(contextURL string) string {
-	return fmt.Sprintf(`set -e
-staging=%[2]s/.staging
-mkdir -p "$staging"
-wget -qO- %[1]q | tar -xzf - -C "$staging"
-
-src="$staging"
-if [ "$(ls -A "$staging" | wc -l)" -eq 1 ]; then
-  only="$staging/$(ls -A "$staging")"
-  [ -d "$only" ] && src="$only"
-fi
-
-# tar rather than mv: it copies dotfiles without a shell glob that misses them.
-tar -cf - -C "$src" . | tar -xf - -C %[2]s
-rm -rf "$staging"
-`, contextURL, contextPath)
+// fetchContextArgs is what the init container is told to fetch. See internal/fetchcontext for why
+// this is our own binary rather than the shell script it replaced.
+func fetchContextArgs(obj *ociv1alpha1.ImageBuild, contextURL, contextDigest string) []string {
+	args := []string{
+		"fetch-context",
+		"--dest=" + contextPath,
+		"--url=" + contextURL,
+		"--digest=" + contextDigest,
+	}
+	// Re-checked on the extracted tree, which is the bytes actually built. Empty when the
+	// Dockerfile comes from outside the context: there is nothing in the tree to point at.
+	if !projectedDockerfile(obj) {
+		args = append(args, "--dockerfile="+obj.Spec.Dockerfile.EffectiveDockerfile())
+	}
+	if ref := obj.Spec.Context.GetSourceRef(); ref != nil {
+		return append(args, "--kind=sourceRef", "--unpack=tar.gz", "--subpath="+ref.Subpath)
+	}
+	if img := obj.Spec.Context.GetImage(); img != nil {
+		// No unpack mode: an image is layers, not an archive, and it is flattened rather than
+		// extracted. --url carries the pinned reference, which is also its digest.
+		return append(args, "--kind=image", "--subpath="+img.Subpath)
+	}
+	f := obj.Spec.Context.GetFetch()
+	return append(args, "--kind=fetch", "--unpack="+string(f.Unpack), "--subpath="+f.Subpath)
 }
 
 // buildctlArgs assembles the buildctl invocation. Split out because it is the part that decides
 // what gets built, and the only part the argv tests read.
 func buildctlArgs(obj *ociv1alpha1.ImageBuild, cfg JobConfig, repo string, cacheAvailable bool) []string {
 	spec := obj.Spec
+	// `context` and `dockerfile` are two independent BuildKit locals; they only ever coincided
+	// because the Dockerfile happened to live in the context tarball.
+	//
+	// Deliberately NOT unified by copying the projected Dockerfile into the context: that would
+	// silently overwrite one already there.
+	dockerfileLocal, filename := path.Join(contextPath, path.Dir(spec.Dockerfile.EffectiveDockerfile())),
+		path.Base(spec.Dockerfile.EffectiveDockerfile())
+	if projectedDockerfile(obj) {
+		dockerfileLocal, filename = dockerfilePath, dockerfileName
+	}
+
 	args := []string{
 		"build",
 		"--frontend", "dockerfile.v0",
 		"--local", "context=" + contextPath,
-		"--local", "dockerfile=" + path.Join(contextPath, path.Dir(spec.Dockerfile)),
-		"--opt", "filename=" + path.Base(spec.Dockerfile),
+		"--local", "dockerfile=" + dockerfileLocal,
+		"--opt", "filename=" + filename,
 		"--opt", "build-arg:BUILDKIT_SYNTAX=" + cfg.FrontendImage,
 		"--metadata-file", path.Join(resultPath, metadataFile),
 	}
@@ -281,16 +305,22 @@ func insecureAttr(repository string, insecure []string) string {
 	return ",registry.insecure=true"
 }
 
-// insecureHost reports whether a repository's host is on the operator's allow-list for plain HTTP.
+// projectedDockerfile reports whether the Dockerfile has to be carried into the pod rather than
+// found inside the context.
 //
-// Shared with the controller's own registry reads, so a host it can push to insecurely is one it
-// can also HEAD insecurely. Diverging would leave onConflict unenforceable against exactly the
-// registries an e2e or air-gapped setup runs.
+// One predicate for both the volume list and the buildctl argv: a mount without the matching
+// `--local` reads the wrong file, and a `--local` without the mount reads nothing.
+func projectedDockerfile(obj *ociv1alpha1.ImageBuild) bool {
+	df := obj.Spec.Dockerfile
+	return df != nil && (df.Inline != "" || df.ConfigMapRef != nil)
+}
+
 // buildVolumes returns the pod's volumes and the build container's mounts.
 //
 // Paired through one closure rather than two appends per source: a volume and the mount that names
 // it have to agree, and building them in separate lists is how they stop agreeing.
-func buildVolumes(spec ociv1alpha1.ImageBuildSpec, pushSecret string) ([]corev1.Volume, []corev1.VolumeMount) {
+func buildVolumes(obj *ociv1alpha1.ImageBuild, pushSecret, dockerfileSecret string) ([]corev1.Volume, []corev1.VolumeMount) {
+	spec := obj.Spec
 	var volumes []corev1.Volume
 	var mounts []corev1.VolumeMount
 
@@ -302,6 +332,31 @@ func buildVolumes(spec ociv1alpha1.ImageBuildSpec, pushSecret string) ([]corev1.
 
 	add(contextVolume, empty, contextPath, false)
 	add(resultVolume, empty, resultPath, false)
+
+	// A Dockerfile from outside the context, projected from the Secret the controller wrote after
+	// checking it.
+	//
+	// subPath, so this is a plain regular file: a Secret volume is otherwise a `..data` symlink farm
+	// and `--local` hands the directory to fsutil, which walks symlinks rather than flattening them.
+	// Losing updates is subPath's usual cost and here a second lock -- the pod builds the bytes the
+	// controller checked, and nothing re-resolves at pod start.
+	if projectedDockerfile(obj) {
+		volumes = append(volumes, corev1.Volume{
+			Name: dockerfileVolume,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: dockerfileSecret,
+					Items:      []corev1.KeyToPath{{Key: dockerfileKey, Path: dockerfileName}},
+				},
+			},
+		})
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      dockerfileVolume,
+			MountPath: path.Join(dockerfilePath, dockerfileName),
+			SubPath:   dockerfileName,
+			ReadOnly:  true,
+		})
+	}
 
 	// Push credentials are projected into the build pod rather than read by the controller, which
 	// keeps registry tokens out of the controller's memory entirely for the push path.
@@ -353,12 +408,12 @@ func registryCAVolumes(caSecret string) ([]corev1.Volume, []corev1.VolumeMount) 
 }
 
 // buildJob renders the Job for one build.
-func buildJob(obj *ociv1alpha1.ImageBuild, inputHash, contextURL string, cfg JobConfig,
-	repo, pushSecret, caSecret string, cacheAvailable bool) *batchv1.Job {
+func buildJob(obj *ociv1alpha1.ImageBuild, inputHash, contextURL, contextDigest string, cfg JobConfig,
+	repo, pushSecret, caSecret, dockerfileSecret string, cacheAvailable bool) *batchv1.Job {
 
 	spec := obj.Spec
 	args := buildctlArgs(obj, cfg, repo, cacheAvailable)
-	volumes, mounts := buildVolumes(spec, pushSecret)
+	volumes, mounts := buildVolumes(obj, pushSecret, dockerfileSecret)
 	caVolumes, caMounts := registryCAVolumes(caSecret)
 	volumes = append(volumes, caVolumes...)
 	mounts = append(mounts, caMounts...)
@@ -426,18 +481,34 @@ cat %s > /dev/termination-log
 	// The context is fetched by an init container rather than by the controller: the controller
 	// would otherwise have to hold the whole context in memory or on its own read-only filesystem,
 	// and the URL is already a digest-addressed artifact that anything can pull.
-	initContainer := corev1.Container{
-		Name:            "fetch-context",
-		Image:           cfg.BuilderImage,
-		Command:         []string{"sh", "-c", fetchContextScript(contextURL)},
-		VolumeMounts:    []corev1.VolumeMount{{Name: contextVolume, MountPath: contextPath}},
-		SecurityContext: rootlessSecurityContext(),
-	}
-	if spec.Resources != nil {
-		// The same limits as the build container. Without this the fetch is the one unbounded
-		// container in the pod, which is the wrong thing to leave unbounded when it is the part
-		// downloading somebody else's tarball.
-		initContainer.Resources = *spec.Resources
+	// No context means nothing to fetch. An empty tree is addressed by construction, and a fetcher
+	// with no URL would be a container whose only job is to succeed at nothing.
+	//
+	// Built inside the branch rather than built and then discarded: fetchContextArgs reads the
+	// context union, so constructing it unconditionally dereferences a nil.
+	var initContainers []corev1.Container
+	if obj.Spec.Context != nil {
+		// Our own image and our own binary, not BuildKit and a shell. It fetches, VERIFIES the
+		// digest and only then extracts.
+		//
+		// FallbackToLogsOnError because an init-container failure used to surface as
+		// "BackoffLimitExceeded" and nothing else -- jobFailureDetail read only ContainerStatuses.
+		// With a real fetcher this is the most common way a build fails, so the message has to
+		// survive.
+		fetch := corev1.Container{
+			Name:                     "fetch-context",
+			Image:                    cfg.FetcherImage,
+			Args:                     fetchContextArgs(obj, contextURL, contextDigest),
+			VolumeMounts:             []corev1.VolumeMount{{Name: contextVolume, MountPath: contextPath}},
+			SecurityContext:          rootlessSecurityContext(),
+			TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
+		}
+		if spec.Resources != nil {
+			// The same limits as the build container: otherwise the one container downloading
+			// somebody else's tarball is the one that is unbounded.
+			fetch.Resources = *spec.Resources
+		}
+		initContainers = append(initContainers, fetch)
 	}
 
 	// Enforced by Kubernetes rather than by the controller noticing: ActiveDeadlineSeconds kills
@@ -489,7 +560,7 @@ cat %s > /dev/termination-log
 					// Suppressing the mount needs no ServiceAccount to exist, so it works in
 					// whatever namespace a build lands in.
 					AutomountServiceAccountToken: automount(spec.ServiceAccountName),
-					InitContainers:               []corev1.Container{initContainer},
+					InitContainers:               initContainers,
 					Containers:                   []corev1.Container{container},
 					Volumes:                      volumes,
 				},

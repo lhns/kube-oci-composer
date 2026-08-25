@@ -42,7 +42,7 @@ func renderBuilder(t *testing.T, args ...string) string {
 	if err != nil {
 		t.Fatalf("helm template failed: %v\n%s", err, out)
 	}
-	return string(out)
+	return helmOut(out)
 }
 
 // TestBuilderChartRBACMatchesTheGeneratedRole — the drift guard that matters most, and the reason
@@ -144,7 +144,7 @@ func TestBuilderChartRefusesUnpinnedBuilderImages(t *testing.T) {
 			if err == nil {
 				t.Fatalf("an unpinned %s rendered successfully:\n%s", field, out)
 			}
-			if !strings.Contains(string(out), "must be pinned by digest") {
+			if !strings.Contains(helmOut(out), "must be pinned by digest") {
 				t.Errorf("the failure does not explain the rule:\n%s", out)
 			}
 		})
@@ -202,4 +202,33 @@ func containerArgs(t *testing.T, rendered, deployment string) string {
 		t.Fatalf("no args found for %s; the assertion would prove nothing", deployment)
 	}
 	return strings.Join(out, "\n")
+}
+
+// TestBuilderChartNeverGrantsConfigMapWrites is the sibling of the Secrets guard above, and it
+// exists because the two resources are granted for opposite reasons.
+//
+// ConfigMaps are read AND watched, which Secrets deliberately are not — a Dockerfile can live in one
+// and an edit must rebuild promptly. But everything this controller writes into a tenant namespace
+// is a Secret, the Dockerfile copy included, so a write verb here would be a new capability in every
+// namespace with nothing asking for it. Without this test that is a comment rather than a guarantee.
+func TestBuilderChartNeverGrantsConfigMapWrites(t *testing.T) {
+	chart := clusterRoleFromRender(t, renderBuilder(t), "test-release-kube-oci-composer-builder")
+
+	var seen bool
+	for _, rule := range chart.Rules {
+		if !containsString(rule.APIGroups, "") || !containsString(rule.Resources, "configmaps") {
+			continue
+		}
+		seen = true
+		for _, verb := range rule.Verbs {
+			switch verb {
+			case "create", "update", "patch", "delete", "deletecollection", "*":
+				t.Fatalf("builder chart grants %q on configmaps; it must be read-only, because "+
+					"everything this controller writes into a tenant namespace is a Secret", verb)
+			}
+		}
+	}
+	if !seen {
+		t.Fatal("no configmaps rule at all; a Dockerfile in a ConfigMap could not be read")
+	}
 }

@@ -1,0 +1,31 @@
+{{- if and .Values.registry.enabled .Values.registry.podDisruptionBudget.enabled (gt (int .Values.registry.readReplicas) 0) }}
+{{- /*
+Replicas alone do not survive a drain.
+
+`kubectl drain` evicts every pod it is asked to, and with nothing objecting it will happily take
+all of them in the same second -- which is the scenario this whole feature exists for. The replica
+count makes the registry survivable; this file is what makes it survive.
+
+NOT RENDERED without read replicas, deliberately. minAvailable 1 against a single pod can never be
+satisfied, so it blocks every drain forever: the node never cordons, a cluster upgrade stalls, and
+nothing in the events names a PodDisruptionBudget as the reason. A budget that cannot be met is
+worse than no budget.
+*/}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "kube-oci-composer.registryFullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kube-oci-composer.componentLabels" (dict "ctx" . "component" "registry") | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.registry.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- /*
+      Every pod serving the API, not just the writer. The point is that a drain never leaves zero
+      registries answering pulls, and a budget naming only the writer would let a drain take all the
+      read replicas at once.
+      */}}
+      {{- include "kube-oci-composer.registryServeSelectorLabels" . | nindent 6 }}
+{{- end }}

@@ -9,6 +9,17 @@ change output without changing the hash. See ADR 0025.
 {{- fail (printf "builder.%s must be pinned by digest (repo:tag@sha256:...). See ADR 0025." $field) }}
 {{- end }}
 {{- end }}
+{{/*
+fetcherImage is checked only when SET, unlike the two above, and the difference is what it is.
+Those are third-party images an operator chooses; this one is this operator's own binary, and left
+empty it is the image this very chart is deploying. Demanding a digest for it would mean looking one
+up for an image the chart already picked. Pinned by TAG it still moves with the chart's appVersion,
+so a released unpack fix does reach the input hash -- what it does not catch is the same tag being
+republished with different content.
+*/}}
+{{- if and .Values.imageBuild.fetcherImage (not (contains "@sha256:" .Values.imageBuild.fetcherImage)) }}
+{{- fail "imageBuild.fetcherImage must be pinned by digest when set explicitly (repo:tag@sha256:...); leave it empty to use this chart's own builder image." }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -31,7 +42,9 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: {{ include "kube-oci-composer.builderServiceAccountName" . }}
-      {{- with .Values.imagePullSecrets }}
+      {{- /* image.pullSecrets, not imagePullSecrets -- the latter is not a key this chart has, so
+      this block silently rendered nothing and the builder could never use a pull secret. */}}
+      {{- with .Values.image.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
@@ -47,6 +60,10 @@ spec:
             - --leader-elect={{ .Values.imageBuild.leaderElect }}
             - --buildkit-image={{ .Values.imageBuild.buildkitImage }}
             - --dockerfile-frontend={{ .Values.imageBuild.dockerfileFrontend }}
+            - --fetcher-image={{ include "kube-oci-composer.fetcherImage" . }}
+            {{- if .Values.imageBuild.fetchDenyPrivate }}
+            - --fetch-deny-private
+            {{- end }}
             - --source-date-epoch={{ .Values.imageBuild.sourceDateEpoch }}
             {{- include "kube-oci-composer.registryArgs" (dict "ctx" $ "supplyChain" .Values.imageBuild.supplyChain) | trim | nindent 12 }}
             - --keep-builds={{ .Values.imageBuild.keepBuilds }}

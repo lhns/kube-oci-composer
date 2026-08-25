@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"github.com/lhns/kube-oci-composer/internal/netguard"
 	"io"
 	"net/http"
 	"os"
@@ -104,3 +105,13 @@ func (f *Fetcher) FetchURL(ctx context.Context, url, wantDigest string) (path st
 
 	return tmp.Name(), nil
 }
+
+// DialGuard is the SSRF guard, which lives in internal/netguard so the build path can use it too.
+//
+// Aliased rather than moved wholesale because the guard is a property of fetching over HTTP, and
+// both controllers fetch. ADR 0025 keeps internal/oci out of the build path, so a builder that
+// needs the same protection has to reach a neutral package rather than this one.
+type DialGuard = netguard.DialGuard
+
+// ErrBlockedAddress is netguard's, re-exported for callers that already match on it here.
+type ErrBlockedAddress = netguard.ErrBlockedAddress
