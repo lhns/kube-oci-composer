@@ -1,6 +1,6 @@
 # Build stage. Dependencies are downloaded in their own layer so a source-only change does not
 # re-resolve the module graph.
-FROM golang:1.26 AS builder
+FROM golang:1.27 AS builder
 
 # CMD selects which binary this image carries. The two are built from one Dockerfile because they
 # share every layer up to the compile step; ADR 0004 wants two DEPLOYMENTS, which is about RBAC and
