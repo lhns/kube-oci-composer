@@ -32,12 +32,26 @@ func withoutReplicaArg(t *testing.T, key string) []string {
 	return out
 }
 
+// docs parses a helm render into one map per document.
+//
+// A parse failure fails the test rather than skipping the document, which is what it did before.
+// Every assertion here reads "the document with property X also has Y", so an unparseable document
+// vanishes from the search and the test passes having examined nothing.
+//
+// Narrow in practice -- helm rejects a syntax error before this sees it -- but "found nothing,
+// therefore fine" is the failure mode worth removing.
+//
+// A chunk that parses to nothing (comments, trailing whitespace) is still skipped: that is absence
+// of content, not failure to read it.
 func docs(t *testing.T, out string) []map[string]any {
 	t.Helper()
 	var all []map[string]any
-	for _, doc := range strings.Split(out, "\n---") {
+	for _, doc := range splitDocs(out) {
 		var d map[string]any
-		if err := yaml.Unmarshal([]byte(doc), &d); err != nil || d == nil {
+		if err := yaml.Unmarshal([]byte(doc), &d); err != nil {
+			t.Fatalf("%s does not parse: %v", describeDoc(doc), err)
+		}
+		if d == nil {
 			continue
 		}
 		all = append(all, d)

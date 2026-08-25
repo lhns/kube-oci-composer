@@ -61,8 +61,7 @@ spec:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/registry-config.yaml") . | sha256sum }}
       labels:
-        {{- include "kube-oci-composer.componentSelectorLabels" (dict "ctx" . "component" "registry-reader") | nindent 8 }}
-        {{- include "kube-oci-composer.registryServeSelectorLabels" . | nindent 8 }}
+        {{- include "kube-oci-composer.registryPodLabels" (dict "ctx" . "component" "registry-reader") | nindent 8 }}
     spec:
       terminationGracePeriodSeconds: {{ .Values.registry.terminationGracePeriodSeconds }}
       {{- with .Values.image.pullSecrets }}
