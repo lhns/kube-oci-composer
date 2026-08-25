@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -66,6 +67,63 @@ func TestAVerifiedArchiveIsExtracted(t *testing.T) {
 	}
 	if string(got) != "FROM scratch\n" {
 		t.Errorf("Dockerfile = %q", got)
+	}
+}
+
+// TestAReadOnlyParentStillFetches — the staging bug, which only a cluster found.
+//
+// The download was staged in filepath.Dir(dest). In the build pod dest is /workspace, so that is
+// the container root: not writable by uid 1000. Every build WITH a context died on "permission
+// denied" while the context-less ones passed, because they never fetch.
+//
+// A read-only parent is the only thing that reproduces it -- asserting on what is left behind
+// cannot, since the staging directory is removed before Run returns either way.
+func TestAReadOnlyParentStillFetches(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod does not restrict directory writes on Windows, so this cannot reproduce")
+	}
+	blob := tarGz(t, "Dockerfile", "FROM scratch\n")
+	parent := t.TempDir()
+	dest := filepath.Join(parent, "workspace")
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
+
+	if err := Run(t.Context(), Options{
+		Kind: "fetch", URL: serve(t, blob), Digest: digestOf(blob),
+		Unpack: "tar.gz", Dest: dest,
+	}); err != nil {
+		t.Fatalf("fetching into a dest whose parent is read-only: %v", err)
+	}
+	if _, err := os.ReadFile(filepath.Join(dest, "Dockerfile")); err != nil {
+		t.Fatalf("reading the extracted Dockerfile: %v", err)
+	}
+}
+
+// TestTheStagingDirectoryDoesNotSurvive — whatever the fetcher stages must not reach the build,
+// which reads dest as its context.
+func TestTheStagingDirectoryDoesNotSurvive(t *testing.T) {
+	blob := tarGz(t, "Dockerfile", "FROM scratch\n")
+	dest := filepath.Join(t.TempDir(), "workspace")
+
+	if err := Run(t.Context(), Options{
+		Kind: "fetch", URL: serve(t, blob), Digest: digestOf(blob),
+		Unpack: "tar.gz", Dest: dest,
+	}); err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	entries, err := os.ReadDir(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".fetch-") {
+			t.Errorf("staging directory %q was left in the build context", e.Name())
+		}
 	}
 }
 

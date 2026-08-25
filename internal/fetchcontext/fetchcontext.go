@@ -73,7 +73,7 @@ func Run(ctx context.Context, opts Options) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(blob.path)
+	defer func() { _ = os.RemoveAll(blob.stage) }()
 
 	if blob.digest != opts.Digest {
 		return &MismatchError{URL: opts.URL, Want: opts.Digest, Got: blob.digest}
@@ -132,38 +132,55 @@ func (e *MismatchError) Error() string {
 type blob struct {
 	path   string
 	digest string
+	// stage is the directory holding path, removed wholesale by the caller.
+	stage string
 }
 
 func download(ctx context.Context, url, dest string) (blob, error) {
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return blob{}, fmt.Errorf("creating %s: %w", dest, err)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(dest), "context-*.blob")
+	// Staged INSIDE dest. filepath.Dir(dest) is the container root, which uid 1000 cannot write --
+	// every build with a context failed on `permission denied` there. dest is the build volume, so
+	// it is writable and, unlike the container's own filesystem, its emptyDir sizeLimit is what
+	// bounds a download.
+	//
+	// Its own directory rather than a loose file, removed with RemoveAll: deleting a bare
+	// `context-*.blob` could delete an archive entry that extracted over the same name.
+	stage, err := os.MkdirTemp(dest, ".fetch-")
 	if err != nil {
 		return blob{}, fmt.Errorf("staging the download: %w", err)
+	}
+	tmp, err := os.CreateTemp(stage, "context-*.blob")
+	if err != nil {
+		return blob{stage: stage}, fmt.Errorf("staging the download: %w", err)
 	}
 	defer tmp.Close()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return blob{}, err
+		return blob{stage: stage}, err
 	}
 	client := &http.Client{Timeout: 10 * time.Minute}
 	resp, err := client.Do(req)
 	if err != nil {
-		return blob{}, fmt.Errorf("fetching %s: %w", url, err)
+		return blob{stage: stage}, fmt.Errorf("fetching %s: %w", url, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return blob{}, fmt.Errorf("fetching %s: %s", url, resp.Status)
+		return blob{stage: stage}, fmt.Errorf("fetching %s: %s", url, resp.Status)
 	}
 
 	// Hashed as the bytes stream past: nothing is buffered, and the digest covers what was written.
 	h := sha256.New()
 	if _, err := io.Copy(io.MultiWriter(tmp, h), resp.Body); err != nil {
-		return blob{}, fmt.Errorf("downloading %s: %w", url, err)
+		return blob{stage: stage}, fmt.Errorf("downloading %s: %w", url, err)
 	}
-	return blob{path: tmp.Name(), digest: "sha256:" + hex.EncodeToString(h.Sum(nil))}, nil
+	return blob{
+		path:   tmp.Name(),
+		digest: "sha256:" + hex.EncodeToString(h.Sum(nil)),
+		stage:  stage,
+	}, nil
 }
 
 // image pulls a digest-pinned image and writes its flattened filesystem into dest.

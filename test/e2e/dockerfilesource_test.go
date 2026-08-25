@@ -174,7 +174,9 @@ func TestTheFromGuardRunsWhateverTheDockerfileCameFrom(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			name := "e2e-guard-" + strings.ReplaceAll(tc.name, " ", "-")
+			// Lowercased: an object name is an RFC 1123 subdomain, and "from a ConfigMap"
+			// carries capitals the API server refuses.
+			name := "e2e-guard-" + strings.ToLower(strings.ReplaceAll(tc.name, " ", "-"))
 			if strings.Contains(tc.name, "ConfigMap") {
 				applyStdin(t, fmt.Sprintf(`
 apiVersion: v1
