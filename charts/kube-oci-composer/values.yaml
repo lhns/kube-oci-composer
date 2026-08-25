@@ -169,6 +169,29 @@ imageBuild:
   buildkitImage: "moby/buildkit:v0.17.2-rootless@sha256:5b45405a38c579692f6fcd47ceef2002fe4fa61bb04ef0c2c644cf74cbbd57b8"
   dockerfileFrontend: "docker/dockerfile:1.12.1@sha256:93bfd3b68c109427185cd78b4779fc82b484b0b7618e36d0f104d4d801e66d25"
 
+  # The image that fetches, VERIFIES and unpacks each build's context, as the Job's init container.
+  #
+  # Empty means this operator's own builder image, which is what you want: the fetcher is a
+  # subcommand of the same binary, so the chart already knows a digest for it. Set it only to pin
+  # the fetcher separately from the controller.
+  #
+  # Its digest is in the build input hash, like the other two. The argument that it need not be is
+  # worth answering: every context is digest-addressed, so a correct fetcher has exactly one possible
+  # output -- true of the DOWNLOAD, false of the UNPACK, where a fixed symlink or wrapper bug changes
+  # the tree under an unchanged digest.
+  fetcherImage: ""
+
+  # Refuse a spec.context.fetch URL resolving to a private, loopback or CGNAT address.
+  #
+  # Link-local is refused whatever this says -- that is where cloud metadata endpoints serve
+  # credentials. Off by default for the same reason the composer's is: an artifact server on a
+  # private address is an ordinary source, and a guard people switch off is no guard. See ADR 0036.
+  #
+  # This governs the CONTROLLER's read of a Dockerfile out of a fetch context. The fetch inside the
+  # build pod is deliberately unguarded: that pod runs arbitrary code from a Dockerfile and can
+  # already reach whatever the pod network allows.
+  fetchDenyPrivate: false
+
   # Its own bind addresses: this is a second pod in the same namespace, not the composer.
   metricsBindAddress: ":8080"
   healthProbeBindAddress: ":8081"

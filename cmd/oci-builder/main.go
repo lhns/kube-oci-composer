@@ -53,6 +53,14 @@ func init() {
 }
 
 func main() {
+	// `oci-builder fetch-context ...` runs as the build pod's init container rather than as the
+	// controller. Dispatched before any flag or manager setup, because none of it applies: this
+	// process has no kubeconfig, no leader election and nothing to reconcile.
+	if len(os.Args) > 1 && os.Args[1] == "fetch-context" {
+		runFetchContext(os.Args[2:])
+		return
+	}
+
 	// Everything both controllers share about publishing, trust and supply chain.
 	var registry opts.Registry
 	registry.Bind(flag.CommandLine)
@@ -63,6 +71,8 @@ func main() {
 		enableLeader         bool
 		builderImage         string
 		frontendImage        string
+		fetcherImage         string
+		fetchDenyPrivate     bool
 		sourceDateEpoch      string
 		refreshInterval      time.Duration
 		historyLimit         int
@@ -77,6 +87,17 @@ func main() {
 		"Rootless BuildKit image, PINNED BY DIGEST. Required.")
 	flag.StringVar(&frontendImage, "dockerfile-frontend", "",
 		"Dockerfile frontend image, PINNED BY DIGEST. Required.")
+	flag.StringVar(&fetcherImage, "fetcher-image", "",
+		"Image running `oci-builder fetch-context` as each build's init container. Required, and "+
+			"normally this operator's own image, which the chart fills in. "+
+			"It is part of the build input hash: the fetcher decides how an archive becomes a directory "+
+			"tree, so a fixed unpack bug would otherwise change that tree under an unchanged hash. "+
+			"Pinning it by digest is recommended but not required -- see the note at startup.")
+	flag.BoolVar(&fetchDenyPrivate, "fetch-deny-private", false,
+		"Refuse a spec.context.fetch URL resolving to a private, loopback or CGNAT address. "+
+			"Link-local is refused whatever this says: that is where cloud metadata endpoints hand "+
+			"out credentials. See ADR 0036. Off by default for the composer's reason -- an artifact "+
+			"server on a private address is an ordinary source, and a guard people disable is no guard.")
 	flag.StringVar(&sourceDateEpoch, "source-date-epoch", "0",
 		"SOURCE_DATE_EPOCH stamped into builds. Fixed rather than the wall clock, matching the composer's epoch.")
 	flag.DurationVar(&refreshInterval, "retention-refresh-interval", retention.DefaultInterval,
@@ -124,6 +145,23 @@ func main() {
 				"flag", img.flag, "value", img.value)
 			os.Exit(1)
 		}
+	}
+
+	// The fetcher is REQUIRED but only WARNED about when unpinned, unlike the two above, and the
+	// asymmetry is deliberate. Those are third-party images an operator chose; this is this
+	// operator's own binary, normally the very image this process is running from, so demanding a
+	// digest would mean looking one up for something the deployment already selected. Pinned by tag
+	// it still moves with a release, so a published unpack fix does reach the input hash; what a tag
+	// cannot catch is the same tag being republished with different content.
+	if fetcherImage == "" {
+		setupLog.Error(nil, "required flag is not set", "flag", "--fetcher-image")
+		os.Exit(1)
+	}
+	if !strings.Contains(fetcherImage, "@sha256:") {
+		setupLog.Info("the fetcher image is not pinned by digest: it decides how an archive becomes "+
+			"a build context, so republishing this tag with different content would change what "+
+			"builds see without moving any input hash",
+			"flag", "--fetcher-image", "value", fetcherImage)
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
@@ -182,9 +220,17 @@ func main() {
 		Attestor:  attestor,
 		//nolint:staticcheck // SA1019: the new events API has no Event method; see the composer.
 		Recorder: mgr.GetEventRecorderFor("imagebuild-controller"),
+		// The controller GETs a user-supplied URL when a fetch context holds the Dockerfile, so it
+		// needs the same dial guard the composer has. Until spec.context.fetch existed, the only URL
+		// this binary ever fetched came from source-controller's own status -- which is why there was
+		// no guard here before, and why adding that field is what brought threat I6 to this
+		// controller. The FETCH INSIDE THE BUILD POD is deliberately unguarded: that pod is about to
+		// run arbitrary code from a Dockerfile and can already reach anything the pod network allows.
+		HTTPClient: guardedClient(fetchDenyPrivate),
 		JobConfig: buildcontroller.JobConfig{
 			BuilderImage:       builderImage,
 			FrontendImage:      frontendImage,
+			FetcherImage:       fetcherImage,
 			SourceDateEpoch:    sourceDateEpoch,
 			InsecureRegistries: registry.Insecure(),
 			RegistryCA:         registryCA,

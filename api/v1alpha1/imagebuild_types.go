@@ -15,7 +15,8 @@ import (
 //
 // Still no inline or bare-URL form: those are the two that genuinely fail the test.
 //
-// +kubebuilder:validation:XValidation:rule="(has(self.sourceRef)?1:0) == 1",message="set sourceRef"
+// +kubebuilder:validation:XValidation:rule="(has(self.sourceRef)?1:0) + (has(self.fetch)?1:0) == 1",message="set exactly one of sourceRef or fetch"
+// +kubebuilder:validation:XValidation:rule="!has(self.fetch) || self.fetch.unpack == 'tar' || self.fetch.unpack == 'tar.gz'",message="a build context is a directory tree, so fetch.unpack must be tar or tar.gz. unpack defaults to 'none', which places a single file, so this has to be set explicitly"
 type BuildContext struct {
 	// SourceRef takes the context from a Flux source's artifact.
 	//
@@ -24,6 +25,18 @@ type BuildContext struct {
 	// kind of tracking are delegated to it rather than reimplemented (ADR 0042).
 	// +optional
 	SourceRef *SourceRefSource `json:"sourceRef,omitempty"`
+
+	// Fetch retrieves the context as an archive over HTTP(S), at a declared digest.
+	//
+	// For a context that is a release tarball rather than a checkout. The digest is DECLARED rather
+	// than resolved, because nothing else addresses an arbitrary URL -- so a mismatch means the URL
+	// served something other than what this spec says, and it is refused rather than built.
+	//
+	// Only the archive unpack modes apply: a context is a tree, and `none` or `gz` place a single
+	// file. The CEL rule above says so rather than letting it fail later as a frontend error nobody
+	// can map back to this field.
+	// +optional
+	Fetch *FetchSource `json:"fetch,omitempty"`
 }
 
 // GetSourceRef returns the Flux source this context names, or nil when it names none.
@@ -386,4 +399,12 @@ type ImageBuildList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []ImageBuild `json:"items"`
+}
+
+// GetFetch returns the fetch source this context names, or nil when it names none.
+func (c *BuildContext) GetFetch() *FetchSource {
+	if c == nil {
+		return nil
+	}
+	return c.Fetch
 }

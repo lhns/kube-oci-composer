@@ -44,6 +44,15 @@ type Inputs struct {
 	BuilderDigest  string
 	FrontendDigest string
 
+	// FetcherDigest pins the image that fetches and unpacks the context.
+	//
+	// Hashed for the same reason as BuilderDigest, and the argument that it need not be is worth
+	// answering: every context is digest-addressed, so a correct fetcher has exactly one possible
+	// output. That holds for the DOWNLOAD and fails for the UNPACK -- a fixed symlink or wrapper
+	// bug changes the tree under an unchanged digest, which is exactly the failure BuilderDigest
+	// exists to prevent.
+	FetcherDigest string
+
 	// ContextKind is which member of the context union was resolved -- "sourceRef", or "" when the
 	// build has no context at all.
 	//
@@ -62,6 +71,10 @@ type Inputs struct {
 	// content, and hashing both would rebuild on a repack that changed nothing.
 	ContextRevision string
 	ContextSubpath  string
+
+	// ContextUnpack is how the fetched archive becomes a tree. Hashed because the same bytes become
+	// different trees under different modes, and the tree is what the build sees.
+	ContextUnpack string
 
 	// DockerfileKind is "path" or "inline".
 	//
@@ -128,9 +141,11 @@ func (in Inputs) Hash() string {
 	writeField(fmt.Sprintf("recipe-v%d", RecipeVersion))
 	writeField(in.BuilderDigest)
 	writeField(in.FrontendDigest)
+	writeField(in.FetcherDigest)
 	writeField(in.ContextKind)
 	writeField(in.ContextDigest)
 	writeField(in.ContextSubpath)
+	writeField(in.ContextUnpack)
 	writeField(in.DockerfileKind)
 	writeField(in.Dockerfile)
 	writeField(in.DockerfileDigest)

@@ -9,7 +9,9 @@ func sampleInputs() Inputs {
 	return Inputs{
 		BuilderDigest:    "sha256:aaaa",
 		FrontendDigest:   "sha256:bbbb",
+		FetcherDigest:    "sha256:ffff",
 		ContextKind:      "sourceRef",
+		ContextUnpack:    "tar.gz",
 		ContextDigest:    "sha256:cccc",
 		ContextSubpath:   "src",
 		DockerfileKind:   "path",
@@ -37,9 +39,6 @@ func TestHashIsStable(t *testing.T) {
 	}
 }
 
-// TestEveryFieldMovesTheHash — a field that does not move the hash is a field that can change the
-// output without triggering a rebuild, which is the failure mode ADR 0002 describes for
-// AssemblyVersion: "keep serving artifacts built by the old algorithm, forever".
 // hashMutations is the one list of "change this, and the hash must move".
 //
 // Extracted so TestEveryFieldIsAccountedFor can check it covers every field, rather than the two
@@ -57,7 +56,9 @@ func hashMutations() []hashMutation {
 	return []hashMutation{
 		{"BuilderDigest", "builder digest", func(in *Inputs) { in.BuilderDigest = "sha256:changed" }},
 		{"FrontendDigest", "frontend digest", func(in *Inputs) { in.FrontendDigest = "sha256:changed" }},
-		{"ContextKind", "context kind", func(in *Inputs) { in.ContextKind = "" }},
+		{"FetcherDigest", "fetcher digest", func(in *Inputs) { in.FetcherDigest = "sha256:changed" }},
+		{"ContextKind", "context kind", func(in *Inputs) { in.ContextKind = "fetch" }},
+		{"ContextUnpack", "context unpack", func(in *Inputs) { in.ContextUnpack = "tar" }},
 		{"ContextDigest", "context digest", func(in *Inputs) { in.ContextDigest = "sha256:changed" }},
 		{"DockerfileKind", "dockerfile kind", func(in *Inputs) { in.DockerfileKind = "inline" }},
 		{"DockerfileDigest", "dockerfile bytes", func(in *Inputs) {
@@ -86,6 +87,9 @@ func hashMutations() []hashMutation {
 	}
 }
 
+// TestEveryFieldMovesTheHash — a field that does not move the hash is a field that can change the
+// output without triggering a rebuild, which is the failure mode ADR 0002 describes for
+// AssemblyVersion: "keep serving artifacts built by the old algorithm, forever".
 func TestEveryFieldMovesTheHash(t *testing.T) {
 	base := sampleInputs().Hash()
 

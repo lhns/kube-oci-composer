@@ -64,6 +64,14 @@ type JobConfig struct {
 	// FrontendImage is the Dockerfile frontend, pinned by digest. BuildKit resolves `# syntax=`
 	// over the network unless told otherwise.
 	FrontendImage string
+	// FetcherImage runs `oci-builder fetch-context` as the init container -- this operator's own
+	// image, pinned by digest.
+	//
+	// In the input hash, and the argument that it need not be is worth answering: every context is
+	// digest-addressed, so a correct fetcher has exactly one possible output. That holds for the
+	// DOWNLOAD and fails for the UNPACK -- a fixed zip or symlink bug changes the tree under an
+	// unchanged digest. Which is precisely why BuilderDigest is hashed.
+	FetcherImage string
 	// SBOM and Provenance turn on BuildKit's own attestations.
 	//
 	// These DO belong in the input hash, unlike RegistryCA below: they change what is pushed. The
@@ -150,33 +158,25 @@ func rootlessSecurityContext() *corev1.SecurityContext {
 	}
 }
 
-// fetchContextScript downloads the build context and unwraps it to the directory buildctl reads.
+// fetchContextArgs is what the init container is told to fetch.
 //
-// The unwrapping is the whole reason this is a script rather than one pipe. A source-controller
-// artifact wraps the tree in a single top-level directory whose name nobody can predict, so a plain
-// extraction leaves the Dockerfile one level below where buildctl looks for it.
-//
-// Deliberately the SAME rule as build.matchesContextPath, which strips that wrapper controller-side:
-// when the two disagreed, an unpinned FROM was correctly refused and every build that passed the
-// check then failed inside BuildKit. Strip one level only when the archive really is a single
-// wrapper directory, so a tarball whose files sit at the root still builds rather than being
-// silently emptied.
-func fetchContextScript(contextURL string) string {
-	return fmt.Sprintf(`set -e
-staging=%[2]s/.staging
-mkdir -p "$staging"
-wget -qO- %[1]q | tar -xzf - -C "$staging"
-
-src="$staging"
-if [ "$(ls -A "$staging" | wc -l)" -eq 1 ]; then
-  only="$staging/$(ls -A "$staging")"
-  [ -d "$only" ] && src="$only"
-fi
-
-# tar rather than mv: it copies dotfiles without a shell glob that misses them.
-tar -cf - -C "$src" . | tar -xf - -C %[2]s
-rm -rf "$staging"
-`, contextURL, contextPath)
+// This replaced a shell script doing `wget -qO- URL | tar -xzf -`, which verified nothing -- not
+// even the Flux artifact digest the controller already held -- and carried a second copy of the
+// wrapper-stripping rule that once disagreed with build.MatchesContextPath, so an unpinned FROM was
+// correctly refused and every build that passed the check then failed inside BuildKit. See
+// internal/fetchcontext.
+func fetchContextArgs(obj *ociv1alpha1.ImageBuild, contextURL, contextDigest string) []string {
+	args := []string{
+		"fetch-context",
+		"--dest=" + contextPath,
+		"--url=" + contextURL,
+		"--digest=" + contextDigest,
+	}
+	if ref := obj.Spec.Context.GetSourceRef(); ref != nil {
+		return append(args, "--kind=sourceRef", "--unpack=tar.gz", "--subpath="+ref.Subpath)
+	}
+	f := obj.Spec.Context.GetFetch()
+	return append(args, "--kind=fetch", "--unpack="+string(f.Unpack), "--subpath="+f.Subpath)
 }
 
 // buildctlArgs assembles the buildctl invocation. Split out because it is the part that decides
@@ -411,7 +411,7 @@ func registryCAVolumes(caSecret string) ([]corev1.Volume, []corev1.VolumeMount) 
 }
 
 // buildJob renders the Job for one build.
-func buildJob(obj *ociv1alpha1.ImageBuild, inputHash, contextURL string, cfg JobConfig,
+func buildJob(obj *ociv1alpha1.ImageBuild, inputHash, contextURL, contextDigest string, cfg JobConfig,
 	repo, pushSecret, caSecret, dockerfileSecret string, cacheAvailable bool) *batchv1.Job {
 
 	spec := obj.Spec
@@ -484,18 +484,35 @@ cat %s > /dev/termination-log
 	// The context is fetched by an init container rather than by the controller: the controller
 	// would otherwise have to hold the whole context in memory or on its own read-only filesystem,
 	// and the URL is already a digest-addressed artifact that anything can pull.
-	initContainer := corev1.Container{
-		Name:            "fetch-context",
-		Image:           cfg.BuilderImage,
-		Command:         []string{"sh", "-c", fetchContextScript(contextURL)},
-		VolumeMounts:    []corev1.VolumeMount{{Name: contextVolume, MountPath: contextPath}},
-		SecurityContext: rootlessSecurityContext(),
-	}
-	if spec.Resources != nil {
-		// The same limits as the build container. Without this the fetch is the one unbounded
-		// container in the pod, which is the wrong thing to leave unbounded when it is the part
-		// downloading somebody else's tarball.
-		initContainer.Resources = *spec.Resources
+	// No context means nothing to fetch. An empty tree is addressed by construction, and a fetcher
+	// with no URL would be a container whose only job is to succeed at nothing.
+	//
+	// Built inside the branch rather than built and then discarded: fetchContextArgs reads the
+	// context union, so constructing it unconditionally dereferences a nil.
+	var initContainers []corev1.Container
+	if obj.Spec.Context != nil {
+		// Our own image and our own binary, not BuildKit and a shell. It fetches, VERIFIES the
+		// digest and only then extracts.
+		//
+		// FallbackToLogsOnError because an init-container failure used to surface as
+		// "BackoffLimitExceeded" and nothing else -- jobFailureDetail read only ContainerStatuses.
+		// With a real fetcher this is the most common way a build fails, so the message has to
+		// survive.
+		fetch := corev1.Container{
+			Name:                     "fetch-context",
+			Image:                    cfg.FetcherImage,
+			Args:                     fetchContextArgs(obj, contextURL, contextDigest),
+			VolumeMounts:             []corev1.VolumeMount{{Name: contextVolume, MountPath: contextPath}},
+			SecurityContext:          rootlessSecurityContext(),
+			TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
+		}
+		if spec.Resources != nil {
+			// The same limits as the build container. Without this the fetch is the one unbounded
+			// container in the pod, which is the wrong thing to leave unbounded when it is the part
+			// downloading somebody else's tarball.
+			fetch.Resources = *spec.Resources
+		}
+		initContainers = append(initContainers, fetch)
 	}
 
 	// Enforced by Kubernetes rather than by the controller noticing: ActiveDeadlineSeconds kills
@@ -547,7 +564,7 @@ cat %s > /dev/termination-log
 					// Suppressing the mount needs no ServiceAccount to exist, so it works in
 					// whatever namespace a build lands in.
 					AutomountServiceAccountToken: automount(spec.ServiceAccountName),
-					InitContainers:               []corev1.Container{initContainer},
+					InitContainers:               initContainers,
 					Containers:                   []corev1.Container{container},
 					Volumes:                      volumes,
 				},

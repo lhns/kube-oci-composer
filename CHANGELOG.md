@@ -149,6 +149,23 @@ must name a source in its own namespace.
   The builder gains `configmaps: get;list;watch` for the watch, and nothing else: everything it
   writes into a tenant namespace stays a Secret, the Dockerfile copy included.
 
+  `spec.context.fetch` takes the context from an archive at a **declared** digest, for a project
+  that publishes releases rather than one you track a branch of. Only archive unpack modes apply —
+  a context is a tree, and `none` or `gz` place a single file.
+
+  The build pod's context fetcher is now this operator's own binary
+  (`oci-builder fetch-context`) rather than a shell script. **The script verified nothing** — not
+  even the Flux artifact digest the controller already held — and it carried a second copy of the
+  wrapper-stripping rule that once disagreed with the controller's, so an unpinned `FROM` was
+  correctly refused and every build that passed the check then failed inside BuildKit. The fetcher
+  verifies the digest **before** unpacking, refuses path traversal and symlinks leaving the tree, and
+  shares one strip rule with the controller. `imageBuild.fetcherImage` defaults to the chart's own
+  builder image and joins the input hash.
+
+  The builder gains the SSRF dial guard the composer has (`imageBuild.fetchDenyPrivate`), because
+  with a fetch context the controller now GETs a **user-supplied** URL to read the Dockerfile. The
+  fetch inside the build pod is deliberately unguarded — that pod runs arbitrary code already.
+
   The Dockerfile's bytes join the input hash and `RecipeVersion` moves to 2. Previously the content
   needed no hashing because it rode inside the content-addressed context tarball — true then, and
   false the moment the recipe can come from anywhere else.
@@ -340,6 +357,12 @@ must name a source in its own namespace.
   `helm.sh/resource-policy: keep`, so `helm uninstall` cannot take your objects with it.
 
 ### Fixed
+
+- **An init-container failure reported nothing actionable.** `jobFailureDetail` iterated only
+  `ContainerStatuses`, which does not include init containers, so a build whose context failed to
+  fetch said "BackoffLimitExceeded" — the mechanism, with the cause discarded. It reads
+  `InitContainerStatuses` too now, init containers first, since one failing means the build container
+  never ran.
 
 Only defects that affected 0.4.0. Bugs introduced and fixed within this release cycle are not
 listed.

@@ -312,6 +312,23 @@ An unpinned `FROM` in an **inline** Dockerfile stalls the object, because editin
 fixes it. One in a Dockerfile that lives in the source does not: the fix is a push there, which
 raises no change here to wake the object, so it retries instead.
 
+A context can also be an archive at a declared digest, for a project that publishes releases rather
+than one you track a branch of:
+
+```yaml
+spec:
+  context:
+    fetch:
+      url: https://github.com/vendor/app/archive/refs/tags/v1.2.3.tar.gz
+      digest: sha256:…
+      unpack: tar.gz
+      subpath: app-1.2.3      # strip the version-named wrapper directory
+```
+
+The digest is **declared**, because nothing else addresses an arbitrary URL, and it is verified in
+the build pod **before** anything is unpacked. `unpack` must be an archive mode: a context is a tree,
+and the single-file modes cannot describe one.
+
 ### Where sources come from
 
 Two rules, and [ADR 0042](docs/adr/0042-content-addressed-not-flux.md) is the record:

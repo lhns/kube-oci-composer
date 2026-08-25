@@ -64,6 +64,48 @@
         "context": {
           "description": "Context is the tree the Dockerfile's COPY and ADD read from.\n\nOPTIONAL. A Dockerfile that only declares a pinned FROM and runs commands reads no files, and\nrequiring a context for it meant pointing a Flux source at an empty directory — the whole\ncost of the feature, paid to satisfy a field. Omitted, the build sees an EMPTY context, which\nis addressed by construction; a COPY then fails inside BuildKit, which is the correct failure\nand not a silent one.",
           "properties": {
+            "fetch": {
+              "description": "Fetch retrieves the context as an archive over HTTP(S), at a declared digest.\n\nFor a context that is a release tarball rather than a checkout. The digest is DECLARED rather\nthan resolved, because nothing else addresses an arbitrary URL -- so a mismatch means the URL\nserved something other than what this spec says, and it is refused rather than built.\n\nOnly the archive unpack modes apply: a context is a tree, and `none` or `gz` place a single\nfile. The CEL rule above says so rather than letting it fail later as a frontend error nobody\ncan map back to this field.",
+              "properties": {
+                "digest": {
+                  "description": "Digest of the fetched bytes. Declared here rather than resolved, because an arbitrary URL\nis not content-addressed by anything else. A mismatch is terminal. See ADR 0002.",
+                  "pattern": "^sha256:[a-f0-9]{64}$",
+                  "type": "string"
+                },
+                "subpath": {
+                  "description": "Subpath selects one directory from inside the archive and strips the prefix. Useful when a\nrelease tarball wraps everything in a version-named directory you do not want in the image.\nA subpath matching nothing is an error rather than a silently empty layer.\n\nApplies to the archive unpack modes only. It is invalid with \"gz\", which unpacks a single\nfile, and ignored with \"none\".",
+                  "maxLength": 4096,
+                  "type": "string"
+                },
+                "unpack": {
+                  "default": "none",
+                  "description": "Unpack controls how the bytes become layer content.",
+                  "enum": [
+                    "none",
+                    "tar",
+                    "tar.gz",
+                    "tar.xz",
+                    "tar.zst",
+                    "tar.bz2",
+                    "gz",
+                    "zip",
+                    "deb"
+                  ],
+                  "type": "string"
+                },
+                "url": {
+                  "description": "URL to fetch.",
+                  "maxLength": 2048,
+                  "pattern": "^https?://",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "digest",
+                "url"
+              ],
+              "type": "object"
+            },
             "sourceRef": {
               "description": "SourceRef takes the context from a Flux source's artifact.\n\nThe one to reach for when the content moves: source-controller tracks the revision, so the\ncontext follows the repository without anything here being edited. Sources that need that\nkind of tracking are delegated to it rather than reimplemented (ADR 0042).",
               "properties": {
@@ -105,8 +147,12 @@
           "type": "object",
           "x-kubernetes-validations": [
             {
-              "message": "set sourceRef",
-              "rule": "(has(self.sourceRef)?1:0) == 1"
+              "message": "set exactly one of sourceRef or fetch",
+              "rule": "(has(self.sourceRef)?1:0) + (has(self.fetch)?1:0) == 1"
+            },
+            {
+              "message": "a build context is a directory tree, so fetch.unpack must be tar or tar.gz. unpack defaults to 'none', which places a single file, so this has to be set explicitly",
+              "rule": "!has(self.fetch) || self.fetch.unpack == 'tar' || self.fetch.unpack == 'tar.gz'"
             }
           ]
         },

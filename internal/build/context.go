@@ -38,7 +38,8 @@ const (
 )
 
 // FetchDockerfile returns the named file from a gzipped-tar build context.
-func FetchDockerfile(ctx context.Context, client *http.Client, url, subpath, dockerfile string) ([]byte, error) {
+func FetchDockerfile(ctx context.Context, client *http.Client, url, subpath, dockerfile string,
+	stripWrapper bool) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()
 
@@ -78,7 +79,7 @@ func FetchDockerfile(ctx context.Context, client *http.Client, url, subpath, doc
 		if hdr.Typeflag != tar.TypeReg {
 			continue
 		}
-		if !matchesContextPath(hdr.Name, want) {
+		if !matchesContextPath(hdr.Name, want, stripWrapper) {
 			continue
 		}
 
@@ -92,10 +93,21 @@ func FetchDockerfile(ctx context.Context, client *http.Client, url, subpath, doc
 
 // matchesContextPath reports whether a tar entry is the file being looked for, ignoring the
 // unpredictable top-level directory source-controller adds.
-func matchesContextPath(entry, want string) bool {
+// stripWrapper applies to a source-controller artifact and to nothing else: it wraps the tree in one
+// top-level directory whose name is unpredictable. A FETCHED archive is whatever the publisher made
+// it, so stripping there would look past a real top-level directory and report the Dockerfile
+// missing -- `subpath` is how a version-named wrapper is named in that case.
+//
+// The same rule as archive.Extract's, and the reason both name it: when the two copies of this
+// disagreed, an unpinned FROM was correctly refused and every build that passed the check then
+// failed inside BuildKit.
+func matchesContextPath(entry, want string, stripWrapper bool) bool {
 	clean := strings.TrimPrefix(path.Clean(entry), "./")
 	if clean == want {
 		return true
+	}
+	if !stripWrapper {
+		return false
 	}
 	// Strip one leading path segment — the wrapper directory — and compare again.
 	if _, rest, ok := strings.Cut(clean, "/"); ok {

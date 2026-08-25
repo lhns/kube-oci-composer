@@ -218,7 +218,15 @@ func (r *ImageBuildReconciler) resolveInputs(ctx context.Context, obj *ociv1alph
 		art         source.FluxArtifact
 		contextKind string
 		subpath     string
+		unpack      string
 	)
+	if f := spec.Context.GetFetch(); f != nil {
+		// Nothing to resolve: the digest is DECLARED, which is what makes an arbitrary URL a legal
+		// build input at all. The bytes are verified against it in the build pod, before anything is
+		// unpacked -- see internal/fetchcontext.
+		contextKind, subpath, unpack = "fetch", f.Subpath, string(f.Unpack)
+		art = source.FluxArtifact{URL: f.URL, Digest: f.Digest}
+	}
 	if ref := spec.Context.GetSourceRef(); ref != nil {
 		contextKind = "sourceRef"
 		subpath = ref.Subpath
@@ -320,11 +328,13 @@ func (r *ImageBuildReconciler) resolveInputs(ctx context.Context, obj *ociv1alph
 	return build.Inputs{
 		BuilderDigest:    r.JobConfig.BuilderImage,
 		FrontendDigest:   r.JobConfig.FrontendImage,
+		FetcherDigest:    r.JobConfig.FetcherImage,
 		ContextKind:      contextKind,
 		ContextDigest:    art.Digest,
 		ContextRevision:  art.Revision,
 		Attestations:     attestationMode(r.JobConfig),
 		ContextSubpath:   subpath,
+		ContextUnpack:    unpack,
 		DockerfileKind:   dockerfileKind,
 		Dockerfile:       dockerfilePath,
 		DockerfileDigest: dockerfileDigest,
@@ -376,11 +386,18 @@ func (r *ImageBuildReconciler) dockerfileBytes(ctx context.Context, obj *ociv1al
 	}
 
 	var subpath string
+	stripWrapper := true
 	if ref := obj.Spec.Context.GetSourceRef(); ref != nil {
 		subpath = ref.Subpath
 	}
+	if f := obj.Spec.Context.GetFetch(); f != nil {
+		// A fetched archive is whatever the publisher made it, so there is no unpredictable wrapper
+		// to strip -- `subpath` is how a version-named one is named. Stripping anyway would look
+		// past the real top-level directory and report the Dockerfile missing.
+		subpath, stripWrapper = f.Subpath, false
+	}
 	content, err = build.FetchDockerfile(ctx, r.httpClient(), contextURL,
-		subpath, obj.Spec.Dockerfile.EffectiveDockerfile())
+		subpath, obj.Spec.Dockerfile.EffectiveDockerfile(), stripWrapper)
 	if err != nil {
 		return nil, false, fmt.Errorf("reading the Dockerfile: %w", err)
 	}
@@ -437,7 +454,7 @@ func (r *ImageBuildReconciler) startBuild(ctx context.Context, obj *ociv1alpha1.
 		}
 	}
 
-	job := buildJob(obj, inputHash, contextURL, r.JobConfig, r.repositoryFor(obj), pushSecret,
+	job := buildJob(obj, inputHash, contextURL, inputs.ContextDigest, r.JobConfig, r.repositoryFor(obj), pushSecret,
 		caSecret, dockerfileSecret, r.cacheAvailable(ctx, obj))
 	if err := ctrl.SetControllerReference(obj, job, r.Scheme()); err != nil {
 		return fmt.Errorf("setting owner: %w", err)
@@ -736,7 +753,14 @@ func (r *ImageBuildReconciler) jobFailureDetail(ctx context.Context, obj *ociv1a
 		return msg
 	}
 	for _, p := range pods.Items {
-		for _, cs := range p.Status.ContainerStatuses {
+		// Init containers FIRST, and including them at all is the fix. This iterated only
+		// ContainerStatuses, which does not contain them, so a context that failed to fetch
+		// reported "BackoffLimitExceeded" and nothing else -- the mechanism, with the cause
+		// discarded. First because an init container failing means the build container never ran,
+		// so its status carries nothing worth preferring.
+		statuses := append(append([]corev1.ContainerStatus{}, p.Status.InitContainerStatuses...),
+			p.Status.ContainerStatuses...)
+		for _, cs := range statuses {
 			t := cs.State.Terminated
 			if t == nil || t.ExitCode == 0 {
 				continue

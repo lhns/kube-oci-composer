@@ -226,3 +226,16 @@ looked fixed.
 {{- with .Values.defaultRegistry.insecure }}{{- $hosts = concat $hosts (splitList "," .) -}}{{- end -}}
 {{- join "," (compact $hosts) -}}
 {{- end -}}
+
+{{- /*
+The image that runs `oci-builder fetch-context` as each build's init container.
+Defaults to the builder's own image: the fetcher is a subcommand of that binary, so one image
+covers both and the chart already knows a digest for it.
+*/}}
+{{- define "kube-oci-composer.fetcherImage" -}}
+{{- if .Values.imageBuild.fetcherImage -}}
+{{- .Values.imageBuild.fetcherImage -}}
+{{- else -}}
+{{- printf "%s:%s" .Values.imageBuild.image.repository (.Values.imageBuild.image.tag | default .Chart.AppVersion) -}}
+{{- end -}}
+{{- end -}}
