@@ -125,16 +125,22 @@ must name a source in its own namespace.
 - **A Dockerfile can come from the spec, and a build can have no context**
   ([ADR 0042](docs/adr/0042-content-addressed-not-flux.md)). `spec.dockerfile.inline` puts the recipe
   in the object, so building an upstream project that ships no Dockerfile no longer means forking it
-  to add one file and carrying that fork forever. `spec.context` is now optional: a Dockerfile that
+  to add one file and carrying that fork forever. `spec.context` is optional: a Dockerfile that
   only declares a pinned `FROM` and runs commands reads no files, and requiring a context for it
   meant pointing a Flux source at an empty directory.
 
-  `spec.context` is also a union now rather than a bare Flux reference — `context.sourceRef` today,
-  with room for the other content-addressed sources. The rule it enforces is **"every build input is
-  content-addressed"**, which is what the old Flux-only restriction's own reasoning actually
-  supported; requiring Flux specifically was narrower than the reason it gave.
+  `spec.context` is a union rather than a bare Flux reference — `sourceRef`, `fetch` or `image`,
+  described below. The rule it enforces is **"every build input is content-addressed"**, which is
+  what the old Flux-only restriction's own reasoning actually supported; requiring Flux specifically
+  was narrower than the reason it gave.
 
-  An unpinned `FROM` in an **inline** Dockerfile now **stalls**, because editing this spec is what
+  `spec.dockerfile` is a union too — `path`, `inline` or `configMapRef` — and carries **no schema
+  default**. A structural default is written into the stored object, so a defaulted `path` would
+  make every object look like it had set one and the "exactly one of" rule could never fire. The
+  effective default (`Dockerfile` at the context root) lives in the controller, the same arrangement
+  `Push.OnConflict` already uses for the same reason.
+
+  An unpinned `FROM` in an **inline** Dockerfile **stalls**, because editing this spec is what
   fixes it and the generation change is what wakes the object. One in a Dockerfile that lives in the
   context still retries rather than stalling: the fix is a push to the source, which raises no
   change here.
@@ -158,8 +164,9 @@ must name a source in its own namespace.
   even the Flux artifact digest the controller already held — and it carried a second copy of the
   wrapper-stripping rule that once disagreed with the controller's, so an unpinned `FROM` was
   correctly refused and every build that passed the check then failed inside BuildKit. The fetcher
-  verifies the digest **before** unpacking, refuses path traversal and symlinks leaving the tree, and
-  shares one strip rule with the controller. `imageBuild.fetcherImage` defaults to the chart's own
+  verifies the digest **before** unpacking, refuses path traversal, symlinks leaving the tree,
+  absolute entries and a `subpath` that matched nothing, and shares one strip rule with the
+  controller. `imageBuild.fetcherImage` defaults to the chart's own
   builder image and joins the input hash.
 
   The builder gains the SSRF dial guard the composer has (`imageBuild.fetchDenyPrivate`), because
@@ -177,6 +184,24 @@ must name a source in its own namespace.
   The Dockerfile's bytes join the input hash and `RecipeVersion` moves to 2. Previously the content
   needed no hashing because it rode inside the content-addressed context tarball — true then, and
   false the moment the recipe can come from anywhere else.
+
+- **Which sources this project resolves, and which it leaves to source-controller**
+  ([ADR 0042](docs/adr/0042-content-addressed-not-flux.md)). Two rules, written down once: if the
+  spec names the exact content we resolve it, and if a mutable ref has to be tracked over time
+  source-controller does; and we only implement a source whose address can be **verified against
+  the bytes we got**.
+
+  So **git stays Flux's** — a branch needs tracking, and even a commit-pinned clone cannot be
+  verified against the commit without implementing git's object model, while `GitRepository`
+  already publishes a content-addressed tarball. HTTP blobs, ConfigMaps and container images are
+  ours, as today. **source-controller installs on its own**
+  (`flux install --components=source-controller`), which is what makes delegating git cheap rather
+  than a reason to run all of Flux.
+
+  **OCI artifacts are ours and are not built yet** — an artifact pinned by digest passes both
+  rules, `image` does not cover it, and today consuming one needs Flux for something Flux is not
+  needed for. Recorded as a known gap with a decided owner
+  ([ADR 0043](docs/adr/0043-an-oci-artifact-is-a-source-we-own.md)), not an oversight.
 
 - **A NetworkPolicy for the registry, enabled by default.** Build Jobs run in their object's
   namespace, not the release's, so every build crosses a namespace boundary to push and a
@@ -234,6 +259,10 @@ must name a source in its own namespace.
   (`persistence.accessMode: ReadWriteMany`, or S3) and a shared metadata database
   (`cache.driver`); the chart refuses to render without both.
 
+  The writer is a **StatefulSet of exactly one**, the readers a separate Deployment, so "one
+  writer" is a property of what the chart renders rather than a value somebody can raise. Scaling
+  reads is `registry.readReplicas`, which cannot reach the writer.
+
   **Exactly one pod ever writes**, and that is the design rather than a simplification. zot
   serialises repository writes with an in-process lock, so two instances writing one repository
   lose tags that returned `201` — measured at 2–4%, with every instance then agreeing they were
@@ -262,17 +291,6 @@ must name a source in its own namespace.
   every drain forever with nothing in the events saying why.
 
 ### Changed
-
-- **BREAKING (unreleased kind): `ImageBuild.spec.context` and `spec.dockerfile` change shape.**
-  `context: {kind: …, name: …}` becomes `context: {sourceRef: {kind: …, name: …}}`, and
-  `dockerfile: Dockerfile` becomes `dockerfile: {path: Dockerfile}` — or is omitted, which is the
-  same thing. `ImageBuild` has never appeared in a release, so nothing published depends on the old
-  shape; doing it now is what avoids a deprecation cycle later.
-
-  `dockerfile` lost its schema default. A structural default is written into the stored object, so a
-  defaulted `path` would make every object look like it had set one and the "exactly one of" rule
-  could never fire. The effective default moves to the controller, the same arrangement
-  `Push.OnConflict` already uses for the same reason.
 
 - **`registry.cluster` never shipped.** It briefly existed on `main` as zot's scale-out mode, which
   **shards** — each repository lived on exactly one member, so a member going down took ~1/N of the
