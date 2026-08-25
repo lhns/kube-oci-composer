@@ -11,6 +11,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -336,4 +337,57 @@ func (r *ImageBuildReconciler) registryCASecretFor(
 		}
 	}
 	return ca.Name, nil
+}
+
+// dockerfileSecretFor puts a Dockerfile that does not live in the build context where the Job can
+// mount it.
+//
+// The bytes are the ones the controller has already hashed and run CheckPinnedBases over. That is
+// the point of copying rather than projecting the user's object directly: the kubelet resolves a
+// volume at pod start, reading whatever the source says THEN, not what the controller checked a
+// moment earlier. An edit landing in that window — seconds to minutes of scheduling and image pull
+// — would build a Dockerfile that was never checked, which is a complete bypass of the only content
+// guard this controller has, reachable with `update` on the source object.
+//
+// Immutable, and safely so: jobName derives from the input hash, and the Dockerfile's content is
+// part of that hash, so the content is a function of the name. Different bytes are a different Job.
+// That is also why there is no update path here, unlike registryCASecretFor.
+//
+// A Secret rather than a ConfigMap for a Dockerfile, which is not secret, for the reason given
+// above registryCASecretFor: the builder already holds get/create/update on secrets cluster-wide,
+// and ConfigMaps would mean a new write verb on a new resource in every tenant namespace.
+func (r *ImageBuildReconciler) dockerfileSecretFor(
+	ctx context.Context, obj *ociv1alpha1.ImageBuild, jobName string, content []byte,
+) (string, error) {
+	if len(content) == 0 {
+		return "", nil
+	}
+
+	df := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jobName + "-dockerfile",
+			Namespace: obj.Namespace,
+			Labels:    map[string]string{"app.kubernetes.io/managed-by": "kube-oci-builder"},
+			Annotations: map[string]string{
+				"oci.lhns.de/description": "The Dockerfile this build runs, as checked by the " +
+					"controller. Not secret; a Secret only because the builder already has " +
+					"permission to write Secrets here. Deleted with the build.",
+			},
+		},
+		Type:      corev1.SecretTypeOpaque,
+		Immutable: ptr.To(true),
+		Data:      map[string][]byte{dockerfileKey: content},
+	}
+	if err := ctrl.SetControllerReference(obj, df, r.Scheme()); err != nil {
+		return "", fmt.Errorf("setting owner on the Dockerfile: %w", err)
+	}
+
+	if err := r.Create(ctx, df); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return "", fmt.Errorf("creating the Dockerfile: %w", err)
+		}
+		// Already there, and because the name carries the input hash it already holds these bytes.
+		// Nothing to refresh, and an Update would be refused by Immutable anyway.
+	}
+	return df.Name, nil
 }

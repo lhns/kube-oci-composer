@@ -360,7 +360,7 @@ func TestSuspendSaysSo(t *testing.T) {
 // TestMissingSourceIsPendingNotStalled — creating the GitRepository fixes it, and that is a
 // different object, so this retries rather than stalls.
 func TestMissingSourceIsPendingNotStalled(t *testing.T) {
-	obj := buildOf(t, func(o *ociv1alpha1.ImageBuild) { o.Spec.Context.Name = "absent" })
+	obj := buildOf(t, func(o *ociv1alpha1.ImageBuild) { o.Spec.Context.SourceRef.Name = "absent" })
 	r := harness(t, pinnedFrom, obj)
 
 	res, err := reconcileOnce(t, r, obj)
@@ -500,7 +500,7 @@ func TestReconcileRequestIsEchoed(t *testing.T) {
 // into an image they control and can read.
 func TestContextMustBeInTheSameNamespace(t *testing.T) {
 	obj := buildOf(t, func(o *ociv1alpha1.ImageBuild) {
-		o.Spec.Context.Namespace = "other-team"
+		o.Spec.Context.SourceRef.Namespace = "other-team"
 	})
 	r := harness(t, pinnedFrom, obj)
 
@@ -523,7 +523,7 @@ func TestContextMustBeInTheSameNamespace(t *testing.T) {
 // a mismatch must wait rather than build the wrong commit.
 func TestContextRevisionIsHonoured(t *testing.T) {
 	obj := buildOf(t, func(o *ociv1alpha1.ImageBuild) {
-		o.Spec.Context.Revision = "v0.6.8"
+		o.Spec.Context.SourceRef.Revision = "v0.6.8"
 	})
 	srv := contextServer(t, contextTarball(t, "src-abc123/", pinnedFrom))
 	src := gitRepositoryAt("team-a", "src", srv.URL, "sha256:ctx", "v0.6.5@sha1:aaaaaaa")
@@ -549,7 +549,7 @@ func TestContextRevisionIsHonoured(t *testing.T) {
 // And a matching revision builds, so the pin is a check rather than a block.
 func TestContextRevisionMatchingBuilds(t *testing.T) {
 	obj := buildOf(t, func(o *ociv1alpha1.ImageBuild) {
-		o.Spec.Context.Revision = "v0.6.8"
+		o.Spec.Context.SourceRef.Revision = "v0.6.8"
 	})
 	srv := contextServer(t, contextTarball(t, "src-abc123/", pinnedFrom))
 	src := gitRepositoryAt("team-a", "src", srv.URL, "sha256:ctx", "v0.6.8@sha1:b739efb5")
@@ -563,5 +563,81 @@ func TestContextRevisionMatchingBuilds(t *testing.T) {
 	}
 	if jobs := jobsIn(t, r, obj.Namespace); len(jobs) != 1 {
 		t.Fatalf("a matching revision did not build: %d jobs", len(jobs))
+	}
+}
+
+// TestAnInlineDockerfileNeedsNoContext.
+//
+// The friction this whole change exists to remove: a Dockerfile that only declares a pinned FROM
+// and runs commands reads no files, and requiring a context for it meant pointing a Flux source at
+// an empty directory.
+func TestAnInlineDockerfileNeedsNoContext(t *testing.T) {
+	obj := buildOf(t, func(o *ociv1alpha1.ImageBuild) {
+		o.Spec.Context = nil
+		o.Spec.Dockerfile = &ociv1alpha1.DockerfileSource{
+			Inline: "FROM scratch@sha256:" + strings.Repeat("a", 64) + "\n",
+		}
+	})
+	// No Flux source in the harness at all: if the controller still reached for one this would fail
+	// rather than quietly resolving something.
+	r := harness(t, "", obj)
+
+	if _, err := reconcileOnce(t, r, obj); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if jobs := jobsIn(t, r, obj.Namespace); len(jobs) != 1 {
+		t.Fatalf("want one Job from a context-less build, got %d", len(jobs))
+	}
+	if c := conditionOf(reload(t, r, obj), ociv1alpha1.StalledCondition); c != nil {
+		t.Errorf("a context-less inline build stalled: %+v", c)
+	}
+}
+
+// TestAnUnpinnedInlineFromStalls is the one place the two Dockerfile forms behave differently.
+//
+// The Dockerfile IS this spec, so editing it is the fix and the generation change that raises is
+// what wakes the object. Stalling something a spec edit resolves is precisely what Stalled is for.
+// A path Dockerfile gets no such event, which is why the same failure is NOT terminal there — that
+// contrast is asserted below.
+func TestAnUnpinnedInlineFromStalls(t *testing.T) {
+	obj := buildOf(t, func(o *ociv1alpha1.ImageBuild) {
+		o.Spec.Context = nil
+		o.Spec.Dockerfile = &ociv1alpha1.DockerfileSource{Inline: "FROM golang:1.26\n"}
+	})
+	r := harness(t, "", obj)
+
+	res, err := reconcileOnce(t, r, obj)
+	if err != nil {
+		t.Fatalf("reconcile returned an error rather than recording one: %v", err)
+	}
+	if jobs := jobsIn(t, r, obj.Namespace); len(jobs) != 0 {
+		t.Fatalf("an unpinned FROM still started %d Jobs", len(jobs))
+	}
+	if c := conditionOf(reload(t, r, obj), ociv1alpha1.StalledCondition); c == nil {
+		t.Error("an unpinned FROM in an inline Dockerfile did not stall, but only a spec edit fixes it")
+	}
+	if res.RequeueAfter != 0 {
+		t.Errorf("a stalled object scheduled a retry (%v); the spec change is the wake-up", res.RequeueAfter)
+	}
+}
+
+// TestAnUnpinnedContextFromDoesNotStall is the other half of the contrast above.
+//
+// The fix is a push to the Flux source, which raises no generation change here, so stalling would
+// leave the object asleep exactly when the thing it needs has been fixed.
+func TestAnUnpinnedContextFromDoesNotStall(t *testing.T) {
+	obj := buildOf(t, nil)
+	r := harness(t, "FROM golang:1.26\n", obj)
+
+	res, err := reconcileOnce(t, r, obj)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if c := conditionOf(reload(t, r, obj), ociv1alpha1.StalledCondition); c != nil {
+		t.Errorf("a Dockerfile in the context stalled: %+v — but pushing a fix there raises no "+
+			"generation change to wake it", c)
+	}
+	if res.RequeueAfter == 0 {
+		t.Error("no retry scheduled, so a fix pushed to the source would never be noticed")
 	}
 }

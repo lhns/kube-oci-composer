@@ -34,6 +34,17 @@ rules:
   - apiGroups: [""]
     resources: [secrets]
     verbs: [get, create, update]
+  # ConfigMaps ARE cached and watched, unlike Secrets, because a Dockerfile can live in one
+  # (spec.dockerfile.configMapRef) and an edit has to rebuild promptly rather than at the next
+  # interval -- an hour by default, which reads as the controller being broken. That costs an
+  # informer over every ConfigMap in the cluster; the composer already pays it for configMap layers.
+  #
+  # Read-only, and the asymmetry with secrets above is deliberate: everything this controller WRITES
+  # into a tenant namespace is a Secret, the Dockerfile copy included, so no create or update belongs
+  # here. TestBuilderChartNeverGrantsConfigMapWrites keeps it that way.
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, watch]
   - apiGroups: [""]
     resources: [events]
     verbs: [create, patch]

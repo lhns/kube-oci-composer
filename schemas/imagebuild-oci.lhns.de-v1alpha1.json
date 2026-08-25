@@ -62,47 +62,176 @@
           "type": "object"
         },
         "context": {
-          "description": "Context is the build context, taken from a Flux source's artifact.\n\nFrom a Flux source, so the revision is content-addressed and its digest is what makes the\ninput hash meaningful. There is no inline or URL form: an unaddressed context would leave\nnothing to hash, and every reconcile would be a build.",
+          "description": "Context is the tree the Dockerfile's COPY and ADD read from.\n\nOptional: a Dockerfile that only declares a pinned FROM and runs commands reads no files.\nOmitted, the build sees an empty context and any COPY fails inside BuildKit.",
           "properties": {
-            "kind": {
-              "description": "Kind of the referenced source.",
-              "enum": [
-                "GitRepository",
-                "OCIRepository",
-                "Bucket"
+            "fetch": {
+              "description": "Fetch retrieves the context as an archive over HTTP(S), at a declared digest.\n\nFor a release tarball rather than a checkout. The digest is declared, not resolved: a\nmismatch means the URL served something other than what this spec names, and is refused.\n\nOnly the archive unpack modes apply, since a context is a tree.",
+              "properties": {
+                "digest": {
+                  "description": "Digest of the fetched bytes. Declared here rather than resolved, because an arbitrary URL\nis not content-addressed by anything else. A mismatch is terminal. See ADR 0002.",
+                  "pattern": "^sha256:[a-f0-9]{64}$",
+                  "type": "string"
+                },
+                "subpath": {
+                  "description": "Subpath selects one directory from inside the archive and strips the prefix. Useful when a\nrelease tarball wraps everything in a version-named directory you do not want in the image.\nA subpath matching nothing is an error rather than a silently empty layer.\n\nApplies to the archive unpack modes only. It is invalid with \"gz\", which unpacks a single\nfile, and ignored with \"none\".",
+                  "maxLength": 4096,
+                  "type": "string"
+                },
+                "unpack": {
+                  "default": "none",
+                  "description": "Unpack controls how the bytes become layer content.",
+                  "enum": [
+                    "none",
+                    "tar",
+                    "tar.gz",
+                    "tar.xz",
+                    "tar.zst",
+                    "tar.bz2",
+                    "gz",
+                    "zip",
+                    "deb"
+                  ],
+                  "type": "string"
+                },
+                "url": {
+                  "description": "URL to fetch.",
+                  "maxLength": 2048,
+                  "pattern": "^https?://",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "digest",
+                "url"
               ],
+              "type": "object"
+            },
+            "image": {
+              "description": "Image takes the flattened filesystem of a digest-pinned image as the context.\n\nFor building on what CI already published. Costs a pull and a flatten in the build pod on\nevery cache miss, so prefer sourceRef where it would do.\n\n`FROM \u003cimage\u003e@sha256:… AS ctx` plus `COPY --from=ctx` does much the same with no context at\nall. Reach for this when the image IS the tree the build reads -- notably an\nImageComposition's output, which is how \"compose the workdir, then build it\" is spelled.",
+              "properties": {
+                "ref": {
+                  "description": "Ref is the image to read, pinned by digest: \"repo:tag@sha256:…\" or \"repo@sha256:…\".\n\nThe tag is decorative — it is recorded for humans and ignored when pulling, exactly as it\nis for spec.base.ref. What is pulled is the digest, which is what ADR 0002 requires of\nevery input.",
+                  "maxLength": 1024,
+                  "pattern": "^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*(:[a-zA-Z0-9._-]+)?@sha256:[a-f0-9]{64}$",
+                  "type": "string"
+                },
+                "secretRef": {
+                  "description": "SecretRef names a kubernetes.io/dockerconfigjson Secret for pulling, when the image is\nprivate. Same arrangement as spec.base.secretRef.",
+                  "properties": {
+                    "name": {
+                      "description": "Name of the referent.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name"
+                  ],
+                  "type": "object"
+                },
+                "subpath": {
+                  "description": "Subpath selects one directory from the flattened filesystem and strips the prefix, so\n\"/usr/local/bin\" from the image can land directly at the target.",
+                  "maxLength": 4096,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "ref"
+              ],
+              "type": "object"
+            },
+            "sourceRef": {
+              "description": "SourceRef takes the context from a Flux source's artifact.\n\nThe one to reach for when the content moves: source-controller tracks the revision. ADR 0042\nsays which sources are delegated to it and why.",
+              "properties": {
+                "kind": {
+                  "description": "Kind of the referenced source.",
+                  "enum": [
+                    "GitRepository",
+                    "OCIRepository",
+                    "Bucket"
+                  ],
+                  "type": "string"
+                },
+                "name": {
+                  "description": "Name of the referenced source.",
+                  "type": "string"
+                },
+                "namespace": {
+                  "description": "Namespace of the referenced source. Must be the consuming object's own namespace, which is\nalso the default — the field remains only so an explicit value is not a schema error.\n\nA source elsewhere is REFUSED. Both controllers read Flux sources cluster-wide, so honouring\nanother namespace would let anyone who can create one of these objects pull that namespace's\ncontent into an image they control and can read.",
+                  "type": "string"
+                },
+                "revision": {
+                  "description": "Revision the artifact is expected to be at. Optional; unset consumes whatever the source\ncurrently publishes.\n\nThis is the only way to make a sourceRef layer a pure function of the spec. Without it the\nsource can move under a fixed spec — a branch or a semver range does so with no edit to\nanything, so nothing observes it. It is also independent of the source controller's own\nbookkeeping: the staleness check compares generation against observedGeneration, which is the\nsource reporting on itself, whereas this is an assertion from the consuming side.\n\nMatched against Flux's \"\u003cref\u003e@\u003calgo\u003e:\u003chash\u003e\" by whichever half you give:\n\n\trevision: v0.6.8                  matches v0.6.8@sha1:\u003canything\u003e\n\trevision: v0.6.8@sha1:b739efb5    matches only that commit\n\nThe short form exists because a generator usually knows the tag it asked for and not the\ncommit it resolved to, and the useful check should not require the half it cannot supply.",
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                "subpath": {
+                  "description": "Subpath selects one directory from the artifact. Defaults to the whole thing.",
+                  "maxLength": 4096,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "name"
+              ],
+              "type": "object"
+            }
+          },
+          "type": "object",
+          "x-kubernetes-validations": [
+            {
+              "message": "set exactly one of sourceRef, fetch or image",
+              "rule": "(has(self.sourceRef)?1:0) + (has(self.fetch)?1:0) + (has(self.image)?1:0) == 1"
+            },
+            {
+              "message": "a build context is a directory tree, so fetch.unpack must be tar or tar.gz. unpack defaults to 'none', which places a single file, so this has to be set explicitly",
+              "rule": "!has(self.fetch) || self.fetch.unpack == 'tar' || self.fetch.unpack == 'tar.gz'"
+            }
+          ]
+        },
+        "dockerfile": {
+          "description": "Dockerfile says where the recipe comes from. Omitted, it is \"Dockerfile\" at the context root\n— see EffectiveDockerfile, and see DockerfileSource for why that default is not in the schema.",
+          "properties": {
+            "configMapRef": {
+              "description": "ConfigMapRef reads the Dockerfile from one key of a ConfigMap in this object's namespace.\n\nThe content is hashed, not the resourceVersion, so an edit rebuilds and a no-op write does\nnot. The ConfigMap is watched, so that happens promptly rather than at the next interval.\n\nNo `optional`, unlike a composition's configMap layer: a missing Dockerfile cannot produce an\nempty build, only an object that can never become Ready.",
+              "properties": {
+                "key": {
+                  "default": "Dockerfile",
+                  "description": "Key within it. Data is read first and BinaryData second.\n\nThis default IS in the schema, unlike the ones on DockerfileSource, and the difference is the\npoint: no CEL rule tests has(self.key), so materialising it costs nothing and buys a value\nvisible in `kubectl get -o yaml`.",
+                  "maxLength": 253,
+                  "type": "string"
+                },
+                "name": {
+                  "description": "Name of the ConfigMap.",
+                  "maxLength": 253,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "type": "object"
+            },
+            "inline": {
+              "description": "Inline is the Dockerfile itself, verbatim. Plaintext in etcd and in `kubectl get -o yaml`.\n\nAn unpinned FROM here is terminal rather than retried: the fix is an edit to this field, and\nthe generation change it raises is what wakes the object. A `path` Dockerfile gets no such\nevent, so the same check is not terminal there.\n\nCapped well below what etcd would take: every watcher of every ImageBuild pays for the size\non every update.",
+              "maxLength": 65536,
+              "minLength": 1,
               "type": "string"
             },
-            "name": {
-              "description": "Name of the referenced source.",
-              "type": "string"
-            },
-            "namespace": {
-              "description": "Namespace of the referenced source. Must be the consuming object's own namespace, which is\nalso the default — the field remains only so an explicit value is not a schema error.\n\nA source elsewhere is REFUSED. Both controllers read Flux sources cluster-wide, so honouring\nanother namespace would let anyone who can create one of these objects pull that namespace's\ncontent into an image they control and can read.",
-              "type": "string"
-            },
-            "revision": {
-              "description": "Revision the artifact is expected to be at. Optional; unset consumes whatever the source\ncurrently publishes.\n\nThis is the only way to make a sourceRef layer a pure function of the spec. Without it the\nsource can move under a fixed spec — a branch or a semver range does so with no edit to\nanything, so nothing observes it. It is also independent of the source controller's own\nbookkeeping: the staleness check compares generation against observedGeneration, which is the\nsource reporting on itself, whereas this is an assertion from the consuming side.\n\nMatched against Flux's \"\u003cref\u003e@\u003calgo\u003e:\u003chash\u003e\" by whichever half you give:\n\n\trevision: v0.6.8                  matches v0.6.8@sha1:\u003canything\u003e\n\trevision: v0.6.8@sha1:b739efb5    matches only that commit\n\nThe short form exists because a generator usually knows the tag it asked for and not the\ncommit it resolved to, and the useful check should not require the half it cannot supply.",
-              "maxLength": 256,
-              "type": "string"
-            },
-            "subpath": {
-              "description": "Subpath selects one directory from the artifact. Defaults to the whole thing.",
+            "path": {
+              "description": "Path to the Dockerfile inside the build context, resolved against the context subpath.\nRefused without a context by the rule on ImageBuildSpec.",
               "maxLength": 4096,
+              "minLength": 1,
               "type": "string"
             }
           },
-          "required": [
-            "kind",
-            "name"
-          ],
-          "type": "object"
-        },
-        "dockerfile": {
-          "default": "Dockerfile",
-          "description": "Dockerfile is the path to the Dockerfile within the context.",
-          "maxLength": 4096,
-          "type": "string"
+          "type": "object",
+          "x-kubernetes-validations": [
+            {
+              "message": "set exactly one of path, inline or configMapRef",
+              "rule": "(has(self.path)?1:0) + (has(self.inline)?1:0) + (has(self.configMapRef)?1:0) == 1"
+            }
+          ]
         },
         "interval": {
           "default": "1h",
@@ -316,10 +445,15 @@
         }
       },
       "required": [
-        "context",
         "platforms"
       ],
-      "type": "object"
+      "type": "object",
+      "x-kubernetes-validations": [
+        {
+          "message": "with no context there is no tree to find a Dockerfile in: set spec.context, or give the Dockerfile directly with spec.dockerfile.inline or spec.dockerfile.configMapRef",
+          "rule": "has(self.context) || (has(self.dockerfile) \u0026\u0026 (has(self.dockerfile.inline) || has(self.dockerfile.configMapRef)))"
+        }
+      ]
     },
     "status": {
       "description": "ImageBuildStatus is the observed state.",

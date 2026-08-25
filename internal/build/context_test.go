@@ -52,7 +52,7 @@ func TestFetchDockerfileStripsTheWrapperDirectory(t *testing.T) {
 		"app-4f2b1c9/main.go":    "package main\n",
 	})
 
-	got, err := FetchDockerfile(context.Background(), srv.Client(), srv.URL, "", "Dockerfile")
+	got, err := FetchDockerfile(context.Background(), srv.Client(), srv.URL, "", "Dockerfile", true)
 	if err != nil {
 		t.Fatalf("FetchDockerfile: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestFetchDockerfileHonoursSubpathAndName(t *testing.T) {
 		"repo-abc/services/api/build.docker": "FROM right\n",
 	})
 
-	got, err := FetchDockerfile(context.Background(), srv.Client(), srv.URL, "services/api", "build.docker")
+	got, err := FetchDockerfile(context.Background(), srv.Client(), srv.URL, "services/api", "build.docker", true)
 	if err != nil {
 		t.Fatalf("FetchDockerfile: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestFetchDockerfileHonoursSubpathAndName(t *testing.T) {
 func TestFetchDockerfileMissing(t *testing.T) {
 	srv := contextServer(t, map[string]string{"repo/Dockerfile": "FROM scratch\n"})
 
-	_, err := FetchDockerfile(context.Background(), srv.Client(), srv.URL, "", "Containerfile")
+	_, err := FetchDockerfile(context.Background(), srv.Client(), srv.URL, "", "Containerfile", true)
 	if err == nil {
 		t.Fatal("a missing Dockerfile was accepted")
 	}
@@ -100,7 +100,7 @@ func TestFetchDockerfileRejectsBadStatus(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	if _, err := FetchDockerfile(context.Background(), srv.Client(), srv.URL, "", "Dockerfile"); err == nil {
+	if _, err := FetchDockerfile(context.Background(), srv.Client(), srv.URL, "", "Dockerfile", true); err == nil {
 		t.Fatal("a 404 was accepted")
 	}
 }
@@ -120,8 +120,8 @@ func TestMatchesContextPath(t *testing.T) {
 		{"other", "Dockerfile", false},
 	}
 	for _, tc := range cases {
-		if got := matchesContextPath(tc.entry, tc.want); got != tc.match {
-			t.Errorf("matchesContextPath(%q, %q) = %v, want %v", tc.entry, tc.want, got, tc.match)
+		if got := matchesContextPath(tc.entry, tc.want, true); got != tc.match {
+			t.Errorf("matchesContextPath(%q, %q, true) = %v, want %v", tc.entry, tc.want, got, tc.match)
 		}
 	}
 }
@@ -133,7 +133,7 @@ func TestFetchDockerfileFeedsTheFromCheck(t *testing.T) {
 		"app-abc/Dockerfile": "FROM golang:1.26\nRUN go build\n",
 	})
 
-	body, err := FetchDockerfile(context.Background(), srv.Client(), srv.URL, "", "Dockerfile")
+	body, err := FetchDockerfile(context.Background(), srv.Client(), srv.URL, "", "Dockerfile", true)
 	if err != nil {
 		t.Fatalf("FetchDockerfile: %v", err)
 	}

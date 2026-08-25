@@ -122,20 +122,86 @@ must name a source in its own namespace.
   expiring rather than warning — an expired certificate stops the retention refresh, and that is a
   deletion one window later rather than an outage.
 
-- **Registry clustering, opt-in — and it shards rather than replicates**
-  ([ADR 0039](docs/adr/0039-zot-clustering-is-sharding.md)). zot hashes each repository name and
-  exactly one member owns it, so a member that is down makes roughly 1/N of repositories
-  unavailable, and zot's own documentation says the cluster is not self-healing. What it buys is
-  throughput and a proxy layer that survives a rolling update. The value is `registry.cluster`, not
-  `registry.ha`, for that reason.
+- **A Dockerfile can come from the spec, and a build can have no context**
+  ([ADR 0042](docs/adr/0042-content-addressed-not-flux.md)). `spec.dockerfile.inline` puts the recipe
+  in the object, so building an upstream project that ships no Dockerfile no longer means forking it
+  to add one file and carrying that fork forever. `spec.context` is optional: a Dockerfile that
+  only declares a pinned `FROM` and runs commands reads no files, and requiring a context for it
+  meant pointing a Flux source at an empty directory.
 
-  Prerequisites the chart wires but does not install: S3-compatible storage, a shared cache driver
-  (**redis** or dynamodb), and TLS. Five combinations are refused rather than rendered.
+  `spec.context` is a union rather than a bare Flux reference — `sourceRef`, `fetch` or `image`,
+  described below. The rule it enforces is **"every build input is content-addressed"**, which is
+  what the old Flux-only restriction's own reasoning actually supported; requiring Flux specifically
+  was narrower than the reason it gave.
 
-  **Use persistent redis.** `extensions.search` records the pull timestamps retention depends on,
-  and clustering moves that metadata into the cache driver. A redis restart without persistence
-  loses every timestamp, every image looks unpulled, and the next GC reclaims images live objects
-  still reference.
+  `spec.dockerfile` is a union too — `path`, `inline` or `configMapRef` — and carries **no schema
+  default**. A structural default is written into the stored object, so a defaulted `path` would
+  make every object look like it had set one and the "exactly one of" rule could never fire. The
+  effective default (`Dockerfile` at the context root) lives in the controller, the same arrangement
+  `Push.OnConflict` already uses for the same reason.
+
+  An unpinned `FROM` in an **inline** Dockerfile **stalls**, because editing this spec is what
+  fixes it and the generation change is what wakes the object. One in a Dockerfile that lives in the
+  context still retries rather than stalling: the fix is a push to the source, which raises no
+  change here.
+
+  `spec.dockerfile.configMapRef` is the modular form: a platform team owns the recipe, an
+  application team owns the `ImageBuild`, and one ConfigMap can serve several builds. The ConfigMap
+  is **watched**, so an edit rebuilds promptly rather than at the next interval — which for the
+  default hour would read as the controller being broken. Its **content** is hashed, not its name or
+  resourceVersion, so an edit rebuilds and repointing at an identical copy does not.
+
+  It cannot be pinned, so `--require-pinned-sources` **refuses** it rather than quietly exempting it.
+  The builder gains `configmaps: get;list;watch` for the watch, and nothing else: everything it
+  writes into a tenant namespace stays a Secret, the Dockerfile copy included.
+
+  `spec.context.fetch` takes the context from an archive at a **declared** digest, for a project
+  that publishes releases rather than one you track a branch of. Only archive unpack modes apply —
+  a context is a tree, and `none` or `gz` place a single file.
+
+  The build pod's context fetcher is now this operator's own binary
+  (`oci-builder fetch-context`) rather than a shell script. **The script verified nothing** — not
+  even the Flux artifact digest the controller already held — and it carried a second copy of the
+  wrapper-stripping rule that once disagreed with the controller's, so an unpinned `FROM` was
+  correctly refused and every build that passed the check then failed inside BuildKit. The fetcher
+  verifies the digest **before** unpacking, refuses path traversal, symlinks leaving the tree,
+  absolute entries and a `subpath` that matched nothing, and shares one strip rule with the
+  controller. `imageBuild.fetcherImage` defaults to the chart's own
+  builder image and joins the input hash.
+
+  The builder gains the SSRF dial guard the composer has (`imageBuild.fetchDenyPrivate`), because
+  with a fetch context the controller now GETs a **user-supplied** URL to read the Dockerfile. The
+  fetch inside the build pod is deliberately unguarded — that pod runs arbitrary code already.
+
+  `spec.context.image` takes the flattened filesystem of a digest-pinned image, applying whiteouts —
+  which is how "compose the workdir, then build it" is spelled without putting a build step inside
+  `ImageComposition` ([ADR 0042](docs/adr/0042-content-addressed-not-flux.md)). For that kind alone
+  the unpinned-`FROM` check runs in the build pod's fetcher rather than in the controller: reading
+  one file out of an image controller-side would mean giving a process shared by every namespace
+  registry credentials for arbitrary repositories. The guard moves rather than being skipped, and
+  the fetcher is our binary running before BuildKit, not user code.
+
+  The Dockerfile's bytes join the input hash and `RecipeVersion` moves to 2. Previously the content
+  needed no hashing because it rode inside the content-addressed context tarball — true then, and
+  false the moment the recipe can come from anywhere else.
+
+- **Which sources this project resolves, and which it leaves to source-controller**
+  ([ADR 0042](docs/adr/0042-content-addressed-not-flux.md)). Two rules, written down once: if the
+  spec names the exact content we resolve it, and if a mutable ref has to be tracked over time
+  source-controller does; and we only implement a source whose address can be **verified against
+  the bytes we got**.
+
+  So **git stays Flux's** — a branch needs tracking, and even a commit-pinned clone cannot be
+  verified against the commit without implementing git's object model, while `GitRepository`
+  already publishes a content-addressed tarball. HTTP blobs, ConfigMaps and container images are
+  ours, as today. **source-controller installs on its own**
+  (`flux install --components=source-controller`), which is what makes delegating git cheap rather
+  than a reason to run all of Flux.
+
+  **OCI artifacts are ours and are not built yet** — an artifact pinned by digest passes both
+  rules, `image` does not cover it, and today consuming one needs Flux for something Flux is not
+  needed for. Recorded as a known gap with a decided owner
+  ([ADR 0043](docs/adr/0043-an-oci-artifact-is-a-source-we-own.md)), not an oversight.
 
 - **A NetworkPolicy for the registry, enabled by default.** Build Jobs run in their object's
   namespace, not the release's, so every build crosses a namespace boundary to push and a
@@ -187,7 +253,52 @@ must name a source in its own namespace.
 - **`--insecure-registry`**, a list of hosts reachable over plain HTTP, matched on host so that
   naming one internal registry does not downgrade every other request.
 
+- **Read replicas for the registry** (`registry.readReplicas`,
+  [ADR 0041](docs/adr/0041-one-writer-many-readers.md)). Extra registry pods that serve pulls, so a
+  node drain stops taking image pulls down with it. Needs one store every pod can see
+  (`persistence.accessMode: ReadWriteMany`, or S3) and a shared metadata database
+  (`cache.driver`); the chart refuses to render without both.
+
+  The writer is a **StatefulSet of exactly one**, the readers a separate Deployment, so "one
+  writer" is a property of what the chart renders rather than a value somebody can raise. Scaling
+  reads is `registry.readReplicas`, which cannot reach the writer.
+
+  **Exactly one pod ever writes**, and that is the design rather than a simplification. zot
+  serialises repository writes with an in-process lock, so two instances writing one repository
+  lose tags that returned `201` — measured at 2–4%, with every instance then agreeing they were
+  never written. Collection rewrites the same index, so a replica that garbage-collects is a second
+  writer; content being actively refreshed still went missing. `test/spike` reproduces both in about
+  two minutes and is kept as the evidence.
+
+  So: pulls survive a drain, pushes do not — while the writer moves, publishing fails and retries on
+  the next reconcile, which is safe because the reconcile is idempotent. Push throughput is
+  unchanged. And the single point of failure moves to the shared store rather than disappearing.
+
+- **The registry can be placed, and is no longer evicted alongside its own consumers.**
+  `registry.nodeSelector`, `registry.tolerations`, `registry.affinity`,
+  `registry.topologySpreadConstraints`, `registry.priorityClassName` and
+  `registry.terminationGracePeriodSeconds`. Until now the registry pod spec carried no scheduling
+  fields at all — while both controllers honoured the top-level ones — so there was no supported
+  way to keep it off the nodes being cordoned. It was rescheduled in the same batch as the
+  workloads that pull from it, which then sat in `ErrImagePull` waiting for it.
+
+  Deliberately registry-scoped rather than reusing the top-level keys: the usual reason to steer
+  the registry is that it should *not* be where the controllers are, and one shared set of keys
+  could not express that.
+
+  A `PodDisruptionBudget` comes with them (`registry.podDisruptionBudget`), rendered **only above
+  one replica** — a floor of one against a single replica can never be satisfied, so it would block
+  every drain forever with nothing in the events saying why.
+
 ### Changed
+
+- **`registry.cluster` never shipped.** It briefly existed on `main` as zot's scale-out mode, which
+  **shards** — each repository lived on exactly one member, so a member going down took ~1/N of the
+  registry with it. That is throughput, not availability, and availability was what it was reached
+  for. `registry.readReplicas` replaces it, and the chart **fails** if `registry.cluster` is still
+  set rather than ignoring it, because Helm drops unknown `--set` paths in silence and the result
+  would be a quiet scale-down to one pod. [ADR 0039](docs/adr/0039-zot-clustering-is-sharding.md) is
+  superseded by [0041](docs/adr/0041-one-writer-many-readers.md).
 
 - **BREAKING: the embedded serving endpoint is removed. A registry is the only publication path**
   ([ADR 0035](docs/adr/0035-a-registry-is-the-only-publication-path.md), superseding ADR 0006).
@@ -273,8 +384,19 @@ must name a source in its own namespace.
 
 ### Fixed
 
+- **An init-container failure reported nothing actionable.** `jobFailureDetail` iterated only
+  `ContainerStatuses`, which does not include init containers, so a build whose context failed to
+  fetch said "BackoffLimitExceeded" — the mechanism, with the cause discarded. It reads
+  `InitContainerStatuses` too now, init containers first, since one failing means the build container
+  never ran.
+
 Only defects that affected 0.4.0. Bugs introduced and fixed within this release cycle are not
 listed.
+
+- **The builder could never use an image pull secret.** `builder-deployment.yaml` read
+  `.Values.imagePullSecrets`, which is not a key this chart has — so the block silently rendered
+  nothing and a private builder image was unpullable with no indication why. It reads
+  `image.pullSecrets` now, like the composer, and the registry pod gained the block it never had.
 
 - **A composition could publish a new tag holding the PREVIOUS revision's content, permanently.**
   An artifact whose status predated its own source's spec was consumed as current, and under

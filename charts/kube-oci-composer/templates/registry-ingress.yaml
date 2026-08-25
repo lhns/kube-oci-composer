@@ -54,7 +54,10 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: {{ include "kube-oci-composer.registryFullname" . }}
+                # The READ Service: an Ingress fronts pulls, and pulls fan out across every
+                # replica. Pushes never come through here -- they go to the write Service over
+                # cluster DNS.
+                name: {{ include "kube-oci-composer.registryFullname" . }}-read
                 port:
                   number: {{ .Values.registry.service.port }}
 {{- end }}

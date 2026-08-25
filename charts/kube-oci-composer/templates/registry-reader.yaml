@@ -1,0 +1,177 @@
+{{- if .Values.registry.enabled }}
+{{- /*
+The READ endpoint, and the read replicas behind it.
+
+This is the Service workloads pull from, and the one an Ingress or a NodePort exposes. It selects
+every pod serving the registry API -- the writer, plus each read replica -- so a drain that takes
+one of them costs capacity and nothing else.
+
+It exists even at readReplicas: 0, where it selects the writer alone and behaves exactly as the
+single Service did before. One code path, so there is no toggle that silently rewires how workloads
+reach the registry.
+
+Why the replicas may only READ: zot serialises repository writes with an in-process mutex, and a
+push is a read-modify-write of <repo>/index.json. Two instances writing one repository lose tags
+that returned 201 -- measured at 2-4% in test/spike -- and collection is a write too, so a replica
+that garbage-collects is a second writer. ADR 0041.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "kube-oci-composer.registryFullname" . }}-read
+  labels:
+    {{- include "kube-oci-composer.componentLabels" (dict "ctx" . "component" "registry") | nindent 4 }}
+spec:
+  selector:
+    {{- include "kube-oci-composer.registryServeSelectorLabels" . | nindent 4 }}
+  type: {{ .Values.registry.service.type }}
+  ports:
+    - name: registry
+      port: {{ .Values.registry.service.port }}
+      targetPort: registry
+      {{- if and (eq .Values.registry.service.type "NodePort") .Values.registry.service.nodePort }}
+      # A NodePort is what makes the registry reachable by the KUBELET, which resolves image
+      # references with the node's resolver and cannot see cluster DNS. Pair it with a containerd
+      # certs.d drop-in mapping registry.host to this port. See docs/registry.md.
+      nodePort: {{ .Values.registry.service.nodePort }}
+      {{- end }}
+{{- if gt (int .Values.registry.readReplicas) 0 }}
+---
+{{- /*
+A Deployment, not a StatefulSet: a read replica has no identity worth keeping. It holds no state of
+its own, its store is the shared volume, and its metadata is in the shared database -- so any pod
+can answer any request and losing one costs nothing that has to be recovered.
+
+It mounts the same claim as the writer, which is why readReplicas > 0 requires ReadWriteMany (or
+object storage, in which case the claim is not used at all).
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kube-oci-composer.registryFullname" . }}-reader
+  labels:
+    {{- include "kube-oci-composer.componentLabels" (dict "ctx" . "component" "registry-reader") | nindent 4 }}
+spec:
+  replicas: {{ .Values.registry.readReplicas }}
+  selector:
+    matchLabels:
+      {{- include "kube-oci-composer.componentSelectorLabels" (dict "ctx" . "component" "registry-reader") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/registry-config.yaml") . | sha256sum }}
+      labels:
+        {{- include "kube-oci-composer.componentSelectorLabels" (dict "ctx" . "component" "registry-reader") | nindent 8 }}
+        {{- include "kube-oci-composer.registryServeSelectorLabels" . | nindent 8 }}
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.registry.terminationGracePeriodSeconds }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.registry.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.registry.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.registry.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.registry.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.registry.affinity }}
+      affinity:
+        {{- toYaml .Values.registry.affinity | nindent 8 }}
+      {{- else }}
+      {{- /*
+      Spread the replicas across nodes, or the feature is void: N pods on one node cost N times as
+      much and survive exactly as much as one. Preferred rather than required, because required with
+      more replicas than nodes leaves pods Pending forever, and a permanently Pending pod reads as a
+      broken chart rather than as a message. The consequence is stated in values.yaml and printed by
+      NOTES: if the scheduler co-locates them, a node failure still takes them all.
+      */}}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "kube-oci-composer.registryServeSelectorLabels" . | nindent 20 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: registry
+          image: {{ .Values.registry.image | quote }}
+          args: ["serve", "/etc/zot/config.json"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          ports:
+            - name: registry
+              containerPort: 5000
+          volumeMounts:
+            - {name: config, mountPath: /etc/zot}
+            - {name: data, mountPath: /var/lib/registry}
+            {{- if .Values.registry.auth.enabled }}
+            - {name: auth, mountPath: /etc/zot/auth, readOnly: true}
+            {{- end }}
+            {{- if .Values.registry.tls.enabled }}
+            - {name: tls, mountPath: /etc/zot/tls, readOnly: true}
+            {{- end }}
+          {{- with .Values.registry.storage.s3.existingSecret }}
+          envFrom:
+            - secretRef:
+                name: {{ . }}
+          {{- end }}
+          {{- $scheme := ternary "HTTPS" "HTTP" .Values.registry.tls.enabled }}
+          readinessProbe:
+            httpGet: {path: /v2/, port: registry, scheme: {{ $scheme }}}
+            initialDelaySeconds: 2
+          livenessProbe:
+            httpGet: {path: /v2/, port: registry, scheme: {{ $scheme }}}
+            initialDelaySeconds: 10
+          resources:
+            {{- toYaml .Values.registry.readerResources | nindent 12 }}
+      volumes:
+        - name: config
+          {{- /* The reader configuration: gc off, no retention policy. */}}
+          {{- if include "kube-oci-composer.registryConfigIsSecret" . }}
+          secret:
+            secretName: {{ include "kube-oci-composer.registryFullname" . }}-reader
+          {{- else }}
+          configMap:
+            name: {{ include "kube-oci-composer.registryFullname" . }}-reader
+          {{- end }}
+        {{- if .Values.registry.tls.enabled }}
+        - name: tls
+          secret:
+            secretName: {{ include "kube-oci-composer.registryTLSSecretName" . }}
+        {{- end }}
+        {{- if .Values.registry.auth.enabled }}
+        - name: auth
+          secret:
+            secretName: {{ .Values.registry.auth.existingHtpasswdSecret | default (printf "%s-htpasswd" (include "kube-oci-composer.registryFullname" .)) }}
+        {{- end }}
+        - name: data
+        {{- if .Values.registry.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "kube-oci-composer.registryFullname" . }}
+        {{- else }}
+          emptyDir: {}
+        {{- end }}
+{{- end }}
+{{- end }}

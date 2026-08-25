@@ -127,7 +127,7 @@ func TestAStalledObjectStillHasItsImagesRefreshed(t *testing.T) {
 	// Break the spec in a way the controller refuses outright rather than retries. A source in
 	// another namespace is a tenancy violation and therefore terminal, which is what Stalled means.
 	applyBuildSpec(t, "keepalive-stalled", "Dockerfile", buildRegistry+"/"+repo, "v1",
-		"    namespace: someone-elses-namespace")
+		"      namespace: someone-elses-namespace")
 
 	buildEventually(t, "the object to go Stalled", func() error {
 		st := buildStatus(t, "keepalive-stalled")
@@ -169,8 +169,8 @@ func buildInto(t *testing.T, name, repository, tag string) string {
 // applyBuildSpec is applyBuildTo with the tag chosen too, which the retention tests need in order to
 // point two objects at one repository without them colliding on a tag.
 //
-// extraContext is appended under spec.context, already indented, for the one test that has to break
-// the reference deliberately.
+// extraContext is appended under spec.context.sourceRef, already indented, for the one test that has
+// to break the reference deliberately.
 func applyBuildSpec(t *testing.T, name, dockerfile, repository, tag string, extraContext ...string) {
 	t.Helper()
 	applyStdin(t, fmt.Sprintf(`
@@ -182,10 +182,11 @@ metadata:
 spec:
   interval: 1h
   context:
-    kind: GitRepository
-    name: e2e-src
+    sourceRef:
+      kind: GitRepository
+      name: e2e-src
 %s
-  dockerfile: %s
+  dockerfile: {path: %s}
   platforms: [linux/amd64]
   timeout: 10m
   push:

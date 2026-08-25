@@ -22,13 +22,17 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+
+	"github.com/lhns/kube-oci-composer/internal/testenv"
 )
 
 var (
@@ -57,12 +61,31 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	code := m.Run()
+	// Ctrl+C has to reach the same teardown, or an interrupted run leaks the pair.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		stopEnv()
+		os.Exit(130)
+	}()
 
+	// Deferred inside a wrapper rather than written after m.Run(): a panic in any test would
+	// otherwise skip the stop entirely, which is how this leaked in the first place.
+	code := func() (rc int) {
+		defer stopEnv()
+		return m.Run()
+	}()
+	os.Exit(code)
+}
+
+// stopEnv tears down the API server, then makes sure it is actually gone. See the twin in
+// internal/controller: Stop() cannot signal its children on Windows, so the reap closes that gap.
+func stopEnv() {
 	if err := testEnv.Stop(); err != nil {
 		fmt.Fprintf(os.Stderr, "stopping envtest: %v\n", err)
 	}
-	os.Exit(code)
+	testenv.ReapChildren()
 }
 
 func integrationCtx(t *testing.T) (context.Context, client.Client) {
