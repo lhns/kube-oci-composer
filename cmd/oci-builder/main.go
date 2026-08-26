@@ -239,16 +239,17 @@ func main() {
 		// controller. The FETCH INSIDE THE BUILD POD is deliberately unguarded: that pod is about to
 		// run arbitrary code from a Dockerfile and can already reach anything the pod network allows.
 		HTTPClient: guardedClient(fetchDenyPrivate),
-		JobConfig: buildcontroller.JobConfig{
+		JobConfig: newJobConfig(jobFlags{
 			BuilderImage:       builderImage,
 			FrontendImage:      frontendImage,
 			FetcherImage:       fetcherImage,
+			ContextBaseURL:     contextBaseURL,
 			SourceDateEpoch:    sourceDateEpoch,
 			InsecureRegistries: registry.Insecure(),
 			RegistryCA:         registryCA,
 			SBOM:               registry.SBOM,
 			Provenance:         registry.Provenance,
-		},
+		}),
 		HistoryLimit:         historyLimit,
 		RequirePinnedSources: requirePinnedSources,
 	}).SetupWithManager(mgr); err != nil {
@@ -325,5 +326,38 @@ func main() {
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "manager exited with an error")
 		os.Exit(1)
+	}
+}
+
+// jobFlags is every operator-supplied value a build Job needs.
+//
+// Its own type so newJobConfig can be tested. The literal it replaced was assembled inline, which
+// is how --context-base-url came to be defined, documented, rendered by the chart, and never
+// actually read: every unit test builds a JobConfig directly, so the whole feature was inert and
+// only the e2e noticed.
+type jobFlags struct {
+	BuilderImage       string
+	FrontendImage      string
+	FetcherImage       string
+	ContextBaseURL     string
+	SourceDateEpoch    string
+	InsecureRegistries []string
+	RegistryCA         []byte
+	SBOM               bool
+	Provenance         bool
+}
+
+// newJobConfig copies the flags across. Every field, every time -- see TestEveryJobFlagIsWired.
+func newJobConfig(f jobFlags) buildcontroller.JobConfig {
+	return buildcontroller.JobConfig{
+		BuilderImage:       f.BuilderImage,
+		FrontendImage:      f.FrontendImage,
+		FetcherImage:       f.FetcherImage,
+		ContextBaseURL:     f.ContextBaseURL,
+		SourceDateEpoch:    f.SourceDateEpoch,
+		InsecureRegistries: f.InsecureRegistries,
+		RegistryCA:         f.RegistryCA,
+		SBOM:               f.SBOM,
+		Provenance:         f.Provenance,
 	}
 }
