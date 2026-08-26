@@ -36,7 +36,13 @@ const retentionWindow = "30s"
 //
 // This is a deadline for "did it happen at all", not a measurement of when. Raising it costs nothing
 // when collection is prompt, because the poll returns as soon as the tag goes.
-const collectionDeadline = 420
+//
+// Raised from 420 after it fired on main: the control survived the full 420s, which fails the suite
+// rather than letting every retention assertion pass vacuously. One added ImageBuild -- one more
+// repository in the rotation -- was enough, which says the old value had no margin left rather than
+// that anything broke. The build was folded into an existing one, and this raised as well, because
+// the next repository anyone adds would have done the same thing.
+const collectionDeadline = 600
 
 // keepaliveRepo scopes these tests to the repository prefix the retention policy applies to, so
 // nothing else in the suite can be collected out from under it.

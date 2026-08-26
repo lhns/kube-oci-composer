@@ -22,6 +22,10 @@ import (
 const contextTokenKey = "token"
 
 // contextSecretName is the Secret holding one build's context token.
+//
+// A helper where the push, CA and Dockerfile secrets spell their names inline, because this is the
+// only one computed in two independent places: the controller mints it, and the endpoint below
+// looks it up. A name that must agree across a trust boundary gets one definition.
 func contextSecretName(job string) string { return job + "-context" }
 
 // ContextProxy streams a build's Flux artifact to its own build pod.

@@ -541,15 +541,8 @@ cat %s > /dev/termination-log
 	}
 
 	if contextSecret != "" {
-		volumes = append(volumes, corev1.Volume{
-			Name: contextTokenVolume,
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName: contextSecret,
-					Items:      []corev1.KeyToPath{{Key: contextTokenKey, Path: contextTokenFile}},
-				},
-			},
-		})
+		vol, _ := contextTokenProjection(contextSecret)
+		volumes = append(volumes, vol)
 	}
 
 	// Enforced by Kubernetes rather than by the controller noticing: ActiveDeadlineSeconds kills
@@ -655,23 +648,40 @@ func cacheRefFor(obj *ociv1alpha1.ImageBuild, repo string) string {
 	return fmt.Sprintf("%s-buildcache-%s-%s", repo, obj.Namespace, obj.Name)
 }
 
+// contextTokenProjection is the token volume and the mount that names it.
+//
+// Returned as a pair, for the reason buildVolumes gives for doing the same: a volume and the mount
+// that names it have to agree, and defining them apart is how they stop agreeing.
+//
+// subPath, as the Dockerfile uses it: a plain regular file rather than a `..data` symlink farm, and
+// no re-projection under a running pod.
+func contextTokenProjection(secret string) (corev1.Volume, corev1.VolumeMount) {
+	return corev1.Volume{
+			Name: contextTokenVolume,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: secret,
+					Items:      []corev1.KeyToPath{{Key: contextTokenKey, Path: contextTokenFile}},
+				},
+			},
+		}, corev1.VolumeMount{
+			Name:      contextTokenVolume,
+			MountPath: path.Join(contextTokenPath, contextTokenFile),
+			SubPath:   contextTokenFile,
+			ReadOnly:  true,
+		}
+}
+
 // fetchMounts is what the context fetcher mounts.
 //
 // The token is mounted HERE and nowhere else: the build container runs the user's Dockerfile, and
-// handing that a credential to the controller's context endpoint would give every RUN line the
-// ability to re-fetch -- exactly the reach this whole arrangement removes.
-//
-// subPath, for the reason the Dockerfile uses it: a plain regular file rather than a `..data`
-// symlink farm, and no re-projection under a running pod.
+// handing that a credential to the context endpoint would give every RUN line the reach this whole
+// arrangement removes.
 func fetchMounts(contextSecret string) []corev1.VolumeMount {
 	mounts := []corev1.VolumeMount{{Name: contextVolume, MountPath: contextPath}}
 	if contextSecret == "" {
 		return mounts
 	}
-	return append(mounts, corev1.VolumeMount{
-		Name:      contextTokenVolume,
-		MountPath: path.Join(contextTokenPath, contextTokenFile),
-		SubPath:   contextTokenFile,
-		ReadOnly:  true,
-	})
+	_, mount := contextTokenProjection(contextSecret)
+	return append(mounts, mount)
 }
