@@ -1,0 +1,65 @@
+{{- if .Values.imageBuild.enabled }}
+{{- /*
+Where build pods fetch their Flux source.
+
+Its own Service, separate from the metrics one, because the two have opposite audiences: metrics
+are scraped from the release namespace, and this is reached from every namespace that owns an
+ImageBuild. One Service would mean one NetworkPolicy admitting both.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "kube-oci-composer.builderFullname" . }}-context
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kube-oci-composer.componentLabels" (dict "ctx" . "component" "builder") | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: context
+      port: {{ include "kube-oci-composer.port" .Values.imageBuild.contextBindAddress }}
+      targetPort: context
+      protocol: TCP
+  selector:
+    {{- include "kube-oci-composer.componentSelectorLabels" (dict "ctx" . "component" "builder") | nindent 4 }}
+{{- if .Values.imageBuild.networkPolicy.enabled }}
+---
+{{- /*
+A CONNECTIVITY guarantee, the exact counterpart of the registry's.
+
+A build Job runs in its OBJECT's namespace, so every build crosses a namespace boundary to fetch
+its source, and a default-deny cluster blocks it. Before this endpoint existed the crossing was to
+source-controller in flux-system -- a namespace this chart does not own and therefore could not
+write a policy for, which is why the fetch leg had no equivalent to the registry's and users
+hand-wrote one per namespace.
+
+Reaching it is not reading it: every request carries a per-build bearer token, and one build's
+token does not open another's source. That is the difference from pointing build pods at
+source-controller, which serves artifacts to anyone who can connect.
+
+Same caveat as the registry's: once any policy selects the builder pod it goes from "everything
+allowed" to "only what is listed", so this file must be COMPLETE rather than merely correct.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "kube-oci-composer.builderFullname" . }}-context
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kube-oci-composer.componentLabels" (dict "ctx" . "component" "builder") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "kube-oci-composer.componentSelectorLabels" (dict "ctx" . "component" "builder") | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: {{ include "kube-oci-composer.port" .Values.imageBuild.contextBindAddress }}
+      from:
+        {{- include "kube-oci-composer.namespaceIngressFrom"
+            (dict "allowed" .Values.imageBuild.networkPolicy.allowedNamespaces
+                  "namespace" .Release.Namespace) | trim | nindent 8 }}
+{{- end }}
+{{- end }}

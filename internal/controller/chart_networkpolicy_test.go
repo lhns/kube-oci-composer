@@ -8,14 +8,25 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
+// registryNetworkPolicy returns the policy in front of the REGISTRY.
+//
+// Selected by name, not by being the first NetworkPolicy in the render. The chart ships a second
+// one for the builder's context endpoint, and "the first one" silently became that instead --
+// these tests failed pointing at a policy they were never about.
 func registryNetworkPolicy(t *testing.T, args ...string) *networkingv1.NetworkPolicy {
 	t.Helper()
 	out := render(t, args...)
-	for _, doc := range strings.Split(out, "\n---") {
+	for _, doc := range splitDocs(out) {
 		var probe struct {
-			Kind string `json:"kind"`
+			Kind     string `json:"kind"`
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
 		}
 		if err := yaml.Unmarshal([]byte(doc), &probe); err != nil || probe.Kind != "NetworkPolicy" {
+			continue
+		}
+		if !strings.HasSuffix(probe.Metadata.Name, "-registry") {
 			continue
 		}
 		var np networkingv1.NetworkPolicy
@@ -139,5 +150,94 @@ func TestThePolicyCanBeTurnedOffEntirely(t *testing.T) {
 	)
 	if np != nil {
 		t.Fatal("networkPolicy.enabled=false must render no policy at all")
+	}
+}
+
+// builderContextPolicy returns the policy in front of the builder's context endpoint.
+func builderContextPolicy(t *testing.T, args ...string) *networkingv1.NetworkPolicy {
+	t.Helper()
+	for _, doc := range splitDocs(render(t, args...)) {
+		var probe struct {
+			Kind     string `json:"kind"`
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+		}
+		if err := yaml.Unmarshal([]byte(doc), &probe); err != nil || probe.Kind != "NetworkPolicy" {
+			continue
+		}
+		if !strings.HasSuffix(probe.Metadata.Name, "-builder-context") {
+			continue
+		}
+		var np networkingv1.NetworkPolicy
+		if err := yaml.Unmarshal([]byte(doc), &np); err != nil {
+			t.Fatalf("parsing NetworkPolicy: %v", err)
+		}
+		return &np
+	}
+	return nil
+}
+
+// TestTheContextPolicyAdmitsEveryNamespaceByDefault is the fetch leg's counterpart to the
+// registry's policy, and the gap this closes.
+//
+// A build Job runs in its OBJECT's namespace, so it crosses a namespace boundary to fetch its
+// source exactly as it does to push. Before the builder served contexts, that crossing went to
+// flux-system -- a namespace this chart does not own and so could not write a policy for, which is
+// why users hand-wrote one per namespace.
+func TestTheContextPolicyAdmitsEveryNamespaceByDefault(t *testing.T) {
+	np := builderContextPolicy(t, "--set", "registry.publish.mode=internalOnly")
+	if np == nil {
+		t.Fatal("no context NetworkPolicy rendered; builds in other namespaces cannot fetch their source")
+	}
+	if got := np.Spec.PodSelector.MatchLabels["app.kubernetes.io/component"]; got != "builder" {
+		t.Errorf("the policy selects component %q; it must select the builder", got)
+	}
+	if len(np.Spec.Ingress) != 1 || len(np.Spec.Ingress[0].From) != 1 {
+		t.Fatalf("want one ingress rule from one source, got %+v", np.Spec.Ingress)
+	}
+	sel := np.Spec.Ingress[0].From[0].NamespaceSelector
+	if sel == nil || len(sel.MatchLabels) != 0 {
+		t.Errorf("the default policy must admit every namespace, got %+v", sel)
+	}
+}
+
+// TestNarrowingTheContextPolicyKeepsTheReleaseNamespace — an ImageBuild in the release namespace
+// builds there, and omitting it would break exactly the install that never left one namespace.
+func TestNarrowingTheContextPolicyKeepsTheReleaseNamespace(t *testing.T) {
+	np := builderContextPolicy(t,
+		"--set", "registry.publish.mode=internalOnly",
+		"--set", "imageBuild.networkPolicy.allowedNamespaces={team-a}")
+	if np == nil {
+		t.Fatal("no context NetworkPolicy rendered")
+	}
+
+	admitted := map[string]bool{}
+	for _, from := range np.Spec.Ingress[0].From {
+		if from.NamespaceSelector == nil {
+			continue
+		}
+		if len(from.NamespaceSelector.MatchLabels) == 0 {
+			t.Error("a narrowed policy must not still admit every namespace")
+		}
+		admitted[from.NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"]] = true
+	}
+	for _, want := range []string{"team-a", "oci-composer"} {
+		if !admitted[want] {
+			t.Errorf("namespace %q is not admitted; got %v", want, admitted)
+		}
+	}
+}
+
+// TestBuildPodsAreToldTheServiceAddress — the URL is used by pods in other namespaces, so a
+// loopback or localhost address would render, lint and then fail every build.
+func TestBuildPodsAreToldTheServiceAddress(t *testing.T) {
+	out := render(t, "--set", "registry.publish.mode=internalOnly")
+	if !strings.Contains(out, "--context-base-url=http://test-release-kube-oci-composer-builder-context.oci-composer.svc.") {
+		t.Error("the builder is not given a cluster-resolvable context URL")
+	}
+	if strings.Contains(out, "--context-base-url=http://localhost") ||
+		strings.Contains(out, "--context-base-url=http://127.0.0.1") {
+		t.Error("the context URL is loopback; build pods in other namespaces cannot reach it")
 	}
 }

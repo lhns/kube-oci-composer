@@ -203,6 +203,31 @@ must name a source in its own namespace.
   needed for. Recorded as a known gap with a decided owner
   ([ADR 0043](docs/adr/0043-an-oci-artifact-is-a-source-we-own.md)), not an oversight.
 
+- **Build pods no longer reach source-controller** ([ADR 0044](docs/adr/0044-the-builder-proxies-flux-sources.md),
+  closing threat I11). The builder serves each build its own Flux artifact, against a per-build
+  bearer token, and re-resolves the URL from the `ImageBuild` rather than taking it from the
+  request — so a token opens exactly one build and steers nowhere.
+
+  It closes a real weakness rather than a connectivity gap. source-controller serves artifacts over
+  **plain HTTP with no authentication**, so any pod that can reach it can fetch *any* namespace's
+  source. Build pods used to fetch directly, and the NetworkPolicy you had to write per namespace to
+  make builds work on a default-deny cluster was itself what granted every tenant's build pod that
+  reach. `imageBuild.networkPolicy` now admits build namespaces to the **builder** instead — a pod
+  this chart owns, where reaching the endpoint is not reading it.
+
+  A pipe, not a cache: nothing is stored, and the pod still verifies the digest, so a wrong answer
+  is caught rather than built. Only `sourceRef` goes through it; `context.fetch` and `context.image`
+  are external by nature and stay direct, because proxying an arbitrary user URL would make the
+  controller an SSRF amplifier. The cost, stated in the ADR: the controller is now in the data path,
+  so a builder that dies mid-stream fails that build.
+
+- **The context fetch is retried**, which fixes builds failing permanently on any default-deny
+  cluster. `fetch-context` dials at t=0 of a brand-new pod, every CNI programs NetworkPolicy
+  asynchronously *after* the pod has its IP, and the denial arrives as `connection refused` rather
+  than a timeout — so it reads like a broken Service. With `backoffLimit: 0` there was no second
+  attempt and a transient condition was a permanent failure. Six attempts over about fifteen
+  seconds; 4xx and digest mismatches are not retried.
+
 - **A NetworkPolicy for the registry, enabled by default.** Build Jobs run in their object's
   namespace, not the release's, so every build crosses a namespace boundary to push and a
   default-deny cluster blocks it. The policy admits every namespace on the registry port, which is

@@ -502,8 +502,18 @@ func (r *ImageBuildReconciler) startBuild(ctx context.Context, obj *ociv1alpha1.
 		}
 	}
 
+	// Only a sourceRef context goes through the builder. A `fetch` URL and an `image` reference are
+	// external by nature and the pod fetches them itself, so they need no token -- see ADR 0044.
+	var contextSecret string
+	if obj.Spec.Context.GetSourceRef() != nil && r.JobConfig.ContextBaseURL != "" {
+		contextSecret, err = r.contextTokenFor(ctx, obj, jobName(obj, inputHash))
+		if err != nil {
+			return err
+		}
+	}
+
 	job := buildJob(obj, inputHash, contextURL, inputs.ContextDigest, r.JobConfig, r.repositoryFor(obj), pushSecret,
-		caSecret, dockerfileSecret, r.cacheAvailable(ctx, obj))
+		caSecret, dockerfileSecret, contextSecret, r.cacheAvailable(ctx, obj))
 	if err := ctrl.SetControllerReference(obj, job, r.Scheme()); err != nil {
 		return fmt.Errorf("setting owner: %w", err)
 	}

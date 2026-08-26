@@ -57,6 +57,13 @@ spec:
           args:
             - --metrics-bind-address={{ .Values.imageBuild.metricsBindAddress }}
             - --health-probe-bind-address={{ .Values.imageBuild.healthProbeBindAddress }}
+            - --context-bind-address={{ .Values.imageBuild.contextBindAddress }}
+            {{- /*
+            The URL BUILD PODS use, so it must resolve from any namespace: the Service DNS, never
+            localhost. Unset would leave build pods fetching source-controller directly, which the
+            binary warns about at startup.
+            */}}
+            - --context-base-url=http://{{ include "kube-oci-composer.builderFullname" . }}-context.{{ .Release.Namespace }}.svc.{{ .Values.registry.clusterDomain }}:{{ include "kube-oci-composer.port" .Values.imageBuild.contextBindAddress }}
             - --leader-elect={{ .Values.imageBuild.leaderElect }}
             - --buildkit-image={{ .Values.imageBuild.buildkitImage }}
             - --dockerfile-frontend={{ .Values.imageBuild.dockerfileFrontend }}
@@ -79,6 +86,8 @@ spec:
                 fieldRef:
                   fieldPath: metadata.namespace
           ports:
+            - name: context
+              containerPort: {{ include "kube-oci-composer.port" .Values.imageBuild.contextBindAddress }}
             - name: metrics
               containerPort: {{ include "kube-oci-composer.port" .Values.imageBuild.metricsBindAddress }}
             - name: probes

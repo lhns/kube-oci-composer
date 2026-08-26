@@ -38,6 +38,12 @@ const (
 	dockerfileName   = "Dockerfile"
 	dockerfileKey    = "Dockerfile"
 	secretPath       = "/secrets"
+
+	// Where the per-build context token is projected. subPath, like the Dockerfile, so it is a
+	// plain regular file rather than a symlink farm.
+	contextTokenVolume = "context-token"
+	contextTokenPath   = "/context-token"
+	contextTokenFile   = "token"
 	// Where the copied registry CA is mounted, and where the merged bundle is written. The bundle
 	// is an emptyDir because uid 1000 cannot write to the image's root-owned /etc/ssl/certs.
 	registryCAPath = "/registry-ca"
@@ -94,6 +100,14 @@ type JobConfig struct {
 	// use a different tool. It is deliberately NOT part of the input hash — how the bytes are
 	// transported does not change what they are, so flipping it must not rebuild anything.
 	InsecureRegistries []string
+	// ContextBaseURL is where a build pod fetches its Flux context from: this controller, not
+	// source-controller. Empty leaves the pod fetching source-controller directly, which is what
+	// happens in tests that render a Job without an operator configuration.
+	//
+	// Not part of the input hash. It is where the bytes come from, not what they are -- the same
+	// note RegistryCA and InsecureRegistries carry.
+	ContextBaseURL string
+
 	// SourceDateEpoch is the timestamp stamped into the result. Zero by default, matching the
 	// composer's fixed epoch.
 	SourceDateEpoch string
@@ -160,7 +174,9 @@ func rootlessSecurityContext() *corev1.SecurityContext {
 
 // fetchContextArgs is what the init container is told to fetch. See internal/fetchcontext for why
 // this is our own binary rather than the shell script it replaced.
-func fetchContextArgs(obj *ociv1alpha1.ImageBuild, contextURL, contextDigest string) []string {
+func fetchContextArgs(obj *ociv1alpha1.ImageBuild, cfg JobConfig, inputHash, contextURL,
+	contextDigest string) []string {
+
 	args := []string{
 		"fetch-context",
 		"--dest=" + contextPath,
@@ -173,6 +189,19 @@ func fetchContextArgs(obj *ociv1alpha1.ImageBuild, contextURL, contextDigest str
 		args = append(args, "--dockerfile="+obj.Spec.Dockerfile.EffectiveDockerfile())
 	}
 	if ref := obj.Spec.Context.GetSourceRef(); ref != nil {
+		// Through the BUILDER, not source-controller. source-controller serves artifacts with no
+		// authentication, so a pod able to reach it can read any namespace's source; the builder
+		// serves only the artifact this build references, against a per-build token. See
+		// ContextProxy and ADR 0044.
+		//
+		// Unset only when the operator did not configure an endpoint, which the chart always does
+		// and the binary warns about at startup. The pod then fetches source-controller itself, as
+		// it did before -- a working build with the old reach, rather than a broken URL.
+		if cfg.ContextBaseURL != "" {
+			args[2] = fmt.Sprintf("--url=%s/contexts/%s/%s/%s",
+				strings.TrimSuffix(cfg.ContextBaseURL, "/"), obj.Namespace, obj.Name, inputHash)
+			args = append(args, "--token-file="+path.Join(contextTokenPath, contextTokenFile))
+		}
 		return append(args, "--kind=sourceRef", "--unpack=tar.gz", "--subpath="+ref.Subpath)
 	}
 	if img := obj.Spec.Context.GetImage(); img != nil {
@@ -409,7 +438,7 @@ func registryCAVolumes(caSecret string) ([]corev1.Volume, []corev1.VolumeMount) 
 
 // buildJob renders the Job for one build.
 func buildJob(obj *ociv1alpha1.ImageBuild, inputHash, contextURL, contextDigest string, cfg JobConfig,
-	repo, pushSecret, caSecret, dockerfileSecret string, cacheAvailable bool) *batchv1.Job {
+	repo, pushSecret, caSecret, dockerfileSecret, contextSecret string, cacheAvailable bool) *batchv1.Job {
 
 	spec := obj.Spec
 	args := buildctlArgs(obj, cfg, repo, cacheAvailable)
@@ -498,8 +527,8 @@ cat %s > /dev/termination-log
 		fetch := corev1.Container{
 			Name:                     "fetch-context",
 			Image:                    cfg.FetcherImage,
-			Args:                     fetchContextArgs(obj, contextURL, contextDigest),
-			VolumeMounts:             []corev1.VolumeMount{{Name: contextVolume, MountPath: contextPath}},
+			Args:                     fetchContextArgs(obj, cfg, inputHash, contextURL, contextDigest),
+			VolumeMounts:             fetchMounts(contextSecret),
 			SecurityContext:          rootlessSecurityContext(),
 			TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 		}
@@ -509,6 +538,18 @@ cat %s > /dev/termination-log
 			fetch.Resources = *spec.Resources
 		}
 		initContainers = append(initContainers, fetch)
+	}
+
+	if contextSecret != "" {
+		volumes = append(volumes, corev1.Volume{
+			Name: contextTokenVolume,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: contextSecret,
+					Items:      []corev1.KeyToPath{{Key: contextTokenKey, Path: contextTokenFile}},
+				},
+			},
+		})
 	}
 
 	// Enforced by Kubernetes rather than by the controller noticing: ActiveDeadlineSeconds kills
@@ -612,4 +653,25 @@ func cacheRefFor(obj *ociv1alpha1.ImageBuild, repo string) string {
 		return ""
 	}
 	return fmt.Sprintf("%s-buildcache-%s-%s", repo, obj.Namespace, obj.Name)
+}
+
+// fetchMounts is what the context fetcher mounts.
+//
+// The token is mounted HERE and nowhere else: the build container runs the user's Dockerfile, and
+// handing that a credential to the controller's context endpoint would give every RUN line the
+// ability to re-fetch -- exactly the reach this whole arrangement removes.
+//
+// subPath, for the reason the Dockerfile uses it: a plain regular file rather than a `..data`
+// symlink farm, and no re-projection under a running pod.
+func fetchMounts(contextSecret string) []corev1.VolumeMount {
+	mounts := []corev1.VolumeMount{{Name: contextVolume, MountPath: contextPath}}
+	if contextSecret == "" {
+		return mounts
+	}
+	return append(mounts, corev1.VolumeMount{
+		Name:      contextTokenVolume,
+		MountPath: path.Join(contextTokenPath, contextTokenFile),
+		SubPath:   contextTokenFile,
+		ReadOnly:  true,
+	})
 }

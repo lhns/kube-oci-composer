@@ -2,6 +2,8 @@ package buildcontroller
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -390,4 +392,47 @@ func (r *ImageBuildReconciler) dockerfileSecretFor(
 		// Nothing to refresh, and an Update would be refused by Immutable anyway.
 	}
 	return df.Name, nil
+}
+
+// contextTokenFor mints the bearer token the build pod uses to fetch its own context.
+//
+// Random and per-build, in a Secret named for the Job -- so the name carries the input hash, and a
+// token cannot open a build other than the one it was minted for. Owner-referenced, so it is
+// deleted with the object; Immutable, because the pod reads it once at startup and nothing may
+// change what it is under a running build.
+//
+// On AlreadyExists the STORED value is returned rather than the freshly generated one. A retry or a
+// leader change must hand the pod the token the endpoint will actually accept.
+func (r *ImageBuildReconciler) contextTokenFor(
+	ctx context.Context, obj *ociv1alpha1.ImageBuild, jobName string,
+) (string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("generating a context token: %w", err)
+	}
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      contextSecretName(jobName),
+			Namespace: obj.Namespace,
+			Labels:    map[string]string{"app.kubernetes.io/managed-by": "kube-oci-builder"},
+			Annotations: map[string]string{
+				"oci.lhns.de/description": "Lets this build fetch its own source through the " +
+					"builder, so the build pod never reaches source-controller. Deleted with the build.",
+			},
+		},
+		Type:      corev1.SecretTypeOpaque,
+		Immutable: ptr.To(true),
+		Data:      map[string][]byte{contextTokenKey: []byte(hex.EncodeToString(raw))},
+	}
+	if err := ctrl.SetControllerReference(obj, secret, r.Scheme()); err != nil {
+		return "", fmt.Errorf("setting owner on the context token: %w", err)
+	}
+
+	if err := r.Create(ctx, secret); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return "", fmt.Errorf("creating the context token: %w", err)
+		}
+	}
+	return secret.Name, nil
 }
