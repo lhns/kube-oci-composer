@@ -72,6 +72,12 @@
                   "pattern": "^sha256:[a-f0-9]{64}$",
                   "type": "string"
                 },
+                "stripComponents": {
+                  "description": "StripComponents removes this many leading path components from every entry, before Subpath\nis applied.\n\nFor an archive that wraps everything in one directory -- a release tarball is\n\"app-1.2.3/Dockerfile\" -- `stripComponents: 1` drops that level. The alternative is\n`subpath: app-1.2.3`, which carries the version and so has to be edited on every release.\n\nPath components, not a tar flag: it behaves the same for every archive format.\n\nZero, the default, leaves the archive's own paths alone. Nothing infers this from the source\nkind -- doing so is what broke every sourceRef context, since a Flux artifact has no wrapping\ndirectory to remove (ADR 0045). A value that would remove every entry is an error rather than\na silently empty layer.",
+                  "maximum": 16,
+                  "minimum": 0,
+                  "type": "integer"
+                },
                 "subpath": {
                   "description": "Subpath selects one directory from inside the archive and strips the prefix. Useful when a\nrelease tarball wraps everything in a version-named directory you do not want in the image.\nA subpath matching nothing is an error rather than a silently empty layer.\n\nApplies to the archive unpack modes only. It is invalid with \"gz\", which unpacks a single\nfile, and ignored with \"none\".",
                   "maxLength": 4096,
@@ -104,7 +110,13 @@
                 "digest",
                 "url"
               ],
-              "type": "object"
+              "type": "object",
+              "x-kubernetes-validations": [
+                {
+                  "message": "stripComponents applies to archive unpack modes only: 'none' and 'gz' place a single file, so there are no path components to remove",
+                  "rule": "!has(self.stripComponents) || self.stripComponents == 0 || (has(self.unpack) \u0026\u0026 self.unpack != 'none' \u0026\u0026 self.unpack != 'gz')"
+                }
+              ]
             },
             "image": {
               "description": "Image takes the flattened filesystem of a digest-pinned image as the context.\n\nFor building on what CI already published. Costs a pull and a flatten in the build pod on\nevery cache miss, so prefer sourceRef where it would do.\n\n`FROM \u003cimage\u003e@sha256:… AS ctx` plus `COPY --from=ctx` does much the same with no context at\nall. Reach for this when the image IS the tree the build reads -- notably an\nImageComposition's output, which is how \"compose the workdir, then build it\" is spelled.",

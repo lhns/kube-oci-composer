@@ -16,6 +16,37 @@ import (
 	"testing"
 )
 
+// file is one entry for tarGzMany.
+type file struct{ name, body string }
+
+// tarGzMany builds a multi-entry archive, which is what a real artifact looks like: several files,
+// and a bare "." for the root. tarGz writes one entry and cannot express either.
+func tarGzMany(t *testing.T, files ...file) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(zw)
+	for _, f := range files {
+		hdr := &tar.Header{Name: f.name, Mode: 0o644, Size: int64(len(f.body))}
+		if strings.HasSuffix(f.name, "/") {
+			hdr.Typeflag, hdr.Mode, hdr.Size = tar.TypeDir, 0o755, 0
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(f.body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
 func tarGz(t *testing.T, name, body string) []byte {
 	t.Helper()
 	var buf bytes.Buffer
@@ -174,10 +205,19 @@ func TestNoDigestIsRefused(t *testing.T) {
 	}
 }
 
-// TestAFluxArtifactHasItsWrapperStripped — source-controller wraps the tree in one directory whose
-// name nobody can predict, and buildctl looks for the Dockerfile at the root.
-func TestAFluxArtifactHasItsWrapperStripped(t *testing.T) {
-	blob := tarGz(t, "src-abc123/Dockerfile", "FROM scratch\n")
+// TestAFluxArtifactArrivesUntouched is the regression this file previously asserted backwards.
+//
+// It used to claim source-controller wraps its tree in an unpredictable directory and that the
+// fetcher removes it. It does not wrap: a GitRepository artifact carries a bare "." entry and then
+// files at the ROOT. Removing a level therefore dropped every root-level file -- Dockerfile,
+// package.json -- and moved every nested path up one, so `subpath: ui` matched nothing. ADR 0045.
+//
+// The old fixture agreed with the belief, which is why nothing caught it.
+func TestAFluxArtifactArrivesUntouched(t *testing.T) {
+	blob := tarGzMany(t,
+		file{"./", ""},
+		file{"Dockerfile", "FROM scratch\n"},
+		file{"ui/Button.tsx", "export {}\n"})
 	dest := filepath.Join(t.TempDir(), "workspace")
 
 	err := Run(t.Context(), Options{
@@ -188,7 +228,10 @@ func TestAFluxArtifactHasItsWrapperStripped(t *testing.T) {
 		t.Fatalf("fetch: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dest, "Dockerfile")); err != nil {
-		t.Errorf("the wrapper directory was not stripped: %v", err)
+		t.Errorf("a root-level file was dropped: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "ui", "Button.tsx")); err != nil {
+		t.Errorf("a nested path was moved: %v", err)
 	}
 }
 

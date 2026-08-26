@@ -254,6 +254,7 @@ func (r *ImageBuildReconciler) resolveInputs(ctx context.Context, obj *ociv1alph
 		ContextRevision:  resolved.art.Revision,
 		Attestations:     attestationMode(r.JobConfig),
 		ContextSubpath:   resolved.subpath,
+		ContextStrip:     resolved.strip,
 		ContextUnpack:    resolved.unpack,
 		DockerfileKind:   dockerfile.kind,
 		Dockerfile:       dockerfile.path,
@@ -273,6 +274,7 @@ func (r *ImageBuildReconciler) resolveInputs(ctx context.Context, obj *ociv1alph
 type contextInputs struct {
 	kind    string
 	subpath string
+	strip   int
 	unpack  string
 	art     source.FluxArtifact
 }
@@ -298,8 +300,9 @@ func (r *ImageBuildReconciler) resolveContext(ctx context.Context, obj *ociv1alp
 		// Nothing to resolve: the digest is DECLARED, which is what makes an arbitrary URL a legal
 		// build input. The bytes are verified against it in the build pod, before anything is
 		// unpacked -- see internal/fetchcontext.
-		return contextInputs{kind: "fetch", subpath: f.Subpath, unpack: string(f.Unpack),
-			art: source.FluxArtifact{URL: f.URL, Digest: f.Digest}}, nil
+		return contextInputs{kind: "fetch", subpath: f.Subpath, strip: f.StripComponents,
+			unpack: string(f.Unpack),
+			art:    source.FluxArtifact{URL: f.URL, Digest: f.Digest}}, nil
 
 	case c.GetSourceRef() != nil:
 		return r.resolveSourceRef(ctx, obj, c.GetSourceRef())
@@ -436,17 +439,17 @@ func (r *ImageBuildReconciler) dockerfileBytes(ctx context.Context, obj *ociv1al
 	}
 
 	var subpath string
-	stripWrapper := true
+	var strip int
 	if ref := obj.Spec.Context.GetSourceRef(); ref != nil {
 		subpath = ref.Subpath
 	}
 	if f := obj.Spec.Context.GetFetch(); f != nil {
-		// No unpredictable wrapper to strip in a fetched archive -- `subpath` names a version-named
-		// one. Stripping anyway would look past the real top-level directory.
-		subpath, stripWrapper = f.Subpath, false
+		// Only a fetch carries a strip depth: it is the one kind whose archive might wrap its
+		// contents. A sourceRef never strips, which is the whole of ADR 0045.
+		subpath, strip = f.Subpath, f.StripComponents
 	}
 	content, err = build.FetchDockerfile(ctx, r.httpClient(), contextURL,
-		subpath, obj.Spec.Dockerfile.EffectiveDockerfile(), stripWrapper)
+		subpath, obj.Spec.Dockerfile.EffectiveDockerfile(), strip)
 	if err != nil {
 		return nil, false, fmt.Errorf("reading the Dockerfile: %w", err)
 	}

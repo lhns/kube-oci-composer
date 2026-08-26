@@ -5,10 +5,10 @@ import (
 	"compress/gzip"
 	"context"
 	"fmt"
+	"github.com/lhns/kube-oci-composer/internal/archive"
 	"io"
 	"net/http"
 	"path"
-	"strings"
 	"time"
 )
 
@@ -39,7 +39,7 @@ const (
 
 // FetchDockerfile returns the named file from a gzipped-tar build context.
 func FetchDockerfile(ctx context.Context, client *http.Client, url, subpath, dockerfile string,
-	stripWrapper bool) ([]byte, error) {
+	strip int) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()
 
@@ -79,7 +79,7 @@ func FetchDockerfile(ctx context.Context, client *http.Client, url, subpath, doc
 		if hdr.Typeflag != tar.TypeReg {
 			continue
 		}
-		if !matchesContextPath(hdr.Name, want, stripWrapper) {
+		if !matchesContextPath(hdr.Name, want, strip) {
 			continue
 		}
 
@@ -91,27 +91,13 @@ func FetchDockerfile(ctx context.Context, client *http.Client, url, subpath, doc
 	}
 }
 
-// matchesContextPath reports whether a tar entry is the file being looked for, ignoring the
-// unpredictable top-level directory source-controller adds.
-// stripWrapper applies to a source-controller artifact and to nothing else: it wraps the tree in one
-// top-level directory whose name is unpredictable. A FETCHED archive is whatever the publisher made
-// it, so stripping there would look past a real top-level directory and report the Dockerfile
-// missing -- `subpath` is how a version-named wrapper is named in that case.
+// matchesContextPath reports whether an archive entry is the file being looked for.
 //
-// The same rule as archive.Extract's, and the reason both name it: when the two copies of this
-// disagreed, an unpinned FROM was correctly refused and every build that passed the check then
-// failed inside BuildKit.
-func matchesContextPath(entry, want string, stripWrapper bool) bool {
-	clean := strings.TrimPrefix(path.Clean(entry), "./")
-	if clean == want {
-		return true
-	}
-	if !stripWrapper {
-		return false
-	}
-	// Strip one leading path segment — the wrapper directory — and compare again.
-	if _, rest, ok := strings.Cut(clean, "/"); ok {
-		return rest == want
-	}
-	return false
+// The SAME mapping the extractor uses, so the file this finds is the file the build gets. It used
+// to be a second, more forgiving rule -- exact match first, then skip a leading component -- which
+// is how the Dockerfile kept being found while the context around it was emptied, and why that bug
+// surfaced as a BuildKit error rather than a fetch failure. ADR 0045.
+func matchesContextPath(entry, want string, strip int) bool {
+	place := archive.NewMapping(strip, "").Map(entry)
+	return place.Selected && place.Dest == want
 }

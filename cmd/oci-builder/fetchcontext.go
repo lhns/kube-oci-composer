@@ -29,6 +29,8 @@ func runFetchContext(args []string) {
 	fs.StringVar(&opts.Digest, "digest", "", "sha256 the fetched bytes must have. Required.")
 	fs.StringVar(&opts.Unpack, "unpack", "tar.gz", "Archive mode: tar or tar.gz.")
 	fs.StringVar(&opts.Subpath, "subpath", "", "Directory inside the archive to take as the context.")
+	fs.IntVar(&opts.Strip, "strip-components", 0,
+		"Leading path components to remove from every entry, before --subpath is applied.")
 	fs.StringVar(&opts.Dest, "dest", "", "Where to write the tree.")
 	fs.StringVar(&opts.Dockerfile, "dockerfile", "",
 		"Path inside the context whose FROM lines must be digest-pinned. Empty skips the check, "+

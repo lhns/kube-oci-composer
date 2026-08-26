@@ -17,8 +17,8 @@ import (
 // When subpath is set, only entries beneath it are taken, and the prefix is stripped so the
 // selected directory's contents land at target rather than the directory itself. Everything about
 // WHERE an entry lands is the collector's; this function only translates tar's typeflags.
-func extractTar(tr *tar.Reader, target, subpath string) ([]tarEntry, error) {
-	c := newCollector(target, subpath)
+func extractTar(tr *tar.Reader, target, subpath string, strip int) ([]tarEntry, error) {
+	c := newCollector(target, subpath, strip)
 
 	for {
 		hdr, err := tr.Next()

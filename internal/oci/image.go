@@ -25,11 +25,11 @@ import (
 
 // extractImage returns the flattened filesystem of img, rebased under target and filtered by
 // subpath.
-func extractImage(img v1.Image, target, subpath string) ([]tarEntry, error) {
+func extractImage(img v1.Image, target, subpath string, strip int) ([]tarEntry, error) {
 	rc := mutate.Extract(img)
 	defer rc.Close()
 
-	entries, err := extractTar(tar.NewReader(rc), target, subpath)
+	entries, err := extractTar(tar.NewReader(rc), target, subpath, strip)
 	if err != nil {
 		return nil, fmt.Errorf("reading image filesystem: %w", err)
 	}

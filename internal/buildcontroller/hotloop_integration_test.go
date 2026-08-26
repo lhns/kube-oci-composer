@@ -52,7 +52,7 @@ func TestAFailingBuildDoesNotSpinTheQueue(t *testing.T) {
 		t.Fatalf("creating namespace: %v", err)
 	}
 
-	srv := contextServer(t, contextTarball(t, "src-abc123/", pinnedFrom))
+	srv := contextServer(t, contextTarball(t, "", pinnedFrom))
 	src := fluxSource("hotloop", "src", srv.URL, "sha256:ctx", "main@sha1:abcd")
 	if err := k8s.Create(ctx, src); err != nil {
 		t.Fatalf("creating source: %v", err)

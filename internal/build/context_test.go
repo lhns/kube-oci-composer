@@ -52,7 +52,7 @@ func TestFetchDockerfileStripsTheWrapperDirectory(t *testing.T) {
 		"app-4f2b1c9/main.go":    "package main\n",
 	})
 
-	got, err := FetchDockerfile(context.Background(), srv.Client(), srv.URL, "", "Dockerfile", true)
+	got, err := FetchDockerfile(context.Background(), srv.Client(), srv.URL, "", "Dockerfile", 1)
 	if err != nil {
 		t.Fatalf("FetchDockerfile: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestFetchDockerfileHonoursSubpathAndName(t *testing.T) {
 		"repo-abc/services/api/build.docker": "FROM right\n",
 	})
 
-	got, err := FetchDockerfile(context.Background(), srv.Client(), srv.URL, "services/api", "build.docker", true)
+	got, err := FetchDockerfile(context.Background(), srv.Client(), srv.URL, "services/api", "build.docker", 1)
 	if err != nil {
 		t.Fatalf("FetchDockerfile: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestFetchDockerfileHonoursSubpathAndName(t *testing.T) {
 func TestFetchDockerfileMissing(t *testing.T) {
 	srv := contextServer(t, map[string]string{"repo/Dockerfile": "FROM scratch\n"})
 
-	_, err := FetchDockerfile(context.Background(), srv.Client(), srv.URL, "", "Containerfile", true)
+	_, err := FetchDockerfile(context.Background(), srv.Client(), srv.URL, "", "Containerfile", 1)
 	if err == nil {
 		t.Fatal("a missing Dockerfile was accepted")
 	}
@@ -100,28 +100,46 @@ func TestFetchDockerfileRejectsBadStatus(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	if _, err := FetchDockerfile(context.Background(), srv.Client(), srv.URL, "", "Dockerfile", true); err == nil {
+	if _, err := FetchDockerfile(context.Background(), srv.Client(), srv.URL, "", "Dockerfile", 1); err == nil {
 		t.Fatal("a 404 was accepted")
 	}
 }
 
-// TestMatchesContextPath — the wrapper-stripping rule, directly.
+// TestMatchesContextPath — the path rule, directly, at both depths.
+//
+// It used to try the exact match FIRST and only then skip a leading component, so it found a
+// Dockerfile whatever the archive's shape. That tolerance looked helpful and was not: it kept
+// finding the file while the extractor next to it emptied the context around it, which is why the
+// bug in ADR 0045 presented as a BuildKit error rather than a fetch failure. One rule now, the
+// same one the extractor uses.
 func TestMatchesContextPath(t *testing.T) {
 	cases := []struct {
 		entry, want string
+		strip       int
 		match       bool
 	}{
-		{"app-abc/Dockerfile", "Dockerfile", true},
-		{"./app-abc/Dockerfile", "Dockerfile", true},
-		{"Dockerfile", "Dockerfile", true},
-		{"app-abc/services/api/Dockerfile", "services/api/Dockerfile", true},
-		{"app-abc/nested/Dockerfile", "Dockerfile", false},
-		{"app-abc/Dockerfile.dev", "Dockerfile", false},
-		{"other", "Dockerfile", false},
+		// Nothing stripped: the archive's paths are the paths. This is a Flux artifact.
+		{"Dockerfile", "Dockerfile", 0, true},
+		{"./Dockerfile", "Dockerfile", 0, true},
+		{"services/api/Dockerfile", "services/api/Dockerfile", 0, true},
+		{"app-abc/Dockerfile", "Dockerfile", 0, false},
+
+		// One component removed: a release tarball, with stripComponents: 1.
+		{"app-abc/Dockerfile", "Dockerfile", 1, true},
+		{"./app-abc/Dockerfile", "Dockerfile", 1, true},
+		{"app-abc/services/api/Dockerfile", "services/api/Dockerfile", 1, true},
+		{"app-abc/nested/Dockerfile", "Dockerfile", 1, false},
+		{"app-abc/Dockerfile.dev", "Dockerfile", 1, false},
+
+		// Shallower than the strip depth: nothing of it remains, so it matches nothing. The old
+		// rule returned true here, and that is precisely the tolerance being removed.
+		{"Dockerfile", "Dockerfile", 1, false},
+		{"other", "Dockerfile", 1, false},
 	}
 	for _, tc := range cases {
-		if got := matchesContextPath(tc.entry, tc.want, true); got != tc.match {
-			t.Errorf("matchesContextPath(%q, %q, true) = %v, want %v", tc.entry, tc.want, got, tc.match)
+		if got := matchesContextPath(tc.entry, tc.want, tc.strip); got != tc.match {
+			t.Errorf("matchesContextPath(%q, %q, %d) = %v, want %v",
+				tc.entry, tc.want, tc.strip, got, tc.match)
 		}
 	}
 }
@@ -133,7 +151,7 @@ func TestFetchDockerfileFeedsTheFromCheck(t *testing.T) {
 		"app-abc/Dockerfile": "FROM golang:1.26\nRUN go build\n",
 	})
 
-	body, err := FetchDockerfile(context.Background(), srv.Client(), srv.URL, "", "Dockerfile", true)
+	body, err := FetchDockerfile(context.Background(), srv.Client(), srv.URL, "", "Dockerfile", 1)
 	if err != nil {
 		t.Fatalf("FetchDockerfile: %v", err)
 	}

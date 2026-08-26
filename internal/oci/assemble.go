@@ -87,6 +87,7 @@ func InputHash(inputs []LayerInput, cfg Config, baseDigest string, platforms []P
 		writeField(in.identity())
 		writeField(string(in.Unpack))
 		writeField(in.Subpath)
+		fmt.Fprintf(h, "strip=%d;", in.StripComponents)
 		writeField(in.Target)
 		fmt.Fprintf(h, "u=%d;g=%d;fm=%d;dm=%d;", in.UID, in.GID, in.FileMode, in.DirMode)
 		fmt.Fprintf(h, "rm=%d;", len(in.Remove))
@@ -271,6 +272,10 @@ type LayerInput struct {
 	// Used by sourceRef layers, where the artifact is a whole repository and usually only one
 	// directory of it belongs in the image.
 	Subpath string
+
+	// StripComponents is how many leading path components to remove from every entry, applied
+	// BEFORE Subpath. Zero leaves the archive's own paths alone.
+	StripComponents int
 	// Target is the absolute path inside the image.
 	Target string
 	// Remove lists absolute paths to delete. Mutually exclusive with a content source; an entry
@@ -619,7 +624,7 @@ func collectEntries(in LayerInput) ([]tarEntry, error) {
 	// An image contributes a filesystem rather than a fetched file, so it returns before the open
 	// below — there is no Path to open. Checked here rather than as a switch arm for that reason.
 	if in.Image != nil {
-		return extractImage(in.Image, target, in.Subpath)
+		return extractImage(in.Image, target, in.Subpath, in.StripComponents)
 	}
 
 	// Every mode past this point reads the fetched file, so it is opened once here rather than in
@@ -635,7 +640,7 @@ func collectEntries(in LayerInput) ([]tarEntry, error) {
 	// A tar under a codec. Looked up rather than listed as case labels, so the set of modes and
 	// their codecs cannot disagree — see tarCompressions.
 	if comp, ok := tarCompressions[in.Unpack]; ok {
-		return extractTarball(f, comp, target, in.Subpath)
+		return extractTarball(f, comp, target, in.Subpath, in.StripComponents)
 	}
 
 	switch in.Unpack {
@@ -646,10 +651,10 @@ func collectEntries(in LayerInput) ([]tarEntry, error) {
 		return singleFile(f, in, target, compGzip)
 
 	case UnpackZip:
-		return extractZip(f, target, in.Subpath)
+		return extractZip(f, target, in.Subpath, in.StripComponents)
 
 	case UnpackDeb:
-		return extractDeb(f, target, in.Subpath)
+		return extractDeb(f, target, in.Subpath, in.StripComponents)
 
 	default:
 		// Reached when the CRD admits a mode this build does not implement. Typed so the reconciler
@@ -694,12 +699,12 @@ func singleFile(f *os.File, in LayerInput, target string, comp compression) ([]t
 //
 // Deferring the codec cleanup here is safe because extractTar materialises every entry before it
 // returns; a change that made it return a lazy reader would have to move this.
-func extractTarball(f *os.File, comp compression, target, subpath string) ([]tarEntry, error) {
+func extractTarball(f *os.File, comp compression, target, subpath string, strip int) ([]tarEntry, error) {
 	r, closeFn, err := decompress(f, comp)
 	if err != nil {
 		return nil, err
 	}
 	defer closeFn()
 
-	return extractTar(tar.NewReader(r), target, subpath)
+	return extractTar(tar.NewReader(r), target, subpath, strip)
 }

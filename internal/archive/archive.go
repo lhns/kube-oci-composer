@@ -4,6 +4,9 @@
 // a build context has to be real files for BuildKit's `--local` to read. Same input, different
 // sink. Keeping it neutral also keeps ADR 0025 true -- internal/oci contributes nothing to a
 // build -- where an import from the build path into internal/oci would falsify it.
+//
+// Different sinks, ONE path rule: Mapping decides where an entry lands and internal/oci calls it
+// too. Two copies of that rule is what ADR 0023 forbade and what ADR 0045 was written about.
 package archive
 
 import (
@@ -39,11 +42,10 @@ const maxEntries = 500_000
 // subpath, when set, selects one directory out of the archive and strips its prefix, so dest ends
 // up holding that directory's contents rather than the directory itself.
 //
-// stripWrapper handles what source-controller does and nothing else does: an artifact wraps the
-// tree in one top-level directory whose name is unpredictable. It strips a segment only when there
-// really is one such directory, so an archive whose files sit at the root still arrives intact.
-// Deliberately the same rule as build.MatchesContextPath, which it once disagreed with.
-func Extract(r io.Reader, mode Mode, dest, subpath string, stripWrapper bool) error {
+// strip removes that many leading path components from every entry, before subpath is considered.
+// Zero leaves the archive's own paths alone, which is what a Flux artifact wants: its entries are
+// already at the root. See Mapping, which both this and the composer's assembler share.
+func Extract(r io.Reader, mode Mode, dest, subpath string, strip int) error {
 	tr, closeFn, err := reader(r, mode)
 	if err != nil {
 		return err
@@ -54,12 +56,9 @@ func Extract(r io.Reader, mode Mode, dest, subpath string, stripWrapper bool) er
 		return fmt.Errorf("creating %s: %w", dest, err)
 	}
 
-	want := strings.Trim(path.Clean("/"+subpath), "/")
-	if want == "." {
-		want = ""
-	}
+	m := NewMapping(strip, subpath)
 
-	var written int
+	var written, survivors int
 	var matched bool
 	for {
 		hdr, err := tr.Next()
@@ -82,19 +81,25 @@ func Extract(r io.Reader, mode Mode, dest, subpath string, stripWrapper bool) er
 				"archive describes", hdr.Name)
 		}
 
-		name, selected, inSubpath := target(hdr.Name, want, stripWrapper)
-		matched = matched || inSubpath
-		if !selected {
+		place := m.Map(hdr.Name)
+		if place.Survived {
+			survivors++
+		}
+		matched = matched || place.InSubpath
+		if !place.Selected {
 			continue
 		}
-		if err := writeEntry(tr, hdr, dest, name); err != nil {
+		if err := writeEntry(tr, hdr, dest, place.Dest); err != nil {
 			return err
 		}
 	}
 
-	// A subpath that selected nothing is a typo, and staying silent about it hands BuildKit an
-	// empty context instead. Same refusal as the composer's collector.done.
-	if want != "" && !matched {
+	// Both of these refuse a silently empty tree, which is the failure that produced this rule:
+	// an empty context reads as a broken build somewhere else entirely.
+	if strip > 0 && survivors == 0 {
+		return fmt.Errorf("stripComponents %d removed every entry in the archive", strip)
+	}
+	if m.Subpath() != "" && !matched {
 		return fmt.Errorf("subpath %q is not present in the archive", subpath)
 	}
 	return nil
@@ -113,36 +118,6 @@ func reader(r io.Reader, mode Mode) (*tar.Reader, func(), error) {
 	default:
 		return nil, nil, fmt.Errorf("unpack %q is not an archive mode this build can extract", mode)
 	}
-}
-
-// target maps an archive entry to its path under dest.
-//
-// selected is whether to write it; inSubpath is whether it lies within subpath at all. They differ
-// for the subpath directory entry itself, which proves the subpath exists but contributes no file.
-func target(entry, subpath string, stripWrapper bool) (name string, selected, inSubpath bool) {
-	clean := strings.TrimPrefix(path.Clean(entry), "./")
-	if clean == "." || clean == "/" {
-		return "", false, false
-	}
-	if stripWrapper {
-		_, rest, ok := strings.Cut(clean, "/")
-		if !ok {
-			// The wrapper directory itself. It becomes dest, so it contributes no entry.
-			return "", false, false
-		}
-		clean = rest
-	}
-	if subpath == "" {
-		return clean, clean != "", true
-	}
-	if clean == subpath {
-		return "", false, true
-	}
-	rest, ok := strings.CutPrefix(clean, subpath+"/")
-	if !ok || rest == "" {
-		return "", false, false
-	}
-	return rest, true, true
 }
 
 // writeEntry places one archive entry, refusing anything that would land outside dest.
