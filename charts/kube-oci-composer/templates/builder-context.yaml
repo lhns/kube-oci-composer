@@ -58,25 +58,8 @@ spec:
         - protocol: TCP
           port: {{ include "kube-oci-composer.port" .Values.imageBuild.contextBindAddress }}
       from:
-        {{- if .Values.imageBuild.networkPolicy.allowedNamespaces }}
-        {{- range .Values.imageBuild.networkPolicy.allowedNamespaces }}
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: {{ . | quote }}
-        {{- end }}
-        {{- /*
-        The release's own namespace, unconditionally when the list is narrowed: an ImageBuild here
-        builds here, and omitting it would break exactly the install that never left one namespace.
-        */}}
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
-        {{- else }}
-        {{- /*
-        Every namespace, because a build can land anywhere and this policy's job is to let it
-        through. The token is what decides who reads what.
-        */}}
-        - namespaceSelector: {}
-        {{- end }}
+        {{- include "kube-oci-composer.namespaceIngressFrom"
+            (dict "allowed" .Values.imageBuild.networkPolicy.allowedNamespaces
+                  "namespace" .Release.Namespace) | trim | nindent 8 }}
 {{- end }}
 {{- end }}

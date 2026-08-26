@@ -92,6 +92,37 @@ release is atomic, that blocked every upgrade.
 {{ include "kube-oci-composer.registryServeRoleLabel" . }}
 {{- end -}}
 
+{{- /*
+The `from:` list for a policy that admits whole namespaces.
+
+Shared by the registry's policy and the builder's context policy, which had the same block twice:
+the listed namespaces, plus the release's own whenever the list is narrowed. Two copies of a rule
+about who may reach what is the kind that drifts, and the drift is silent -- a policy that admits
+one namespace too few fails as a timeout somewhere else entirely.
+
+Callers pass (dict "allowed" <list> "namespace" .Release.Namespace) and indent the result.
+*/}}
+{{- define "kube-oci-composer.namespaceIngressFrom" -}}
+{{- if .allowed -}}
+{{- range .allowed }}
+- namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: {{ . | quote }}
+{{- end }}
+{{- /*
+The release's own namespace, unconditionally when the list is narrowed. Both controllers live
+there, and for the registry omitting it would stop the retention refresh -- whose silence deletes
+images one window later (ADR 0031).
+*/}}
+- namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: {{ .namespace | quote }}
+{{- else }}
+{{- /* Every namespace: a build can land anywhere, and this is a connectivity guarantee. */}}
+- namespaceSelector: {}
+{{- end }}
+{{- end -}}
+
 {{- define "kube-oci-composer.componentLabels" -}}
 {{ include "kube-oci-composer.labels" .ctx }}
 app.kubernetes.io/component: {{ .component }}

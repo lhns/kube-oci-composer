@@ -37,28 +37,9 @@ spec:
         - protocol: TCP
           port: {{ .Values.registry.service.port }}
       from:
-        {{- if .Values.registry.networkPolicy.allowedNamespaces }}
-        {{- range .Values.registry.networkPolicy.allowedNamespaces }}
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: {{ . | quote }}
-        {{- end }}
-        {{- /*
-        The release's own namespace is added unconditionally when the list is narrowed: both
-        controllers live here and both talk to the registry constantly, so omitting it would stop
-        publishing and -- worse -- stop the retention refresh, whose silence deletes images one
-        window later (ADR 0031).
-        */}}
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
-        {{- else }}
-        {{- /*
-        Every namespace. An empty namespaceSelector matches all of them, which is the default
-        because a build can land anywhere and this policy's job is to let it through.
-        */}}
-        - namespaceSelector: {}
-        {{- end }}
+        {{- include "kube-oci-composer.namespaceIngressFrom"
+            (dict "allowed" .Values.registry.networkPolicy.allowedNamespaces
+                  "namespace" .Release.Namespace) | trim | nindent 8 }}
         {{- /*
         Node traffic, for kubelet image pulls. Not a pod, so not selectable any other way.
         */}}
