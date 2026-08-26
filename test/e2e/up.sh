@@ -135,7 +135,11 @@ mkdir -p "$WORK/src-e2e"
 cp "$HERE/manifests/dockerfile" "$WORK/src-e2e/Dockerfile"
 cp "$HERE/manifests/dockerfile.unpinned" "$WORK/src-e2e/Dockerfile.unpinned"
 cp "$HERE/manifests/dockerfile.other" "$WORK/src-e2e/Dockerfile.other"
-tar -czf "$WORK/context.tar.gz" -C "$WORK" src-e2e
+# Archived from INSIDE src-e2e, so entries land at the root -- "./", "Dockerfile" -- which is the
+# shape source-controller actually publishes. Archiving the directory itself wrapped everything in
+# "src-e2e/", and that fixture agreed with a wrong assumption in the fetcher: the suite passed while
+# every real sourceRef build was dropping its root-level files. See ADR 0045.
+tar -czf "$WORK/context.tar.gz" -C "$WORK/src-e2e" .
 
 kubectl -n "$BUILD_NS" create configmap e2e-context \
   --from-file=context.tar.gz="$WORK/context.tar.gz" \

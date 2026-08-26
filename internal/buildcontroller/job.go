@@ -210,7 +210,8 @@ func fetchContextArgs(obj *ociv1alpha1.ImageBuild, cfg JobConfig, inputHash, con
 		return append(args, "--kind=image", "--subpath="+img.Subpath)
 	}
 	f := obj.Spec.Context.GetFetch()
-	return append(args, "--kind=fetch", "--unpack="+string(f.Unpack), "--subpath="+f.Subpath)
+	return append(args, "--kind=fetch", "--unpack="+string(f.Unpack), "--subpath="+f.Subpath,
+		fmt.Sprintf("--strip-components=%d", f.StripComponents))
 }
 
 // buildctlArgs assembles the buildctl invocation. Split out because it is the part that decides

@@ -60,6 +60,7 @@ func (r *ImageCompositionReconciler) resolveInputs(ctx context.Context, obj *oci
 			in.Digest = l.Fetch.Digest
 			in.Unpack = oci.UnpackMode(orDefault(string(l.Fetch.Unpack), "none"))
 			in.Subpath = l.Fetch.Subpath
+			in.StripComponents = l.Fetch.StripComponents
 
 		case l.SourceRef != nil:
 			art, err := r.resolveFluxSource(ctx, obj, l.SourceRef)

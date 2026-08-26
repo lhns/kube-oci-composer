@@ -14,6 +14,7 @@ func sampleInputs() Inputs {
 		ContextUnpack:    "tar.gz",
 		ContextDigest:    "sha256:cccc",
 		ContextSubpath:   "src",
+		ContextStrip:     2,
 		DockerfileKind:   "path",
 		Dockerfile:       "Dockerfile",
 		DockerfileDigest: "",
@@ -62,6 +63,7 @@ func hashMutations() []hashMutation {
 			in.DockerfileDigest = "sha256:dddd"
 		}},
 		{"ContextSubpath", "context subpath", func(in *Inputs) { in.ContextSubpath = "other" }},
+		{"ContextStrip", "context strip depth", func(in *Inputs) { in.ContextStrip = 1 }},
 		{"Dockerfile", "dockerfile", func(in *Inputs) { in.Dockerfile = "build/Dockerfile" }},
 		{"Target", "target", func(in *Inputs) { in.Target = "debug" }},
 		{"Network", "network", func(in *Inputs) { in.Network = "None" }},

@@ -2,6 +2,7 @@ package oci
 
 import (
 	"fmt"
+	"github.com/lhns/kube-oci-composer/internal/archive"
 	"path"
 	"strings"
 )
@@ -21,25 +22,26 @@ import (
 type collector struct {
 	// target is the cleaned, relative destination inside the image. Empty is the image root.
 	target string
-	// prefix is the cleaned subpath, empty for the whole archive.
-	prefix string
+	// mapping decides where an entry lands: how deep to strip, and which subdirectory to take.
+	// SHARED with the builder's fetcher -- see archive.Mapping and ADR 0045. Two copies of this
+	// rule is what ADR 0023 forbade, and what broke every sourceRef build when it happened anyway.
+	mapping archive.Mapping
 	// subpath is the subpath as declared, kept only so the error message quotes what was written.
 	subpath string
-	// matched records whether prefix selected anything at all.
+	// matched records whether the subpath selected anything at all.
 	matched bool
+	// survivors counts entries deeper than the strip depth, so a strip that emptied the archive is
+	// refused rather than producing a silently empty layer.
+	survivors int
 	// dirs de-duplicates directory entries, whether they came from the archive or were synthesised.
 	dirs    map[string]bool
 	entries []tarEntry
 }
 
-func newCollector(target, subpath string) *collector {
-	prefix := strings.Trim(path.Clean("/"+subpath), "/")
-	if prefix == "." {
-		prefix = ""
-	}
+func newCollector(target, subpath string, strip int) *collector {
 	return &collector{
 		target:  target,
-		prefix:  prefix,
+		mapping: archive.NewMapping(strip, subpath),
 		subpath: subpath,
 		dirs:    make(map[string]bool),
 	}
@@ -74,27 +76,23 @@ func (c *collector) rebase(name string) (dest string, ok bool, err error) {
 	// "/etc/passwd" names a path inside the archive's own idea of a root and has an obvious
 	// harmless reading, whereas ".." has none.
 	clean = strings.TrimPrefix(clean, "/")
-	if clean == "" || clean == "." {
+
+	// Everything from here -- strip depth, subpath selection -- is the shared rule.
+	place := c.mapping.Map(clean)
+	if place.Survived {
+		c.survivors++
+	}
+	if place.InSubpath {
+		c.matched = true
+	}
+	if !place.Selected {
 		return "", false, nil
 	}
 
-	if c.prefix != "" {
-		switch {
-		case clean == c.prefix:
-			c.matched = true
-			return "", false, nil // the directory itself; its contents are what we want
-		case strings.HasPrefix(clean, c.prefix+"/"):
-			c.matched = true
-			clean = strings.TrimPrefix(clean, c.prefix+"/")
-		default:
-			return "", false, nil
-		}
-	}
-
 	if c.target == "" {
-		return clean, true, nil
+		return place.Dest, true, nil
 	}
-	return path.Join(c.target, clean), true, nil
+	return path.Join(c.target, place.Dest), true, nil
 }
 
 // addDir records a directory, ignoring a repeat.
@@ -135,7 +133,10 @@ func (c *collector) addSymlink(name, link string) {
 // A subpath that matched nothing is a silent empty layer, and the workload then starts with files
 // missing for no visible reason. Far better to stall on a typo.
 func (c *collector) done() ([]tarEntry, error) {
-	if c.prefix != "" && !c.matched {
+	if c.mapping.Strip > 0 && c.survivors == 0 {
+		return nil, fmt.Errorf("stripComponents %d removed every entry in the archive", c.mapping.Strip)
+	}
+	if c.mapping.Subpath() != "" && !c.matched {
 		return nil, fmt.Errorf("path %q is not present in the archive", c.subpath)
 	}
 	return c.entries, nil

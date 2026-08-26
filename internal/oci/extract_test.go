@@ -45,7 +45,7 @@ func TestExtractRefusesTraversal(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			// target is set, since that is the case where an escape actually leaves somewhere it
 			// was confined to.
-			_, err := extractTar(tarWithNames(t, entry), "opt/vendor", "")
+			_, err := extractTar(tarWithNames(t, entry), "opt/vendor", "", 0)
 			if err == nil {
 				t.Fatalf("entry %q was accepted; it escapes the target directory", entry)
 			}
@@ -61,7 +61,7 @@ func TestExtractRefusesTraversal(t *testing.T) {
 // with no target inherits a weaker guard than one with.
 func TestExtractRefusesTraversalWithoutATarget(t *testing.T) {
 	for _, entry := range []string{"../etc/passwd", ".."} {
-		if _, err := extractTar(tarWithNames(t, entry), "", ""); err == nil {
+		if _, err := extractTar(tarWithNames(t, entry), "", "", 0); err == nil {
 			t.Errorf("entry %q was accepted with no target", entry)
 		}
 	}
@@ -72,7 +72,7 @@ func TestExtractRefusesTraversalWithoutATarget(t *testing.T) {
 // the archive's own idea of a root, so it has an obvious and harmless reading, whereas ".." does
 // not. Pinned here so it reads as a decision rather than an oversight.
 func TestExtractDeRootsAbsoluteNames(t *testing.T) {
-	entries, err := extractTar(tarWithNames(t, "/etc/passwd"), "opt", "")
+	entries, err := extractTar(tarWithNames(t, "/etc/passwd"), "opt", "", 0)
 	if err != nil {
 		t.Fatalf("extractTar: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestExtractDeRootsAbsoluteNames(t *testing.T) {
 // resolves it before it is used as a prefix, so the worst case is selecting nothing.
 func TestExtractSubpathCannotEscape(t *testing.T) {
 	// "../x" cleans to "x", which the archive does contain, so this selects x/ normally.
-	entries, err := extractTar(tarWithNames(t, "x/a.txt"), "opt", "../x")
+	entries, err := extractTar(tarWithNames(t, "x/a.txt"), "opt", "../x", 0)
 	if err != nil {
 		t.Fatalf("extractTar: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestExtractSubpathCannotEscape(t *testing.T) {
 	}
 
 	// A subpath that resolves to nothing present is the existing terminal error, not an escape.
-	if _, err := extractTar(tarWithNames(t, "x/a.txt"), "opt", "../nope"); err == nil {
+	if _, err := extractTar(tarWithNames(t, "x/a.txt"), "opt", "../nope", 0); err == nil {
 		t.Error("a subpath matching nothing was accepted")
 	}
 }

@@ -46,8 +46,11 @@ type Options struct {
 	Digest string
 	// Unpack is the archive mode.
 	Unpack string
-	// Subpath selects one directory out of the archive.
+	// Subpath selects one directory out of the archive, after Strip has been applied.
 	Subpath string
+	// Strip is how many leading path components to remove from every entry. Zero leaves the
+	// archive's paths alone, which is what a Flux artifact wants.
+	Strip int
 	// Dest is where the tree is written.
 	Dest string
 	// Dockerfile is a path inside the context whose FROM lines must all be digest-pinned. Empty
@@ -90,10 +93,11 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	defer f.Close()
 
-	// The wrapper strip applies to a Flux artifact and nothing else: source-controller wraps the
-	// tree in one directory whose name is unpredictable. In a fetched tarball, `subpath` names it.
+	// How deep to strip comes from the SPEC, never from the kind. Deciding it from the kind is what
+	// broke every sourceRef build: source-controller does not wrap its tree, so removing a level
+	// dropped every root-level file. See ADR 0045.
 	if err := archive.Extract(f, archive.Mode(opts.Unpack), opts.Dest, opts.Subpath,
-		opts.Kind == "sourceRef"); err != nil {
+		opts.Strip); err != nil {
 		return err
 	}
 	return checkDockerfile(opts)
@@ -289,7 +293,7 @@ func image(ctx context.Context, opts Options) error {
 
 	// The same extractor as every other kind, so traversal, symlink and subpath rules are one
 	// implementation rather than three.
-	if err := archive.Extract(rc, archive.ModeTar, opts.Dest, opts.Subpath, false); err != nil {
+	if err := archive.Extract(rc, archive.ModeTar, opts.Dest, opts.Subpath, opts.Strip); err != nil {
 		return err
 	}
 	return checkDockerfile(opts)

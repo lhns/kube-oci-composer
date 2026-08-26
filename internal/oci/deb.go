@@ -90,11 +90,11 @@ func openDebData(r io.Reader) (io.Reader, func(), error) {
 //
 // Payload entries are named "./usr/lib/…"; extractTar's path.Clean drops the leading "./", so
 // subpath and target are written without one.
-func extractDeb(r io.Reader, target, subpath string) ([]tarEntry, error) {
+func extractDeb(r io.Reader, target, subpath string, strip int) ([]tarEntry, error) {
 	dr, closeFn, err := openDebData(r)
 	if err != nil {
 		return nil, err
 	}
 	defer closeFn()
-	return extractTar(tar.NewReader(dr), target, subpath)
+	return extractTar(tar.NewReader(dr), target, subpath, strip)
 }

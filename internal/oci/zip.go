@@ -39,7 +39,7 @@ import (
 const zipEncryptedFlag = 0x1
 
 // extractZip reads a zip archive and rebases its entries under target, filtered by subpath.
-func extractZip(f *os.File, target, subpath string) ([]tarEntry, error) {
+func extractZip(f *os.File, target, subpath string, strip int) ([]tarEntry, error) {
 	size, err := f.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("sizing zip: %w", err)
@@ -49,7 +49,7 @@ func extractZip(f *os.File, target, subpath string) ([]tarEntry, error) {
 		return nil, fmt.Errorf("reading zip: %w", err)
 	}
 
-	c := newCollector(target, subpath)
+	c := newCollector(target, subpath, strip)
 	// Tracks emitted non-directory destinations, so a duplicate is refused rather than resolved.
 	// Directories are excluded because repeats of those are ordinary and the collector absorbs them.
 	seen := make(map[string]bool, len(zr.File))

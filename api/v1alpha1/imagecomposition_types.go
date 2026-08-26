@@ -103,6 +103,8 @@ type BaseImage struct {
 }
 
 // FetchSource retrieves content over HTTP(S).
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.stripComponents) || self.stripComponents == 0 || (has(self.unpack) && self.unpack != 'none' && self.unpack != 'gz')",message="stripComponents applies to archive unpack modes only: 'none' and 'gz' place a single file, so there are no path components to remove"
 type FetchSource struct {
 	// URL to fetch.
 	// +kubebuilder:validation:Pattern=`^https?://`
@@ -130,6 +132,24 @@ type FetchSource struct {
 	// +kubebuilder:validation:MaxLength=4096
 	// +optional
 	Subpath string `json:"subpath,omitempty"`
+
+	// StripComponents removes this many leading path components from every entry, before Subpath
+	// is applied.
+	//
+	// For an archive that wraps everything in one directory -- a release tarball is
+	// "app-1.2.3/Dockerfile" -- `stripComponents: 1` drops that level. The alternative is
+	// `subpath: app-1.2.3`, which carries the version and so has to be edited on every release.
+	//
+	// Path components, not a tar flag: it behaves the same for every archive format.
+	//
+	// Zero, the default, leaves the archive's own paths alone. Nothing infers this from the source
+	// kind -- doing so is what broke every sourceRef context, since a Flux artifact has no wrapping
+	// directory to remove (ADR 0045). A value that would remove every entry is an error rather than
+	// a silently empty layer.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=16
+	// +optional
+	StripComponents int `json:"stripComponents,omitempty"`
 }
 
 // ConfigMapSource turns a ConfigMap's entries into files.

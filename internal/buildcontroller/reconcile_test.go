@@ -47,8 +47,13 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	return s
 }
 
-// contextTarball is a build context holding one Dockerfile. prefix is the wrapper directory
-// source-controller adds; empty puts the file at the archive root.
+// contextTarball is a build context holding one Dockerfile.
+//
+// prefix wraps the file in a directory, which is what a RELEASE TARBALL looks like and what
+// `stripComponents` exists for. Empty is what source-controller publishes: files at the root. This
+// comment used to say the opposite -- that the prefix was "the wrapper directory source-controller
+// adds" -- and every caller passed one, so the fixtures agreed with a belief that was never true
+// and the suite passed while every sourceRef build dropped its root-level files. ADR 0045.
 func contextTarball(t *testing.T, prefix, dockerfile string) []byte {
 	t.Helper()
 	var buf bytes.Buffer
@@ -106,7 +111,7 @@ func gitRepositoryAt(namespace, name, url, digest, revision string) *unstructure
 // harness wires a reconciler over a fake client, with a server standing in for the context.
 func harness(t *testing.T, dockerfile string, objs ...client.Object) *ImageBuildReconciler {
 	t.Helper()
-	srv := contextServer(t, contextTarball(t, "src-abc123/", dockerfile))
+	srv := contextServer(t, contextTarball(t, "", dockerfile))
 	all := append([]client.Object{gitRepository("team-a", "src", srv.URL, "sha256:ctx")}, objs...)
 
 	c := fake.NewClientBuilder().
@@ -525,7 +530,7 @@ func TestContextRevisionIsHonoured(t *testing.T) {
 	obj := buildOf(t, func(o *ociv1alpha1.ImageBuild) {
 		o.Spec.Context.SourceRef.Revision = "v0.6.8"
 	})
-	srv := contextServer(t, contextTarball(t, "src-abc123/", pinnedFrom))
+	srv := contextServer(t, contextTarball(t, "", pinnedFrom))
 	src := gitRepositoryAt("team-a", "src", srv.URL, "sha256:ctx", "v0.6.5@sha1:aaaaaaa")
 
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
@@ -551,7 +556,7 @@ func TestContextRevisionMatchingBuilds(t *testing.T) {
 	obj := buildOf(t, func(o *ociv1alpha1.ImageBuild) {
 		o.Spec.Context.SourceRef.Revision = "v0.6.8"
 	})
-	srv := contextServer(t, contextTarball(t, "src-abc123/", pinnedFrom))
+	srv := contextServer(t, contextTarball(t, "", pinnedFrom))
 	src := gitRepositoryAt("team-a", "src", srv.URL, "sha256:ctx", "v0.6.8@sha1:b739efb5")
 
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).

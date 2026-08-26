@@ -58,6 +58,11 @@ deterministic ordering and traversal refusal are the same code the tar path uses
 `extract.go` so there is exactly one implementation of *where an entry is allowed to land*. Two
 copies of that check would mean the next hardening reaching one of them.
 
+> **This happened.** `internal/archive` was later written as a second copy, for the builder's own
+> context fetcher, and the next change to path handling reached one of them and was wrong — every
+> `ImageBuild` with a `sourceRef` context broke while the composer was fine. The rule is shared
+> again in [ADR 0045](0045-one-implementation-of-where-an-entry-lands.md).
+
 `gz` unpacks a single compressed file rather than an archive, so `to` must name a file and
 `subpath` is invalid. The name in the image comes from `to` and nothing else: gzip records an
 original filename in its header and the URL usually ends in one, and using either would make the

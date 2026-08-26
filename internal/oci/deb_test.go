@@ -122,7 +122,7 @@ func byName(entries []tarEntry) map[string]tarEntry {
 func TestExtractDebTakesOnlyTheDataMember(t *testing.T) {
 	deb := buildDeb(t, ".xz", []tarFile{{name: "./usr/bin/tool", body: "payload"}})
 
-	entries, err := extractDeb(bytes.NewReader(deb), "", "")
+	entries, err := extractDeb(bytes.NewReader(deb), "", "", 0)
 	if err != nil {
 		t.Fatalf("extractDeb: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestExtractDebEveryCompression(t *testing.T) {
 	for _, suffix := range []string{"", ".gz", ".xz", ".zst"} {
 		t.Run("data.tar"+suffix, func(t *testing.T) {
 			deb := buildDeb(t, suffix, []tarFile{{name: "./usr/bin/tool", body: "payload"}})
-			entries, err := extractDeb(bytes.NewReader(deb), "", "")
+			entries, err := extractDeb(bytes.NewReader(deb), "", "", 0)
 			if err != nil {
 				t.Fatalf("extractDeb: %v", err)
 			}
@@ -164,7 +164,7 @@ func TestExtractDebPreservesRelativeSymlinks(t *testing.T) {
 		{name: "./usr/lib/x86_64-linux-gnu/lua/5.4/lualdap.so", link: "../../liblua5.4-ldap.so.0.0.0"},
 	})
 
-	entries, err := extractDeb(bytes.NewReader(deb), "", "usr/lib/x86_64-linux-gnu")
+	entries, err := extractDeb(bytes.NewReader(deb), "", "usr/lib/x86_64-linux-gnu", 0)
 	if err != nil {
 		t.Fatalf("extractDeb: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestExtractDebRebasesUnderTarget(t *testing.T) {
 		{name: "./usr/lib/thing.so", body: "ELF"},
 	})
 
-	entries, err := extractDeb(bytes.NewReader(deb), "opt/vendor", "usr/lib")
+	entries, err := extractDeb(bytes.NewReader(deb), "opt/vendor", "usr/lib", 0)
 	if err != nil {
 		t.Fatalf("extractDeb: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestExtractDebRejectsMalformed(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := extractDeb(bytes.NewReader(tc.in), "", "")
+			_, err := extractDeb(bytes.NewReader(tc.in), "", "", 0)
 			if err == nil {
 				t.Fatal("expected an error")
 			}

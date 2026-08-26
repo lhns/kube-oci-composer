@@ -203,6 +203,39 @@ must name a source in its own namespace.
   needed for. Recorded as a known gap with a decided owner
   ([ADR 0043](docs/adr/0043-an-oci-artifact-is-a-source-we-own.md)), not an oversight.
 
+- **Fixed: every `ImageBuild` with a `sourceRef` context**
+  ([ADR 0045](docs/adr/0045-one-implementation-of-where-an-entry-lands.md)). The context fetcher
+  removed one leading path component from every entry whenever the context came from a Flux source,
+  believing source-controller wraps its tree in a directory. It does not — a `GitRepository`
+  artifact has its files at the root. So every root-level file was taken for the wrapping directory
+  and **dropped**, and every nested path moved up a level, which made `subpath` match nothing. The
+  fetch reported success, so it surfaced as `failed to compute cache key: "/package.json": not
+  found` from BuildKit.
+
+  Nothing infers depth from the source kind any more, and the composer and the builder share one
+  implementation of where an entry lands — which [ADR 0023](docs/adr/0023-more-archive-formats.md)
+  already required, and whose absence is exactly what let the two disagree.
+
+- **`fetch.stripComponents`, on both kinds.** Removes that many leading path components from every
+  entry, before `subpath`:
+
+  ```yaml
+  fetch:
+    url: https://github.com/me/app/archive/v1.2.3.tar.gz
+    digest: sha256:…
+    unpack: tar.gz
+    stripComponents: 1     # drops the app-1.2.3/ level
+  ```
+
+  Reaching into a release tarball previously meant `subpath: app-1.2.3`, which carries the version
+  and so had to be edited on every bump. Path components, not a tar flag: it behaves the same for
+  tar, zip, deb and image layers, because it lives in the one shared path rule.
+
+  **Upgrading rebuilds every `ImageComposition` once.** The field is hashed unconditionally rather
+  than only when set, so existing specs get a new input hash. Harmless — `output = f(spec)`, so the
+  digest and tag come out identical and the push is a no-op — but it is real work on first
+  reconcile.
+
 - **Build pods no longer reach source-controller** ([ADR 0044](docs/adr/0044-the-builder-proxies-flux-sources.md),
   closing threat I11). The builder serves each build its own Flux artifact, against a per-build
   bearer token, and re-resolves the URL from the `ImageBuild` rather than taking it from the

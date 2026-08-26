@@ -131,7 +131,7 @@ func TestExtractZipMapsEntryKinds(t *testing.T) {
 		{name: "dev/pipe", mode: 0o644 | fs.ModeNamedPipe},
 	})
 
-	entries, err := extractZip(src, "", "")
+	entries, err := extractZip(src, "", "", 0)
 	if err != nil {
 		t.Fatalf("extractZip: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestExtractZipMapsEntryKinds(t *testing.T) {
 func TestExtractZipSynthesisesParentDirs(t *testing.T) {
 	entries, err := extractZip(openZip(t, []zipEntry{
 		{name: "a/b/c.txt", body: "x"},
-	}), "", "")
+	}), "", "", 0)
 	if err != nil {
 		t.Fatalf("extractZip: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestExtractZipSynthesisesParentDirs(t *testing.T) {
 		{name: "a/"},
 		{name: "a/b/"},
 		{name: "a/b/c.txt", body: "x"},
-	}), "", "")
+	}), "", "", 0)
 	if err != nil {
 		t.Fatalf("extractZip: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestExtractZipSynthesisesParentDirs(t *testing.T) {
 func TestExtractZipNormalisesBackslashSeparators(t *testing.T) {
 	entries, err := extractZip(openZip(t, []zipEntry{
 		{name: `dir\sub\file.txt`, body: "x"},
-	}), "", "")
+	}), "", "", 0)
 	if err != nil {
 		t.Fatalf("extractZip: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestExtractZipRefusesTraversal(t *testing.T) {
 		`..\`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := extractZip(openZip(t, []zipEntry{{name: name, body: "x"}}), "opt", "")
+			_, err := extractZip(openZip(t, []zipEntry{{name: name, body: "x"}}), "opt", "", 0)
 			if err == nil {
 				t.Fatalf("entry %q was accepted; it escapes the target directory", name)
 			}
@@ -245,7 +245,7 @@ func TestExtractZipRefusesDuplicateNames(t *testing.T) {
 	_, err := extractZip(openZip(t, []zipEntry{
 		{name: "a.txt", body: "first"},
 		{name: "a.txt", body: "second"},
-	}), "", "")
+	}), "", "", 0)
 	if err == nil {
 		t.Fatal("a duplicate file name was accepted")
 	}
@@ -257,7 +257,7 @@ func TestExtractZipRefusesDuplicateNames(t *testing.T) {
 		{name: "d/"},
 		{name: "d/"},
 		{name: "d/x", body: "y"},
-	}), "", ""); err != nil {
+	}), "", "", 0); err != nil {
 		t.Errorf("a repeated directory entry was refused: %v", err)
 	}
 }
@@ -271,7 +271,7 @@ func TestExtractZipRefusesEncryptedEntries(t *testing.T) {
 	patchZipField(raw, zipLocalHeader, 6, zipEncryptedFlag)
 	patchZipField(raw, zipCentralHeader, 8, zipEncryptedFlag)
 
-	_, err := extractZip(openBytes(t, "enc.zip", raw), "", "")
+	_, err := extractZip(openBytes(t, "enc.zip", raw), "", "", 0)
 	if err == nil {
 		t.Fatal("an encrypted entry was accepted")
 	}
@@ -290,7 +290,7 @@ func TestExtractZipRefusesUnsupportedMethods(t *testing.T) {
 	patchZipField(raw, zipLocalHeader, 8, methodLZMA)
 	patchZipField(raw, zipCentralHeader, 10, methodLZMA)
 
-	_, err := extractZip(openBytes(t, "lzma.zip", raw), "", "")
+	_, err := extractZip(openBytes(t, "lzma.zip", raw), "", "", 0)
 	if err == nil {
 		t.Fatal("an LZMA entry was accepted")
 	}
@@ -309,7 +309,7 @@ func TestExtractZipRefusesUnsupportedMethods(t *testing.T) {
 func TestExtractZipNormalisesWindowsModes(t *testing.T) {
 	entries, err := extractZip(openZip(t, []zipEntry{
 		{name: "tool.exe", body: "MZ", dosOnly: true},
-	}), "", "")
+	}), "", "", 0)
 	if err != nil {
 		t.Fatalf("extractZip: %v", err)
 	}
@@ -332,7 +332,7 @@ func TestExtractZipSubpathAndTarget(t *testing.T) {
 		{name: "other/ignored", body: "no"},
 	})
 
-	entries, err := extractZip(src, "opt/plugins", "plugin-1.2.3")
+	entries, err := extractZip(src, "opt/plugins", "plugin-1.2.3", 0)
 	if err != nil {
 		t.Fatalf("extractZip: %v", err)
 	}
@@ -350,7 +350,7 @@ func TestExtractZipSubpathAndTarget(t *testing.T) {
 	}
 
 	// A subpath matching nothing is a stall, not a silently empty layer.
-	if _, err := extractZip(src, "opt", "nope"); err == nil {
+	if _, err := extractZip(src, "opt", "nope", 0); err == nil {
 		t.Error("a subpath matching nothing was accepted")
 	}
 }

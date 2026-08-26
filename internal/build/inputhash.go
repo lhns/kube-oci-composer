@@ -59,6 +59,10 @@ type Inputs struct {
 	ContextRevision string
 	ContextSubpath  string
 
+	// ContextStrip is how many leading path components the fetcher removes. Hashed because the same
+	// bytes become a different tree at a different depth -- exactly why ContextUnpack is hashed.
+	ContextStrip int
+
 	// ContextUnpack is how the fetched archive becomes a tree. Hashed because the same bytes become
 	// different trees under different modes, and the tree is what the build sees.
 	ContextUnpack string
@@ -128,6 +132,7 @@ func (in Inputs) Hash() string {
 	writeField(in.ContextKind)
 	writeField(in.ContextDigest)
 	writeField(in.ContextSubpath)
+	fmt.Fprintf(h, "strip=%d;", in.ContextStrip)
 	writeField(in.ContextUnpack)
 	writeField(in.DockerfileKind)
 	writeField(in.Dockerfile)

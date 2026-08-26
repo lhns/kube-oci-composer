@@ -131,7 +131,7 @@ func TestExtractImageSubpathAndTarget(t *testing.T) {
 		}
 	}
 
-	if _, err := extractImage(src, "opt", "nope"); err == nil {
+	if _, err := extractImage(src, "opt", "nope", 0); err == nil {
 		t.Error("a subpath matching nothing was accepted")
 	}
 }
@@ -201,7 +201,7 @@ func TestImageLayerAndTarballAgree(t *testing.T) {
 // mustExtractImage is the common shape of these assertions.
 func mustExtractImage(t *testing.T, img v1.Image, target, subpath string) []tarEntry {
 	t.Helper()
-	entries, err := extractImage(img, target, subpath)
+	entries, err := extractImage(img, target, subpath, 0)
 	if err != nil {
 		t.Fatalf("extractImage: %v", err)
 	}

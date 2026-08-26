@@ -52,6 +52,7 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0042](0042-content-addressed-not-flux.md) | Which sources we resolve, and which source-controller resolves | Accepted, narrows 0025's Flux-only rule |
 | [0043](0043-an-oci-artifact-is-a-source-we-own.md) | An OCI artifact is a source we own | **Accepted, not yet implemented** |
 | [0044](0044-the-builder-proxies-flux-sources.md) | The builder proxies Flux sources | **Accepted** |
+| [0045](0045-one-implementation-of-where-an-entry-lands.md) | One implementation of where an entry lands | **Accepted** |
 
 ## Open questions
 
