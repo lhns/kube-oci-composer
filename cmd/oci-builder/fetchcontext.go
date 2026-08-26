@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/lhns/kube-oci-composer/internal/fetchcontext"
@@ -32,7 +33,20 @@ func runFetchContext(args []string) {
 	fs.StringVar(&opts.Dockerfile, "dockerfile", "",
 		"Path inside the context whose FROM lines must be digest-pinned. Empty skips the check, "+
 			"which is what a Dockerfile from outside the context means.")
+	tokenFile := fs.String("token-file", "",
+		"File holding the bearer token for the controller's context endpoint.")
 	_ = fs.Parse(args)
+
+	// Read from a file, never passed as a flag: argv is visible in `kubectl describe pod` and in
+	// every process listing inside the pod, and this is a credential.
+	if *tokenFile != "" {
+		raw, err := os.ReadFile(*tokenFile)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "reading the context token:", err)
+			os.Exit(1)
+		}
+		opts.Token = strings.TrimSpace(string(raw))
+	}
 
 	if err := fetchcontext.Run(context.Background(), opts); err != nil {
 		fmt.Fprintln(os.Stderr, "fetching the build context:", err)

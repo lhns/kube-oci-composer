@@ -226,3 +226,56 @@ spec:
 		})
 	}
 }
+
+// TestTheBuildPodFetchesThroughTheBuilder — the fetch leg, against a real cluster.
+//
+// NOT written as "deny egress to flux-system and see the build still work", which is what it should
+// be: kind runs kindnet, which does not enforce NetworkPolicy, so that assertion would pass with
+// the policy ignored and prove nothing. What is asserted instead is what the pod was actually told
+// to do, plus the build succeeding — and the build succeeding IS the proof the endpoint serves,
+// since a broken proxy fails every sourceRef build in this suite.
+func TestTheBuildPodFetchesThroughTheBuilder(t *testing.T) {
+	name := "e2e-proxied-context"
+	applyStdin(t, fmt.Sprintf(`
+apiVersion: oci.lhns.de/v1alpha1
+kind: ImageBuild
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  interval: 1h
+  context:
+    sourceRef:
+      kind: GitRepository
+      name: e2e-src
+  dockerfile:
+    inline: |
+      FROM %s
+      COPY Dockerfile /recipe
+  platforms: [linux/amd64]
+  timeout: 10m
+  push:
+    repository: %s/e2e/%s
+    tags: [v1]
+`, name, buildNamespace, pinnedBase, buildRegistry, name))
+
+	buildEventually(t, "the proxied build to publish", func() error {
+		st := buildStatus(t, name)
+		if st.Artifact == nil {
+			return fmt.Errorf("no artifact yet: %+v", st.Conditions)
+		}
+		return nil
+	})
+
+	args := mustKubectl(t, "-n", buildNamespace, "get", "jobs",
+		"-o", `jsonpath={.items[*].spec.template.spec.initContainers[*].args}`)
+	if strings.Contains(args, "flux-system") {
+		t.Errorf("a build pod was pointed at source-controller: %s", args)
+	}
+	if !strings.Contains(args, "-builder-context") {
+		t.Errorf("no build pod was pointed at the builder's context endpoint: %s", args)
+	}
+	if !strings.Contains(args, "--token-file=") {
+		t.Errorf("the fetcher was given no context token: %s", args)
+	}
+}

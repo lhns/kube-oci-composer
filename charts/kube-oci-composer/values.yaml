@@ -195,6 +195,17 @@ imageBuild:
   # Its own bind addresses: this is a second pod in the same namespace, not the composer.
   metricsBindAddress: ":8080"
   healthProbeBindAddress: ":8081"
+  # Where build pods fetch their Flux source, so they never reach source-controller. See ADR 0044.
+  contextBindAddress: ":8090"
+
+  # Lets build pods reach the context endpoint above. A build Job runs in its OBJECT's namespace,
+  # so it crosses a namespace boundary to fetch, and a default-deny cluster blocks it.
+  #
+  # Empty allowedNamespaces means every namespace, which is the default because a build can land
+  # anywhere. Reaching the endpoint is not reading it: every request carries a per-build token.
+  networkPolicy:
+    enabled: true
+    allowedNamespaces: []
 
   sourceDateEpoch: "0"
   keepBuilds: 10

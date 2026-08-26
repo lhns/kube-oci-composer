@@ -53,6 +53,10 @@ type Options struct {
 	// Dockerfile is a path inside the context whose FROM lines must all be digest-pinned. Empty
 	// means the Dockerfile came from outside the context and the controller already checked it.
 	Dockerfile string
+	// Token authenticates this build to the controller's context endpoint. Empty for a URL that
+	// needs no credential -- a fetch context, an image, or a source-controller URL under an
+	// operator who configured no endpoint.
+	Token string
 }
 
 // Run fetches, verifies and extracts.
@@ -70,7 +74,7 @@ func Run(ctx context.Context, opts Options) error {
 		return fmt.Errorf("no digest for the %s context: refusing to build content nothing addresses", opts.Kind)
 	}
 
-	blob, err := download(ctx, opts.URL, opts.Dest)
+	blob, err := download(ctx, opts.URL, opts.Dest, opts.Token)
 	if err != nil {
 		return err
 	}
@@ -137,7 +141,7 @@ type blob struct {
 	stage string
 }
 
-func download(ctx context.Context, url, dest string) (blob, error) {
+func download(ctx context.Context, url, dest, token string) (blob, error) {
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return blob{}, fmt.Errorf("creating %s: %w", dest, err)
 	}
@@ -163,7 +167,7 @@ func download(ctx context.Context, url, dest string) (blob, error) {
 	var lastErr error
 
 	for attempt := 1; attempt <= fetchAttempts; attempt++ {
-		digest, err := fetchInto(ctx, client, tmp, url)
+		digest, err := fetchInto(ctx, client, tmp, url, token)
 		if err == nil {
 			return blob{path: tmp.Name(), digest: digest, stage: stage}, nil
 		}
@@ -209,7 +213,7 @@ type permanentError struct{ error }
 // Truncates first: an attempt that failed partway has already written bytes, and appending to them
 // would produce a digest over the concatenation of two attempts -- which fails verification and
 // looks like the server served the wrong content.
-func fetchInto(ctx context.Context, client *http.Client, tmp *os.File, url string) (string, error) {
+func fetchInto(ctx context.Context, client *http.Client, tmp *os.File, url, token string) (string, error) {
 	if err := tmp.Truncate(0); err != nil {
 		return "", &permanentError{fmt.Errorf("resetting the staged download: %w", err)}
 	}
@@ -220,6 +224,9 @@ func fetchInto(ctx context.Context, client *http.Client, tmp *os.File, url strin
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", &permanentError{err}
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	resp, err := client.Do(req)
 	if err != nil {

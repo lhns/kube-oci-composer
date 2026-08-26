@@ -76,7 +76,7 @@ func TestJobNameStaysWithinLimit(t *testing.T) {
 // refusing to build at all. Rootless is the half of that this project accepts; privileged is not
 // offered at any setting, so nothing in the spec can reach these fields.
 func TestBuildJobRunsRootless(t *testing.T) {
-	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo, "", "", "", true)
+	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo, "", "", "", "", true)
 
 	pod := job.Spec.Template.Spec
 	if len(pod.Containers) != 1 {
@@ -152,7 +152,7 @@ func TestBuildJobRunsRootless(t *testing.T) {
 func TestBuildJobUsesTheObjectsServiceAccount(t *testing.T) {
 	obj := sampleBuild()
 	obj.Spec.ServiceAccountName = "builder"
-	job := buildJob(obj, testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo, "", "", "", true)
+	job := buildJob(obj, testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo, "", "", "", "", true)
 
 	if got := job.Spec.Template.Spec.ServiceAccountName; got != "builder" {
 		t.Errorf("service account = %q, want %q", got, "builder")
@@ -167,7 +167,7 @@ func TestBuildJobArgs(t *testing.T) {
 	obj.Spec.Target = "runtime"
 	obj.Spec.Args = []ociv1alpha1.BuildArg{{Name: "VERSION", Value: "1.2.3"}}
 
-	job := buildJob(obj, testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo, "", "", "", true)
+	job := buildJob(obj, testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo, "", "", "", "", true)
 	argv := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " ")
 
 	for _, want := range []string{
@@ -190,7 +190,7 @@ func TestBuildJobArgs(t *testing.T) {
 func TestNetworkNoneIsPassedThrough(t *testing.T) {
 	obj := sampleBuild()
 	obj.Spec.Network = "None"
-	job := buildJob(obj, testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo, "", "", "", true)
+	job := buildJob(obj, testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo, "", "", "", "", true)
 
 	argv := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " ")
 	if !strings.Contains(argv, "no-network=true") {
@@ -229,7 +229,7 @@ func TestSecretsAreMountedNotInlined(t *testing.T) {
 		SecretRef: &ociv1alpha1.LocalObjectReference{Name: "npm-creds"},
 	}}
 
-	job := buildJob(obj, testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo, "", "", "", true)
+	job := buildJob(obj, testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo, "", "", "", "", true)
 	argv := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " ")
 
 	if !strings.Contains(argv, "--secret id=npmrc") {
@@ -270,14 +270,14 @@ func TestInsecureRegistryIsOptInPerHost(t *testing.T) {
 	cfg := sampleConfig()
 	cfg.InsecureRegistries = []string{"registry.internal:5000"}
 
-	secure := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", "sha256:ctx", cfg, sampleRepo, "", "", "", true)
+	secure := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", "sha256:ctx", cfg, sampleRepo, "", "", "", "", true)
 	if argv := strings.Join(secure.Spec.Template.Spec.Containers[0].Args, " "); strings.Contains(argv, "registry.insecure") {
 		t.Errorf("a non-listed host was pushed insecurely\ngot: %s", argv)
 	}
 
 	obj := sampleBuild()
 	obj.Spec.Push.Repository = "registry.internal:5000/team/app"
-	listed := buildJob(obj, testHash, "https://example/ctx.tgz", "sha256:ctx", cfg, obj.Spec.Push.Repository, "", "", "", true)
+	listed := buildJob(obj, testHash, "https://example/ctx.tgz", "sha256:ctx", cfg, obj.Spec.Push.Repository, "", "", "", "", true)
 	if argv := strings.Join(listed.Spec.Template.Spec.Containers[0].Args, " "); !strings.Contains(argv, "registry.insecure=true") {
 		t.Errorf("a listed host was not allowed plain HTTP\ngot: %s", argv)
 	}
@@ -294,8 +294,8 @@ func TestInsecureRegistryIsNotInTheInputHash(t *testing.T) {
 	insecure.InsecureRegistries = []string{"registry.internal:5000"}
 
 	// The Job name is derived from the input hash, so identical names prove the hash did not move.
-	a := buildJob(obj, testHash, "https://example/ctx.tgz", "sha256:ctx", plain, obj.Spec.Push.Repository, "", "", "", true)
-	b := buildJob(obj, testHash, "https://example/ctx.tgz", "sha256:ctx", insecure, obj.Spec.Push.Repository, "", "", "", true)
+	a := buildJob(obj, testHash, "https://example/ctx.tgz", "sha256:ctx", plain, obj.Spec.Push.Repository, "", "", "", "", true)
+	b := buildJob(obj, testHash, "https://example/ctx.tgz", "sha256:ctx", insecure, obj.Spec.Push.Repository, "", "", "", "", true)
 	if a.Name != b.Name {
 		t.Errorf("the insecure list moved the input hash: %q vs %q", a.Name, b.Name)
 	}
@@ -313,7 +313,7 @@ func TestTheFetcherIsToldWhatToFetch(t *testing.T) {
 		obj := sampleBuild()
 		obj.Spec.Context.SourceRef.Subpath = "ui"
 		job := buildJob(obj, testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(),
-			sampleRepo, "", "", "", true)
+			sampleRepo, "", "", "", "", true)
 
 		init := job.Spec.Template.Spec.InitContainers
 		if len(init) != 1 {
@@ -341,7 +341,7 @@ func TestTheFetcherIsToldWhatToFetch(t *testing.T) {
 			URL: "https://example/app.tgz", Digest: "sha256:decl", Unpack: "tar.gz", Subpath: "app-1.2.3",
 		}}
 		job := buildJob(obj, testHash, "https://example/app.tgz", "sha256:decl", sampleConfig(),
-			sampleRepo, "", "", "", true)
+			sampleRepo, "", "", "", "", true)
 
 		args := strings.Join(job.Spec.Template.Spec.InitContainers[0].Args, " ")
 		for _, want := range []string{"--kind=fetch", "--digest=sha256:decl", "--unpack=tar.gz",
@@ -358,7 +358,7 @@ func TestTheFetcherIsToldWhatToFetch(t *testing.T) {
 		obj := sampleBuild()
 		obj.Spec.Context = nil
 		obj.Spec.Dockerfile = &ociv1alpha1.DockerfileSource{Inline: "FROM scratch\n"}
-		job := buildJob(obj, testHash, "", "", sampleConfig(), sampleRepo, "", "", "df", true)
+		job := buildJob(obj, testHash, "", "", sampleConfig(), sampleRepo, "", "", "df", "", true)
 
 		if got := len(job.Spec.Template.Spec.InitContainers); got != 0 {
 			t.Errorf("a context-less build runs %d init containers", got)
@@ -376,7 +376,7 @@ func TestTheFetcherIsToldWhatToFetch(t *testing.T) {
 //
 // Without pod labels the only way to write such a policy was to match every pod in the namespace.
 func TestBuildPodsAreSelectable(t *testing.T) {
-	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo, "", "", "", true)
+	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo, "", "", "", "", true)
 
 	labels := job.Spec.Template.Labels
 	if labels == nil {
@@ -406,7 +406,7 @@ func TestBuildPodsAreSelectable(t *testing.T) {
 // drifted.
 func TestTheBuildTrustsTheRegistryCA(t *testing.T) {
 	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo,
-		"", "build-registry-ca", "", true)
+		"", "build-registry-ca", "", "", true)
 	pod := job.Spec.Template.Spec
 	container := pod.Containers[0]
 
@@ -459,7 +459,7 @@ func TestTheBuildTrustsTheRegistryCA(t *testing.T) {
 // or a stray empty volume would be a change to every build for the benefit of none.
 func TestNoCAMeansNoCAPlumbing(t *testing.T) {
 	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo,
-		"", "", "", true)
+		"", "", "", "", true)
 	pod := job.Spec.Template.Spec
 
 	for _, v := range pod.Volumes {
@@ -484,7 +484,7 @@ func TestNoCAMeansNoCAPlumbing(t *testing.T) {
 func TestAContextDockerfileStillComesFromTheContext(t *testing.T) {
 	obj := sampleBuild()
 	obj.Spec.Dockerfile = &ociv1alpha1.DockerfileSource{Path: "build/Dockerfile.prod"}
-	job := buildJob(obj, testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo, "", "", "", true)
+	job := buildJob(obj, testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo, "", "", "", "", true)
 	args := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " ")
 
 	if !strings.Contains(args, "--local dockerfile=/workspace/build") {
@@ -508,7 +508,7 @@ func TestAnInlineDockerfileIsProjectedAsItsOwnLocal(t *testing.T) {
 	obj := sampleBuild()
 	obj.Spec.Dockerfile = &ociv1alpha1.DockerfileSource{Inline: "FROM scratch\n"}
 	job := buildJob(obj, testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo,
-		"", "", "app-abc123-dockerfile", true)
+		"", "", "app-abc123-dockerfile", "", true)
 	args := strings.Join(job.Spec.Template.Spec.Containers[0].Args, " ")
 
 	if !strings.Contains(args, "--local dockerfile=/dockerfile") {
@@ -552,7 +552,7 @@ func TestTheProjectedDockerfileComesFromTheControllersOwnSecret(t *testing.T) {
 	obj := sampleBuild()
 	obj.Spec.Dockerfile = &ociv1alpha1.DockerfileSource{Inline: "FROM scratch\n"}
 	job := buildJob(obj, testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo,
-		"", "", "app-abc123-dockerfile", true)
+		"", "", "app-abc123-dockerfile", "", true)
 
 	for _, v := range job.Spec.Template.Spec.Volumes {
 		if v.Name != dockerfileVolume {

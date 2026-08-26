@@ -13,8 +13,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -27,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
@@ -68,6 +71,8 @@ func main() {
 	var (
 		metricsAddr          string
 		probeAddr            string
+		contextAddr          string
+		contextBaseURL       string
 		enableLeader         bool
 		builderImage         string
 		frontendImage        string
@@ -82,6 +87,13 @@ func main() {
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "Address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "Address the probe endpoint binds to.")
+	flag.StringVar(&contextAddr, "context-bind-address", ":8090",
+		"Address the build-context endpoint binds to. Build pods fetch their Flux source through "+
+			"it, so they never reach source-controller.")
+	flag.StringVar(&contextBaseURL, "context-base-url", "",
+		"URL build pods use to reach the context endpoint, e.g. "+
+			"http://oci-builder-context.oci-composer.svc:8090. Unset makes build pods fetch "+
+			"source-controller directly, which lets any build read any namespace's source.")
 	flag.BoolVar(&enableLeader, "leader-elect", false, "Enable leader election.")
 	flag.StringVar(&builderImage, "buildkit-image", "",
 		"Rootless BuildKit image, PINNED BY DIGEST. Required.")
@@ -269,6 +281,34 @@ func main() {
 		// spec (ADR 0025), so an image a registry reclaims here is gone rather than rebuildable.
 		setupLog.Info("retention refresh DISABLED; a registry with an expiry policy will delete " +
 			"images this operator's builds still reference, and a build cannot be reproduced")
+	}
+
+	// The context endpoint. Runs on every replica, not only the leader: it answers build pods, and
+	// a pod whose build was started by a leader that has since changed still needs its source.
+	if contextBaseURL == "" {
+		setupLog.Info("WARNING: --context-base-url is unset, so build pods will fetch " +
+			"source-controller directly. source-controller serves artifacts unauthenticated, so " +
+			"every build pod can then read every namespace's source. See ADR 0044.")
+	} else {
+		proxy := &buildcontroller.ContextProxy{
+			Client: mgr.GetClient(),
+			HTTP:   guardedClient(fetchDenyPrivate),
+		}
+		srv := buildcontroller.ContextServer(contextAddr, proxy)
+		if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+			go func() {
+				<-ctx.Done()
+				_ = srv.Close()
+			}()
+			setupLog.Info("serving build contexts", "addr", contextAddr, "url", contextBaseURL)
+			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				return err
+			}
+			return nil
+		})); err != nil {
+			setupLog.Error(err, "unable to start the context endpoint")
+			os.Exit(1)
+		}
 	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
