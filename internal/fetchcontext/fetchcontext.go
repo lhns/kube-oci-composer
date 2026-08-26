@@ -13,6 +13,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -157,30 +158,92 @@ func download(ctx context.Context, url, dest string) (blob, error) {
 	}
 	defer tmp.Close()
 
+	client := &http.Client{Timeout: 10 * time.Minute}
+	delay := fetchBaseDelay
+	var lastErr error
+
+	for attempt := 1; attempt <= fetchAttempts; attempt++ {
+		digest, err := fetchInto(ctx, client, tmp, url)
+		if err == nil {
+			return blob{path: tmp.Name(), digest: digest, stage: stage}, nil
+		}
+		lastErr = err
+
+		var permanent *permanentError
+		if errors.As(err, &permanent) || ctx.Err() != nil {
+			break
+		}
+		if attempt == fetchAttempts {
+			break
+		}
+		fmt.Fprintf(os.Stderr, "fetching the build context (attempt %d/%d): %v; retrying in %s\n",
+			attempt, fetchAttempts, err, delay)
+		select {
+		case <-ctx.Done():
+			return blob{stage: stage}, ctx.Err()
+		case <-time.After(delay):
+		}
+		delay *= 2
+	}
+	return blob{stage: stage}, lastErr
+}
+
+// fetchAttempts and fetchBaseDelay bound the retry: six attempts, doubling from half a second, so
+// about fifteen seconds in total (0.5 + 1 + 2 + 4 + 8), measured.
+//
+// A retry exists because the first dial happens at t=0 of a brand-new pod, and every CNI programs
+// NetworkPolicy asynchronously AFTER the pod has its IP -- kube-router takes one to two seconds,
+// and the denial arrives as `connection refused` rather than a timeout. The Job runs with
+// BackoffLimit: 0, so without this a single unlucky dial fails the build permanently. It also
+// covers a source-controller restart and a transient 5xx.
+const (
+	fetchAttempts  = 6
+	fetchBaseDelay = 500 * time.Millisecond
+)
+
+// permanentError marks a response not worth repeating.
+type permanentError struct{ error }
+
+// fetchInto makes one attempt, returning the digest of what it wrote.
+//
+// Truncates first: an attempt that failed partway has already written bytes, and appending to them
+// would produce a digest over the concatenation of two attempts -- which fails verification and
+// looks like the server served the wrong content.
+func fetchInto(ctx context.Context, client *http.Client, tmp *os.File, url string) (string, error) {
+	if err := tmp.Truncate(0); err != nil {
+		return "", &permanentError{fmt.Errorf("resetting the staged download: %w", err)}
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return "", &permanentError{fmt.Errorf("resetting the staged download: %w", err)}
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return blob{stage: stage}, err
+		return "", &permanentError{err}
 	}
-	client := &http.Client{Timeout: 10 * time.Minute}
 	resp, err := client.Do(req)
 	if err != nil {
-		return blob{stage: stage}, fmt.Errorf("fetching %s: %w", url, err)
+		// Dial, DNS, reset, timeout. All transient by nature, and the one this retry exists for.
+		return "", fmt.Errorf("fetching %s: %w", url, err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return blob{stage: stage}, fmt.Errorf("fetching %s: %s", url, resp.Status)
+
+	switch {
+	case resp.StatusCode == http.StatusOK:
+	case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500:
+		return "", fmt.Errorf("fetching %s: %s", url, resp.Status)
+	default:
+		// 4xx. The URL, the token or the object is wrong, and asking five more times will not
+		// change any of them.
+		return "", &permanentError{fmt.Errorf("fetching %s: %s", url, resp.Status)}
 	}
 
 	// Hashed as the bytes stream past: nothing is buffered, and the digest covers what was written.
 	h := sha256.New()
 	if _, err := io.Copy(io.MultiWriter(tmp, h), resp.Body); err != nil {
-		return blob{stage: stage}, fmt.Errorf("downloading %s: %w", url, err)
+		return "", fmt.Errorf("downloading %s: %w", url, err)
 	}
-	return blob{
-		path:   tmp.Name(),
-		digest: "sha256:" + hex.EncodeToString(h.Sum(nil)),
-		stage:  stage,
-	}, nil
+	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // image pulls a digest-pinned image and writes its flattened filesystem into dest.
