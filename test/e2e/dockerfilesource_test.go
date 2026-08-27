@@ -246,3 +246,47 @@ spec:
 		})
 	}
 }
+
+// TestAFailedBuildSaysWhyInStatus — the diagnostics fix, against a real cluster.
+//
+// The cause has to be IN status, not behind `kubectl logs <pod>`: the next retry deletes the Job
+// and takes the pod with it, so the pointer outlives neither. Asserting on the message rather than
+// on Ready=False is the whole point; the old behaviour was already Ready=False with the reason
+// unavailable.
+//
+// A failing build pushes nothing, so this adds no repository to zot's GC rotation -- unlike the
+// build that starved the retention control in #51.
+func TestAFailedBuildSaysWhyInStatus(t *testing.T) {
+	name := "e2e-failing-build"
+	applyStdin(t, fmt.Sprintf(`
+apiVersion: oci.lhns.de/v1alpha1
+kind: ImageBuild
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  interval: 1h
+  dockerfile:
+    inline: |
+      FROM %s
+      RUN echo deliberate-e2e-failure >&2; exit 17
+  platforms: [linux/amd64]
+  timeout: 10m
+  push:
+    repository: %s/e2e/%s
+    tags: [v1]
+`, name, buildNamespace, pinnedBase, buildRegistry, name))
+
+	buildEventually(t, "the failure to be explained in status", func() error {
+		st := buildStatus(t, name)
+		if st.LastAttempt == nil || st.LastAttempt.Message == "" {
+			return fmt.Errorf("no failure message yet: %+v", st.Conditions)
+		}
+		// The build's own output, copied by the kubelet into the termination message. Without
+		// FallbackToLogsOnError this is boilerplate and a pod name.
+		if !strings.Contains(st.LastAttempt.Message, "deliberate-e2e-failure") {
+			return fmt.Errorf("the message does not carry the build's output: %s", st.LastAttempt.Message)
+		}
+		return nil
+	})
+}

@@ -120,7 +120,7 @@ func main() {
 
 	flag.BoolVar(&showVersion, "version", false, "Print version information and exit.")
 
-	zapOpts := zap.Options{Development: false}
+	zapOpts := opts.Zap()
 	zapOpts.BindFlags(flag.CommandLine)
 	flag.Parse()
 

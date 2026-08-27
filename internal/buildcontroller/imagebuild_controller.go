@@ -806,6 +806,10 @@ func retryDue(obj *ociv1alpha1.ImageBuild) bool {
 // The Job's own condition says only "BackoffLimitExceeded", which names the mechanism and not the
 // cause. The cause is the build container's exit code and termination message, so those are read
 // from the pod and appended — otherwise status shows a failure with no way to act on it.
+// maxFailureDetail is BuildAttempt.Message's MaxLength. Exceeding it does not truncate; the API
+// server rejects the status write, so the failure is lost rather than shortened.
+const maxFailureDetail = 4096
+
 func (r *ImageBuildReconciler) jobFailureDetail(ctx context.Context, obj *ociv1alpha1.ImageBuild, job *batchv1.Job) string {
 	msg := jobFailureMessage(job)
 
@@ -813,7 +817,15 @@ func (r *ImageBuildReconciler) jobFailureDetail(ctx context.Context, obj *ociv1a
 	if err != nil {
 		return msg
 	}
-	for _, p := range pods.Items {
+	return failureDetailFor(msg, pods.Items...)
+}
+
+// failureDetailFor turns the pods of a failed Job into the message stored in status.
+//
+// Split from the lookup so it can be tested without a client: what it produces has to fit
+// BuildAttempt.Message exactly, and that is not something to discover in a cluster.
+func failureDetailFor(msg string, pods ...corev1.Pod) string {
+	for _, p := range pods {
 		// Init containers FIRST, and including them at all is the fix. This iterated only
 		// ContainerStatuses, which does not contain them, so a context that failed to fetch
 		// reported "BackoffLimitExceeded" and nothing else -- the mechanism, with the cause
@@ -826,14 +838,28 @@ func (r *ImageBuildReconciler) jobFailureDetail(ctx context.Context, obj *ociv1a
 			if t == nil || t.ExitCode == 0 {
 				continue
 			}
-			detail := fmt.Sprintf("%s: container %q exited %d", msg, cs.Name, t.ExitCode)
+			where := fmt.Sprintf("container %q exited %d", cs.Name, t.ExitCode)
 			if t.Reason != "" {
-				detail += " (" + t.Reason + ")"
+				where += " (" + t.Reason + ")"
 			}
-			if m := strings.TrimSpace(t.Message); m != "" {
-				detail += ": " + m
+			// The pod is named for the FULL log, but it is not the record: the next retry deletes
+			// the Job and takes it with it, which is why the cause has to be in the message.
+			hint := fmt.Sprintf("; see `kubectl -n %s logs %s -c %s` while the pod lasts",
+				p.Namespace, p.Name, cs.Name)
+
+			cause := strings.TrimSpace(t.Message)
+			if cause == "" {
+				return recon.Truncate(msg+": "+where+hint, maxFailureDetail)
 			}
-			return detail + fmt.Sprintf("; see `kubectl -n %s logs %s -c %s`", p.Namespace, p.Name, cs.Name)
+			// CAUSE FIRST. It used to come last, so every truncation ate the one part worth
+			// reading and left the mechanism behind.
+			//
+			// Only the cause is trimmed, and from the front: it can be ~4KB on its own, and
+			// LastAttempt.Message caps at 4096 -- an over-long value does not truncate, it makes
+			// the status write FAIL, which loses the failure entirely.
+			suffix := " [" + where + "]" + hint
+			budget := max(maxFailureDetail-len(suffix), 0)
+			return recon.TruncateTail(cause, budget) + suffix
 		}
 	}
 	return msg

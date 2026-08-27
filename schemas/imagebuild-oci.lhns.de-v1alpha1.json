@@ -705,7 +705,7 @@
               "type": "string"
             },
             "podName": {
-              "description": "PodName of the build pod. Logs are not copied into status, so this is what `kubectl logs`\nneeds.",
+              "description": "PodName of the build pod, for the FULL log.\n\nNot the record of why a build failed -- Message is, since ADR 0046. This pod is deleted when\nthe next retry falls due, so a pointer to it outlives neither the pod nor the failure.",
               "type": "string"
             },
             "startedAt": {

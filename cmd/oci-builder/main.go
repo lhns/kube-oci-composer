@@ -124,7 +124,7 @@ func main() {
 	flag.IntVar(&historyLimit, "keep-builds", ociv1alpha1.DefaultHistoryLimit, "How many past builds to retain in status.")
 	flag.BoolVar(&showVersion, "version", false, "Print the version and exit.")
 
-	zapOpts := zap.Options{Development: false}
+	zapOpts := opts.Zap()
 	zapOpts.BindFlags(flag.CommandLine)
 	flag.Parse()
 

@@ -203,6 +203,23 @@ must name a source in its own namespace.
   needed for. Recorded as a known gap with a decided owner
   ([ADR 0043](docs/adr/0043-an-oci-artifact-is-a-source-we-own.md)), not an oversight.
 
+- **A failed build now says why, in status**
+  ([ADR 0046](docs/adr/0046-a-failure-explains-itself-in-status.md)). The failing container's log
+  tail lands in `status.lastAttempt.message` and in the Warning Event, so `kubectl describe` answers
+  the question. Previously the message was boilerplate plus ``see `kubectl logs <pod>` `` — and that
+  pod is deleted when the next retry falls due, so the pointer usually outlived its target.
+
+  The cause now leads the message rather than trailing it, because truncation was eating exactly the
+  part worth reading. `kubectl get` gains a **Reason** column on both kinds, so the kind of failure
+  is visible without `-o wide`.
+
+  Controller logs keep `error` level for a failed build — the severity was never wrong — but no
+  longer attach a Go stacktrace to it. A reconcile error is already wrapped with the context that
+  matters, and the trace buried it under twelve frames on every retry. Panics still trace.
+
+  Note that a build's output is now stored on the object and emitted as an Event; it is truncated to
+  4096 bytes, keeping the end. Threat-model row I12.
+
 - **Fixed: every `ImageBuild` with a `sourceRef` context**
   ([ADR 0045](docs/adr/0045-one-implementation-of-where-an-entry-lands.md)). The context fetcher
   removed one leading path component from every entry whenever the context came from a Flux source,

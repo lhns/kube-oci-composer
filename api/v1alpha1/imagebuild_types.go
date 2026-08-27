@@ -296,8 +296,10 @@ type BuildAttempt struct {
 	// +optional
 	InputHash string `json:"inputHash,omitempty"`
 
-	// PodName of the build pod. Logs are not copied into status, so this is what `kubectl logs`
-	// needs.
+	// PodName of the build pod, for the FULL log.
+	//
+	// Not the record of why a build failed -- Message is, since ADR 0046. This pod is deleted when
+	// the next retry falls due, so a pointer to it outlives neither the pod nor the failure.
 	// +optional
 	PodName string `json:"podName,omitempty"`
 
@@ -382,6 +384,7 @@ type ImageBuildStatus struct {
 // +kubebuilder:resource:shortName=ibuild
 // +kubebuilder:printcolumn:name="Ref",type=string,JSONPath=`.status.artifact.ref`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].reason`
 // +kubebuilder:printcolumn:name="Status",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].message`,priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 type ImageBuild struct {
