@@ -80,6 +80,12 @@ type dockerBuildStatus struct {
 		Existing string `json:"existing"`
 		Dropped  string `json:"dropped"`
 	} `json:"conflict"`
+	// LastAttempt carries WHY a build failed, which since ADR 0046 is the durable record -- the
+	// pod named in it is deleted by the next retry.
+	LastAttempt *struct {
+		PodName string `json:"podName"`
+		Message string `json:"message"`
+	} `json:"lastAttempt"`
 	Conditions []statusCondition `json:"conditions"`
 }
 

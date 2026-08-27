@@ -101,13 +101,35 @@ func RemoveCondition(o Object, condType string) {
 	o.SetConditions(conds)
 }
 
-// Truncate keeps a message inside the API server's per-condition limit.
+// Truncate keeps a message inside the API server's per-condition limit, from the START.
 func Truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n]
+	return validUTF8(s[:n])
 }
+
+// TruncateTail keeps the END instead.
+//
+// For anything derived from a LOG, the end is the part worth having: a build's failure is its last
+// lines, so cutting from the front keeps the base image being pulled and throws away the error.
+func TruncateTail(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	const marker = "...(truncated)...\n"
+	if n <= len(marker) {
+		return validUTF8(s[len(s)-n:])
+	}
+	return marker + validUTF8(s[len(s)-(n-len(marker)):])
+}
+
+// validUTF8 drops whatever the cut left behind.
+//
+// Both functions slice BYTES, so either end can land mid-rune. Go's JSON encoder would replace the
+// fragment rather than fail, so the symptom is a mangled message rather than a rejected write --
+// which is worse, because it looks like the log said that.
+func validUTF8(s string) string { return strings.ToValidUTF8(s, "") }
 
 // Interval is spec.interval, or an hour. The CRD defaults it, so the fallback covers an object
 // created before the default existed and a deliberate zero.
