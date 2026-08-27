@@ -203,6 +203,25 @@ must name a source in its own namespace.
   needed for. Recorded as a known gap with a decided owner
   ([ADR 0043](docs/adr/0043-an-oci-artifact-is-a-source-we-own.md)), not an oversight.
 
+- **Large layers can be pushed again**
+  ([ADR 0047](docs/adr/0047-uploads-serialise-on-one-registry-lock.md)). The chart never set zot's
+  `http.readTimeout`, so zot applied its own 60-second default — and Go's `ReadTimeout` bounds the
+  **whole request including the body**, which means it counts time spent queued behind zot's
+  registry-wide upload lock. A push could therefore die at exactly 60s having transferred nothing,
+  BuildKit retried from zero, and the retry queued behind the next one.
+
+  `registry.readTimeout` now defaults to `1h` and is refused if emptied. **Contention becomes
+  latency instead of failure.**
+
+  `registry.storage.dedupe` is exposed too, still defaulting to `true`. Dedupe runs inside that same
+  lock, so turning it off shortens the window every other upload waits behind — measured at
+  twenty-way concurrency, 3.9–6.1s per push with it on against 1.0–3.9s with it off. A partial
+  lever: `InitRepo` takes the same lock, so uploads still serialise. It trades disk for latency,
+  which is why the default is unchanged.
+
+  **Existing installs need the upgrade** — the value is baked into the rendered ConfigMap. And
+  concurrent large pushes remain slow by default; `docs/registry.md` says what to do about it.
+
 - **A failed build now says why, in status**
   ([ADR 0046](docs/adr/0046-a-failure-explains-itself-in-status.md)). The failing container's log
   tail lands in `status.lastAttempt.message` and in the Warning Event, so `kubectl describe` answers

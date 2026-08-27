@@ -54,6 +54,7 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0044](0044-the-builder-proxies-flux-sources.md) | The builder proxies Flux sources | **Accepted** |
 | [0045](0045-one-implementation-of-where-an-entry-lands.md) | One implementation of where an entry lands | **Accepted** |
 | [0046](0046-a-failure-explains-itself-in-status.md) | A failure explains itself in status | **Accepted** |
+| [0047](0047-uploads-serialise-on-one-registry-lock.md) | Uploads serialise on one registry lock, and the timeout counts the waiting | **Accepted** |
 
 ## Open questions
 

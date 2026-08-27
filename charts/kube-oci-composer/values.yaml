@@ -262,6 +262,11 @@ defaultRegistry:
 registry:
   enabled: true
 
+  # How long one HTTP request may take, end to end -- not a stall timeout. It counts time queued
+  # behind zot's registry-wide upload lock, so a short value makes large layers unpushable under
+  # concurrency. Unset, zot applies 60s. Generous on purpose; docs/registry.md, ADR 0047.
+  readTimeout: "1h"
+
   # Pinned by digest, like every other image this project consumes.
   image: ghcr.io/project-zot/zot:v2.1.20@sha256:542e25be4d32e7879c0cfad93492a93c81b1e059cbd2d30d485d4bd567318234
 
@@ -369,6 +374,13 @@ registry:
   # Where the registry keeps blobs. `local` is the PVC below.
   storage:
     driver: local
+
+    # Store a blob once even when several repositories reference it.
+    #
+    # Turn this OFF if concurrent pushes are slow: dedupe runs inside zot's registry-wide write lock,
+    # so it lengthens the window every other upload waits behind. Costs disk, and only shortens the
+    # critical section rather than removing it. docs/registry.md, ADR 0047.
+    dedupe: true
     s3:
       bucket: ""
       region: ""

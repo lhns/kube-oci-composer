@@ -14,3 +14,11 @@ inside the include still aborts `helm template`, `helm install` and `helm upgrad
 {{- include "kube-oci-composer.checkRegistryCert" . -}}
 {{- include "kube-oci-composer.checkRegistryReplicas" . -}}
 {{- include "kube-oci-composer.checkRegistryMigration" . -}}
+
+{{- /*
+An empty readTimeout renders no key, and zot then injects its own 60s -- the exact failure ADR 0047
+is about, one plausible edit away. Refused rather than silently restored.
+*/}}
+{{- if and .Values.registry.enabled (not .Values.registry.readTimeout) }}
+{{- fail "registry.readTimeout must be set: leaving it empty makes zot apply its own 60s limit to the WHOLE request, including time queued behind the upload lock, so large layers become unpushable. See ADR 0047." }}
+{{- end }}
