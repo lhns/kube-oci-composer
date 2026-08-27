@@ -501,11 +501,9 @@ cat %s > /dev/termination-log
 		Env:                    env,
 		VolumeMounts:           mounts,
 		TerminationMessagePath: corev1.TerminationMessagePathDefault,
-		// The SAME policy the fetcher uses, and the whole reason a build failure can explain
-		// itself. ReadFile takes the message only from /dev/termination-log, which buildctl never
-		// writes -- so t.Message was always empty and status carried boilerplate and a pointer to a
-		// pod that the next retry deletes. The kubelet copies the log tail for us, which is why
-		// this needs no pods/log grant. ADR 0046.
+		// The SAME policy the fetcher uses. ReadFile reads only /dev/termination-log, which
+		// buildctl never writes, so t.Message was always empty. The kubelet copies the log tail
+		// instead, which is why this needs no pods/log grant. ADR 0046.
 		TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 		SecurityContext:          rootlessSecurityContext(),
 	}

@@ -56,10 +56,9 @@ func Extract(r io.Reader, mode Mode, dest, subpath string, strip int) error {
 		return fmt.Errorf("creating %s: %w", dest, err)
 	}
 
-	m := NewMapping(strip, subpath)
+	w := NewWalk(strip, subpath)
 
-	var written, survivors int
-	var matched bool
+	var written int
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -81,11 +80,7 @@ func Extract(r io.Reader, mode Mode, dest, subpath string, strip int) error {
 				"archive describes", hdr.Name)
 		}
 
-		place := m.Map(hdr.Name)
-		if place.Survived {
-			survivors++
-		}
-		matched = matched || place.InSubpath
+		place := w.Map(hdr.Name)
 		if !place.Selected {
 			continue
 		}
@@ -94,15 +89,7 @@ func Extract(r io.Reader, mode Mode, dest, subpath string, strip int) error {
 		}
 	}
 
-	// Both of these refuse a silently empty tree, which is the failure that produced this rule:
-	// an empty context reads as a broken build somewhere else entirely.
-	if strip > 0 && survivors == 0 {
-		return fmt.Errorf("stripComponents %d removed every entry in the archive", strip)
-	}
-	if m.Subpath() != "" && !matched {
-		return fmt.Errorf("subpath %q is not present in the archive", subpath)
-	}
-	return nil
+	return w.Err()
 }
 
 func reader(r io.Reader, mode Mode) (*tar.Reader, func(), error) {

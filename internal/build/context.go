@@ -5,11 +5,12 @@ import (
 	"compress/gzip"
 	"context"
 	"fmt"
-	"github.com/lhns/kube-oci-composer/internal/archive"
 	"io"
 	"net/http"
 	"path"
 	"time"
+
+	"github.com/lhns/kube-oci-composer/internal/archive"
 )
 
 // Reading one file out of a build context.

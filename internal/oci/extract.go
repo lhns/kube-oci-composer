@@ -2,9 +2,10 @@ package oci
 
 import (
 	"fmt"
-	"github.com/lhns/kube-oci-composer/internal/archive"
 	"path"
 	"strings"
+
+	"github.com/lhns/kube-oci-composer/internal/archive"
 )
 
 // Archive-independent extraction.
@@ -22,17 +23,9 @@ import (
 type collector struct {
 	// target is the cleaned, relative destination inside the image. Empty is the image root.
 	target string
-	// mapping decides where an entry lands: how deep to strip, and which subdirectory to take.
-	// SHARED with the builder's fetcher -- see archive.Mapping and ADR 0045. Two copies of this
-	// rule is what ADR 0023 forbade, and what broke every sourceRef build when it happened anyway.
-	mapping archive.Mapping
-	// subpath is the subpath as declared, kept only so the error message quotes what was written.
-	subpath string
-	// matched records whether the subpath selected anything at all.
-	matched bool
-	// survivors counts entries deeper than the strip depth, so a strip that emptied the archive is
-	// refused rather than producing a silently empty layer.
-	survivors int
+	// walk decides where an entry lands and tallies what the archive proved. SHARED with the
+	// builder's fetcher, placement and refusal alike -- see archive.Walk and ADR 0045.
+	walk *archive.Walk
 	// dirs de-duplicates directory entries, whether they came from the archive or were synthesised.
 	dirs    map[string]bool
 	entries []tarEntry
@@ -40,34 +33,27 @@ type collector struct {
 
 func newCollector(target, subpath string, strip int) *collector {
 	return &collector{
-		target:  target,
-		mapping: archive.NewMapping(strip, subpath),
-		subpath: subpath,
-		dirs:    make(map[string]bool),
+		target: target,
+		walk:   archive.NewWalk(strip, subpath),
+		dirs:   make(map[string]bool),
 	}
 }
 
 // rebase maps an archive-declared name onto its place in the layer.
 //
-// ok is false when the entry contributes nothing — it is outside the subpath, or it IS the subpath
-// directory, or it is the archive root. err is a traversal attempt, which is refused rather than
-// sanitised: an archive trying to escape its target is not something to quietly correct.
+// ok is false when the entry contributes nothing — outside the subpath, the subpath directory
+// itself, or the archive root. err is a traversal attempt, refused rather than sanitised.
 //
-// name must already use forward slashes. Normalising separators is the CALLER's job, because a
-// backslash is a legal filename character in a tar and a path separator in a zip written on
-// Windows, and only the caller knows which it is holding.
+// name must already use forward slashes; see archive.Mapping.Map for why that is the caller's job.
 func (c *collector) rebase(name string) (dest string, ok bool, err error) {
 	clean := path.Clean(name)
 
 	// Refuse anything that walks out of the target. Checked on the cleaned RELATIVE form, so
-	// "a/../../etc" is caught after Clean collapses it to "../etc". Note that path.Clean already
-	// swallows ".." at an absolute root — "/../etc" becomes "/etc" — so an absolute name cannot
-	// reach this and is de-rooted below instead.
+	// "a/../../etc" is caught after Clean collapses it to "../etc". path.Clean already swallows
+	// ".." at an absolute root, so an absolute name is de-rooted below instead.
 	//
-	// The bare ".." case is spelled out because it is the one an earlier version of this check
-	// missed: it tested `clean == ".."` in the outer condition but then only errored on the
-	// "../" prefix, which ".." does not have, so the entry survived and landed one level above
-	// the target.
+	// The bare ".." is spelled out separately because it has no "../" prefix, and an earlier
+	// version that only tested the prefix let it land one level above the target.
 	if clean == ".." || strings.HasPrefix(clean, "../") {
 		return "", false, fmt.Errorf("archive entry %q escapes the target directory", name)
 	}
@@ -77,14 +63,8 @@ func (c *collector) rebase(name string) (dest string, ok bool, err error) {
 	// harmless reading, whereas ".." has none.
 	clean = strings.TrimPrefix(clean, "/")
 
-	// Everything from here -- strip depth, subpath selection -- is the shared rule.
-	place := c.mapping.Map(clean)
-	if place.Survived {
-		c.survivors++
-	}
-	if place.InSubpath {
-		c.matched = true
-	}
+	// Everything from here -- strip depth, subpath selection, the refusals in done -- is shared.
+	place := c.walk.Map(clean)
 	if !place.Selected {
 		return "", false, nil
 	}
@@ -128,16 +108,10 @@ func (c *collector) addSymlink(name, link string) {
 	c.entries = append(c.entries, tarEntry{name: name, mode: 0o777, link: link})
 }
 
-// done returns the collected entries, or an error if the subpath selected nothing.
-//
-// A subpath that matched nothing is a silent empty layer, and the workload then starts with files
-// missing for no visible reason. Far better to stall on a typo.
+// done returns the collected entries, unless the selection contributed nothing.
 func (c *collector) done() ([]tarEntry, error) {
-	if c.mapping.Strip > 0 && c.survivors == 0 {
-		return nil, fmt.Errorf("stripComponents %d removed every entry in the archive", c.mapping.Strip)
-	}
-	if c.mapping.Subpath() != "" && !c.matched {
-		return nil, fmt.Errorf("path %q is not present in the archive", c.subpath)
+	if err := c.walk.Err(); err != nil {
+		return nil, err
 	}
 	return c.entries, nil
 }

@@ -801,15 +801,15 @@ func retryDue(obj *ociv1alpha1.ImageBuild) bool {
 	return !time.Now().Before(la.FinishedAt.Add(failureBackoff(obj.Status.Failures)))
 }
 
+// maxFailureDetail is BuildAttempt.Message's MaxLength. Exceeding it does not truncate; the API
+// server rejects the status write, so the failure is lost rather than shortened.
+const maxFailureDetail = 4096
+
 // jobFailureDetail explains a failed build as specifically as the cluster allows.
 //
 // The Job's own condition says only "BackoffLimitExceeded", which names the mechanism and not the
 // cause. The cause is the build container's exit code and termination message, so those are read
 // from the pod and appended — otherwise status shows a failure with no way to act on it.
-// maxFailureDetail is BuildAttempt.Message's MaxLength. Exceeding it does not truncate; the API
-// server rejects the status write, so the failure is lost rather than shortened.
-const maxFailureDetail = 4096
-
 func (r *ImageBuildReconciler) jobFailureDetail(ctx context.Context, obj *ociv1alpha1.ImageBuild, job *batchv1.Job) string {
 	msg := jobFailureMessage(job)
 
@@ -851,12 +851,8 @@ func failureDetailFor(msg string, pods ...corev1.Pod) string {
 			if cause == "" {
 				return recon.Truncate(msg+": "+where+hint, maxFailureDetail)
 			}
-			// CAUSE FIRST. It used to come last, so every truncation ate the one part worth
-			// reading and left the mechanism behind.
-			//
-			// Only the cause is trimmed, and from the front: it can be ~4KB on its own, and
-			// LastAttempt.Message caps at 4096 -- an over-long value does not truncate, it makes
-			// the status write FAIL, which loses the failure entirely.
+			// CAUSE FIRST, and only the cause is trimmed: it used to come last, so every
+			// truncation ate the one part worth reading. ADR 0046.
 			suffix := " [" + where + "]" + hint
 			budget := max(maxFailureDetail-len(suffix), 0)
 			return recon.TruncateTail(cause, budget) + suffix
