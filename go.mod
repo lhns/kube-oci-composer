@@ -9,6 +9,7 @@ require (
 	github.com/secure-systems-lab/go-securesystemslib v0.11.1
 	github.com/sigstore/sigstore v1.10.9
 	github.com/ulikunitz/xz v0.5.16
+	go.uber.org/zap v1.27.1
 	go.yaml.in/yaml/v3 v3.0.5
 	k8s.io/api v0.36.4
 	k8s.io/apimachinery v0.36.4
@@ -64,7 +65,6 @@ require (
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	go.uber.org/zap v1.27.1 // indirect
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
 	golang.org/x/crypto v0.55.0 // indirect
 	golang.org/x/net v0.58.0 // indirect

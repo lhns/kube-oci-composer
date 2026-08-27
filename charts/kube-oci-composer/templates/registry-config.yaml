@@ -52,6 +52,8 @@ data:
       "distSpecVersion": "1.1.0",
       "storage": {
         "rootDirectory": {{ ternary $.Values.registry.storage.s3.rootDirectory "/var/lib/registry" (eq $.Values.registry.storage.driver "s3") | quote }},
+        {{- /* Runs inside zot's registry-wide write lock; the knob for slow concurrent pushes (ADR 0047). */}}
+        "dedupe": {{ $.Values.registry.storage.dedupe }},
         {{- if eq $.Values.registry.storage.driver "s3" }}
         {{- /*
         No accesskey/secretkey here. The driver honours the standard AWS environment chain, and the
@@ -121,7 +123,13 @@ data:
       },
       "http": {
         "address": "0.0.0.0",
-        "port": "5000"
+        "port": "5000",
+        {{- /*
+        Emitted ALWAYS: absent, zot's CLI injects 60s, and Go's ReadTimeout bounds the whole request
+        including time queued behind the registry-wide upload lock, so large layers stop being
+        pushable at all. ADR 0047.
+        */}}
+        "readTimeout": {{ $.Values.registry.readTimeout | quote }}
         {{- if $.Values.registry.tls.enabled }},
         {{- /*
         http.tls, NOT http.tls.cacert.
