@@ -117,24 +117,8 @@ func TestOnlyOneRegistryPodEverWrites(t *testing.T) {
 // is a second writer wearing a different name. The refresh probe in test/spike lost content to
 // exactly this, while it was being actively pulled.
 func TestReadReplicasNeverCollect(t *testing.T) {
-	out := render(t, replicaArgs[2:]...)
-
 	var writer, reader map[string]any
-	for _, d := range docs(t, out) {
-		if d["kind"] != "ConfigMap" {
-			continue
-		}
-		meta, _ := d["metadata"].(map[string]any)
-		name, _ := meta["name"].(string)
-		data, _ := d["data"].(map[string]any)
-		raw, ok := data["config.json"].(string)
-		if !ok {
-			continue
-		}
-		var cfg map[string]any
-		if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
-			t.Fatalf("%s is not valid JSON: %v", name, err)
-		}
+	for name, cfg := range registryConfigs(t, replicaArgs[2:]...) {
 		storage, _ := cfg["storage"].(map[string]any)
 		switch {
 		case strings.HasSuffix(name, "-registry-reader"):

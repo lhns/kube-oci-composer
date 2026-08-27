@@ -6,18 +6,19 @@ import (
 	"testing"
 )
 
-// registryConfig returns the zot config the chart renders.
-func registryConfig(t *testing.T, args ...string) map[string]any {
+// registryConfigs returns every zot config the chart renders, keyed by its ConfigMap name.
+//
+// Both the writer and the read replicas carry one, and their differences are what several tests are
+// about, so this returns the lot rather than guessing which one a caller means.
+func registryConfigs(t *testing.T, args ...string) map[string]map[string]any {
 	t.Helper()
+	out := map[string]map[string]any{}
 	for _, d := range docs(t, render(t, args...)) {
 		if d["kind"] != "ConfigMap" {
 			continue
 		}
 		meta, _ := d["metadata"].(map[string]any)
 		name, _ := meta["name"].(string)
-		if !strings.HasSuffix(name, "-registry") {
-			continue
-		}
 		data, _ := d["data"].(map[string]any)
 		raw, ok := data["config.json"].(string)
 		if !ok {
@@ -27,7 +28,18 @@ func registryConfig(t *testing.T, args ...string) map[string]any {
 		if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
 			t.Fatalf("%s config.json is not valid JSON: %v", name, err)
 		}
-		return cfg
+		out[name] = cfg
+	}
+	return out
+}
+
+// registryConfig returns the writer's config, which is the one every non-replica test means.
+func registryConfig(t *testing.T, args ...string) map[string]any {
+	t.Helper()
+	for name, cfg := range registryConfigs(t, args...) {
+		if strings.HasSuffix(name, "-registry") {
+			return cfg
+		}
 	}
 	t.Fatal("no registry config rendered")
 	return nil

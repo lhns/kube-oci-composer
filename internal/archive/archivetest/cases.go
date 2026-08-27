@@ -6,11 +6,6 @@
 package archivetest
 
 // PathCase is one entry mapped by one Mapping.
-//
-// Exported so the composer's assembler drives its extractors from the same list. That is the whole
-// point: ADR 0023 required one implementation of where an entry lands, a second was written anyway,
-// and the two disagreed until every sourceRef build broke (ADR 0045). One table means neither side
-// can quietly cover a case the other gets wrong.
 type PathCase struct {
 	Name    string
 	Entry   string
