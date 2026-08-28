@@ -281,6 +281,55 @@ timeout that looks exactly like a broken registry.
 the controllers get a write identity — give them a `dockerconfigjson` Secret and point
 `spec.push.secretRef` at it. The refresh path needs no more than *read*.
 
+## Large pushes, and why concurrency makes them slow
+
+zot guards its whole store with **one write lock**. `FinishBlobUpload` holds it across dedupe and
+the blob move; `InitRepo` takes it as the first action of a chunk upload, *before reading any of the
+body*. So uploads serialise registry-wide — not per repository — and a queued upload is waiting
+before it has transferred anything.
+
+That matters because `http.readTimeout` bounds the **entire request, including the body**, so the
+clock is running while a handler waits for the lock. Left unset, zot applies 60 seconds, and a push
+can die having sent nothing:
+
+```
+Put ".../blobs/uploads/<uuid>?digest=sha256:…": use of closed network connection
+```
+
+with `read tcp …: i/o timeout` on the registry side at the same moment. It reads like a network or
+storage fault and is neither. BuildKit then retries the blob from zero, and each retry queues behind
+the next one, so a couple of failing builds sustain it indefinitely.
+
+The chart sets `registry.readTimeout` to `1h` for this reason. It is not a stall timeout — Go cannot
+express one — so it is generous on purpose, and the cost is that a dead connection holds a goroutine
+until it expires.
+
+**If concurrent pushes are slow**, the lever is `registry.storage.dedupe: false`. Dedupe runs inside
+that lock, so removing it shortens the window everything else waits behind. Measured against
+zot v2.1.20 with twenty concurrent 1 MB pushes:
+
+| | single upload | twenty concurrent |
+|---|---|---|
+| `dedupe: true` (default) | 0.37s | 3.9 – 6.1s |
+| `dedupe: false` | 0.34s | 1.0 – 3.9s |
+
+It is a partial fix: `InitRepo` takes the same lock, so uploads still serialise, and it costs disk —
+a blob shared by several repositories is stored once per repository. That trade is why the default
+is left as zot's own.
+
+**To check whether you are hitting this**, push a large blob directly and watch for a reset at a
+suspiciously round number:
+
+```sh
+head -c 300M /dev/urandom > /tmp/blob
+LOC=$(curl -si -X POST http://<registry>:5000/v2/probe/blobs/uploads/ | tr -d '\r' | awk '/^[Ll]ocation:/{print $2}')
+curl -s -o /dev/null -w 'http=%{http_code} time=%{time_total}s\n' \
+  -X PUT --data-binary @/tmp/blob "<registry>${LOC}&digest=sha256:$(sha256sum /tmp/blob | cut -d' ' -f1)"
+```
+
+A failure at 60.0–60.3s, repeatedly, is this. `test/spike/contention_test.go` reproduces it in
+Docker.
+
 ## Staying up while nodes move
 
 `registry.readReplicas` runs extra registry pods that serve **pulls**. Pulls are what fails visibly
@@ -409,52 +458,3 @@ other, which is exactly what you want to be able to do while diagnosing a missin
 `registry.enabled=false` with `defaultRegistry.host` — see *Bringing your own* above. What you cannot
 do is publish nowhere: both kinds upload to a registry, and for `ImageBuild` the Job executes in
 another pod with no route back to the controller at all.
-
-## Large pushes, and why concurrency makes them slow
-
-zot guards its whole store with **one write lock**. `FinishBlobUpload` holds it across dedupe and
-the blob move; `InitRepo` takes it as the first action of a chunk upload, *before reading any of the
-body*. So uploads serialise registry-wide — not per repository — and a queued upload is waiting
-before it has transferred anything.
-
-That matters because `http.readTimeout` bounds the **entire request, including the body**, so the
-clock is running while a handler waits for the lock. Left unset, zot applies 60 seconds, and a push
-can die having sent nothing:
-
-```
-Put ".../blobs/uploads/<uuid>?digest=sha256:…": use of closed network connection
-```
-
-with `read tcp …: i/o timeout` on the registry side at the same moment. It reads like a network or
-storage fault and is neither. BuildKit then retries the blob from zero, and each retry queues behind
-the next one, so a couple of failing builds sustain it indefinitely.
-
-The chart sets `registry.readTimeout` to `1h` for this reason. It is not a stall timeout — Go cannot
-express one — so it is generous on purpose, and the cost is that a dead connection holds a goroutine
-until it expires.
-
-**If concurrent pushes are slow**, the lever is `registry.storage.dedupe: false`. Dedupe runs inside
-that lock, so removing it shortens the window everything else waits behind. Measured against
-zot v2.1.20 with twenty concurrent 1 MB pushes:
-
-| | single upload | twenty concurrent |
-|---|---|---|
-| `dedupe: true` (default) | 0.37s | 3.9 – 6.1s |
-| `dedupe: false` | 0.34s | 1.0 – 3.9s |
-
-It is a partial fix: `InitRepo` takes the same lock, so uploads still serialise, and it costs disk —
-a blob shared by several repositories is stored once per repository. That trade is why the default
-is left as zot's own.
-
-**To check whether you are hitting this**, push a large blob directly and watch for a reset at a
-suspiciously round number:
-
-```sh
-head -c 300M /dev/urandom > /tmp/blob
-LOC=$(curl -si -X POST http://<registry>:5000/v2/probe/blobs/uploads/ | tr -d '\r' | awk '/^[Ll]ocation:/{print $2}')
-curl -s -o /dev/null -w 'http=%{http_code} time=%{time_total}s\n' \
-  -X PUT --data-binary @/tmp/blob "<registry>${LOC}&digest=sha256:$(sha256sum /tmp/blob | cut -d' ' -f1)"
-```
-
-A failure at 60.0–60.3s, repeatedly, is this. `test/spike/contention_test.go` reproduces it in
-Docker.

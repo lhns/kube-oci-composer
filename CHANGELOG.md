@@ -5,7 +5,7 @@ may change between minor versions.
 
 ## [Unreleased]
 
-## [0.5.0] - 2026-08-23
+## [0.5.0] - 2026-08-28
 
 **A registry is now the only publication path, and there is a second kind.**
 
@@ -478,14 +478,14 @@ must name a source in its own namespace.
 
 ### Fixed
 
+Only defects that affected 0.4.0. Bugs introduced and fixed within this release cycle are not
+listed.
+
 - **An init-container failure reported nothing actionable.** `jobFailureDetail` iterated only
   `ContainerStatuses`, which does not include init containers, so a build whose context failed to
   fetch said "BackoffLimitExceeded" — the mechanism, with the cause discarded. It reads
   `InitContainerStatuses` too now, init containers first, since one failing means the build container
   never ran.
-
-Only defects that affected 0.4.0. Bugs introduced and fixed within this release cycle are not
-listed.
 
 - **The builder could never use an image pull secret.** `builder-deployment.yaml` read
   `.Values.imagePullSecrets`, which is not a key this chart has — so the block silently rendered
@@ -688,12 +688,6 @@ those changes describe the older shapes:
   being accepted rather than rejected.
 
 ### Removed
-- **`--s3-presign-blobs` and `operator.s3.presignBlobs`.** Presigning existed so the serving
-  endpoint could redirect a blob pull straight to object storage. That endpoint is gone (ADR 0035),
-  and the flag had been left behind doing nothing but validating itself. `store.Presigner` and the
-  `blobs` and `manifests` key namespaces go with it -- the layer cache only ever used `inputs`.
-
-
 - Pod-reference protection in the garbage collector: implemented, measured to protect nothing, and
   removed. See [ADR 0011](docs/adr/0011-content-tags-expire.md).
 
