@@ -181,9 +181,8 @@ must name a source in its own namespace.
   registry credentials for arbitrary repositories. The guard moves rather than being skipped, and
   the fetcher is our binary running before BuildKit, not user code.
 
-  The Dockerfile's bytes join the input hash and `RecipeVersion` moves to 2. Previously the content
-  needed no hashing because it rode inside the content-addressed context tarball — true then, and
-  false the moment the recipe can come from anywhere else.
+  The Dockerfile's bytes are part of the input hash, since the recipe need not ride inside the
+  content-addressed context tarball.
 
 - **Which sources this project resolves, and which it leaves to source-controller**
   ([ADR 0042](docs/adr/0042-content-addressed-not-flux.md)). Two rules, written down once: if the
@@ -203,54 +202,23 @@ must name a source in its own namespace.
   needed for. Recorded as a known gap with a decided owner
   ([ADR 0043](docs/adr/0043-an-oci-artifact-is-a-source-we-own.md)), not an oversight.
 
-- **Large layers can be pushed again**
-  ([ADR 0047](docs/adr/0047-uploads-serialise-on-one-registry-lock.md)). The chart never set zot's
-  `http.readTimeout`, so zot applied its own 60-second default — and Go's `ReadTimeout` bounds the
-  **whole request including the body**, which means it counts time spent queued behind zot's
-  registry-wide upload lock. A push could therefore die at exactly 60s having transferred nothing,
-  BuildKit retried from zero, and the retry queued behind the next one.
+- **`registry.readTimeout` and `registry.storage.dedupe`**, defaulting to `1h` and `true`. Uploads
+  serialise on one registry-wide lock and the timeout counts the waiting, which is why the first is
+  generous and refused if emptied, and why the second is worth turning off when concurrent pushes
+  are slow. `docs/registry.md` and [ADR 0047](docs/adr/0047-uploads-serialise-on-one-registry-lock.md)
+  have the measurements.
 
-  `registry.readTimeout` now defaults to `1h` and is refused if emptied. **Contention becomes
-  latency instead of failure.**
-
-  `registry.storage.dedupe` is exposed too, still defaulting to `true`. Dedupe runs inside that same
-  lock, so turning it off shortens the window every other upload waits behind — measured at
-  twenty-way concurrency, 3.9–6.1s per push with it on against 1.0–3.9s with it off. A partial
-  lever: `InitRepo` takes the same lock, so uploads still serialise. It trades disk for latency,
-  which is why the default is unchanged.
-
-  **Existing installs need the upgrade** — the value is baked into the rendered ConfigMap. And
-  concurrent large pushes remain slow by default; `docs/registry.md` says what to do about it.
-
-- **A failed build now says why, in status**
+- **A failed build explains itself in status**
   ([ADR 0046](docs/adr/0046-a-failure-explains-itself-in-status.md)). The failing container's log
-  tail lands in `status.lastAttempt.message` and in the Warning Event, so `kubectl describe` answers
-  the question. Previously the message was boilerplate plus ``see `kubectl logs <pod>` `` — and that
-  pod is deleted when the next retry falls due, so the pointer usually outlived its target.
+  tail lands in `status.lastAttempt.message` and in the Warning Event, cause first, so
+  `kubectl describe` answers the question without the pod — which the next retry deletes. It costs
+  no `pods/log` grant: the kubelet copies the tail into the termination message.
 
-  The cause now leads the message rather than trailing it, because truncation was eating exactly the
-  part worth reading. `kubectl get` gains a **Reason** column on both kinds, so the kind of failure
-  is visible without `-o wide`.
+  `kubectl get` carries a **Reason** column on both kinds, so the kind of failure is visible without
+  `-o wide`.
 
-  Controller logs keep `error` level for a failed build — the severity was never wrong — but no
-  longer attach a Go stacktrace to it. A reconcile error is already wrapped with the context that
-  matters, and the trace buried it under twelve frames on every retry. Panics still trace.
-
-  Note that a build's output is now stored on the object and emitted as an Event; it is truncated to
-  4096 bytes, keeping the end. Threat-model row I12.
-
-- **Fixed: every `ImageBuild` with a `sourceRef` context**
-  ([ADR 0045](docs/adr/0045-one-implementation-of-where-an-entry-lands.md)). The context fetcher
-  removed one leading path component from every entry whenever the context came from a Flux source,
-  believing source-controller wraps its tree in a directory. It does not — a `GitRepository`
-  artifact has its files at the root. So every root-level file was taken for the wrapping directory
-  and **dropped**, and every nested path moved up a level, which made `subpath` match nothing. The
-  fetch reported success, so it surfaced as `failed to compute cache key: "/package.json": not
-  found` from BuildKit.
-
-  Nothing infers depth from the source kind any more, and the composer and the builder share one
-  implementation of where an entry lands — which [ADR 0023](docs/adr/0023-more-archive-formats.md)
-  already required, and whose absence is exactly what let the two disagree.
+  A build's output therefore reaches the object and an Event, truncated to 4096 bytes keeping the
+  end. Threat-model row I12.
 
 - **`fetch.stripComponents`, on both kinds.** Removes that many leading path components from every
   entry, before `subpath`:
@@ -265,24 +233,27 @@ must name a source in its own namespace.
 
   Reaching into a release tarball previously meant `subpath: app-1.2.3`, which carries the version
   and so had to be edited on every bump. Path components, not a tar flag: it behaves the same for
-  tar, zip, deb and image layers, because it lives in the one shared path rule.
+  tar, zip, deb and image layers, because the composer and the builder share one implementation of
+  where an entry lands ([ADR 0045](docs/adr/0045-one-implementation-of-where-an-entry-lands.md)).
+
+  Depth comes from the spec and is never inferred from the source kind. A Flux artifact needs none:
+  source-controller puts its files at the root, so leave it unset for a `sourceRef`.
 
   **Upgrading rebuilds every `ImageComposition` once.** The field is hashed unconditionally rather
   than only when set, so existing specs get a new input hash. Harmless — `output = f(spec)`, so the
   digest and tag come out identical and the push is a no-op — but it is real work on first
   reconcile.
 
-- **Build pods no longer reach source-controller** ([ADR 0044](docs/adr/0044-the-builder-proxies-flux-sources.md),
+- **Build pods never reach source-controller** ([ADR 0044](docs/adr/0044-the-builder-proxies-flux-sources.md),
   closing threat I11). The builder serves each build its own Flux artifact, against a per-build
   bearer token, and re-resolves the URL from the `ImageBuild` rather than taking it from the
   request — so a token opens exactly one build and steers nowhere.
 
-  It closes a real weakness rather than a connectivity gap. source-controller serves artifacts over
-  **plain HTTP with no authentication**, so any pod that can reach it can fetch *any* namespace's
-  source. Build pods used to fetch directly, and the NetworkPolicy you had to write per namespace to
-  make builds work on a default-deny cluster was itself what granted every tenant's build pod that
-  reach. `imageBuild.networkPolicy` now admits build namespaces to the **builder** instead — a pod
-  this chart owns, where reaching the endpoint is not reading it.
+  That matters because source-controller serves artifacts over **plain HTTP with no
+  authentication**: any pod that can reach it can fetch *any* namespace's source, so granting build
+  namespaces that reach would hand every tenant's build pod the same. `imageBuild.networkPolicy`
+  admits them to the **builder** instead — a pod this chart owns, where reaching the endpoint is not
+  reading it.
 
   A pipe, not a cache: nothing is stored, and the pod still verifies the digest, so a wrong answer
   is caught rather than built. Only `sourceRef` goes through it; `context.fetch` and `context.image`
@@ -290,12 +261,11 @@ must name a source in its own namespace.
   controller an SSRF amplifier. The cost, stated in the ADR: the controller is now in the data path,
   so a builder that dies mid-stream fails that build.
 
-- **The context fetch is retried**, which fixes builds failing permanently on any default-deny
-  cluster. `fetch-context` dials at t=0 of a brand-new pod, every CNI programs NetworkPolicy
-  asynchronously *after* the pod has its IP, and the denial arrives as `connection refused` rather
-  than a timeout — so it reads like a broken Service. With `backoffLimit: 0` there was no second
-  attempt and a transient condition was a permanent failure. Six attempts over about fifteen
-  seconds; 4xx and digest mismatches are not retried.
+- **The context fetch is retried**, which matters on any default-deny cluster. `fetch-context`
+  dials at t=0 of a brand-new pod, every CNI programs NetworkPolicy asynchronously *after* the pod
+  has its IP, and the denial arrives as `connection refused` rather than a timeout — so a transient
+  condition reads like a broken Service. Six attempts over about fifteen seconds; 4xx and digest
+  mismatches are not retried.
 
 - **A NetworkPolicy for the registry, enabled by default.** Build Jobs run in their object's
   namespace, not the release's, so every build crosses a namespace boundary to push and a
@@ -368,13 +338,11 @@ must name a source in its own namespace.
   the next reconcile, which is safe because the reconcile is idempotent. Push throughput is
   unchanged. And the single point of failure moves to the shared store rather than disappearing.
 
-- **The registry can be placed, and is no longer evicted alongside its own consumers.**
-  `registry.nodeSelector`, `registry.tolerations`, `registry.affinity`,
-  `registry.topologySpreadConstraints`, `registry.priorityClassName` and
-  `registry.terminationGracePeriodSeconds`. Until now the registry pod spec carried no scheduling
-  fields at all — while both controllers honoured the top-level ones — so there was no supported
-  way to keep it off the nodes being cordoned. It was rescheduled in the same batch as the
-  workloads that pull from it, which then sat in `ErrImagePull` waiting for it.
+- **The registry can be placed.** `registry.nodeSelector`, `registry.tolerations`,
+  `registry.affinity`, `registry.topologySpreadConstraints`, `registry.priorityClassName` and
+  `registry.terminationGracePeriodSeconds` — so it can be kept off the nodes being cordoned, rather
+  than rescheduled in the same batch as the workloads that pull from it and leave them in
+  `ErrImagePull` waiting for it.
 
   Deliberately registry-scoped rather than reusing the top-level keys: the usual reason to steer
   the registry is that it should *not* be where the controllers are, and one shared set of keys
@@ -472,6 +440,11 @@ must name a source in its own namespace.
   source-controller re-packs its artifacts on restart, so the digest changes while the revision it
   describes does not — which rebuilt every composition for bytes that were identical.
 
+- **Controller error logs no longer carry a Go stacktrace.** The level stays `error` — the severity
+  was never the problem — but controller-runtime's production default attached a Go stack to every
+  one, burying an already-wrapped reconcile error under twelve frames on each retry. Panics still
+  trace.
+
 - **CRDs install from `templates/` rather than `crds/`.** Helm never upgrades anything in `crds/`,
   which is why schema changes previously needed CRD surgery by hand. Both CRDs carry
   `helm.sh/resource-policy: keep`, so `helm uninstall` cannot take your objects with it.
@@ -481,17 +454,6 @@ must name a source in its own namespace.
 Only defects that affected 0.4.0. Bugs introduced and fixed within this release cycle are not
 listed.
 
-- **An init-container failure reported nothing actionable.** `jobFailureDetail` iterated only
-  `ContainerStatuses`, which does not include init containers, so a build whose context failed to
-  fetch said "BackoffLimitExceeded" — the mechanism, with the cause discarded. It reads
-  `InitContainerStatuses` too now, init containers first, since one failing means the build container
-  never ran.
-
-- **The builder could never use an image pull secret.** `builder-deployment.yaml` read
-  `.Values.imagePullSecrets`, which is not a key this chart has — so the block silently rendered
-  nothing and a private builder image was unpullable with no indication why. It reads
-  `image.pullSecrets` now, like the composer, and the registry pod gained the block it never had.
-
 - **A composition could publish a new tag holding the PREVIOUS revision's content, permanently.**
   An artifact whose status predated its own source's spec was consumed as current, and under
   `immutable` the wrong content then held that tag forever — a tag's first publish has nothing for
@@ -499,7 +461,8 @@ listed.
   Pending rather than consumed ([ADR 0026](docs/adr/0026-a-source-artifact-can-lag-its-own-spec.md)).
 
 - **`flux reconcile` timed out instead of reporting a failure.** `status.lastHandledReconcileAt`
-  was never echoed, so Flux waited for an acknowledgement that never came.
+  was echoed only when the reconcile succeeded, so a failing one left Flux waiting for an
+  acknowledgement that never came.
 
 - **An archive entry named exactly `..` escaped its target directory.** The traversal guard tested
   for a `../` prefix, which a bare `..` does not have.
