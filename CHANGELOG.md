@@ -7,6 +7,25 @@ may change between minor versions.
 
 ### Fixed
 
+- **Per-build Secrets are reclaimed instead of accumulating forever**
+  ([ADR 0050](docs/adr/0050-a-builds-secrets-belong-to-the-build.md)). Each `ImageBuild` revision
+  creates up to four Secrets — `-push`, `-registry-ca`, `-dockerfile`, `-context` — owner-referenced
+  to the **ImageBuild**, which a GitOps layer never deletes, and named after the input hash so every
+  revision added four more. A ten-day-old install reported **42 of 63 Secrets in one namespace being
+  garbage**, the largest Secret consumer in the cluster.
+
+  They are now owned by the **Job** that mounts them, which already carries
+  `ttlSecondsAfterFinished: 3600` and is deleted outright on retry — so Kubernetes reclaims them.
+  No pruning loop and **no RBAC change**; a list-and-prune sweep would have needed `list` on Secrets
+  cluster-wide, where re-owning needs only `update`.
+
+  A Secret named by your own `spec.push.secretRef` is never adopted: adoption requires the name,
+  the `managed-by` label and the existing owner to all be this controller's.
+
+  **Existing orphaned Secrets are not removed by the upgrade** — nothing re-parents them
+  retroactively. Note also that deleting a Job now deletes its credentials, so a Job cannot be
+  re-run by hand afterwards; let the controller start a fresh build instead.
+
 - **A reference that is already gone no longer keeps an object Degraded forever**
   ([ADR 0049](docs/adr/0049-a-reference-that-is-gone-is-a-fact-not-a-failure.md)). A deleted
   manifest was counted as a refresh failure, so `consecutiveFailures` climbed every cycle and could

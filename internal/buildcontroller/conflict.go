@@ -9,6 +9,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -16,6 +17,7 @@ import (
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
@@ -255,7 +257,7 @@ func (r *ImageBuildReconciler) pushSecretFor(
 			Labels:    map[string]string{"app.kubernetes.io/managed-by": "kube-oci-builder"},
 			Annotations: map[string]string{
 				"oci.lhns.de/description": "Short-lived copy of the operator's registry credential, " +
-					"mounted by this build's Job. Deleted with the build.",
+					"mounted by this build's Job. Owned by this build's Job and deleted with it.",
 			},
 		},
 		Type: source.Type,
@@ -286,8 +288,8 @@ func (r *ImageBuildReconciler) pushSecretFor(
 // registryCASecretFor puts the operator's registry CA where a build Job can mount it.
 //
 // Same shape and same reasoning as pushSecretFor: the Job runs in the OBJECT's namespace and a pod
-// can only mount Secrets from its own, so the material is copied there, owned by the ImageBuild,
-// and garbage-collected with it.
+// can only mount Secrets from its own, so the material is copied there. Created owned by the
+// ImageBuild because the Job does not exist yet, then re-owned by the Job -- see adoptBuildSecrets.
 //
 // A SEPARATE object rather than an extra key on the copied push credential, and that is not
 // tidiness. pushSecretFor returns early when the object has its own `spec.push.secretRef` — an
@@ -313,7 +315,7 @@ func (r *ImageBuildReconciler) registryCASecretFor(
 			Annotations: map[string]string{
 				"oci.lhns.de/description": "The registry CA this build's Job trusts. " +
 					"Not secret; a Secret only because the builder already has permission to " +
-					"write Secrets here. Deleted with the build.",
+					"write Secrets here. Owned by this build's Job and deleted with it.",
 			},
 		},
 		Type: corev1.SecretTypeOpaque,
@@ -373,7 +375,7 @@ func (r *ImageBuildReconciler) dockerfileSecretFor(
 			Annotations: map[string]string{
 				"oci.lhns.de/description": "The Dockerfile this build runs, as checked by the " +
 					"controller. Not secret; a Secret only because the builder already has " +
-					"permission to write Secrets here. Deleted with the build.",
+					"permission to write Secrets here. Owned by this build's Job and deleted with it.",
 			},
 		},
 		Type:      corev1.SecretTypeOpaque,
@@ -418,7 +420,7 @@ func (r *ImageBuildReconciler) contextTokenFor(
 			Labels:    map[string]string{"app.kubernetes.io/managed-by": "kube-oci-builder"},
 			Annotations: map[string]string{
 				"oci.lhns.de/description": "Lets this build fetch its own source through the " +
-					"builder, so the build pod never reaches source-controller. Deleted with the build.",
+					"builder, so the build pod never reaches source-controller. Owned by this build's Job and deleted with it.",
 			},
 		},
 		Type:      corev1.SecretTypeOpaque,
@@ -435,4 +437,68 @@ func (r *ImageBuildReconciler) contextTokenFor(
 		}
 	}
 	return secret.Name, nil
+}
+
+// buildSecretNames are the Secrets this controller creates for one Job, derived rather than
+// collected.
+//
+// Derived on purpose. pushSecretFor returns the OBJECT's own secret when spec.push.secretRef is set
+// -- a Secret this controller neither made nor owns -- so adopting whatever name came back would
+// hand a user's credential to the Job's garbage collection and delete it an hour after the build.
+func buildSecretNames(jobName string) []string {
+	return []string{
+		jobName + "-push",
+		jobName + "-registry-ca",
+		jobName + "-dockerfile",
+		contextSecretName(jobName),
+	}
+}
+
+// adoptBuildSecrets hands each per-build Secret's lifetime to the Job that mounts it.
+//
+// They are created owned by the ImageBuild, because the Job does not exist yet and an owner must.
+// Left that way they outlive every build the object ever runs: Kubernetes reclaims a dependent only
+// when its OWNER goes, the ImageBuild is a GitOps object that does not, and their names carry the
+// input hash so each revision adds four more rather than replacing them. A ten-day-old install
+// reported 42 of 63 Secrets in one namespace being garbage.
+//
+// The Job already carries TTLSecondsAfterFinished and is deleted outright on retry, so owning them
+// from it is the whole fix -- no pruning loop, no reconstructing which are dead, and nothing that
+// could delete a running build's credentials. It also makes their annotation true.
+//
+// Deliberately NOT a list-and-prune sweep, which would need `list` on Secrets cluster-wide; this
+// needs only `update`, which the builder already has. ADR 0050.
+func (r *ImageBuildReconciler) adoptBuildSecrets(ctx context.Context, obj *ociv1alpha1.ImageBuild, job *batchv1.Job) {
+	log := logf.FromContext(ctx)
+	for _, name := range buildSecretNames(job.Name) {
+		var sec corev1.Secret
+		key := types.NamespacedName{Namespace: job.Namespace, Name: name}
+		if err := r.Get(ctx, key, &sec); err != nil {
+			// Most of these do not exist for any given build -- no TLS, no inline Dockerfile, no
+			// proxied context -- so absence is the ordinary case and not worth a line.
+			if !apierrors.IsNotFound(err) {
+				log.Error(err, "reading a build secret to re-own it", "secret", key)
+			}
+			continue
+		}
+		// Three guards, and the point of all three is that this can never touch a Secret the
+		// controller did not create: the name is one it generates, the label is one it sets, and it
+		// is currently owned by this very object.
+		if sec.Labels["app.kubernetes.io/managed-by"] != "kube-oci-builder" {
+			continue
+		}
+		if !metav1.IsControlledBy(&sec, obj) {
+			continue
+		}
+		sec.OwnerReferences = nil
+		if err := ctrl.SetControllerReference(job, &sec, r.Scheme()); err != nil {
+			log.Error(err, "re-owning a build secret", "secret", key)
+			continue
+		}
+		if err := r.Update(ctx, &sec); err != nil {
+			// Not fatal. The Job is already running and the build must not fail over its
+			// housekeeping; the outcome is the old behaviour, which is a leak and not an outage.
+			log.Error(err, "re-owning a build secret", "secret", key)
+		}
+	}
 }
