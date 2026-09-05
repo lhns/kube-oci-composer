@@ -69,25 +69,29 @@ func TestAnUnsetPublicHostChangesNothing(t *testing.T) {
 		t.Fatalf("PublicRepository rewrote a reference with no public host set: %q", got)
 	}
 	internal := d.RepositoryFor("team-a", "app")
-	public := d.PublicRepositoryFor("team-a", "app")
-	if internal != public {
+	if public := d.PublicRepository(internal); internal != public {
 		t.Fatalf("with no public host the two must agree: %q vs %q", internal, public)
 	}
 }
 
-// TestPublicRepositoryForIsNamespaceQualifiedToo — the public name is derived from the same rule as
-// the internal one, so a bare object name cannot collide across namespaces in one and not the other.
-func TestPublicRepositoryForIsNamespaceQualifiedToo(t *testing.T) {
+// TestThePublicNameIsNamespaceQualifiedToo — the public name keeps the path the internal one has,
+// so a bare object name cannot collide across namespaces in one and not the other.
+//
+// Against PublicRepository, which is what the controllers call. PublicRepositoryFor said the same
+// thing for nobody: it had no caller outside this file, while carrying the most confident statement
+// of an invariant the retention refresh was busy violating. ADR 0048.
+func TestThePublicNameIsNamespaceQualifiedToo(t *testing.T) {
 	d := DefaultRegistry{
 		Host:       "registry.svc:5000",
 		PublicHost: "oci-composer.internal:30500",
 	}
-	if got, want := d.PublicRepositoryFor("team-a", "app"), "oci-composer.internal:30500/team-a/app"; got != want {
-		t.Fatalf("PublicRepositoryFor = %q, want %q", got, want)
+	internal := d.RepositoryFor("team-a", "app")
+	if got, want := d.PublicRepository(internal), "oci-composer.internal:30500/team-a/app"; got != want {
+		t.Fatalf("PublicRepository(%q) = %q, want %q", internal, got, want)
 	}
 	// A trailing slash on the configured host must not double up.
 	d.PublicHost = "oci-composer.internal:30500/"
-	if got, want := d.PublicRepositoryFor("team-a", "app"), "oci-composer.internal:30500/team-a/app"; got != want {
+	if got, want := d.PublicRepository(internal), "oci-composer.internal:30500/team-a/app"; got != want {
 		t.Fatalf("a trailing slash produced %q, want %q", got, want)
 	}
 }

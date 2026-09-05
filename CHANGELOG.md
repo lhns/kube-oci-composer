@@ -5,6 +5,25 @@ may change between minor versions.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Retention never refreshed a single tag, so published images lost their protection**
+  ([ADR 0048](docs/adr/0048-retention-addresses-the-registry-it-can-reach.md)). The refresher built
+  digest references from the repository it resolved but took tag references from
+  `status.artifact.tags` verbatim — and both controllers write those through the **public** host,
+  an Ingress or NodePort name a pod deliberately cannot resolve. So digests refreshed, tags did not,
+  and the reported symptom was `5 of 9 references … no such host`, hourly, forever.
+
+  Tags then aged out while their content stayed alive, leaving untagged manifests — which is
+  precisely what the shipped `deleteUntagged` policy reclaims. One reported repository lost every
+  tag it had while its `ImageBuild` still reported `Ready=True`.
+
+  **Every install with `registry.publish.mode` of `ingress` or `nodePort` is affected**, which is
+  every install whose images workloads can actually pull. `internalOnly` is unaffected.
+
+  Retention now rebuilds every reference from the repository it resolved and trusts nothing stored.
+  **Images already reclaimed are not restored by the upgrade.**
+
 ## [0.5.0] - 2026-08-28
 
 **A registry is now the only publication path, and there is a second kind.**

@@ -55,23 +55,21 @@ func (d DefaultRegistry) RepositoryFor(namespace, name string) string {
 	return repositoryAt(d.Host, namespace, name)
 }
 
-// PublicRepositoryFor is the same repository, addressed as a workload should address it.
-//
-// Used ONLY to render status.artifact.ref and status.artifact.tags. Everything that actually talks
-// to a registry -- pushing, the tag-conflict check, the retention refresh -- uses RepositoryFor,
-// because those run from inside the cluster where the public name may not resolve at all.
-func (d DefaultRegistry) PublicRepositoryFor(namespace, name string) string {
-	if d.PublicHost == "" {
-		return d.RepositoryFor(namespace, name)
-	}
-	return repositoryAt(d.PublicHost, namespace, name)
-}
-
 // PublicRepository maps a repository the controller wrote to onto the name a workload should pull.
 //
 // Only the HOST is rewritten, and only for the operator's own registry. An object that named its
 // own repository somewhere else is reported back exactly as written -- the operator's public name
 // says nothing about a registry the operator does not run.
+//
+// What comes out of here is for status.artifact.ref and status.artifact.tags and nothing else. It
+// is an Ingress or NodePort name, and a pod generally CANNOT resolve it -- so anything that dials a
+// registry, including the retention refresh, must build its own reference from RepositoryFor
+// instead of reading one back out of status.
+//
+// That was stated in three comments and enforced by none of them, and the retention refresh read
+// the public name back out of status.Tags for exactly as long. Saying it here is not the mechanism;
+// the mechanism is that retention rebuilds every reference from the repository it resolved and its
+// fixtures use two different hosts, so the two cannot agree by accident. ADR 0048.
 func (d DefaultRegistry) PublicRepository(repository string) string {
 	if d.PublicHost == "" || repository == "" || !d.Owns(repository) {
 		return repository

@@ -182,7 +182,9 @@ rule host produces an Ingress that matches nothing, silently.
 {{- end -}}
 
 {{- /*
-What a WORKLOAD is told to pull from. Rendered into status.artifact.ref and nowhere else.
+What a WORKLOAD is told to pull from, and the one name in this chart that a pod may be unable to
+resolve. It reaches status.artifact.ref and status.artifact.tags; nothing that dials the registry
+may use it.
 
 Empty whenever it would equal the internal name -- an external registry is one name that already
 works from both places, and emitting it twice would only invite the two to drift.
