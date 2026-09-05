@@ -470,19 +470,52 @@ func digestRef(repo, digest string) string {
 	return repo + "@" + digest
 }
 
-// qualify accepts a tag recorded either bare or already fully qualified.
+// qualify rebuilds a stored tag against the repository this refresh resolved, keeping only the tag
+// itself.
 //
-// status.Tags is written as "repo:tag" by both controllers, but a hand-edited or older object may
-// hold a bare tag, and a refresh that silently skipped those would under-protect exactly the objects
-// least likely to be noticed.
+// The stored value is NOT usable as a reference here. Both controllers write status.Tags as a
+// workload should pull them -- through the PUBLIC host, an Ingress or NodePort name that a pod
+// deliberately cannot resolve -- so trusting it made every tag refresh fail DNS while the digests,
+// built from repo, succeeded. Silently: the images kept their content alive and lost their tags,
+// which is precisely what the shipped deleteUntagged policy reclaims. ADR 0048.
+//
+// Symmetric with digestRef, which has always taken repo as the authority. A hand-edited or older
+// object may hold a bare tag, and those still work.
 func qualify(repo, tag string) string {
+	t := bareTag(tag)
+	if t == "" {
+		return ""
+	}
+	return repo + ":" + t
+}
+
+// bareTag strips any repository the stored value carries.
+//
+// The tag is what follows the last ":" that comes AFTER the last "/", which is the one rule that
+// survives a host with a port: in "host:30500/ns/app:v1" the first colon belongs to the port and
+// only the second introduces a tag. A value with no such colon is already bare. A value that names
+// a repository and no tag -- "host:30500/ns/app" -- yields nothing, because appending it to repo
+// would fabricate a reference that was never published. Nor does a digest reference, which carries
+// a colon of its own.
+func bareTag(tag string) string {
 	if tag == "" {
 		return ""
 	}
-	if strings.Contains(tag, "/") || strings.Contains(tag, "@") {
-		return tag
+	// A digest reference first, because a digest CONTAINS a colon -- "app@sha256:abc" would
+	// otherwise parse as the tag "abc". It is not a tag at all, and digests already reach the
+	// refresh set through digestRef.
+	if strings.Contains(tag, "@") {
+		return ""
 	}
-	return repo + ":" + tag
+	colon := strings.LastIndex(tag, ":")
+	slash := strings.LastIndex(tag, "/")
+	if colon > slash {
+		return tag[colon+1:]
+	}
+	if slash >= 0 {
+		return ""
+	}
+	return tag
 }
 
 // remoteOptions reads the push credential, and nothing else.

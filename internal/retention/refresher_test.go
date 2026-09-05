@@ -143,6 +143,18 @@ func scheme(t *testing.T) *runtime.Scheme {
 	return s
 }
 
+// publicHost is what a workload is told to pull from, and it resolves NOWHERE -- no test server
+// listens on it and it is not in InsecureRegistries.
+//
+// Every fixture below stores its tags through it, because that is what both controllers write into
+// status.artifact.tags and status.history[].tags. Using the reachable host in both places is what
+// let the refresher trust a stored tag for a whole release: the two could not disagree, so the bug
+// had nowhere to show. ADR 0048.
+const publicHost = "oci-composer.internal:30500"
+
+// publicTag writes a tag the way status carries it: qualified with the public host.
+func publicTag(tag string) string { return publicHost + "/team/app:" + tag }
+
 // buildWith returns an ImageBuild publishing the given history to the registry.
 func buildWith(reg *recordingRegistry, name string, history []ociv1alpha1.BuildRecord,
 	artifact *ociv1alpha1.ArtifactStatus) *ociv1alpha1.ImageBuild {
@@ -163,11 +175,10 @@ func buildWith(reg *recordingRegistry, name string, history []ociv1alpha1.BuildR
 // manifests by different rules. A refresh keeps alive exactly what it asks for.
 func TestEveryRetainedReferenceIsRefreshed(t *testing.T) {
 	reg := newRegistry(t)
-	repo := reg.host() + "/team/app"
 
 	obj := buildWith(reg, "app", []ociv1alpha1.BuildRecord{
-		{Digest: digestA, Tags: []string{repo + ":v1", repo + ":latest"}},
-		{Digest: digestB, Tags: []string{repo + ":v0"}},
+		{Digest: digestA, Tags: []string{publicTag("v1"), publicTag("latest")}},
+		{Digest: digestB, Tags: []string{publicTag("v0")}},
 	}, nil)
 
 	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithObjects(obj).Build()
@@ -204,10 +215,9 @@ func TestEveryRetainedReferenceIsRefreshed(t *testing.T) {
 // retention window after it broke.
 func TestAStalledObjectStillRefreshes(t *testing.T) {
 	reg := newRegistry(t)
-	repo := reg.host() + "/team/app"
 
 	obj := buildWith(reg, "stalled", []ociv1alpha1.BuildRecord{
-		{Digest: digestA, Tags: []string{repo + ":v1"}},
+		{Digest: digestA, Tags: []string{publicTag("v1")}},
 	}, nil)
 	obj.Status.Conditions = []metav1.Condition{
 		{Type: ociv1alpha1.StalledCondition, Status: metav1.ConditionTrue,
@@ -246,10 +256,9 @@ func TestAStalledObjectStillRefreshes(t *testing.T) {
 // back to the cause.
 func TestAPartialViewRefreshesNothing(t *testing.T) {
 	reg := newRegistry(t)
-	repo := reg.host() + "/team/app"
 
 	obj := buildWith(reg, "app", []ociv1alpha1.BuildRecord{
-		{Digest: digestA, Tags: []string{repo + ":v1"}},
+		{Digest: digestA, Tags: []string{publicTag("v1")}},
 	}, nil)
 
 	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithObjects(obj).Build()
@@ -278,10 +287,9 @@ func TestAPartialViewRefreshesNothing(t *testing.T) {
 // protection failed, the other says it might.
 func TestAMissingReferenceIsReportedSeparately(t *testing.T) {
 	reg := newRegistry(t, digestB)
-	repo := reg.host() + "/team/app"
 
 	obj := buildWith(reg, "app", []ociv1alpha1.BuildRecord{
-		{Digest: digestA, Tags: []string{repo + ":v1"}},
+		{Digest: digestA, Tags: []string{publicTag("v1")}},
 		{Digest: digestB},
 	}, nil)
 
@@ -509,4 +517,125 @@ func sourceFor(obj client.Object, c client.Client) Source {
 		return BuildSource{Client: c}
 	}
 	return CompositionSource{Client: c}
+}
+
+// TestEveryReferenceIsBuiltFromTheResolvedRepository is the invariant, asserted directly.
+//
+// Retention runs in-cluster. If a reference it dials came from anywhere but the repository it
+// resolved, it is addressing a host it may not be able to reach -- which is the whole of ADR 0048.
+// One assertion, and the class of bug cannot come back.
+func TestEveryReferenceIsBuiltFromTheResolvedRepository(t *testing.T) {
+	const repo = "registry.svc.cluster.local:5000/team-a/app"
+
+	refs := refsOf(repo,
+		&ociv1alpha1.ArtifactStatus{
+			Digest: digestA,
+			// As status carries them: through the public host.
+			Tags: []string{publicTag("v1"), publicTag("latest")},
+		},
+		[]ociv1alpha1.BuildRecord{
+			{Digest: digestB, Tags: []string{publicTag("v0")}},
+			// A bare tag, as a hand-edited or pre-0.5.0 object may hold.
+			{Digest: digestA, Tags: []string{"legacy"}},
+		})
+
+	if len(refs) == 0 {
+		t.Fatal("no references at all")
+	}
+	for _, ref := range refs {
+		if !strings.HasPrefix(ref, repo+":") && !strings.HasPrefix(ref, repo+"@") {
+			t.Errorf("reference %q was not built from the resolved repository %q; retention would "+
+				"dial a host it has no reason to be able to resolve", ref, repo)
+		}
+	}
+	for _, want := range []string{repo + ":v1", repo + ":latest", repo + ":v0", repo + ":legacy"} {
+		var found bool
+		for _, ref := range refs {
+			if ref == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%q is missing; whatever is not refreshed is what the registry collects\ngot: %v",
+				want, refs)
+		}
+	}
+}
+
+// TestABareTagIsRecoveredFromWhateverStatusHolds pins the parse, because the rule is not obvious:
+// a host carries a colon of its own and only the LAST one, after the last slash, introduces a tag.
+func TestABareTagIsRecoveredFromWhateverStatusHolds(t *testing.T) {
+	for _, tc := range []struct{ name, in, want string }{
+		{"already bare", "v1", "v1"},
+		{"public host with a port", "oci-composer.internal:30500/team-a/app:v1", "v1"},
+		{"in-cluster host with a port", "registry.svc:5000/team-a/app:sb6b025064f7ba9bc", "sb6b025064f7ba9bc"},
+		{"no port", "ghcr.io/example/app:v1", "v1"},
+		{"empty", "", ""},
+		// A repository and no tag names nothing that was ever published, so it contributes
+		// nothing rather than being appended to repo as if it were a tag.
+		{"repository with no tag", "oci-composer.internal:30500/team-a/app", ""},
+		{"host and port only", "registry.svc:5000/app", ""},
+		{"a digest is not a tag", "ghcr.io/example/app@" + digestA, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := bareTag(tc.in); got != tc.want {
+				t.Errorf("bareTag(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTagsStoredWithAnUnresolvableHostStillRefresh is the reported bug, end to end.
+//
+// A live 0.5.0 cluster reported "5 of 9 references" failing every hour for three days, with
+// "lookup oci-composer.internal: no such host". Digests refreshed and tags did not, because the
+// stored tag carried the public host and the refresher used it verbatim. One repository lost every
+// tag it had; the manifest survived only as an untagged blob, which is what deleteUntagged reclaims.
+//
+// The public host here resolves nowhere, exactly as it does not resolve from a pod.
+func TestTagsStoredWithAnUnresolvableHostStillRefresh(t *testing.T) {
+	reg := newRegistry(t)
+
+	obj := buildWith(reg, "app", []ociv1alpha1.BuildRecord{
+		{Digest: digestB, Tags: []string{publicTag("v0")}},
+	}, &ociv1alpha1.ArtifactStatus{
+		Digest: digestA,
+		Ref:    publicHost + "/team/app@" + digestA,
+		Tags:   []string{publicTag("v1")},
+	})
+
+	rec := record.NewFakeRecorder(50)
+	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithObjects(obj).Build()
+	r := &Refresher{
+		Client:             c,
+		Source:             sourceFor(obj, c),
+		Pending:            allReconciled{},
+		Recorder:           rec,
+		InsecureRegistries: []string{reg.host()},
+	}
+
+	res, err := r.RefreshOnce(context.Background())
+	if err != nil {
+		t.Fatalf("refreshing: %v", err)
+	}
+
+	if res.Failed != 0 {
+		t.Errorf("failed = %d, want 0: every reference is reachable at the resolved repository",
+			res.Failed)
+	}
+	if res.Refreshed != res.References {
+		t.Errorf("refreshed %d of %d references", res.Refreshed, res.References)
+	}
+	// The tags specifically, since those are the ones that were being lost.
+	for _, want := range []string{"v1", "v0"} {
+		if !containsRef(reg.requests(), want) {
+			t.Errorf("tag %q was never refreshed, so the registry would collect it\nrequests: %v",
+				want, reg.requests())
+		}
+	}
+	select {
+	case ev := <-rec.Events:
+		t.Errorf("a healthy refresh raised an event: %s", ev)
+	default:
+	}
 }
