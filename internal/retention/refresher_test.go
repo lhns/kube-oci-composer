@@ -36,11 +36,12 @@ type recordingRegistry struct {
 	mu      sync.Mutex
 	got     []string
 	missing map[string]bool
+	broken  map[string]bool
 }
 
 func newRegistry(t *testing.T, missing ...string) *recordingRegistry {
 	t.Helper()
-	reg := &recordingRegistry{missing: map[string]bool{}}
+	reg := &recordingRegistry{missing: map[string]bool{}, broken: map[string]bool{}}
 	for _, m := range missing {
 		reg.missing[m] = true
 	}
@@ -60,8 +61,16 @@ func newRegistry(t *testing.T, missing ...string) *recordingRegistry {
 		reg.mu.Lock()
 		reg.got = append(reg.got, r.Method+" "+ref)
 		missing := reg.missing[ref]
+		broken := reg.broken[ref]
 		reg.mu.Unlock()
 
+		// A 500 and a 404 are DIFFERENT alarms (ADR 0049), so the stub has to be able to produce
+		// both. It could only 404, which is why a test about recovery from a transient failure was
+		// written using a permanently deleted manifest.
+		if broken {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		if missing {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -316,7 +325,10 @@ func TestAMissingReferenceIsReportedSeparately(t *testing.T) {
 // does not: sustained failure has to be loud well before the window elapses, because the alternative
 // to noticing is deletion.
 func TestSustainedFailureRaisesAnEvent(t *testing.T) {
-	reg := newRegistry(t, digestA)
+	// A registry that is there and unwell, not a manifest that is gone: Degraded is the alarm for
+	// something that MIGHT still be failing, and only a transient error can sustain it (ADR 0049).
+	reg := newRegistry(t)
+	reg.setBroken(digestA)
 	obj := buildWith(reg, "app", []ociv1alpha1.BuildRecord{{Digest: digestA}}, nil)
 
 	events := record.NewFakeRecorder(50)
@@ -356,7 +368,8 @@ func TestSustainedFailureRaisesAnEvent(t *testing.T) {
 
 // A recovered object must stop being reported, or the warning becomes permanent and worthless.
 func TestRecoveryClearsTheFailureCount(t *testing.T) {
-	reg := newRegistry(t, digestA)
+	reg := newRegistry(t)
+	reg.setBroken(digestA)
 	obj := buildWith(reg, "app", []ociv1alpha1.BuildRecord{{Digest: digestA}}, nil)
 
 	events := record.NewFakeRecorder(50)
@@ -376,17 +389,13 @@ func TestRecoveryClearsTheFailureCount(t *testing.T) {
 	}
 
 	// The registry comes back.
-	reg.mu.Lock()
-	reg.missing = map[string]bool{}
-	reg.mu.Unlock()
+	reg.setBroken()
 
 	if _, err := r.RefreshOnce(context.Background()); err != nil {
 		t.Fatalf("refreshing: %v", err)
 	}
 	// ...and then fails once more. That must not immediately re-trip the threshold.
-	reg.mu.Lock()
-	reg.missing = map[string]bool{digestA: true}
-	reg.mu.Unlock()
+	reg.setBroken(digestA)
 	if _, err := r.RefreshOnce(context.Background()); err != nil {
 		t.Fatalf("refreshing: %v", err)
 	}
@@ -637,5 +646,89 @@ func TestTagsStoredWithAnUnresolvableHostStillRefresh(t *testing.T) {
 	case ev := <-rec.Events:
 		t.Errorf("a healthy refresh raised an event: %s", ev)
 	default:
+	}
+}
+
+// setBroken makes the named references answer 500 -- a registry that is there and unwell, which is
+// a different thing from a manifest that is gone. Replaces the whole set, so no arguments clears it.
+func (reg *recordingRegistry) setBroken(refs ...string) {
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	reg.broken = map[string]bool{}
+	for _, r := range refs {
+		reg.broken[r] = true
+	}
+}
+
+// TestAGoneReferenceDoesNotHoldTheObjectDegradedForever is the bug ADR 0049 is about.
+//
+// A deleted manifest cannot come back on its own, so counting it as a failure re-armed the
+// escalation every cycle and clearFailure was never reached: consecutiveFailures reached 72 on the
+// cluster that reported it, and the object was permanently Degraded over history that had expired.
+// The cost is not the counter, it is that a genuine outage then arrives looking like three days of
+// existing noise.
+func TestAGoneReferenceDoesNotHoldTheObjectDegradedForever(t *testing.T) {
+	reg := newRegistry(t, digestA)
+	obj := buildWith(reg, "app", []ociv1alpha1.BuildRecord{
+		{Digest: digestA}, // gone for good
+		{Digest: digestB}, // still there
+	}, nil)
+
+	events := record.NewFakeRecorder(200)
+	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithObjects(obj).Build()
+	r := &Refresher{
+		Client:             c,
+		Source:             sourceFor(obj, c),
+		Pending:            allReconciled{},
+		Recorder:           events,
+		InsecureRegistries: []string{reg.host()},
+	}
+
+	// Well past the point at which a failure would have escalated.
+	for i := 0; i < DegradedAfter+3; i++ {
+		res, err := r.RefreshOnce(context.Background())
+		if err != nil {
+			t.Fatalf("refreshing: %v", err)
+		}
+		if res.NotFound != 1 {
+			t.Fatalf("notFound = %d, want 1", res.NotFound)
+		}
+		if res.Failed != 0 {
+			t.Errorf("failed = %d, want 0: nothing here is a transient failure", res.Failed)
+		}
+	}
+
+	// The failure count never rose, so a real outage starting now would still be distinguishable.
+	if n := r.failures["team-a/app"]; n != 0 {
+		t.Errorf("consecutiveFailures = %d after %d cycles; a permanent loss must not hold the "+
+			"escalation open", n, DegradedAfter+3)
+	}
+
+	var degraded, lost int
+	for {
+		select {
+		case ev := <-events.Events:
+			switch {
+			case strings.Contains(ev, ociv1alpha1.ReasonRetentionDegraded):
+				degraded++
+			case strings.Contains(ev, ociv1alpha1.ReasonRetentionLost):
+				lost++
+			}
+			continue
+		default:
+		}
+		break
+	}
+	if degraded != 0 {
+		t.Errorf("raised %d Degraded events; a manifest that is gone is not a refresh that is "+
+			"failing", degraded)
+	}
+	// Reported every cycle, deliberately: a loss that is still true an hour later is still true.
+	if lost == 0 {
+		t.Error("a reference was lost and nothing said so")
+	}
+	// And the surviving reference is still being refreshed, which is the point of not bailing out.
+	if !containsRef(reg.requests(), digestB) {
+		t.Error("the reference that still exists stopped being refreshed")
 	}
 }

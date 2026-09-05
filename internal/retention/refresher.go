@@ -336,8 +336,8 @@ func (r *Refresher) refreshObject(ctx context.Context, target Target, out *Resul
 		refOpts = append(refOpts, name.Insecure)
 	}
 
-	var failed int
-	var lastErr error
+	var failed, gone int
+	var lastErr, lastGone error
 	for _, ref := range refs {
 		parsed, err := name.ParseReference(ref, refOpts...)
 		if err != nil {
@@ -368,12 +368,19 @@ func (r *Refresher) refreshObject(ctx context.Context, target Target, out *Resul
 			// Signatures need nothing here: cosign's .sig is a TAG, so keepTags already covers it.
 			r.refreshReferrers(parsed, opts, out)
 		case isNotFound(err):
-			// The guarantee has ALREADY been broken by something else, and quietly. Counted
-			// separately because it is a different alarm from a registry that is merely unreachable:
-			// one says the protection failed, the other says it might.
+			// The guarantee has ALREADY been broken by something else, and quietly. A different
+			// alarm from a registry that is merely unreachable: one says the protection failed, the
+			// other says it might.
+			//
+			// Counted apart from failed, not just apart in Result. A deleted manifest cannot come
+			// back on its own, so folding it into failed re-armed noteFailure every cycle,
+			// clearFailure was unreachable, and consecutiveFailures grew without bound -- 72 and
+			// climbing, on the cluster that reported it. An object stayed Degraded permanently over
+			// history that had expired, which is exactly how a real outage arrives looking like
+			// three days of existing noise. ADR 0049.
 			out.NotFound++
-			failed++
-			lastErr = fmt.Errorf("%s is gone: %w", ref, err)
+			gone++
+			lastGone = fmt.Errorf("%s is gone: %w", ref, err)
 		default:
 			out.Failed++
 			failed++
@@ -381,11 +388,24 @@ func (r *Refresher) refreshObject(ctx context.Context, target Target, out *Resul
 		}
 	}
 
+	// Reported every cycle rather than once, and as a summary rather than per reference: it holds
+	// no state, and a loss that is still true an hour later is still worth seeing. It does NOT
+	// touch the failure count, so an object whose only problem is expired history is not Degraded.
+	if gone > 0 {
+		recon.Event(r.Recorder, obj, corev1.EventTypeWarning, ociv1alpha1.ReasonRetentionLost,
+			fmt.Sprintf("%d of %d references this object published are already gone from the "+
+				"registry and cannot be refreshed back into existence (%v).",
+				gone, len(refs), lastGone))
+	}
+
 	if failed > 0 {
 		r.noteFailure(ctx, obj, namespace, objName,
 			fmt.Sprintf("%d of %d references: %v", failed, len(refs), lastErr))
 		return
 	}
+	// Reached whenever nothing transient failed, gone references included. Those are permanent, so
+	// leaving them to hold the counter open would mean the escalation never resets and a genuine
+	// registry outage could not be told from an old loss.
 	r.clearFailure(namespace, objName)
 }
 

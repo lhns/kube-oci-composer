@@ -43,6 +43,13 @@ const (
 	// ends in deletion rather than in a stuck object, and this is the warning before that.
 	ReasonRetentionDegraded = "RetentionDegraded"
 
+	// ReasonRetentionLost reports that a reference this object published is already gone from the
+	// registry. A different alarm from RetentionDegraded, and deliberately so: Degraded says the
+	// protection MIGHT be failing and can clear, while this says it already did and cannot. Merging
+	// the two kept an object Degraded forever over history that had expired, which is how a real
+	// outage would have arrived looking like the noise of the previous three days.
+	ReasonRetentionLost = "RetentionLost"
+
 	// ReasonBuildFailed covers an ImageBuild whose Job did not succeed. Never sets Stalled: the fix
 	// lives in another object, so no generation change would arrive to wake it up.
 	ReasonBuildFailed = "BuildFailed"

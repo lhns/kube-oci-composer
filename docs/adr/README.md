@@ -56,6 +56,7 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0046](0046-a-failure-explains-itself-in-status.md) | A failure explains itself in status | **Accepted** |
 | [0047](0047-uploads-serialise-on-one-registry-lock.md) | Uploads serialise on one registry lock, and the timeout counts the waiting | **Accepted** |
 | [0048](0048-retention-addresses-the-registry-it-can-reach.md) | Retention addresses the registry it can reach | **Accepted** |
+| [0049](0049-a-reference-that-is-gone-is-a-fact-not-a-failure.md) | A reference that is gone is a fact, not a failure | **Accepted** |
 
 ## Open questions
 
