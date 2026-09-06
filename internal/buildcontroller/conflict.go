@@ -502,3 +502,59 @@ func (r *ImageBuildReconciler) adoptBuildSecrets(ctx context.Context, obj *ociv1
 		}
 	}
 }
+
+// stillPublished reports whether what this object last published is still in the registry.
+//
+// The composer has always asked this, with one HEAD, because it can rebuild identical bytes if the
+// answer is no. This kind could not: a rebuild produces a DIFFERENT digest, so for a release the
+// question was not asked at all and a lost image simply stayed lost while the object reported
+// Ready. That is now decided the other way -- see ADR 0051 for what it costs.
+//
+// Only a definite 404 counts as missing. Every other outcome -- unreachable registry, expired
+// credential, timeout -- answers true, because the alternative is that one registry outage starts a
+// build for every ImageBuild in the cluster at once. Fail towards doing nothing.
+//
+// The tags come from the SPEC, never from status.artifact.tags: those are stored through the public
+// host, which is exactly the trap ADR 0048 was written about.
+func (r *ImageBuildReconciler) stillPublished(ctx context.Context, obj *ociv1alpha1.ImageBuild) bool {
+	prev := obj.Status.Artifact
+	if prev == nil || prev.Digest == "" {
+		return true
+	}
+	repo := r.repositoryFor(obj)
+	if repo == "" {
+		return true
+	}
+	opts, err := r.remoteOptions(ctx, obj)
+	if err != nil {
+		return true
+	}
+	var refOpts []name.Option
+	if recon.InsecureHost(repo, r.JobConfig.InsecureRegistries) {
+		refOpts = append(refOpts, name.Insecure)
+	}
+
+	// The digest, then every tag the spec asks for. A tag is checked even though the content it
+	// names may still exist under its digest: an untagged manifest is precisely what the shipped
+	// deleteUntagged policy reclaims next, so a lost tag is a loss in progress rather than a
+	// cosmetic one. It is also the shape the field report took -- tags gone, manifest alive.
+	refs := []string{repo + "@" + prev.Digest}
+	if p := obj.Spec.Push; p != nil {
+		if tags, err := recon.EffectiveTags(p.GetTags(), p.GetRef()); err == nil {
+			for _, t := range tags {
+				refs = append(refs, repo+":"+t)
+			}
+		}
+	}
+
+	for _, ref := range refs {
+		parsed, err := name.ParseReference(ref, refOpts...)
+		if err != nil {
+			continue
+		}
+		if _, err := remote.Head(parsed, opts...); err != nil && recon.IsNotFound(err) {
+			return false
+		}
+	}
+	return true
+}

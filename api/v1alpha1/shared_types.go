@@ -50,6 +50,12 @@ const (
 	// outage would have arrived looking like the noise of the previous three days.
 	ReasonRetentionLost = "RetentionLost"
 
+	// ReasonArtifactLost reports that an ImageBuild's published image is gone from the registry and
+	// a rebuild has been started to replace it. Replace, not restore: this kind is not
+	// reproducible, so the new image has a different digest and anything pinned to the old one is
+	// not helped. ADR 0051.
+	ReasonArtifactLost = "ArtifactLost"
+
 	// ReasonBuildFailed covers an ImageBuild whose Job did not succeed. Never sets Stalled: the fix
 	// lives in another object, so no generation change would arrive to wake it up.
 	ReasonBuildFailed = "BuildFailed"

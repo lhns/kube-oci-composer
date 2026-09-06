@@ -25,7 +25,6 @@ package retention
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -34,7 +33,6 @@ import (
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
-	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -367,7 +365,7 @@ func (r *Refresher) refreshObject(ctx context.Context, target Target, out *Resul
 			//
 			// Signatures need nothing here: cosign's .sig is a TAG, so keepTags already covers it.
 			r.refreshReferrers(parsed, opts, out)
-		case isNotFound(err):
+		case recon.IsNotFound(err):
 			// The guarantee has ALREADY been broken by something else, and quietly. A different
 			// alarm from a registry that is merely unreachable: one says the protection failed, the
 			// other says it might.
@@ -616,16 +614,4 @@ func (r *Refresher) refreshReferrers(ref name.Reference, opts []remote.Option, o
 		_ = desc
 		out.Refreshed++
 	}
-}
-
-// isNotFound distinguishes "the registry says this is gone" from "the registry did not answer".
-//
-// The difference is the difference between an alarm and a warning: a 404 means the guarantee has
-// ALREADY been broken by something, while a timeout means it might be about to be.
-func isNotFound(err error) bool {
-	var terr *transport.Error
-	if errors.As(err, &terr) {
-		return terr.StatusCode == http.StatusNotFound
-	}
-	return false
 }

@@ -163,13 +163,21 @@ func (r *ImageBuildReconciler) reconcile(ctx context.Context, obj *ociv1alpha1.I
 	}
 	inputHash := inputs.Hash()
 
-	// Note what is NOT checked here — that the artifact is still present in the
-	// registry. The composer verifies that with one HEAD because it can rebuild identical bytes if
-	// it is gone; a rebuild here might not produce the same digest, so re-verifying would risk
-	// turning a missing artifact into a permanent immutable-tag conflict. ADR 0025 records that
-	// storage durability stops being optional for this kind.
+	// Unchanged inputs are not enough: what was published has to still BE there. This kind used to
+	// stop at the inputs, and a lost image therefore stayed lost while the object reported Ready --
+	// which is how a repository that had lost every tag went three days without saying so.
+	//
+	// The rebuild produces a DIFFERENT digest, because this kind is not reproducible. That is the
+	// price, it is why ADR 0025 assumed durability instead, and it is recorded in ADR 0051. Loud
+	// rather than silent, because anything pinned to the old digest is not helped by the new one.
 	if obj.Status.Artifact != nil && obj.Status.InputHash == inputHash {
-		return ctrl.Result{RequeueAfter: recon.Interval(obj.Spec.Interval)}, nil
+		if r.stillPublished(ctx, obj) {
+			return ctrl.Result{RequeueAfter: recon.Interval(obj.Spec.Interval)}, nil
+		}
+		recon.Event(r.Recorder, obj, corev1.EventTypeWarning, ociv1alpha1.ReasonArtifactLost,
+			fmt.Sprintf("%s is no longer in the registry; rebuilding. The new image will have a "+
+				"DIFFERENT digest, so anything referencing the old one by digest is not restored "+
+				"by this.", obj.Status.Artifact.Digest))
 	}
 
 	// Adopt, observe or start.

@@ -58,6 +58,7 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0048](0048-retention-addresses-the-registry-it-can-reach.md) | Retention addresses the registry it can reach | **Accepted** |
 | [0049](0049-a-reference-that-is-gone-is-a-fact-not-a-failure.md) | A reference that is gone is a fact, not a failure | **Accepted** |
 | [0050](0050-a-builds-secrets-belong-to-the-build.md) | A build's Secrets belong to the build | **Accepted** |
+| [0051](0051-a-build-that-lost-its-image-rebuilds-it.md) | A build that lost its image rebuilds it | **Accepted** |
 
 ## Open questions
 
