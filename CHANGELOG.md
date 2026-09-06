@@ -7,6 +7,26 @@ may change between minor versions.
 
 ### Fixed
 
+- **An `ImageBuild` whose image was deleted now rebuilds it**
+  ([ADR 0051](docs/adr/0051-a-build-that-lost-its-image-rebuilds-it.md)). The reconcile short-circuit
+  checked only that the inputs were unchanged, never that what it published was still there — so an
+  image reclaimed by the registry stayed lost while the object reported `Ready=True`. One reported
+  repository went three days that way.
+
+  It now verifies the digest **and every tag the spec asks for**, and falls through to a build when
+  one is gone. A lost tag counts: the surviving manifest is untagged, which is what `deleteUntagged`
+  reclaims next.
+
+  **The rebuild replaces rather than restores.** This kind is not reproducible, so the new image has
+  a **different digest** and anything pinned to the old one is not helped. `onConflict: immutable`
+  will not stop the republish either, because the tag is gone and there is nothing left to conflict
+  with — a real weakening of that guarantee, taken deliberately so an object can recover by itself.
+  A Warning Event (**`ArtifactLost`**, a new reason) says so every time.
+
+  Only a definite 404 counts as missing: an unreachable or unauthorised registry answers "present",
+  so an outage can never start a build for every object at once. This reverses the durability
+  assumption in [ADR 0025](docs/adr/0025-dockerfile-builds-as-a-second-kind.md).
+
 - **Per-build Secrets are reclaimed instead of accumulating forever**
   ([ADR 0050](docs/adr/0050-a-builds-secrets-belong-to-the-build.md)). Each `ImageBuild` revision
   creates up to four Secrets — `-push`, `-registry-ca`, `-dockerfile`, `-context` — owner-referenced

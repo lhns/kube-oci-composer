@@ -40,8 +40,7 @@ func (r *ImageBuildReconciler) checkTagConflict(
 	ctx context.Context, obj *ociv1alpha1.ImageBuild,
 ) (stop bool, conflict *ociv1alpha1.TagConflictStatus, err error) {
 	p := obj.Spec.Push
-	repo := r.repositoryFor(obj)
-	if repo == "" {
+	if r.repositoryFor(obj) == "" {
 		return false, nil, recon.Pending(
 			"this build names no push.repository, and no default registry is configured")
 	}
@@ -61,16 +60,12 @@ func (r *ImageBuildReconciler) checkTagConflict(
 		return false, nil, nil
 	}
 
-	opts, err := r.remoteOptions(ctx, obj)
+	reg, err := r.registryFor(ctx, obj)
 	if err != nil {
 		return false, nil, err
 	}
-	var refOpts []name.Option
-	if recon.InsecureHost(repo, r.JobConfig.InsecureRegistries) {
-		refOpts = append(refOpts, name.Insecure)
-	}
 
-	published, err := recon.ResolvePublished(repo, tags, obj.Status.Artifact, refOpts, opts)
+	published, err := recon.ResolvePublished(reg.repo, tags, obj.Status.Artifact, reg.refOpts, reg.opts)
 	if err != nil {
 		return false, nil, err
 	}
@@ -501,4 +496,87 @@ func (r *ImageBuildReconciler) adoptBuildSecrets(ctx context.Context, obj *ociv1
 			log.Error(err, "re-owning a build secret", "secret", key)
 		}
 	}
+}
+
+// stillPublished reports whether what this object last published is still in the registry.
+//
+// The composer has always asked this, with one HEAD, because it can rebuild identical bytes if the
+// answer is no. This kind could not: a rebuild produces a DIFFERENT digest, so for a release the
+// question was not asked at all and a lost image simply stayed lost while the object reported
+// Ready. That is now decided the other way -- see ADR 0051 for what it costs.
+//
+// Only a definite 404 counts as missing. Every other outcome -- unreachable registry, expired
+// credential, timeout -- answers true, because the alternative is that one registry outage starts a
+// build for every ImageBuild in the cluster at once. Fail towards doing nothing.
+//
+// The tags come from the SPEC, never from status.artifact.tags: those are stored through the public
+// host, which is exactly the trap ADR 0048 was written about.
+func (r *ImageBuildReconciler) stillPublished(ctx context.Context, obj *ociv1alpha1.ImageBuild) bool {
+	prev := obj.Status.Artifact
+	if prev == nil || prev.Digest == "" {
+		return true
+	}
+	reg, err := r.registryFor(ctx, obj)
+	if err != nil || reg.repo == "" {
+		return true
+	}
+	repo := reg.repo
+
+	// The digest, then every tag the spec asks for. A tag is checked even though the content it
+	// names may still exist under its digest: an untagged manifest is precisely what the shipped
+	// deleteUntagged policy reclaims next, so a lost tag is a loss in progress rather than a
+	// cosmetic one. It is also the shape the field report took -- tags gone, manifest alive.
+	refs := []string{repo + "@" + prev.Digest}
+	if p := obj.Spec.Push; p != nil {
+		if tags, err := recon.EffectiveTags(p.GetTags(), p.GetRef()); err == nil {
+			for _, t := range tags {
+				refs = append(refs, repo+":"+t)
+			}
+		}
+	}
+
+	for _, ref := range refs {
+		parsed, err := name.ParseReference(ref, reg.refOpts...)
+		if err != nil {
+			// Unparseable is not evidence of absence, and this fails towards doing nothing.
+			continue
+		}
+		if _, err := remote.Head(parsed, reg.opts...); recon.IsNotFound(err) {
+			return false
+		}
+	}
+	return true
+}
+
+// registryAccess is everything needed to ask this object's registry a question.
+type registryAccess struct {
+	// repo is empty when the object names no repository and no default registry is configured, so
+	// there is nowhere to ask about.
+	repo    string
+	refOpts []name.Option
+	opts    []remote.Option
+}
+
+// registryFor resolves that once, for every caller.
+//
+// The tag-conflict check and the published-artifact check ask the SAME registry about the SAME
+// object, so any difference between how they reach it could only be a bug. The insecure-host half
+// is the one that would bite: a mismatch there surfaces as a TLS error that looks nothing like the
+// missing --insecure-registry entry causing it.
+func (r *ImageBuildReconciler) registryFor(
+	ctx context.Context, obj *ociv1alpha1.ImageBuild,
+) (registryAccess, error) {
+	repo := r.repositoryFor(obj)
+	if repo == "" {
+		return registryAccess{}, nil
+	}
+	opts, err := r.remoteOptions(ctx, obj)
+	if err != nil {
+		return registryAccess{}, err
+	}
+	access := registryAccess{repo: repo, opts: opts}
+	if recon.InsecureHost(repo, r.JobConfig.InsecureRegistries) {
+		access.refOpts = append(access.refOpts, name.Insecure)
+	}
+	return access, nil
 }

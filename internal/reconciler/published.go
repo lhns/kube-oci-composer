@@ -1,10 +1,13 @@
 package reconciler
 
 import (
+	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 )
@@ -91,4 +94,18 @@ func ResolvePublished(
 		}
 	}
 	return state, nil
+}
+
+// IsNotFound distinguishes "the registry says this is gone" from "the registry did not answer".
+//
+// The difference is the difference between an alarm and a warning, and between rebuilding and
+// waiting: a 404 means something has ALREADY been lost, while a timeout means it might be about to
+// be. Anything that acts on a loss must treat only the first as one, or a registry outage becomes a
+// cluster-wide stampede of whatever that action is.
+func IsNotFound(err error) bool {
+	var terr *transport.Error
+	if errors.As(err, &terr) {
+		return terr.StatusCode == http.StatusNotFound
+	}
+	return false
 }
