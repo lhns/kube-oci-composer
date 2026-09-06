@@ -490,14 +490,14 @@ func (r *ImageBuildReconciler) adoptBuildSecrets(ctx context.Context, obj *ociv1
 		if !metav1.IsControlledBy(&sec, obj) {
 			continue
 		}
+		// Not fatal at any step. The Job is already running and a build must not fail over its own
+		// housekeeping; the outcome is the previous behaviour, which is a leak and not an outage.
 		sec.OwnerReferences = nil
-		if err := ctrl.SetControllerReference(job, &sec, r.Scheme()); err != nil {
-			log.Error(err, "re-owning a build secret", "secret", key)
-			continue
+		err := ctrl.SetControllerReference(job, &sec, r.Scheme())
+		if err == nil {
+			err = r.Update(ctx, &sec)
 		}
-		if err := r.Update(ctx, &sec); err != nil {
-			// Not fatal. The Job is already running and the build must not fail over its
-			// housekeeping; the outcome is the old behaviour, which is a leak and not an outage.
+		if err != nil {
 			log.Error(err, "re-owning a build secret", "secret", key)
 		}
 	}

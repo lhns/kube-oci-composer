@@ -3,6 +3,8 @@
 package buildcontroller
 
 import (
+	"context"
+	"net/http/httptest"
 	"testing"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -29,15 +31,11 @@ func TestABuildsSecretsAreOwnedByItsJob(t *testing.T) {
 	ctx, k8s := integrationCtx(t)
 
 	const ns = "secretlifetime"
-	if err := k8s.Create(ctx, &corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{Name: ns},
-	}); err != nil {
-		t.Fatalf("creating namespace: %v", err)
-	}
+	srv := buildableNamespace(t, ctx, k8s, ns)
 
-	// The operator's credential, so pushSecretFor copies it into the object's namespace. Both the
-	// CA and an inline Dockerfile are set too, so all four Secrets exist in one build rather than
-	// leaving the TLS and inline paths untested.
+	// The operator's credential, so pushSecretFor copies it into the object's namespace. Together
+	// with the CA and an inline Dockerfile below, this makes all four Secrets exist in one build
+	// rather than leaving the TLS and inline paths untested.
 	const opsNS = "default"
 	if err := k8s.Create(ctx, &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "push-cred", Namespace: opsNS},
@@ -45,15 +43,6 @@ func TestABuildsSecretsAreOwnedByItsJob(t *testing.T) {
 		Data:       map[string][]byte{".dockerconfigjson": []byte(`{"auths":{"registry.svc:5000":{"auth":"dTpw"}}}`)},
 	}); err != nil {
 		t.Fatalf("creating operator credential: %v", err)
-	}
-
-	srv := contextServer(t, contextTarball(t, "", pinnedFrom))
-	src := fluxSource(ns, "src", srv.URL, "sha256:ctx", "main@sha1:abcd")
-	if err := k8s.Create(ctx, src); err != nil {
-		t.Fatalf("creating source: %v", err)
-	}
-	if err := k8s.Update(ctx, src); err != nil {
-		t.Fatalf("writing source status: %v", err)
 	}
 
 	obj := sampleBuild()
@@ -132,20 +121,7 @@ func TestAUserSuppliedPushSecretIsNeverAdopted(t *testing.T) {
 	ctx, k8s := integrationCtx(t)
 
 	const ns = "usersecret"
-	if err := k8s.Create(ctx, &corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{Name: ns},
-	}); err != nil {
-		t.Fatalf("creating namespace: %v", err)
-	}
-
-	srv := contextServer(t, contextTarball(t, "", pinnedFrom))
-	src := fluxSource(ns, "src", srv.URL, "sha256:ctx", "main@sha1:abcd")
-	if err := k8s.Create(ctx, src); err != nil {
-		t.Fatalf("creating source: %v", err)
-	}
-	if err := k8s.Update(ctx, src); err != nil {
-		t.Fatalf("writing source status: %v", err)
-	}
+	srv := buildableNamespace(t, ctx, k8s, ns)
 
 	obj := sampleBuild()
 	obj.Namespace = ns
@@ -186,4 +162,27 @@ func TestAUserSuppliedPushSecretIsNeverAdopted(t *testing.T) {
 		t.Errorf("the user's own push credential was adopted by %s/%s; the Job's TTL would then "+
 			"delete a Secret this controller never created", owner.Kind, owner.Name)
 	}
+}
+
+// buildableNamespace creates a namespace with a Flux source an ImageBuild can build from, and
+// returns the server standing in for source-controller.
+//
+// The stand-in CRD declares no status subresource, deliberately, so a test can publish an artifact
+// with a plain update instead of running source-controller.
+func buildableNamespace(t *testing.T, ctx context.Context, k8s client.Client, ns string) *httptest.Server {
+	t.Helper()
+	if err := k8s.Create(ctx, &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: ns},
+	}); err != nil {
+		t.Fatalf("creating namespace: %v", err)
+	}
+	srv := contextServer(t, contextTarball(t, "", pinnedFrom))
+	src := fluxSource(ns, "src", srv.URL, "sha256:ctx", "main@sha1:abcd")
+	if err := k8s.Create(ctx, src); err != nil {
+		t.Fatalf("creating source: %v", err)
+	}
+	if err := k8s.Update(ctx, src); err != nil {
+		t.Fatalf("writing source status: %v", err)
+	}
+	return srv
 }
