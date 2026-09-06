@@ -7,6 +7,19 @@ may change between minor versions.
 
 ### Fixed
 
+- **A reference that is already gone no longer keeps an object Degraded forever**
+  ([ADR 0049](docs/adr/0049-a-reference-that-is-gone-is-a-fact-not-a-failure.md)). A deleted
+  manifest was counted as a refresh failure, so `consecutiveFailures` climbed every cycle and could
+  never reset — 72 and rising on the cluster that reported it. The cost is not the counter:
+  `RetentionDegraded` is the warning that fires *before* deletion, and an object permanently
+  Degraded over history that expired weeks ago trains you to ignore it.
+
+  Transient and permanent are now counted apart. An object whose only problem is expired history
+  clears its failure count, and gone references raise their own Warning instead —
+  **`RetentionLost`, a new reason**, summarising how many of how many are gone. Anything alerting
+  on `RetentionDegraded` alone will stop seeing these, which is the point, but it is a change to
+  make in existing alert rules.
+
 - **Retention never refreshed a single tag, so published images lost their protection**
   ([ADR 0048](docs/adr/0048-retention-addresses-the-registry-it-can-reach.md)). The refresher built
   digest references from the repository it resolved but took tag references from
