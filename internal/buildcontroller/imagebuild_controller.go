@@ -529,6 +529,11 @@ func (r *ImageBuildReconciler) startBuild(ctx context.Context, obj *ociv1alpha1.
 		return fmt.Errorf("creating the build job: %w", err)
 	}
 
+	// Now that the Job exists, its Secrets belong to it. They had to be created before it -- an
+	// owner reference needs an owner that exists -- and owned by the ImageBuild they would outlive
+	// every build this object ever runs. ADR 0050.
+	r.adoptBuildSecrets(ctx, obj, job)
+
 	obj.Status.BuildRef = &ociv1alpha1.LocalObjectReference{Name: job.Name}
 	obj.Status.LastAttempt = &ociv1alpha1.BuildAttempt{
 		InputHash: inputHash,
