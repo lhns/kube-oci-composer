@@ -40,8 +40,7 @@ func (r *ImageBuildReconciler) checkTagConflict(
 	ctx context.Context, obj *ociv1alpha1.ImageBuild,
 ) (stop bool, conflict *ociv1alpha1.TagConflictStatus, err error) {
 	p := obj.Spec.Push
-	repo := r.repositoryFor(obj)
-	if repo == "" {
+	if r.repositoryFor(obj) == "" {
 		return false, nil, recon.Pending(
 			"this build names no push.repository, and no default registry is configured")
 	}
@@ -61,16 +60,12 @@ func (r *ImageBuildReconciler) checkTagConflict(
 		return false, nil, nil
 	}
 
-	opts, err := r.remoteOptions(ctx, obj)
+	reg, err := r.registryFor(ctx, obj)
 	if err != nil {
 		return false, nil, err
 	}
-	var refOpts []name.Option
-	if recon.InsecureHost(repo, r.JobConfig.InsecureRegistries) {
-		refOpts = append(refOpts, name.Insecure)
-	}
 
-	published, err := recon.ResolvePublished(repo, tags, obj.Status.Artifact, refOpts, opts)
+	published, err := recon.ResolvePublished(reg.repo, tags, obj.Status.Artifact, reg.refOpts, reg.opts)
 	if err != nil {
 		return false, nil, err
 	}
@@ -521,18 +516,11 @@ func (r *ImageBuildReconciler) stillPublished(ctx context.Context, obj *ociv1alp
 	if prev == nil || prev.Digest == "" {
 		return true
 	}
-	repo := r.repositoryFor(obj)
-	if repo == "" {
+	reg, err := r.registryFor(ctx, obj)
+	if err != nil || reg.repo == "" {
 		return true
 	}
-	opts, err := r.remoteOptions(ctx, obj)
-	if err != nil {
-		return true
-	}
-	var refOpts []name.Option
-	if recon.InsecureHost(repo, r.JobConfig.InsecureRegistries) {
-		refOpts = append(refOpts, name.Insecure)
-	}
+	repo := reg.repo
 
 	// The digest, then every tag the spec asks for. A tag is checked even though the content it
 	// names may still exist under its digest: an untagged manifest is precisely what the shipped
@@ -548,13 +536,47 @@ func (r *ImageBuildReconciler) stillPublished(ctx context.Context, obj *ociv1alp
 	}
 
 	for _, ref := range refs {
-		parsed, err := name.ParseReference(ref, refOpts...)
+		parsed, err := name.ParseReference(ref, reg.refOpts...)
 		if err != nil {
+			// Unparseable is not evidence of absence, and this fails towards doing nothing.
 			continue
 		}
-		if _, err := remote.Head(parsed, opts...); err != nil && recon.IsNotFound(err) {
+		if _, err := remote.Head(parsed, reg.opts...); recon.IsNotFound(err) {
 			return false
 		}
 	}
 	return true
+}
+
+// registryAccess is everything needed to ask this object's registry a question.
+type registryAccess struct {
+	// repo is empty when the object names no repository and no default registry is configured, so
+	// there is nowhere to ask about.
+	repo    string
+	refOpts []name.Option
+	opts    []remote.Option
+}
+
+// registryFor resolves that once, for every caller.
+//
+// The tag-conflict check and the published-artifact check ask the SAME registry about the SAME
+// object, so any difference between how they reach it could only be a bug. The insecure-host half
+// is the one that would bite: a mismatch there surfaces as a TLS error that looks nothing like the
+// missing --insecure-registry entry causing it.
+func (r *ImageBuildReconciler) registryFor(
+	ctx context.Context, obj *ociv1alpha1.ImageBuild,
+) (registryAccess, error) {
+	repo := r.repositoryFor(obj)
+	if repo == "" {
+		return registryAccess{}, nil
+	}
+	opts, err := r.remoteOptions(ctx, obj)
+	if err != nil {
+		return registryAccess{}, err
+	}
+	access := registryAccess{repo: repo, opts: opts}
+	if recon.InsecureHost(repo, r.JobConfig.InsecureRegistries) {
+		access.refOpts = append(access.refOpts, name.Insecure)
+	}
+	return access, nil
 }

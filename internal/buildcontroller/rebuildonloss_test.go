@@ -59,7 +59,7 @@ func builtAndPublished(host, digest string) *ociv1alpha1.ImageBuild {
 	return obj
 }
 
-func refresherFor(t *testing.T, srv *httptest.Server) *ImageBuildReconciler {
+func reconcilerFor(t *testing.T, srv *httptest.Server) *ImageBuildReconciler {
 	t.Helper()
 	cfg := sampleConfig()
 	cfg.InsecureRegistries = []string{strings.TrimPrefix(srv.URL, "http://")}
@@ -71,7 +71,7 @@ func TestAPresentArtifactIsNotRebuilt(t *testing.T) {
 	srv := registryAnswering(t, http.StatusNotFound, digestOfNothing, "v1")
 	host := strings.TrimPrefix(srv.URL, "http://")
 
-	r := refresherFor(t, srv)
+	r := reconcilerFor(t, srv)
 	if !r.stillPublished(context.Background(), builtAndPublished(host, digestOfNothing)) {
 		t.Error("an artifact that is entirely present was reported missing; every reconcile would " +
 			"start a build")
@@ -83,7 +83,7 @@ func TestAMissingDigestIsMissing(t *testing.T) {
 	srv := registryAnswering(t, http.StatusNotFound, "v1")
 	host := strings.TrimPrefix(srv.URL, "http://")
 
-	r := refresherFor(t, srv)
+	r := reconcilerFor(t, srv)
 	if r.stillPublished(context.Background(), builtAndPublished(host, digestOfNothing)) {
 		t.Error("a deleted manifest was reported present")
 	}
@@ -98,7 +98,7 @@ func TestAMissingTagIsMissing(t *testing.T) {
 	srv := registryAnswering(t, http.StatusNotFound, digestOfNothing)
 	host := strings.TrimPrefix(srv.URL, "http://")
 
-	r := refresherFor(t, srv)
+	r := reconcilerFor(t, srv)
 	if r.stillPublished(context.Background(), builtAndPublished(host, digestOfNothing)) {
 		t.Error("the manifest survives by digest but every tag is gone, and that was called " +
 			"healthy; deleteUntagged reclaims it next")
@@ -121,7 +121,7 @@ func TestAnUnreachableRegistryNeverTriggersARebuild(t *testing.T) {
 		srv := registryAnswering(t, code)
 		host := strings.TrimPrefix(srv.URL, "http://")
 
-		r := refresherFor(t, srv)
+		r := reconcilerFor(t, srv)
 		if !r.stillPublished(context.Background(), builtAndPublished(host, digestOfNothing)) {
 			t.Errorf("HTTP %d was treated as a loss; one registry outage would rebuild the whole "+
 				"cluster", code)
@@ -143,7 +143,7 @@ func TestAnObjectThatNeverPublishedIsNotChecked(t *testing.T) {
 	obj := builtAndPublished(host, digestOfNothing)
 	obj.Status.Artifact = nil
 
-	r := refresherFor(t, srv)
+	r := reconcilerFor(t, srv)
 	if !r.stillPublished(context.Background(), obj) {
 		t.Error("an object with no artifact was reported as having lost one")
 	}

@@ -445,13 +445,10 @@ func (r *Refresher) clearFailure(namespace, objName string) {
 //
 // Sourced from status.history plus status.artifact, because history is the retention record and the
 // current artifact may not be in it yet.
-func refsOf(repository string, artifact *ociv1alpha1.ArtifactStatus,
+// refsOf is only reached with a resolved repository -- refreshObject returns before this when there
+// is none -- so it does not re-check for one.
+func refsOf(repo string, artifact *ociv1alpha1.ArtifactStatus,
 	history []ociv1alpha1.BuildRecord) []string {
-
-	repo := repository
-	if repo == "" {
-		return nil
-	}
 
 	seen := map[string]struct{}{}
 	var refs []string

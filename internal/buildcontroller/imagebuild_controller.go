@@ -656,8 +656,8 @@ func (r *ImageBuildReconciler) recordSuccess(obj *ociv1alpha1.ImageBuild, inputs
 	// gets the public name; everything that connects goes through repositoryFor, because those run
 	// from inside the cluster where this name may not resolve.
 	//
-	// Note that retention reads these tags back out of status and must therefore rebuild them
-	// against its own resolved repository -- see archive of that bug in ADR 0048.
+	// Retention reads these tags back out of status, so it has to rebuild them against its own
+	// resolved repository rather than dial what it finds here. ADR 0048.
 	repo := r.Default.PublicRepository(r.repositoryFor(obj))
 	// Same list the Job was told to push, so status cannot describe a different set of tags than
 	// the build actually wrote.
