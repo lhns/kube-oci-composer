@@ -7,14 +7,10 @@ may change between minor versions.
 
 ## [0.5.1] - 2026-09-07
 
-**Retention was not protecting anything, and nothing said so.** Four defects found on one live
-0.5.0 cluster, one of which had already destroyed content: a repository that had lost every tag it
-had, while its `ImageBuild` reported `Ready=True` throughout.
+Four defects found on a live 0.5.0 cluster. Affects any install running the bundled registry with
+`registry.publish.mode` of `ingress` or `nodePort`; `internalOnly` is unaffected.
 
-Upgrade if you run the bundled registry with `publish.mode` of `ingress` or `nodePort` — which is
-every install whose images workloads can actually pull.
-
-**No spec changes.** The CRDs are byte-identical to 0.5.0 and nothing needs editing.
+No spec changes: the CRDs are byte-identical to 0.5.0.
 
 ### Changed
 
@@ -24,12 +20,10 @@ every install whose images workloads can actually pull.
   action. `checkTagConflict` asks whether the tag already holds something; a deleted tag holds
   nothing, so there is nothing left to refuse.
 
-  This is a deliberate weakening, taken so an object can recover by itself rather than staying
-  silently broken, and it is announced by a Warning (**`ArtifactLost`**, a new reason) every time.
-  If you would rather a lost image stayed lost and visible, that is what the Event is for — there is
-  no opt-out yet. See [ADR 0051](docs/adr/0051-a-build-that-lost-its-image-rebuilds-it.md), which
-  reverses the durability assumption in
-  [ADR 0025](docs/adr/0025-dockerfile-builds-as-a-second-kind.md).
+  A deliberate weakening, so an object recovers rather than staying silently broken. A Warning
+  (**`ArtifactLost`**, a new reason) is emitted each time. No opt-out.
+  [ADR 0051](docs/adr/0051-a-build-that-lost-its-image-rebuilds-it.md) reverses the durability
+  assumption in [ADR 0025](docs/adr/0025-dockerfile-builds-as-a-second-kind.md).
 
 - **Alerting on `RetentionDegraded` alone now misses lost references.** Gone references raise
   **`RetentionLost`** instead, so existing alert rules need it adding.
@@ -39,18 +33,17 @@ every install whose images workloads can actually pull.
 
 ### Fixed
 
-- **An `ImageBuild` whose image was deleted stayed lost, silently**
+- **An `ImageBuild` did not detect that its image was gone**
   ([ADR 0051](docs/adr/0051-a-build-that-lost-its-image-rebuilds-it.md)). The reconcile short-circuit
-  checked only that the inputs were unchanged, never that what it published was still there — so an
-  image reclaimed by the registry stayed lost while the object reported `Ready=True`. One reported
-  repository went three days that way.
+  checked only that the inputs were unchanged, so an image reclaimed by the registry stayed lost
+  while the object reported `Ready=True`. One reported repository went three days that way.
 
-  It now verifies the digest **and every tag the spec asks for**. A lost tag counts: the surviving
-  manifest is untagged, which is what `deleteUntagged` reclaims next. What it does about a loss is
-  under **Changed** above, because it is one.
+  It now verifies the digest and every tag in the spec. A lost tag counts, because the surviving
+  manifest is untagged and that is what `deleteUntagged` reclaims next. What it *does* about a loss
+  is under **Changed** above.
 
-  Only a definite 404 counts as missing: an unreachable or unauthorised registry answers "present",
-  so an outage can never start a build for every object at once.
+  Only a definite 404 counts as missing; an unreachable or unauthorised registry answers "present",
+  so an outage cannot start a build for every object at once.
 
 - **Per-build Secrets are reclaimed instead of accumulating forever**
   ([ADR 0050](docs/adr/0050-a-builds-secrets-belong-to-the-build.md)). Each `ImageBuild` revision
