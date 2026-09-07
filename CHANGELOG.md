@@ -5,27 +5,52 @@ may change between minor versions.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-07
+
+**Retention was not protecting anything, and nothing said so.** Four defects found on one live
+0.5.0 cluster, one of which had already destroyed content: a repository that had lost every tag it
+had, while its `ImageBuild` reported `Ready=True` throughout.
+
+Upgrade if you run the bundled registry with `publish.mode` of `ingress` or `nodePort` — which is
+every install whose images workloads can actually pull.
+
+**No spec changes.** The CRDs are byte-identical to 0.5.0 and nothing needs editing.
+
+### Changed
+
+- **`onConflict: immutable` no longer holds when the tag has been deleted from the registry.**
+  An `ImageBuild` that finds its published image gone now rebuilds and republishes — so a tag that
+  was immutable can come back carrying **different content**, with no spec change and no user
+  action. `checkTagConflict` asks whether the tag already holds something; a deleted tag holds
+  nothing, so there is nothing left to refuse.
+
+  This is a deliberate weakening, taken so an object can recover by itself rather than staying
+  silently broken, and it is announced by a Warning (**`ArtifactLost`**, a new reason) every time.
+  If you would rather a lost image stayed lost and visible, that is what the Event is for — there is
+  no opt-out yet. See [ADR 0051](docs/adr/0051-a-build-that-lost-its-image-rebuilds-it.md), which
+  reverses the durability assumption in
+  [ADR 0025](docs/adr/0025-dockerfile-builds-as-a-second-kind.md).
+
+- **Alerting on `RetentionDegraded` alone now misses lost references.** Gone references raise
+  **`RetentionLost`** instead, so existing alert rules need it adding.
+
+- **Deleting a build Job now deletes its credentials**, so a Job cannot be re-run by hand
+  afterwards. Let the controller start a fresh build instead.
+
 ### Fixed
 
-- **An `ImageBuild` whose image was deleted now rebuilds it**
+- **An `ImageBuild` whose image was deleted stayed lost, silently**
   ([ADR 0051](docs/adr/0051-a-build-that-lost-its-image-rebuilds-it.md)). The reconcile short-circuit
   checked only that the inputs were unchanged, never that what it published was still there — so an
   image reclaimed by the registry stayed lost while the object reported `Ready=True`. One reported
   repository went three days that way.
 
-  It now verifies the digest **and every tag the spec asks for**, and falls through to a build when
-  one is gone. A lost tag counts: the surviving manifest is untagged, which is what `deleteUntagged`
-  reclaims next.
-
-  **The rebuild replaces rather than restores.** This kind is not reproducible, so the new image has
-  a **different digest** and anything pinned to the old one is not helped. `onConflict: immutable`
-  will not stop the republish either, because the tag is gone and there is nothing left to conflict
-  with — a real weakening of that guarantee, taken deliberately so an object can recover by itself.
-  A Warning Event (**`ArtifactLost`**, a new reason) says so every time.
+  It now verifies the digest **and every tag the spec asks for**. A lost tag counts: the surviving
+  manifest is untagged, which is what `deleteUntagged` reclaims next. What it does about a loss is
+  under **Changed** above, because it is one.
 
   Only a definite 404 counts as missing: an unreachable or unauthorised registry answers "present",
-  so an outage can never start a build for every object at once. This reverses the durability
-  assumption in [ADR 0025](docs/adr/0025-dockerfile-builds-as-a-second-kind.md).
+  so an outage can never start a build for every object at once.
 
 - **Per-build Secrets are reclaimed instead of accumulating forever**
   ([ADR 0050](docs/adr/0050-a-builds-secrets-belong-to-the-build.md)). Each `ImageBuild` revision
@@ -43,8 +68,7 @@ may change between minor versions.
   the `managed-by` label and the existing owner to all be this controller's.
 
   **Existing orphaned Secrets are not removed by the upgrade** — nothing re-parents them
-  retroactively. Note also that deleting a Job now deletes its credentials, so a Job cannot be
-  re-run by hand afterwards; let the controller start a fresh build instead.
+  retroactively; they need a manual sweep.
 
 - **A reference that is already gone no longer keeps an object Degraded forever**
   ([ADR 0049](docs/adr/0049-a-reference-that-is-gone-is-a-fact-not-a-failure.md)). A deleted
@@ -55,9 +79,7 @@ may change between minor versions.
 
   Transient and permanent are now counted apart. An object whose only problem is expired history
   clears its failure count, and gone references raise their own Warning instead —
-  **`RetentionLost`, a new reason**, summarising how many of how many are gone. Anything alerting
-  on `RetentionDegraded` alone will stop seeing these, which is the point, but it is a change to
-  make in existing alert rules.
+  **`RetentionLost`**, summarising how many of how many are gone.
 
 - **Retention never refreshed a single tag, so published images lost their protection**
   ([ADR 0048](docs/adr/0048-retention-addresses-the-registry-it-can-reach.md)). The refresher built
@@ -74,7 +96,8 @@ may change between minor versions.
   every install whose images workloads can actually pull. `internalOnly` is unaffected.
 
   Retention now rebuilds every reference from the repository it resolved and trusts nothing stored.
-  **Images already reclaimed are not restored by the upgrade.**
+  **Images already reclaimed are not restored by the upgrade**, and anything pinned to a digest that
+  was collected stays broken.
 
 ## [0.5.0] - 2026-08-28
 
