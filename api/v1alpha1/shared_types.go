@@ -56,6 +56,12 @@ const (
 	// not helped. ADR 0051.
 	ReasonArtifactLost = "ArtifactLost"
 
+	// ReasonUnpinnedSource reports a sourceRef with no revision feeding tags that cannot move.
+	//
+	// The combination promises fixed content from an input that is free to change under it, and
+	// the tag can be built before the source holds what it was named for. ADR 0052.
+	ReasonUnpinnedSource = "UnpinnedSource"
+
 	// ReasonBuildFailed covers an ImageBuild whose Job did not succeed. Never sets Stalled: the fix
 	// lives in another object, so no generation change would arrive to wake it up.
 	ReasonBuildFailed = "BuildFailed"

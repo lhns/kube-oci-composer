@@ -5,8 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/tools/record"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 	"github.com/lhns/kube-oci-composer/internal/oci"
@@ -197,24 +200,26 @@ func (r *ImageCompositionReconciler) resolveBase(ctx context.Context, obj *ociv1
 
 // resolveFluxSource reads the referenced source's published artifact.
 func (r *ImageCompositionReconciler) resolveFluxSource(ctx context.Context, obj *ociv1alpha1.ImageComposition, ref *ociv1alpha1.SourceRefSource) (source.FluxArtifact, error) {
+	// Optional by design (ADR 0026): pinning every source would make a composition that tracks a
+	// branch impossible. Unpinned is a choice, with two consequences.
+	if ref.Revision == "" {
+		// Threat-model gap T1: the operator had no way to decide otherwise for a whole cluster.
+		// Terminal, unlike the revision MISMATCH below -- what fixes an absent pin is editing this
+		// spec, which bumps the generation; what fixes a mismatch is the source catching up, which
+		// does not.
+		if r.RequirePinnedSources {
+			return source.FluxArtifact{}, recon.Terminal(
+				"layer source %s/%s names no revision, and this controller runs with "+
+					"--require-pinned-sources: add `revision:` to pin what this layer consumes",
+				ref.Kind, ref.Name)
+		}
+		warnUnpinnedUnderFail(r.Recorder, obj, ref)
+	}
+
 	// Same namespace only. The controller's RBAC is cluster-wide, so without this a tenant who can
 	// create an ImageComposition could name any namespace's source and bake its content into an
 	// image they control and can read — the one tenancy boundary a spec could cross on its own.
 	// Terminal because editing THIS spec is what fixes it.
-	// Threat-model gap T1. `sourceRef.revision` is optional by design (ADR 0026:121): pinning every
-	// source would make a composition that tracks a branch impossible, and that is a legitimate
-	// thing to want. What was missing was the operator's ability to decide otherwise for a whole
-	// cluster -- so an unpinned source was an unreviewable gap rather than a choice.
-	//
-	// Terminal, unlike the revision MISMATCH below: what fixes an absent pin is editing this spec,
-	// which bumps the generation. What fixes a mismatch is the source catching up, which does not.
-	if r.RequirePinnedSources && ref.Revision == "" {
-		return source.FluxArtifact{}, recon.Terminal(
-			"layer source %s/%s names no revision, and this controller runs with "+
-				"--require-pinned-sources: add `revision:` to pin what this layer consumes",
-			ref.Kind, ref.Name)
-	}
-
 	ns := obj.Namespace
 	if ref.Namespace != "" && ref.Namespace != obj.Namespace {
 		return source.FluxArtifact{}, recon.Terminal(
@@ -262,4 +267,32 @@ func (r *ImageCompositionReconciler) resolveFluxSource(ctx context.Context, obj 
 	}
 
 	return art, nil
+}
+
+// warnUnpinnedUnderFail says so when an unpinned layer feeds tags that cannot move. The caller has
+// already established that the layer is unpinned.
+//
+// A digest-only publish is silent: the name IS the content, so a different build gets a different
+// name and collides with nothing. Repeats aggregate, the API server counting by
+// (reason, message, object), so an object left unpinned costs one event with a rising count.
+func warnUnpinnedUnderFail(
+	recorder record.EventRecorder, obj *ociv1alpha1.ImageComposition, ref *ociv1alpha1.SourceRefSource,
+) {
+	if obj.Spec.Push.ResolveConflictPolicy() != ociv1alpha1.ConflictFail {
+		return
+	}
+	// An unusable ref fails the reconcile a moment later with a message about the ref, which is the
+	// better complaint than one about pinning.
+	tags, err := recon.EffectiveTags(obj.Spec.Push.GetTags(), obj.Spec.Push.GetRef())
+	if err != nil || len(tags) == 0 {
+		return
+	}
+
+	recon.Event(recorder, obj, corev1.EventTypeWarning, ociv1alpha1.ReasonUnpinnedSource,
+		fmt.Sprintf("layer source %s/%s names no revision while %s publishes tags under "+
+			"onConflict: %s. The tag is fixed and the source is not, so a build that starts "+
+			"before the source catches up publishes the previous revision under it and the tag "+
+			"cannot be corrected afterwards. Add `revision:` to this sourceRef, or use a "+
+			"conflict policy that tolerates a moving source.",
+			ref.Kind, ref.Name, strings.Join(tags, ","), ociv1alpha1.ConflictFail))
 }
