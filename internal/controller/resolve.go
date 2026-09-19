@@ -9,6 +9,7 @@ import (
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/tools/record"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 	"github.com/lhns/kube-oci-composer/internal/oci"
@@ -199,32 +200,26 @@ func (r *ImageCompositionReconciler) resolveBase(ctx context.Context, obj *ociv1
 
 // resolveFluxSource reads the referenced source's published artifact.
 func (r *ImageCompositionReconciler) resolveFluxSource(ctx context.Context, obj *ociv1alpha1.ImageComposition, ref *ociv1alpha1.SourceRefSource) (source.FluxArtifact, error) {
+	// Optional by design (ADR 0026): pinning every source would make a composition that tracks a
+	// branch impossible. Unpinned is a choice, with two consequences.
+	if ref.Revision == "" {
+		// Threat-model gap T1: the operator had no way to decide otherwise for a whole cluster.
+		// Terminal, unlike the revision MISMATCH below -- what fixes an absent pin is editing this
+		// spec, which bumps the generation; what fixes a mismatch is the source catching up, which
+		// does not.
+		if r.RequirePinnedSources {
+			return source.FluxArtifact{}, recon.Terminal(
+				"layer source %s/%s names no revision, and this controller runs with "+
+					"--require-pinned-sources: add `revision:` to pin what this layer consumes",
+				ref.Kind, ref.Name)
+		}
+		warnUnpinnedUnderFail(r.Recorder, obj, ref)
+	}
+
 	// Same namespace only. The controller's RBAC is cluster-wide, so without this a tenant who can
 	// create an ImageComposition could name any namespace's source and bake its content into an
 	// image they control and can read — the one tenancy boundary a spec could cross on its own.
 	// Terminal because editing THIS spec is what fixes it.
-	// Threat-model gap T1. `sourceRef.revision` is optional by design (ADR 0026:121): pinning every
-	// source would make a composition that tracks a branch impossible, and that is a legitimate
-	// thing to want. What was missing was the operator's ability to decide otherwise for a whole
-	// cluster -- so an unpinned source was an unreviewable gap rather than a choice.
-	//
-	// Terminal, unlike the revision MISMATCH below: what fixes an absent pin is editing this spec,
-	// which bumps the generation. What fixes a mismatch is the source catching up, which does not.
-	if r.RequirePinnedSources && ref.Revision == "" {
-		return source.FluxArtifact{}, recon.Terminal(
-			"layer source %s/%s names no revision, and this controller runs with "+
-				"--require-pinned-sources: add `revision:` to pin what this layer consumes",
-			ref.Kind, ref.Name)
-	}
-
-	// An unpinned source under a tag policy that refuses to move is the shape that wedges.
-	//
-	// Not refused, because tracking a branch is legitimate and ADR 0026 left the pin optional on
-	// purpose. But it cannot be silent either: the failure it produces arrives later, as a tag
-	// holding the previous revision's content and an object Stalled on a conflict no retry can
-	// clear -- and by then nothing on the object says the source was unpinned. ADR 0052.
-	r.warnIfUnpinnedUnderFail(obj, ref)
-
 	ns := obj.Namespace
 	if ref.Namespace != "" && ref.Namespace != obj.Namespace {
 		return source.FluxArtifact{}, recon.Terminal(
@@ -274,36 +269,26 @@ func (r *ImageCompositionReconciler) resolveFluxSource(ctx context.Context, obj 
 	return art, nil
 }
 
-// warnIfUnpinnedUnderFail says so when a layer's source can move but its tags cannot.
+// warnUnpinnedUnderFail says so when an unpinned layer feeds tags that cannot move. The caller has
+// already established that the layer is unpinned.
 //
-// Three conditions, and all three are needed before this is worth saying:
-//
-//   - the layer names no revision, so what it consumes is whatever the source happens to hold;
-//   - the conflict policy refuses to change what a tag means, so a second answer wedges rather
-//     than overwrites;
-//   - the object actually publishes a tag. A digest-only publish cannot wedge, because the name IS
-//     the content -- a different build simply gets a different name, and warning about it would be
-//     noise on the one configuration that is structurally safe.
-//
-// Repeats aggregate: the API server counts events by (reason, message, object), so an object left
-// unpinned costs one event with a rising count rather than one per reconcile.
-func (r *ImageCompositionReconciler) warnIfUnpinnedUnderFail(
-	obj *ociv1alpha1.ImageComposition, ref *ociv1alpha1.SourceRefSource,
+// A digest-only publish is silent: the name IS the content, so a different build gets a different
+// name and collides with nothing. Repeats aggregate, the API server counting by
+// (reason, message, object), so an object left unpinned costs one event with a rising count.
+func warnUnpinnedUnderFail(
+	recorder record.EventRecorder, obj *ociv1alpha1.ImageComposition, ref *ociv1alpha1.SourceRefSource,
 ) {
-	if ref.Revision != "" {
-		return
-	}
 	if obj.Spec.Push.ResolveConflictPolicy() != ociv1alpha1.ConflictFail {
 		return
 	}
-	// Errors here are not this function's to report: an unusable ref fails the reconcile itself a
-	// moment later, with a message about the ref rather than about pinning.
+	// An unusable ref fails the reconcile a moment later with a message about the ref, which is the
+	// better complaint than one about pinning.
 	tags, err := recon.EffectiveTags(obj.Spec.Push.GetTags(), obj.Spec.Push.GetRef())
 	if err != nil || len(tags) == 0 {
 		return
 	}
 
-	recon.Event(r.Recorder, obj, corev1.EventTypeWarning, ociv1alpha1.ReasonUnpinnedSource,
+	recon.Event(recorder, obj, corev1.EventTypeWarning, ociv1alpha1.ReasonUnpinnedSource,
 		fmt.Sprintf("layer source %s/%s names no revision while %s publishes tags under "+
 			"onConflict: %s. The tag is fixed and the source is not, so a build that starts "+
 			"before the source catches up publishes the previous revision under it and the tag "+

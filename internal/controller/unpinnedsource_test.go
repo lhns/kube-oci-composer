@@ -13,49 +13,39 @@ import (
 // TestAnUnpinnedSourceUnderFailIsAnnounced covers the combination behind a field incident: a tag
 // that cannot move fed by a source that can.
 //
-// The composition's spec-hash tag is computed by the consumer and lands with the spec, while the
-// GitRepository it names catches up separately. A build started in that window publishes the
-// PREVIOUS revision under the new tag, and because provenance records the source revision on the
-// manifest, the corrective build is GUARANTEED to produce a different digest -- so onConflict: Fail
-// refuses it and the object is wedged with no retry that can clear it. ADR 0052.
+// The tag is computed by the consumer and lands with the spec while the source catches up
+// separately, so a build in that window publishes the PREVIOUS revision under the new tag -- and
+// provenance records the revision on the manifest, so the corrective build is guaranteed to differ
+// and Fail refuses it. ADR 0052.
 //
-// Deliberately a warning rather than a refusal: tracking a branch is legitimate and ADR 0026 left
-// the pin optional on purpose. What was missing is that nothing said so until after it broke.
+// The caller establishes that the layer is unpinned; pinning is covered by the wiring test below,
+// where the condition actually lives.
 func TestAnUnpinnedSourceUnderFailIsAnnounced(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		revision string
-		push     *ociv1alpha1.Push
-		want     bool
+		name string
+		push *ociv1alpha1.Push
+		want bool
 	}{
 		{
-			name: "unpinned, Fail, tagged",
+			name: "Fail, tagged",
 			push: &ociv1alpha1.Push{Tags: []string{"s0eff05b20f86b0e9"}},
 			want: true,
 		},
 		{
-			// The pin is what ties the tag to the content, so there is nothing left to warn about.
-			name:     "pinned",
-			revision: "sha1:882834f",
-			push:     &ociv1alpha1.Push{Tags: []string{"s0eff05b20f86b0e9"}},
-			want:     false,
-		},
-		{
 			// A policy that tolerates a second answer cannot wedge.
-			name: "unpinned, Overwrite",
+			name: "Overwrite",
 			push: &ociv1alpha1.Push{Tags: []string{"v1"}, OnConflict: ociv1alpha1.ConflictOverwrite},
 			want: false,
 		},
 		{
-			name: "unpinned, Keep",
+			name: "Keep",
 			push: &ociv1alpha1.Push{Tags: []string{"v1"}, OnConflict: ociv1alpha1.ConflictKeep},
 			want: false,
 		},
 		{
 			// The one structurally safe configuration: the name IS the content, so a build from a
-			// different revision gets a different name and collides with nothing. Warning here
-			// would be noise on the case that cannot fail.
-			name: "unpinned, Fail, digest-only",
+			// different revision gets a different name and collides with nothing.
+			name: "Fail, digest-only",
 			push: &ociv1alpha1.Push{Repository: "ghcr.io/me/app"},
 			want: false,
 		},
@@ -68,14 +58,13 @@ func TestAnUnpinnedSourceUnderFailIsAnnounced(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := record.NewFakeRecorder(8)
-			r := &ImageCompositionReconciler{Recorder: rec}
 
 			obj := &ociv1alpha1.ImageComposition{}
 			obj.Name, obj.Namespace = "app", "team-a"
 			obj.Spec.Push = tc.push
 
-			r.warnIfUnpinnedUnderFail(obj, &ociv1alpha1.SourceRefSource{
-				Kind: "GitRepository", Name: "ext", Revision: tc.revision,
+			warnUnpinnedUnderFail(rec, obj, &ociv1alpha1.SourceRefSource{
+				Kind: "GitRepository", Name: "ext",
 			})
 
 			var got string
@@ -109,40 +98,53 @@ func TestAnUnpinnedSourceUnderFailIsAnnounced(t *testing.T) {
 
 // TestTheUnpinnedWarningIsActuallyWired is the half the table above cannot cover.
 //
-// Every case there calls warnIfUnpinnedUnderFail directly, so all six would pass unchanged if
-// nothing ever called it. This drives resolveInputs, which is the path a reconcile takes.
+// Every case there calls warnUnpinnedUnderFail directly, so all of them would pass unchanged if
+// nothing ever called it. This drives resolveInputs, the path a reconcile takes, and so it is also
+// where pinning is covered: the revision check lives at the call site, not in the helper.
 func TestTheUnpinnedWarningIsActuallyWired(t *testing.T) {
-	url, digest := tarball(t, map[string]string{"config/app.conf": "x"})
-	repo := gitRepository("platform-config", "default", url, digest, "main@sha1:abcd")
+	for _, tc := range []struct {
+		name     string
+		revision string
+		want     bool
+	}{
+		{"unpinned", "", true},
+		// The pin ties the tag to the content, so there is nothing left to warn about.
+		{"pinned", "main@sha1:abcd", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			url, digest := tarball(t, map[string]string{"config/app.conf": "x"})
+			repo := gitRepository("platform-config", "default", url, digest, "main@sha1:abcd")
 
-	obj := unpinnedComposition()
-	// The shared fixture publishes with immutable: false, which resolves to Overwrite and cannot
-	// wedge. The incident's configuration is the default policy over a moving source.
-	obj.Spec.Push = &ociv1alpha1.Push{Tags: []string{"s0eff05b20f86b0e9"}}
+			obj := unpinnedComposition()
+			obj.Spec.Layers[0].SourceRef.Revision = tc.revision
+			// The shared fixture publishes with immutable: false, which resolves to Overwrite and
+			// cannot wedge. The incident's configuration is the default policy over a moving source.
+			obj.Spec.Push = &ociv1alpha1.Push{Tags: []string{"s0eff05b20f86b0e9"}}
 
-	r := reconcilerWith(t, repo)
-	if _, _, err := r.resolveInputs(context.Background(), obj, t.TempDir()); err != nil {
-		t.Fatalf("resolving: %v", err)
-	}
-
-	rec, ok := r.Recorder.(*record.FakeRecorder)
-	if !ok {
-		t.Fatal("expected a fake recorder")
-	}
-	var found bool
-	for {
-		select {
-		case ev := <-rec.Events:
-			if strings.Contains(ev, ociv1alpha1.ReasonUnpinnedSource) {
-				found = true
+			r := reconcilerWith(t, repo)
+			if _, _, err := r.resolveInputs(context.Background(), obj, t.TempDir()); err != nil {
+				t.Fatalf("resolving: %v", err)
 			}
-			continue
-		default:
-		}
-		break
-	}
-	if !found {
-		t.Error("resolving an unpinned sourceRef under onConflict: Fail raised no warning, so " +
-			"the object gives no sign of the one configuration that wedges it")
+
+			rec, ok := r.Recorder.(*record.FakeRecorder)
+			if !ok {
+				t.Fatal("expected a fake recorder")
+			}
+			var found bool
+			for {
+				select {
+				case ev := <-rec.Events:
+					if strings.Contains(ev, ociv1alpha1.ReasonUnpinnedSource) {
+						found = true
+					}
+					continue
+				default:
+				}
+				break
+			}
+			if found != tc.want {
+				t.Errorf("warning raised = %v, want %v", found, tc.want)
+			}
+		})
 	}
 }

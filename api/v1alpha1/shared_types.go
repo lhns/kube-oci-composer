@@ -56,15 +56,10 @@ const (
 	// not helped. ADR 0051.
 	ReasonArtifactLost = "ArtifactLost"
 
-	// ReasonUnpinnedSource reports a layer taking content from a sourceRef with no revision while
-	// the object publishes tags under a policy that refuses to change what a tag means.
+	// ReasonUnpinnedSource reports a sourceRef with no revision feeding tags that cannot move.
 	//
-	// The combination promises fixed content from a moving input. A spec-hash tag is computed by
-	// the CONSUMER from the spec (ADR 0017) and lands the moment the spec is applied, while the
-	// source it names catches up separately -- so the tag can exist, and be built, before the
-	// source holds what it was named for. Nothing in the source looks wrong while that is true:
-	// it is self-consistent at the previous revision. `sourceRef.revision` is the only thing that
-	// ties the two together. ADR 0052.
+	// The combination promises fixed content from an input that is free to change under it, and
+	// the tag can be built before the source holds what it was named for. ADR 0052.
 	ReasonUnpinnedSource = "UnpinnedSource"
 
 	// ReasonBuildFailed covers an ImageBuild whose Job did not succeed. Never sets Stalled: the fix
