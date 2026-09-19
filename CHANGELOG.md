@@ -5,6 +5,24 @@ may change between minor versions.
 
 ## [Unreleased]
 
+### Added
+
+- **A Warning when a layer's source can move but its tags cannot**
+  ([ADR 0052](docs/adr/0052-a-tag-that-cannot-move-needs-a-source-that-cannot-either.md)). A
+  `sourceRef` layer with no `revision`, in an object publishing tags under `onConflict: Fail` (the
+  default), now raises `UnpinnedSource`.
+
+  That combination is what wedges a composition. A spec-hash tag is computed by the consumer and
+  lands with the spec, while the source it names catches up separately — so a build starting in
+  that window publishes the previous revision under the new tag, and the corrective build is
+  refused because provenance records the source revision on the manifest and the two therefore
+  differ. The tag cannot be corrected afterwards.
+
+  A warning, not a refusal: tracking a branch stays legal. Add `revision:` to the `sourceRef`, or
+  use `--require-pinned-sources` to require it cluster-wide, or choose a conflict policy that
+  tolerates a moving source. A digest-only publish is never flagged — the name is the content, so
+  it cannot wedge.
+
 ## [0.5.1] - 2026-09-07
 
 Four defects found on a live 0.5.0 cluster. Affects any install running the bundled registry with

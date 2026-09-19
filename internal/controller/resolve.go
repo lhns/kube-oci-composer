@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
+	corev1 "k8s.io/api/core/v1"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 	"github.com/lhns/kube-oci-composer/internal/oci"
@@ -215,6 +217,14 @@ func (r *ImageCompositionReconciler) resolveFluxSource(ctx context.Context, obj 
 			ref.Kind, ref.Name)
 	}
 
+	// An unpinned source under a tag policy that refuses to move is the shape that wedges.
+	//
+	// Not refused, because tracking a branch is legitimate and ADR 0026 left the pin optional on
+	// purpose. But it cannot be silent either: the failure it produces arrives later, as a tag
+	// holding the previous revision's content and an object Stalled on a conflict no retry can
+	// clear -- and by then nothing on the object says the source was unpinned. ADR 0052.
+	r.warnIfUnpinnedUnderFail(obj, ref)
+
 	ns := obj.Namespace
 	if ref.Namespace != "" && ref.Namespace != obj.Namespace {
 		return source.FluxArtifact{}, recon.Terminal(
@@ -262,4 +272,42 @@ func (r *ImageCompositionReconciler) resolveFluxSource(ctx context.Context, obj 
 	}
 
 	return art, nil
+}
+
+// warnIfUnpinnedUnderFail says so when a layer's source can move but its tags cannot.
+//
+// Three conditions, and all three are needed before this is worth saying:
+//
+//   - the layer names no revision, so what it consumes is whatever the source happens to hold;
+//   - the conflict policy refuses to change what a tag means, so a second answer wedges rather
+//     than overwrites;
+//   - the object actually publishes a tag. A digest-only publish cannot wedge, because the name IS
+//     the content -- a different build simply gets a different name, and warning about it would be
+//     noise on the one configuration that is structurally safe.
+//
+// Repeats aggregate: the API server counts events by (reason, message, object), so an object left
+// unpinned costs one event with a rising count rather than one per reconcile.
+func (r *ImageCompositionReconciler) warnIfUnpinnedUnderFail(
+	obj *ociv1alpha1.ImageComposition, ref *ociv1alpha1.SourceRefSource,
+) {
+	if ref.Revision != "" {
+		return
+	}
+	if obj.Spec.Push.ResolveConflictPolicy() != ociv1alpha1.ConflictFail {
+		return
+	}
+	// Errors here are not this function's to report: an unusable ref fails the reconcile itself a
+	// moment later, with a message about the ref rather than about pinning.
+	tags, err := recon.EffectiveTags(obj.Spec.Push.GetTags(), obj.Spec.Push.GetRef())
+	if err != nil || len(tags) == 0 {
+		return
+	}
+
+	recon.Event(r.Recorder, obj, corev1.EventTypeWarning, ociv1alpha1.ReasonUnpinnedSource,
+		fmt.Sprintf("layer source %s/%s names no revision while %s publishes tags under "+
+			"onConflict: %s. The tag is fixed and the source is not, so a build that starts "+
+			"before the source catches up publishes the previous revision under it and the tag "+
+			"cannot be corrected afterwards. Add `revision:` to this sourceRef, or use a "+
+			"conflict policy that tolerates a moving source.",
+			ref.Kind, ref.Name, strings.Join(tags, ","), ociv1alpha1.ConflictFail))
 }
