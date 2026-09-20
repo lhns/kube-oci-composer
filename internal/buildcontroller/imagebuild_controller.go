@@ -566,6 +566,20 @@ func (r *ImageBuildReconciler) observeJob(ctx context.Context, obj *ociv1alpha1.
 		if err != nil {
 			return ctrl.Result{}, err
 		}
+		// The content is pushed; naming it is this controller's decision, and the only point at
+		// which onConflict can be enforced exactly. ADR 0054.
+		conflict, err := r.applyTags(ctx, obj, digest)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if conflict != nil {
+			// onConflict: Keep. The tag was left alone, so this build is not published under it
+			// and there is no artifact to record -- but what was dropped is now a real digest
+			// rather than the empty field ADR 0029 had to accept.
+			r.recordKept(obj, conflict)
+			return ctrl.Result{RequeueAfter: recon.Interval(obj.Spec.Interval)}, nil
+		}
+
 		r.recordSuccess(obj, inputs, inputHash, digest)
 		// After recordSuccess, so status already names what was built when signing looks at it.
 		obj.Status.Attestations = r.signBuild(ctx, obj, digest)

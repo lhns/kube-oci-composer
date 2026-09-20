@@ -304,6 +304,10 @@ type Push struct {
 	// Republishing IDENTICAL content is a no-op regardless of this field, so a steady reconcile
 	// loop never reaches it -- only a real change of meaning does.
 	//
+	// Evaluated against the digest actually produced, on both kinds: the build uploads by digest
+	// and this controller applies the names afterwards (ADR 0054). A tag meant to MOVE therefore
+	// conflicts under Fail -- that is what Fail asks for -- and wants Overwrite instead.
+	//
 	// Deliberately carries NO schema default, unlike the `immutable` field it replaces. Structural
 	// defaults are applied when an object is read back from storage, so defaulting this would
 	// rewrite every existing `immutable: false` object into a refusing one the moment the CRD was

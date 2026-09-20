@@ -269,8 +269,14 @@ func buildctlArgs(obj *ociv1alpha1.ImageBuild, cfg JobConfig, repo string, cache
 	// already writes OCI manifests, and the two kinds emitting different media types into the same
 	// registry is the kind of divergence the rest of this work has been removing. The Docker types
 	// were never chosen here; they were BuildKit's default and nothing had contradicted it.
+	// push-by-digest: the Job uploads the CONTENT and names nothing.
+	//
+	// Naming is the controller's, because only it can decide whether a tag may take on new meaning
+	// -- and it cannot decide that until the digest exists, which is after the build. A Job that
+	// tagged as it pushed made onConflict unenforceable on this kind: the check had to run before
+	// the build, against a digest that was not yet known. ADR 0054.
 	args = append(args, "--output",
-		"type=image,name="+pushNames(obj, repo)+",push=true,rewrite-timestamp=true,oci-mediatypes=true"+
+		"type=image,name="+repo+",push=true,push-by-digest=true,rewrite-timestamp=true,oci-mediatypes=true"+
 			insecureAttr(repo, cfg.InsecureRegistries))
 	args = append(args, "--opt", "build-arg:SOURCE_DATE_EPOCH="+cfg.SourceDateEpoch)
 
@@ -617,24 +623,6 @@ func automount(serviceAccount string) *bool {
 }
 
 // pushNames renders the comma-separated image names the exporter pushes to.
-func pushNames(obj *ociv1alpha1.ImageBuild, repo string) string {
-	if repo == "" {
-		return ""
-	}
-	// EffectiveTags folds in whatever push.ref carries, so a generator that retags through a
-	// kustomize images transformer reaches the build the same way it reaches a composition. An
-	// invalid ref is caught during resolution, before a Job exists, so it cannot arrive here.
-	tags, err := recon.EffectiveTags(obj.Spec.Push.GetTags(), obj.Spec.Push.GetRef())
-	if err != nil || len(tags) == 0 {
-		return repo
-	}
-	names := make([]string, 0, len(tags))
-	for _, tag := range tags {
-		names = append(names, repo+":"+tag)
-	}
-	return strings.Join(names, ",")
-}
-
 // cacheRefFor returns where this object's build cache lives, or "" when caching is disabled.
 //
 // Always per-object; nothing shares one. See the doc on BuildCache.Ref for why.
