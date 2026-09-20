@@ -80,6 +80,7 @@ func main() {
 		fetchDenyPrivate     bool
 		sourceDateEpoch      string
 		refreshInterval      time.Duration
+		refExportNamespaces  string
 		historyLimit         int
 		requirePinnedSources bool
 		showVersion          bool
@@ -112,6 +113,10 @@ func main() {
 			"server on a private address is an ordinary source, and a guard people disable is no guard.")
 	flag.StringVar(&sourceDateEpoch, "source-date-epoch", "0",
 		"SOURCE_DATE_EPOCH stamped into builds. Fixed rather than the wall clock, matching the composer's epoch.")
+	flag.StringVar(&refExportNamespaces, "ref-export-namespaces", "",
+		"comma-separated namespaces push.writeRefTo may write a ConfigMap in. Empty refuses every "+
+			"export: a substitution source in the namespace that parameterises a cluster is a "+
+			"privilege to grant deliberately.")
 	flag.DurationVar(&refreshInterval, "retention-refresh-interval", retention.DefaultInterval,
 		"How often to re-pull the images every live ImageBuild still references, so that a registry "+
 			"with an expiry policy does not reclaim them. Zero disables it.\n"+
@@ -255,11 +260,19 @@ func main() {
 	}
 
 	if err := (&buildcontroller.ImageBuildReconciler{
+<<<<<<< HEAD
 		Client:    mgr.GetClient(),
 		Default:   defaults,
 		Transport: registryTransport,
 		Attestor:  attestor,
 		Refresher: refresher,
+=======
+		Client:              mgr.GetClient(),
+		Default:             defaults,
+		Transport:           registryTransport,
+		Attestor:            attestor,
+		RefExportNamespaces: splitList(refExportNamespaces),
+>>>>>>> 1129595 (feat(builder): export the published reference into a ConfigMap)
 		//nolint:staticcheck // SA1019: the new events API has no Event method; see the composer.
 		Recorder: mgr.GetEventRecorderFor("imagebuild-controller"),
 		// The controller GETs a user-supplied URL when a fetch context holds the Dockerfile, so it
@@ -363,4 +376,16 @@ func newJobConfig(f jobFlags) buildcontroller.JobConfig {
 		SBOM:               f.SBOM,
 		Provenance:         f.Provenance,
 	}
+}
+
+// splitList turns a comma-separated flag into a list, dropping empties so a trailing comma or an
+// unset flag yields nothing rather than a namespace named "".
+func splitList(v string) []string {
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

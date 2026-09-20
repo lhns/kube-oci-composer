@@ -315,6 +315,11 @@ type Push struct {
 	// lives in ResolveConflictPolicy instead, where it can consult `immutable` first.
 	// +optional
 	OnConflict TagConflictPolicy `json:"onConflict,omitempty"`
+
+	// WriteRefTo exports the published reference into a ConfigMap. Off unless set, and refused
+	// unless the controller allow-lists the target namespace. See RefExport.
+	// +optional
+	WriteRefTo *RefExport `json:"writeRefTo,omitempty"`
 }
 
 // TagConflictPolicy decides what happens when a tag already resolves to content other than what
@@ -501,4 +506,48 @@ func RevisionMatches(want, got string) bool {
 	}
 	ref, _, found := strings.Cut(got, "@")
 	return found && ref == want
+}
+
+// RefExport writes what was published into a ConfigMap, for a consumer that substitutes it.
+//
+// The case for it is `ImageBuild`: its digest is an observation rather than a function of its spec
+// (ADR 0025), so a consumer cannot compute the reference in advance the way the spec-hash tag lets
+// it for `ImageComposition` (ADR 0017). Publishing by digest and exporting the result needs no tag
+// at all, which also means no tag can be remeaned -- onConflict becomes inapplicable rather than
+// approximate.
+//
+// Strictly opt-in, and the cost is stated in ADR 0055: the digest becomes state outside git, so a
+// revert no longer reverts the running image.
+type RefExport struct {
+	// Name of the ConfigMap to write.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+
+	// Namespace to write it in. Required, and must be allow-listed on the controller.
+	//
+	// No default, deliberately. Substitution sources are read from the consuming Kustomization's
+	// namespace -- usually flux-system, the namespace that parameterises everything -- so this
+	// silently defaulting to the object's own namespace would produce a ConfigMap nothing reads.
+	// +kubebuilder:validation:MinLength=1
+	Namespace string `json:"namespace"`
+
+	// Keys names the ConfigMap keys to write.
+	Keys RefExportKeys `json:"keys"`
+}
+
+// RefExportKeys names what to write under which key. At least one is required.
+//
+// +kubebuilder:validation:XValidation:rule="has(self.ref) || has(self.digest)",message="set at least one of ref or digest"
+type RefExportKeys struct {
+	// Ref receives the full pullable reference, registry/repository@sha256:...
+	//
+	// Prefer this over Digest alone: a consumer substituting a bare digest into an image field
+	// produces a trailing "@" on an empty string if the key is ever missing, which fails later and
+	// less legibly than a missing image would.
+	// +optional
+	Ref string `json:"ref,omitempty"`
+
+	// Digest receives the bare sha256:... value.
+	// +optional
+	Digest string `json:"digest,omitempty"`
 }

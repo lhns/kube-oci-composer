@@ -7,6 +7,7 @@ may change between minor versions.
 
 ### Added
 
+<<<<<<< HEAD
 - **A Warning when a layer's source can move but its tags cannot**
   ([ADR 0052](docs/adr/0052-a-tag-that-cannot-move-needs-a-source-that-cannot-either.md)). A
   `sourceRef` layer with no `revision`, in an object publishing tags under `onConflict: Fail` (the
@@ -22,6 +23,27 @@ may change between minor versions.
   use `--require-pinned-sources` to require it cluster-wide, or choose a conflict policy that
   tolerates a moving source. A digest-only publish is never flagged — the name is the content, so
   it cannot wedge.
+=======
+- **`push.writeRefTo`, exporting the published reference into a ConfigMap**
+  ([ADR 0055](docs/adr/0055-exporting-a-reference-a-consumer-cannot-compute.md)). For a Flux
+  `postBuild.substituteFrom` consumer. Off by default, and **refused unless the operator
+  allow-lists the target namespace** with `--ref-export-namespaces` — the useful target is the
+  namespace that parameterises the cluster, so this is a privilege to grant deliberately.
+
+  It exists for `ImageBuild`, whose digest is an observation rather than a function of its spec, so
+  a consumer cannot compute the reference in advance the way a spec-hash tag lets it for
+  `ImageComposition`. Publishing this way needs **no tag at all**, which also means no tag can be
+  remeaned.
+
+  Writes the full ref as well as the bare digest, sets `reconcile.fluxcd.io/watch: Enabled` itself,
+  and replaces the ConfigMap wholesale so a consumer never sees one key updated and another stale.
+  An incomplete reference is never written — a missing key substitutes the empty string and Flux
+  says nothing.
+
+  **The digest becomes state outside git**, so a revert no longer reverts the running image; and
+  the ConfigMap is labelled rather than owner-referenced, because a cross-namespace owner reference
+  is invalid, so it is not reclaimed with the object. Both are in the ADR.
+>>>>>>> 1129595 (feat(builder): export the published reference into a ConfigMap)
 
 ### Changed
 

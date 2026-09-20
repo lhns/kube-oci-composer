@@ -158,6 +158,15 @@ imageBuild:
   enabled: true
   replicaCount: 1
 
+  # Namespaces that `push.writeRefTo` may write a ConfigMap in. Empty refuses every export, and
+  # also withholds the ConfigMap write verbs from the builder's ClusterRole -- the feature and the
+  # privilege are turned on by the same value.
+  #
+  # The useful target is the namespace your Kustomizations substitute from, usually flux-system,
+  # which parameterises everything in the cluster. Naming it here is the decision; see ADR 0055 for
+  # what it costs, chiefly that the digest becomes state outside git.
+  refExportNamespaces: []
+
   image:
     repository: ghcr.io/lhns/kube-oci-builder
     # Defaults to the chart's appVersion.

@@ -62,6 +62,7 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0052](0052-a-tag-that-cannot-move-needs-a-source-that-cannot-either.md) | A tag that cannot move needs a source that cannot either | **Accepted** |
 | [0053](0053-a-publish-is-protected-before-the-reconcile-returns.md) | A publish is protected before the reconcile returns | **Accepted** |
 | [0054](0054-name-it-after-you-push-it.md) | Name it after you push it | **Accepted** |
+| [0055](0055-exporting-a-reference-a-consumer-cannot-compute.md) | Exporting a reference a consumer cannot compute | **Accepted** |
 
 ## Open questions
 

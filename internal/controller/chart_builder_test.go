@@ -58,7 +58,12 @@ func TestBuilderChartRBACMatchesTheGeneratedRole(t *testing.T) {
 		t.Fatalf("reading generated role: %v", err)
 	}
 
-	chart := clusterRoleFromRender(t, renderBuilder(t), "test-release-kube-oci-composer-builder")
+	// Rendered with push.writeRefTo enabled, because the generated role carries its verbs
+	// unconditionally while the chart grants them only when an export is possible. The DEFAULT
+	// render is asserted separately, by TestBuilderChartNeverGrantsConfigMapWrites.
+	chart := clusterRoleFromRender(t,
+		renderBuilder(t, "--set", "imageBuild.refExportNamespaces=flux-system"),
+		"test-release-kube-oci-composer-builder")
 
 	// Leader election lives in a namespaced Role in the chart, as it does for the composer.
 	want := ruleSet(rulesExcluding(generated, "coordination.k8s.io"))

@@ -57,6 +57,10 @@ type ImageBuildReconciler struct {
 	// leaving it unprotected until the next scheduled cycle. Optional: nil disables it, which
 	// is what --retention-refresh-interval=0 means.
 	Refresher *retention.Refresher
+	// RefExportNamespaces are the namespaces push.writeRefTo may write a ConfigMap in. Empty
+	// refuses every export: writing a substitution source into the namespace that parameterises a
+	// cluster is a privilege an operator grants deliberately, not a default. ADR 0055.
+	RefExportNamespaces []string
 
 	// Attestor signs the build's output, after the Job has terminated.
 	//
@@ -109,7 +113,7 @@ type ImageBuildReconciler struct {
 // get;list;watch and NOTHING else. Everything this controller WRITES into a tenant namespace is a
 // Secret -- the Dockerfile copy included -- so no create or update appears here, and that asymmetry
 // is deliberate rather than an oversight.
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=gitrepositories;ocirepositories;buckets,verbs=get;list;watch
 
@@ -584,6 +588,9 @@ func (r *ImageBuildReconciler) observeJob(ctx context.Context, obj *ociv1alpha1.
 		// After recordSuccess, so status already names what was built when signing looks at it.
 		obj.Status.Attestations = r.signBuild(ctx, obj, digest)
 		r.refreshNow(ctx, obj)
+		if err := r.exportRef(ctx, obj); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{RequeueAfter: recon.Interval(obj.Spec.Interval)}, nil
 
 	case jobFailed(job):
@@ -1058,4 +1065,17 @@ func (r *ImageBuildReconciler) refreshNow(ctx context.Context, obj *ociv1alpha1.
 		Object: obj, Push: obj.Spec.Push,
 		Artifact: obj.Status.Artifact, History: obj.Status.History,
 	})
+}
+
+// exportRef publishes the reference into the ConfigMap a consumer substitutes from.
+//
+// After recordSuccess, so what is exported is exactly what status reports, and only on a confirmed
+// publish -- a consumer substitutes whatever it finds, and a missing key substitutes the empty
+// string with no complaint from anything.
+func (r *ImageBuildReconciler) exportRef(ctx context.Context, obj *ociv1alpha1.ImageBuild) error {
+	if obj.Spec.Push == nil || obj.Spec.Push.WriteRefTo == nil || obj.Status.Artifact == nil {
+		return nil
+	}
+	return recon.ExportRef(ctx, r.Client, obj, obj.Spec.Push.WriteRefTo,
+		r.RefExportNamespaces, obj.Status.Artifact.Digest, obj.Status.Artifact.Ref)
 }

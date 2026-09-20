@@ -39,12 +39,17 @@ rules:
   # interval -- an hour by default, which reads as the controller being broken. That costs an
   # informer over every ConfigMap in the cluster; the composer already pays it for configMap layers.
   #
-  # Read-only, and the asymmetry with secrets above is deliberate: everything this controller WRITES
-  # into a tenant namespace is a Secret, the Dockerfile copy included, so no create or update belongs
-  # here. TestBuilderChartNeverGrantsConfigMapWrites keeps it that way.
+  # Read-only unless push.writeRefTo is in use. Everything this controller writes into a tenant
+  # namespace is otherwise a Secret, the Dockerfile copy included, and
+  # TestBuilderChartNeverGrantsConfigMapWrites keeps the DEFAULT render that way -- the write verbs
+  # appear only once an operator has named the namespaces an export may target (ADR 0055).
   - apiGroups: [""]
     resources: [configmaps]
+    {{- if .Values.imageBuild.refExportNamespaces }}
+    verbs: [get, list, watch, create, update]
+    {{- else }}
     verbs: [get, list, watch]
+    {{- end }}
   - apiGroups: [""]
     resources: [events]
     verbs: [create, patch]
