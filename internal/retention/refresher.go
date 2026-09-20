@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -179,7 +180,13 @@ type Refresher struct {
 	InsecureRegistries []string
 
 	// failures counts consecutive failed cycles per object, keyed by namespace/name.
+	//
+	// Guarded, because RefreshNow is called from a reconcile while the cycle goroutine may be
+	// running. Before that it was only ever touched by the ticker.
+	mu       sync.Mutex
 	failures map[string]int
+	// skips counts consecutive cycles that refreshed NOTHING because the view was partial.
+	skips int
 }
 
 // Result summarises one cycle.
@@ -235,12 +242,29 @@ func (r *Refresher) cycle(ctx context.Context, logger interface {
 	result, err := r.RefreshOnce(ctx)
 	switch {
 	case err != nil:
+		r.skips = 0
 		// Loud, and not merely logged at info. A failed cycle is a step toward deletion.
 		logger.Error(err, "RETENTION REFRESH FAILED; live images lose their protection if this "+
 			"continues for the registry's retention window")
 	case result.Skipped:
-		logger.Info("retention refresh skipped", "reason", result.SkipReason)
+		// A skipped cycle protects exactly as much as a failed one: nothing. The gate is right --
+		// a partial view would under-refresh silently -- but declining is not a benign outcome, and
+		// it was reported as though it were. One object stuck with observedGeneration behind its
+		// generation stops the refresh for EVERY object in the cluster, and nothing makes that
+		// resolve on its own.
+		r.skips++
+		if r.skips < DegradedAfter {
+			logger.Info("retention refresh skipped", "reason", result.SkipReason,
+				"consecutiveSkips", r.skips)
+			return
+		}
+		logger.Error(fmt.Errorf("%s", result.SkipReason),
+			"RETENTION REFRESH HAS REFRESHED NOTHING FOR "+
+				"SEVERAL CYCLES; live images lose their protection just as surely as if it were "+
+				"failing, and this will not clear until every object has been reconciled",
+			"consecutiveSkips", r.skips)
 	default:
+		r.skips = 0
 		logger.Info("retention refresh complete",
 			"objects", result.Objects, "references", result.References,
 			"refreshed", result.Refreshed, "failed", result.Failed,
@@ -410,11 +434,13 @@ func (r *Refresher) refreshObject(ctx context.Context, target Target, out *Resul
 // noteFailure counts consecutive failures and gets loud once they persist.
 func (r *Refresher) noteFailure(ctx context.Context, obj client.Object, namespace, objName, detail string) {
 	key := namespace + "/" + objName
+	r.mu.Lock()
 	if r.failures == nil {
 		r.failures = map[string]int{}
 	}
 	r.failures[key]++
 	n := r.failures[key]
+	r.mu.Unlock()
 
 	log.FromContext(ctx).WithName("retention").Error(fmt.Errorf("%s", detail),
 		"refresh failed", "object", key, "consecutiveFailures", n)
@@ -432,9 +458,27 @@ func (r *Refresher) noteFailure(ctx context.Context, obj client.Object, namespac
 }
 
 func (r *Refresher) clearFailure(namespace, objName string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.failures != nil {
 		delete(r.failures, namespace+"/"+objName)
 	}
+}
+
+// RefreshNow renews the lease on one object's images without waiting for the next cycle.
+//
+// Called straight after a publish. Until it runs, the artifact has NO lease: a registry that
+// expires on pull recency holds no record that something was pushed, and zot in particular can
+// carry an old timestamp onto a new tag when the digest is one it has seen before. A GC pass in
+// the gap collects content that is minutes old. The scheduled cycle would close that gap only
+// after a full Interval -- an hour, by default.
+//
+// Deliberately NOT gated on Pending. That gate exists so a PARTIAL view does not under-refresh a
+// whole cycle; here the caller has one object it has just published and knows to be current.
+func (r *Refresher) RefreshNow(ctx context.Context, target Target) Result {
+	var out Result
+	r.refreshObject(ctx, target, &out)
+	return out
 }
 
 // refsOf lists every reference an object still needs kept alive.

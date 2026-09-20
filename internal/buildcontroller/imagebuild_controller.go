@@ -29,6 +29,7 @@ import (
 	"github.com/lhns/kube-oci-composer/internal/attest"
 	"github.com/lhns/kube-oci-composer/internal/build"
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
+	"github.com/lhns/kube-oci-composer/internal/retention"
 	"github.com/lhns/kube-oci-composer/internal/source"
 )
 
@@ -51,6 +52,11 @@ type ImageBuildReconciler struct {
 	// Recorder surfaces failures as Events. A build failure's detail lives in the pod's logs,
 	// which vanish with the pod, so the Event is often the only durable trace of why.
 	Recorder record.EventRecorder
+
+	// Refresher renews the lease on an artifact the moment it is published, rather than
+	// leaving it unprotected until the next scheduled cycle. Optional: nil disables it, which
+	// is what --retention-refresh-interval=0 means.
+	Refresher *retention.Refresher
 
 	// Attestor signs the build's output, after the Job has terminated.
 	//
@@ -563,6 +569,7 @@ func (r *ImageBuildReconciler) observeJob(ctx context.Context, obj *ociv1alpha1.
 		r.recordSuccess(obj, inputs, inputHash, digest)
 		// After recordSuccess, so status already names what was built when signing looks at it.
 		obj.Status.Attestations = r.signBuild(ctx, obj, digest)
+		r.refreshNow(ctx, obj)
 		return ctrl.Result{RequeueAfter: recon.Interval(obj.Spec.Interval)}, nil
 
 	case jobFailed(job):
@@ -1018,4 +1025,23 @@ func (r *ImageBuildReconciler) buildsForConfigMap(ctx context.Context, obj clien
 		})
 	}
 	return out
+}
+
+// refreshNow renews the lease on what was just published, without waiting for the next cycle.
+//
+// Until this runs the artifact has NO lease. A registry that expires on pull recency holds no
+// record that anything was pushed, and zot can carry an OLD timestamp onto a new tag when the
+// digest is one it has seen before -- so a collection pass in the gap reclaims content that is
+// minutes old. The scheduled cycle closes that gap only after a full interval.
+//
+// Never fatal. The push succeeded; a failed opportunistic refresh leaves exactly the situation
+// that existed before this call, and the next cycle tries again.
+func (r *ImageBuildReconciler) refreshNow(ctx context.Context, obj *ociv1alpha1.ImageBuild) {
+	if r.Refresher == nil {
+		return
+	}
+	r.Refresher.RefreshNow(ctx, retention.Target{
+		Object: obj, Push: obj.Spec.Push,
+		Artifact: obj.Status.Artifact, History: obj.Status.History,
+	})
 }

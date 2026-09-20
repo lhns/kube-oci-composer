@@ -33,6 +33,7 @@ import (
 	"github.com/lhns/kube-oci-composer/internal/cache"
 	"github.com/lhns/kube-oci-composer/internal/oci"
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
+	"github.com/lhns/kube-oci-composer/internal/retention"
 )
 
 // pendingRetryInterval is how often a composition waiting on a dependency re-checks. Short
@@ -45,6 +46,11 @@ type ImageCompositionReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
+
+	// Refresher renews the lease on an artifact the moment it is published, rather than
+	// leaving it unprotected until the next scheduled cycle. Optional: nil disables it, which
+	// is what --retention-refresh-interval=0 means.
+	Refresher *retention.Refresher
 
 	// Default is where objects publish when they name no repository of their own. Configured once
 	// by the operator; see recon.DefaultRegistry for why its credential is namespaced to the
@@ -233,6 +239,12 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		recon.RemoveCondition(o, ociv1alpha1.StalledCondition)
 	}); err != nil {
 		return ctrl.Result{}, err
+	}
+
+	// A nil Record means the reconcile converged without publishing, so there is nothing newly
+	// unprotected.
+	if result.Record != nil {
+		r.refreshNow(ctx, &obj, result.Artifact)
 	}
 
 	return ctrl.Result{RequeueAfter: interval}, nil
@@ -958,4 +970,27 @@ func (r *ImageCompositionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 
 	return b.Complete(r)
+}
+
+// refreshNow renews the lease on what was just published, without waiting for the next cycle.
+//
+// Until this runs the artifact has NO lease. A registry that expires on pull recency holds no
+// record that anything was pushed, and zot can carry an OLD timestamp onto a new tag when the
+// digest is one it has seen before -- so a collection pass in the gap reclaims content that is
+// minutes old. The scheduled cycle closes that gap only after a full interval.
+//
+// Never fatal. The push succeeded; a failed opportunistic refresh leaves exactly the situation
+// that existed before this call, and the next cycle tries again.
+func (r *ImageCompositionReconciler) refreshNow(
+	ctx context.Context, obj *ociv1alpha1.ImageComposition, artifact *ociv1alpha1.ArtifactStatus,
+) {
+	if r.Refresher == nil || artifact == nil {
+		return
+	}
+	// The artifact is passed rather than read from obj.Status: patchStatus writes to a freshly
+	// fetched copy, so the object this function is handed still describes the previous pass.
+	// History is left out on purpose -- what is newly unprotected is this publish.
+	r.Refresher.RefreshNow(ctx, retention.Target{
+		Object: obj, Push: obj.Spec.Push, Artifact: artifact,
+	})
 }

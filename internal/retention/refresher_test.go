@@ -732,3 +732,56 @@ func TestAGoneReferenceDoesNotHoldTheObjectDegradedForever(t *testing.T) {
 		t.Error("the reference that still exists stopped being refreshed")
 	}
 }
+
+// recordingLogger captures what a cycle said, and at which severity.
+type recordingLogger struct {
+	infos  []string
+	errors []string
+}
+
+func (l *recordingLogger) Info(msg string, _ ...any)           { l.infos = append(l.infos, msg) }
+func (l *recordingLogger) Error(_ error, msg string, _ ...any) { l.errors = append(l.errors, msg) }
+
+// TestASkippedCycleGetsLoud — a cycle that declines to run protects exactly as much as one that
+// fails: nothing.
+//
+// The gate itself is right, and stays: a partial view would under-refresh silently, which is worse.
+// What was wrong is that declining was reported at Info while failing was escalated, though the
+// consequence is identical and a skip does not resolve on its own -- one object stuck with
+// observedGeneration behind its generation stops the refresh for EVERY object in the cluster.
+func TestASkippedCycleGetsLoud(t *testing.T) {
+	r := &Refresher{
+		Source:   staticSource{},
+		Pending:  allReconciled{pending: []string{"team-a/stuck"}},
+		Recorder: record.NewFakeRecorder(8),
+	}
+
+	log := &recordingLogger{}
+	for i := 0; i < DegradedAfter-1; i++ {
+		r.cycle(context.Background(), log)
+	}
+	if len(log.errors) != 0 {
+		t.Fatalf("escalated after %d skips; a rolling restart must not read as an outage: %v",
+			DegradedAfter-1, log.errors)
+	}
+
+	r.cycle(context.Background(), log)
+	if len(log.errors) == 0 {
+		t.Error("a refresh that has protected nothing for several cycles said so only at info, " +
+			"which is how it can be off for days unnoticed")
+	}
+
+	// And it stops being loud once the view is complete again.
+	r.Pending = allReconciled{}
+	before := len(log.errors)
+	r.cycle(context.Background(), log)
+	r.cycle(context.Background(), log)
+	if len(log.errors) != before {
+		t.Error("the skip count did not reset once cycles ran again")
+	}
+}
+
+// staticSource yields nothing; these tests are about the gate, not the refreshing.
+type staticSource struct{}
+
+func (staticSource) Targets(context.Context) ([]Target, error) { return nil, nil }

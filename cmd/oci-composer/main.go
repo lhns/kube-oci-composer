@@ -217,6 +217,30 @@ func main() {
 		os.Exit(1)
 	}
 
+	var refresher *retention.Refresher
+
+	if refreshInterval > 0 {
+		refresher = &retention.Refresher{
+			Client:   mgr.GetClient(),
+			Source:   retention.CompositionSource{Client: mgr.GetClient()},
+			Pending:  readiness,
+			Interval: refreshInterval,
+			//nolint:staticcheck // SA1019: the new events API has no Event method; same as above.
+			Recorder:           mgr.GetEventRecorderFor("retention"),
+			InsecureRegistries: registry.Insecure(),
+			Transport:          registryTransport,
+			Default:            defaults,
+		}
+		if err := refresher.SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to set up retention refresh")
+			os.Exit(1)
+		}
+		setupLog.Info("retention refresh enabled", "interval", refreshInterval)
+	} else {
+		setupLog.Info("retention refresh DISABLED; a registry with an expiry policy will delete " +
+			"images this operator's objects still reference (ADR 0031)")
+	}
+
 	if err := (&controller.ImageCompositionReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
@@ -236,31 +260,10 @@ func main() {
 		InsecureRegistries:   registry.Insecure(),
 		Attestor:             attestor,
 		Transport:            registryTransport,
+		Refresher:            refresher,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ImageComposition")
 		os.Exit(1)
-	}
-
-	if refreshInterval > 0 {
-		refresher := &retention.Refresher{
-			Client:   mgr.GetClient(),
-			Source:   retention.CompositionSource{Client: mgr.GetClient()},
-			Pending:  readiness,
-			Interval: refreshInterval,
-			//nolint:staticcheck // SA1019: the new events API has no Event method; same as above.
-			Recorder:           mgr.GetEventRecorderFor("retention"),
-			InsecureRegistries: registry.Insecure(),
-			Transport:          registryTransport,
-			Default:            defaults,
-		}
-		if err := refresher.SetupWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to set up retention refresh")
-			os.Exit(1)
-		}
-		setupLog.Info("retention refresh enabled", "interval", refreshInterval)
-	} else {
-		setupLog.Info("retention refresh DISABLED; a registry with an expiry policy will delete " +
-			"images this operator's objects still reference (ADR 0031)")
 	}
 
 	// Liveness stays a bare ping. A replica that has not won the lease is alive and must not be
