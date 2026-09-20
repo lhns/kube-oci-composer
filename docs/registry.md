@@ -145,8 +145,8 @@ If you shorten the window, shorten the interval with it.
 ## A zot configuration that works
 
 **This is what the chart renders**, reproduced here because it is what you would need if you ran zot
-yourself, and because four details in it are easy to get silently wrong. Verified against zot
-`v2.1.20` by `test/e2e/`; the chart's copy is checked at build time by
+yourself, and because five details in it are easy to get silently wrong. Verified against zot
+`v2.1.21` by `test/e2e/`; the chart's copy is checked at build time by
 `hack/check-bundled-registry.py`.
 
 ```json
@@ -163,7 +163,10 @@ yourself, and because four details in it are easy to get silently wrong. Verifie
         {
           "repositories": ["**"],
           "deleteUntagged": true,
-          "keepTags": [{ "patterns": [".*"], "pulledWithin": "720h" }],
+          "keepTags": [
+            { "patterns": [".*"], "pulledWithin": "720h" },
+            { "patterns": [".*"], "pushedWithin": "720h" }
+          ],
           "keepUntagged": { "pulledWithin": "720h" }
         }
       ]
@@ -188,7 +191,7 @@ yourself, and because four details in it are easy to get silently wrong. Verifie
 }
 ```
 
-Four details in that file are easy to get wrong, and each was got wrong at least once while this was
+Five details in that file are easy to get wrong, and each was got wrong at least once while this was
 being built.
 
 **`extensions.search` is not optional.** Pull-recency retention needs the registry to have *recorded*
@@ -198,6 +201,12 @@ what the config appears to say.
 
 **`keepTags` needs an explicit `patterns`.** zot retains `patterns` AND (`pulledWithin` OR …), so an
 entry with no `patterns` matches no tags, and every tag becomes a deletion candidate.
+
+**`pushedWithin` is a floor, not a second window.** The entries in `keepTags` are OR'ed, so the
+second one keeps an image that has been built but not yet pulled — the gap between a publish and the
+refresher's first pass. It does not extend retention: zot writes a push timestamp per *digest* and
+only when that digest is new, so republishing an existing digest does not renew it, and anything the
+refresher touches has a later pull than push. Pull recency remains the mechanism.
 
 **`keepUntagged` is a separate rule from `keepTags`.** Tagged and untagged manifests are governed
 independently, which is why the controllers refresh **both** the digest and every tag. Leaving

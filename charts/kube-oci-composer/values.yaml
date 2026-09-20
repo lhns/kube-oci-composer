@@ -268,7 +268,11 @@ registry:
   readTimeout: "1h"
 
   # Pinned by digest, like every other image this project consumes.
-  image: ghcr.io/project-zot/zot:v2.1.20@sha256:542e25be4d32e7879c0cfad93492a93c81b1e059cbd2d30d485d4bd567318234
+  #
+  # NOT below v2.1.21. Earlier versions walk an image index shallowly during collection and drop the
+  # child manifests' blobs -- every artifact this project publishes is an index, so the tag still
+  # resolves and the pull fails on a missing layer.
+  image: ghcr.io/project-zot/zot:v2.1.21@sha256:6b69512c00dceaad05b1144e6079aac6aa7309d7fd200f9947ecb1de09cf48c8
 
   # Retention. The controllers keep live images alive by re-pulling them; this is the other half of
   # that bargain, and the two have to be set together.
@@ -290,7 +294,8 @@ registry:
     # How often collection runs, and how long something must be eligible before it goes.
     gcInterval: 6h
     gcDelay: 1h
-    # Log what would be reclaimed and reclaim nothing. Useful when first tuning the window.
+    # Skip the index rewrite, so tags survive collection -- but only on v2.1.21 or later. Before
+    # that, unreferenced blobs and uploads are still deleted, and a dry run destroys content.
     dryRun: false
 
   # Anonymous read, authenticated WRITE, enforced by the registry itself with no proxy in front.
