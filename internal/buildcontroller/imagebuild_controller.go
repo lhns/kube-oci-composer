@@ -134,12 +134,24 @@ func (r *ImageBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	// Suspended objects say so, rather than going quiet and looking stalled.
-	if obj.Spec.Suspend {
+	//
+	// NOT while the object is being deleted, and observedGeneration is advanced here as well --
+	// both because the composer does them and this kind quietly did not.
+	//
+	// Deletion first: a cross-namespace export puts a finalizer on this object, and the only code
+	// that removes it is below. Returning here on a suspended object left it Terminating forever.
+	//
+	// observedGeneration because suspending bumps the generation. Leaving status behind makes the
+	// retention refresher report this object as not yet reconciled, and RefreshOnce skips a cycle
+	// when ANY object is pending -- so one suspended ImageBuild stopped every image in the cluster
+	// from being refreshed, with nothing to resolve it and a retention window counting down.
+	if obj.Spec.Suspend && obj.DeletionTimestamp.IsZero() {
 		patch := client.MergeFrom(obj.DeepCopy())
 		recon.SetCondition(&obj, ociv1alpha1.ReadyCondition, metav1.ConditionFalse,
 			ociv1alpha1.ReasonSuspended, "Reconciliation is suspended")
 		recon.RemoveCondition(&obj, ociv1alpha1.ReconcilingCondition)
-		return ctrl.Result{}, r.Status().Patch(ctx, &obj, patch)
+		obj.Status.ObservedGeneration = obj.Generation
+		return ctrl.Result{}, client.IgnoreNotFound(r.Status().Patch(ctx, &obj, patch))
 	}
 
 	patch := client.MergeFrom(obj.DeepCopy())
@@ -150,7 +162,10 @@ func (r *ImageBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// must not hang because the build it asked for failed (ADR 0009).
 	obj.Status.LastHandledReconcileAt = obj.Annotations[ociv1alpha1.ReconcileRequestAnnotation]
 	r.applyOutcome(&obj, err)
-	if perr := r.Status().Patch(ctx, &obj, patch); perr != nil {
+	// IgnoreNotFound: the last finalizer may have just been removed, in which case the object is
+	// already gone and there is no status left to patch. Reporting that as an error logged one on
+	// every deletion.
+	if perr := client.IgnoreNotFound(r.Status().Patch(ctx, &obj, patch)); perr != nil {
 		return ctrl.Result{}, fmt.Errorf("patching status: %w", perr)
 	}
 
@@ -201,6 +216,15 @@ func (r *ImageBuildReconciler) reconcile(ctx context.Context, obj *ociv1alpha1.I
 	// rather than silent, because anything pinned to the old digest is not helped by the new one.
 	if obj.Status.Artifact != nil && obj.Status.InputHash == inputHash {
 		if r.stillPublished(ctx, obj) {
+			// The export runs on the converged path too, which is the only place it CAN run for an
+			// object that is already built. push.writeRefTo is not part of the input hash -- adding
+			// it changes nothing about what to build -- so an object that has converged never
+			// reaches the publish path again, and the ConfigMap a consumer substitutes from was
+			// never written. Same for moving it, or for someone deleting it by hand. The composer
+			// calls its equivalent unconditionally for this reason.
+			if err := r.exportRef(ctx, obj); err != nil {
+				return ctrl.Result{}, err
+			}
 			return ctrl.Result{RequeueAfter: recon.Interval(obj.Spec.Interval)}, nil
 		}
 		recon.Event(r.Recorder, obj, corev1.EventTypeWarning, ociv1alpha1.ReasonArtifactLost,
