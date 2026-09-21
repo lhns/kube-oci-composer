@@ -42,6 +42,29 @@ may change between minor versions.
   tolerates a moving source. A digest-only publish is never flagged — the name is the content, so
   it cannot wedge.
 
+### Fixed
+
+- **The bundled registry is pinned to zot v2.1.21**, up from v2.1.20, which could delete layers
+  that published images still needed. The damage was hard to recognise: the tag kept resolving and
+  the pull failed partway with a missing layer, which reads as a broken image rather than a registry
+  that reclaimed too much. Everything this project publishes was exposed, because BuildKit attaches
+  SBOM and provenance manifests and that makes every artifact an index — the case v2.1.20 got wrong.
+
+  Also in v2.1.20, `retention.dryRun` was not dry. It still deleted blobs, so turning it on to see
+  what collection *would* do destroyed content. The values file said the opposite.
+
+  **It does not fix everything.** zot records an image's push time the first time it sees that
+  digest and never updates it, so republishing identical content does not renew it. That is
+  unchanged in v2.1.21 and shapes the next entry.
+
+- **`keepTags` also keys on `pushedWithin` now**, alongside `pulledWithin`, and a tag survives if
+  either keeps it. Previously an image was protected only once the retention refresher had reached
+  it, leaving it exposed between being built and that first refresh.
+
+  This helps brand-new content only. Because of the push timestamp above, republishing the same
+  digest renews nothing — and an image the refresher is already touching has a more recent pull
+  than push regardless.
+
 ## [0.5.1] - 2026-09-07
 
 Four defects found on a live 0.5.0 cluster. Affects any install running the bundled registry with

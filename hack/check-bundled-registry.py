@@ -44,8 +44,10 @@ def problems(cfg):
     for entry in keep_tags:
         if not entry.get("patterns"):
             found.append("a keepTags entry has no patterns, so it protects no tag at all")
-        if not entry.get("pulledWithin"):
-            found.append("a keepTags entry does not key on pulledWithin, so refreshing cannot protect it")
+    # Entries are OR'ed, so pull recency has to be one of them -- `pushedWithin` alone would expire
+    # every tag a window after its push however often it is fetched.
+    if keep_tags and not any(e.get("pulledWithin") for e in keep_tags):
+        found.append("no keepTags entry keys on pulledWithin, so refreshing cannot protect anything")
 
     # Tagged and untagged manifests are governed independently, and ADR 0010 has workloads pin
     # digests -- so an untagged manifest may be exactly what a rescheduled pod pulls.

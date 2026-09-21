@@ -96,3 +96,51 @@ func TestAnEmptyReadTimeoutIsRefused(t *testing.T) {
 		t.Errorf("an empty readTimeout rendered instead of failing:\n%s", out)
 	}
 }
+
+// TestKeepTagsAlsoKeysOnPushRecency — `pulledWithin` alone makes every artifact's survival depend on
+// the refresher having already run, and a freshly built image sits in that gap.
+//
+// The entries are OR'ed, so this is a floor and not a second window: zot records a push timestamp
+// per digest and only when that digest is new, so a republish does not renew it.
+func TestKeepTagsAlsoKeysOnPushRecency(t *testing.T) {
+	storage, _ := registryConfig(t)["storage"].(map[string]any)
+	retention, _ := storage["retention"].(map[string]any)
+	policies, _ := retention["policies"].([]any)
+	if len(policies) == 0 {
+		t.Fatalf("no retention policy rendered: %v", retention)
+	}
+	policy, _ := policies[0].(map[string]any)
+	keepTags, _ := policy["keepTags"].([]any)
+
+	var pulled, pushed bool
+	for _, e := range keepTags {
+		entry, _ := e.(map[string]any)
+		if patterns, _ := entry["patterns"].([]any); len(patterns) == 0 {
+			t.Errorf("a keepTags entry has no patterns, so it protects no tag: %v", entry)
+		}
+		if entry["pulledWithin"] != nil {
+			pulled = true
+		}
+		if got := entry["pushedWithin"]; got != nil {
+			pushed = true
+			if got != "720h" {
+				t.Errorf("pushedWithin = %v; it tracks registry.retention.window", got)
+			}
+		}
+	}
+	if !pulled {
+		t.Errorf("no keepTags entry keys on pulledWithin, so refreshing protects nothing: %v", keepTags)
+	}
+	if !pushed {
+		t.Errorf("no keepTags entry keys on pushedWithin, so an image built between refreshes is a "+
+			"deletion candidate: %v", keepTags)
+	}
+
+	storage, _ = registryConfig(t, "--set", "registry.retention.window=48h",
+		"--set", "operator.retention.refreshInterval=1h",
+		"--set", "imageBuild.retention.refreshInterval=1h")["storage"].(map[string]any)
+	raw, _ := json.Marshal(storage["retention"])
+	if !strings.Contains(string(raw), `"pushedWithin":"48h"`) {
+		t.Errorf("registry.retention.window did not reach pushedWithin: %s", raw)
+	}
+}
