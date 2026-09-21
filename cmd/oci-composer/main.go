@@ -92,6 +92,8 @@ func main() {
 		"Use path-style addressing (host/bucket/key) instead of virtual-host style. Required by "+
 			"most self-hosted gateways, whose certificate does not cover per-bucket subdomains.")
 
+	var exportFlags opts.ExportFlags
+	exportFlags.Register(flag.CommandLine)
 	flag.DurationVar(&refreshInterval, "retention-refresh-interval", retention.DefaultInterval,
 		"How often to re-pull the images every live object still references, so that a registry "+
 			"with an expiry policy does not reclaim them. Zero disables it.\n"+
@@ -253,6 +255,7 @@ func main() {
 		Recorder:             mgr.GetEventRecorderFor("imagecomposition-controller"),
 		Readiness:            readiness,
 		Default:              defaults,
+		Export:               exportFlags.Options(),
 		Cache:                layerCache,
 		HistoryLimit:         keepBuilds,
 		Fetcher:              oci.NewFetcherWithGuard(oci.DialGuard{DenyPrivate: fetchDenyPrivate}),

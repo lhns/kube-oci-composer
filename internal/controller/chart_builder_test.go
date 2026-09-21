@@ -204,85 +204,123 @@ func containerArgs(t *testing.T, rendered, deployment string) string {
 	return strings.Join(out, "\n")
 }
 
-// TestBuilderChartNeverGrantsConfigMapWrites is the sibling of the Secrets guard above, and it
-// exists because the two resources are granted for opposite reasons.
+// TestBothChartsGrantConfigMapWritesButNeverInBulk.
 //
-// ConfigMaps are read AND watched, which Secrets deliberately are not — a Dockerfile can live in one
-// and an edit must rebuild promptly. But everything this controller writes into a tenant namespace
-// is a Secret, the Dockerfile copy included, so a write verb here would be a new capability in every
-// namespace with nothing asking for it. Without this test that is a comment rather than a guarantee.
-func TestBuilderChartNeverGrantsConfigMapWrites(t *testing.T) {
-	chart := clusterRoleFromRender(t, renderBuilder(t), "test-release-kube-oci-composer-builder")
-
-	var seen bool
-	for _, rule := range chart.Rules {
-		if !containsString(rule.APIGroups, "") || !containsString(rule.Resources, "configmaps") {
-			continue
-		}
-		seen = true
-		for _, verb := range rule.Verbs {
-			switch verb {
-			case "create", "update", "patch", "delete", "deletecollection", "*":
-				t.Fatalf("builder chart grants %q on configmaps; it must be read-only, because "+
-					"everything this controller writes into a tenant namespace is a Secret", verb)
-			}
-		}
-	}
-	if !seen {
-		t.Fatal("no configmaps rule at all; a Dockerfile in a ConfigMap could not be read")
-	}
-}
-
-// TestRefExportIsGrantedPerNamespace is the privilege boundary, enforced by the API server rather
-// than only by the controller's allow-list.
+// ADR 0056 moved this boundary from RBAC into the controller: the verbs are cluster-wide because
+// RBAC is granted before an object exists, so permitting an export into whatever namespace its
+// object lives in means permitting it everywhere.
 //
-// The useful target for a substitution source is the namespace a cluster substitutes from, so a
-// cluster-wide ConfigMap write would reach everything. It is a Role in each named namespace.
-func TestRefExportIsGrantedPerNamespace(t *testing.T) {
-	t.Run("nothing by default", func(t *testing.T) {
-		for _, d := range docs(t, renderBuilder(t)) {
-			if k, _ := d["kind"].(string); k == "Role" || k == "RoleBinding" {
-				meta, _ := d["metadata"].(map[string]any)
-				if name, _ := meta["name"].(string); strings.Contains(name, "refexport") {
-					t.Errorf("an export Role was rendered without refExportNamespaces: %s", name)
+// What RBAC still says is that nothing here removes ConfigMaps in BULK. A create/update/delete
+// mistake damages one object at a time and is guarded by the managed-by and owner labels;
+// deletecollection or a wildcard is a different order of accident, and neither controller has any
+// use for one.
+//
+// The delete verb is asserted present, not merely permitted: without it the finalizer on an export
+// into another namespace fails Forbidden and the object never finishes deleting. That was the
+// state of the chart when this was written.
+func TestBothChartsGrantConfigMapWritesButNeverInBulk(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		out  string
+		role string
+	}{
+		{"builder", renderBuilder(t), "test-release-kube-oci-composer-builder"},
+		{"composer", render(t), "test-release-kube-oci-composer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			chart := clusterRoleFromRender(t, tc.out, tc.role)
+
+			var seen bool
+			verbs := map[string]bool{}
+			for _, rule := range chart.Rules {
+				if !containsString(rule.APIGroups, "") || !containsString(rule.Resources, "configmaps") {
+					continue
 				}
-			}
-		}
-	})
-
-	t.Run("one per named namespace, and only there", func(t *testing.T) {
-		out := renderBuilder(t, "--set", `imageBuild.refExportNamespaces={flux-system,team-a}`)
-		seen := map[string]bool{}
-		for _, d := range docs(t, out) {
-			k, _ := d["kind"].(string)
-			meta, _ := d["metadata"].(map[string]any)
-			name, _ := meta["name"].(string)
-			if !strings.Contains(name, "refexport") {
-				continue
-			}
-			ns, _ := meta["namespace"].(string)
-			if k == "Role" {
-				seen[ns] = true
-				// No delete, and no list: the controller reads the one ConfigMap it names.
-				rules, _ := d["rules"].([]any)
-				for _, r := range rules {
-					rule, _ := r.(map[string]any)
-					verbs, _ := rule["verbs"].([]any)
-					for _, v := range verbs {
-						if s, _ := v.(string); s == "delete" || s == "list" {
-							t.Errorf("the export Role in %s grants %q", ns, s)
-						}
+				seen = true
+				for _, verb := range rule.Verbs {
+					verbs[verb] = true
+					if verb == "deletecollection" || verb == "*" {
+						t.Errorf("grants %q on configmaps; nothing removes them in bulk", verb)
 					}
 				}
 			}
-		}
-		for _, ns := range []string{"flux-system", "team-a"} {
-			if !seen[ns] {
-				t.Errorf("no export Role in %s", ns)
+			if !seen {
+				t.Fatal("no configmaps rule at all; a ConfigMap layer could not be read")
 			}
+			for _, want := range []string{"get", "list", "watch", "create", "update", "delete"} {
+				if !verbs[want] {
+					t.Errorf("missing %q on configmaps: push.writeRefTo needs the write verbs, and "+
+						"without delete the finalizer fails Forbidden and blocks deletion", want)
+				}
+			}
+		})
+	}
+}
+
+// TestNoPerNamespaceExportRoleIsRendered.
+//
+// There used to be a Role and RoleBinding per allow-listed namespace. Once the ClusterRole carried
+// the verbs it granted nothing further, and RBAC that looks like a boundary while being inert is
+// worse than none -- somebody reads it and believes it. ADR 0056.
+func TestNoPerNamespaceExportRoleIsRendered(t *testing.T) {
+	out := renderBuilder(t, "--set", `refExport.namespaces={flux-system,team-a}`)
+	for _, d := range docs(t, out) {
+		k, _ := d["kind"].(string)
+		if k != "Role" && k != "RoleBinding" {
+			continue
 		}
-		if len(seen) != 2 {
-			t.Errorf("export Roles in %v, want exactly the two named namespaces", seen)
+		meta, _ := d["metadata"].(map[string]any)
+		if name, _ := meta["name"].(string); strings.Contains(name, "refexport") {
+			t.Errorf("a per-namespace export %s is still rendered: %s", k, name)
 		}
-	})
+	}
+}
+
+// TestBothControllersGetTheExportFlags -- the feature is identical on both kinds, so a setting
+// that reached only one would be a silent half-configuration.
+func TestBothControllersGetTheExportFlags(t *testing.T) {
+	args := []string{
+		"--set", `refExport.namespaces={flux-system}`,
+		"--set", `refExport.labels=reconcile.fluxcd.io/watch=Enabled`,
+		"--set", `refExport.allowedLabels={team}`,
+		"--set", `refExport.allowedAnnotations={example.com/*}`,
+	}
+	for _, tc := range []struct {
+		name       string
+		got        string
+		deployment string
+	}{
+		{"builder", renderBuilder(t, args...), "test-release-kube-oci-composer-builder"},
+		{"composer", render(t, args...), "test-release-kube-oci-composer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := containerArgs(t, tc.got, tc.deployment)
+			for _, want := range []string{
+				"--ref-export-namespaces=flux-system",
+				"--ref-export-labels=reconcile.fluxcd.io/watch=Enabled",
+				"--ref-export-allowed-labels=team",
+				"--ref-export-allowed-annotations=example.com/*",
+			} {
+				if !strings.Contains(got, want) {
+					t.Errorf("missing %q; got:\n%s", want, got)
+				}
+			}
+		})
+	}
+}
+
+// TestTheWatchLabelDoesNotDependOnTheAllowList.
+//
+// An export into the object's OWN namespace needs no allow-list, so a chart that rendered
+// --ref-export-labels only alongside --ref-export-namespaces would leave those exports unwatched.
+// It did, while the allow-list was the only way to export at all.
+func TestTheWatchLabelDoesNotDependOnTheAllowList(t *testing.T) {
+	out := renderBuilder(t, "--set", `refExport.labels=reconcile.fluxcd.io/watch=Enabled`)
+	got := containerArgs(t, out, "test-release-kube-oci-composer-builder")
+	if !strings.Contains(got, "--ref-export-labels=reconcile.fluxcd.io/watch=Enabled") {
+		t.Errorf("the watch label was dropped without an allow-list; got:\n%s", got)
+	}
+	if strings.Contains(got, "--ref-export-namespaces") {
+		t.Errorf("an allow-list was rendered from nothing; got:\n%s", got)
+	}
 }

@@ -510,24 +510,25 @@ func RevisionMatches(want, got string) bool {
 
 // RefExport writes what was published into a ConfigMap, for a consumer that substitutes it.
 //
-// The case for it is `ImageBuild`: its digest is an observation rather than a function of its spec
-// (ADR 0025), so a consumer cannot compute the reference in advance the way the spec-hash tag lets
-// it for `ImageComposition` (ADR 0017). Publishing by digest and exporting the result needs no tag
-// at all, which also means no tag can be remeaned -- onConflict becomes inapplicable rather than
-// approximate.
+// On `ImageBuild` the reference cannot be known in advance at all: the digest is an observation
+// rather than a function of the spec (ADR 0025). On `ImageComposition` it is computable from the
+// spec hash (ADR 0017) -- but only by reproducing that hash on the consuming side, which is not
+// trivial, so both kinds export.
+//
+// THE CONFIGMAP'S NAME IS DERIVED, not chosen: <kind>-<namespace>-<object name>, e.g.
+// imagebuild-team-a-pymods. A consuming Kustomization spells that in substituteFrom, so it is API.
 //
 // Strictly opt-in, and the cost is stated in ADR 0055: the digest becomes state outside git, so a
 // revert no longer reverts the running image.
 type RefExport struct {
-	// Name of the ConfigMap to write.
-	// +kubebuilder:validation:MinLength=1
-	Name string `json:"name"`
-
-	// Namespace to write it in. Required, and must be allow-listed on the controller.
+	// Namespace to write the ConfigMap in.
 	//
-	// No default, deliberately. Substitution sources are read from the consuming Kustomization's
-	// namespace -- usually flux-system, the namespace that parameterises everything -- so this
-	// silently defaulting to the object's own namespace would produce a ConfigMap nothing reads.
+	// Must be the object's OWN namespace, or one the operator allow-listed with
+	// --ref-export-namespaces (ADR 0056). Anything else is refused.
+	//
+	// No default, deliberately: a substitution source is read from the CONSUMING Kustomization's
+	// namespace, so defaulting this to the object's own would often produce a ConfigMap nothing
+	// reads, silently.
 	// +kubebuilder:validation:MinLength=1
 	Namespace string `json:"namespace"`
 
@@ -536,13 +537,17 @@ type RefExport struct {
 
 	// Labels are added to the generated ConfigMap.
 	//
-	// reconcile.fluxcd.io/watch=Enabled is set regardless, because without it nothing notices the
-	// value change and the absence is invisible. These are for anything else that selects on the
-	// object -- a different watch selector, or a consumer's own conventions.
+	// Each key must be permitted by --ref-export-allowed-labels, which is empty by default: these
+	// land on an object in a namespace this object may not otherwise touch. An unpermitted key is
+	// refused rather than dropped, because a dropped one leaves a ConfigMap that looks right.
+	//
+	// The controller's own watch labels and its managed-by and owner labels are written last, so
+	// nothing set here can turn them off.
 	// +optional
 	Labels map[string]string `json:"labels,omitempty"`
 
-	// Annotations are added to the generated ConfigMap.
+	// Annotations are added to the generated ConfigMap. Gated by
+	// --ref-export-allowed-annotations, exactly as Labels is.
 	// +optional
 	Annotations map[string]string `json:"annotations,omitempty"`
 }
@@ -562,6 +567,20 @@ type RefExportKeys struct {
 	// Digest receives the bare sha256:... value.
 	// +optional
 	Digest string `json:"digest,omitempty"`
+}
+
+// RefExportStatus records the ConfigMap this object last wrote.
+//
+// Needed because an export outlives the spec that asked for it. The name is derivable from the
+// object, but the NAMESPACE it was last written to is not -- so moving writeRefTo.namespace, or
+// removing the field, would otherwise strand a ConfigMap nobody maintains and a consumer may still
+// be substituting from (ADR 0056).
+type RefExportStatus struct {
+	// Name of the ConfigMap that was written.
+	Name string `json:"name"`
+
+	// Namespace it was written in.
+	Namespace string `json:"namespace"`
 }
 
 // GetWriteRefTo is nil-safe, because spec.push may be omitted entirely.

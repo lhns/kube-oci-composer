@@ -20,6 +20,11 @@ func exportScheme(t *testing.T) *runtime.Scheme {
 	if err := corev1.AddToScheme(s); err != nil {
 		t.Fatal(err)
 	}
+	// The exported name carries the object's KIND, which comes from the scheme -- a typed read
+	// clears TypeMeta, so the object itself cannot be asked.
+	if err := ociv1alpha1.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
 	return s
 }
 
@@ -31,9 +36,31 @@ func owner() *ociv1alpha1.ImageBuild {
 
 func exportSpec() *ociv1alpha1.RefExport {
 	return &ociv1alpha1.RefExport{
-		Name: "pymods-ref", Namespace: "flux-system",
-		Keys: ociv1alpha1.RefExportKeys{Ref: "PYMODS_REF", Digest: "PYMODS_DIGEST"},
+		Namespace: "flux-system",
+		Keys:      ociv1alpha1.RefExportKeys{Ref: "PYMODS_REF", Digest: "PYMODS_DIGEST"},
 	}
+}
+
+// exportedName is what owner() writes: derived from the object, never chosen.
+const exportedName = "imagebuild-synapse-pymods"
+
+// wroteTo is the status record a previous export would have left.
+func wroteTo(ns string) *ociv1alpha1.RefExportStatus {
+	return &ociv1alpha1.RefExportStatus{Name: exportedName, Namespace: ns}
+}
+
+// ourLabels are what decorate() stamps, for a ConfigMap a test pre-creates as ours.
+func ourLabels() map[string]string {
+	return map[string]string{
+		ManagedByLabel:      managedBy,
+		ownerNamespaceLabel: "synapse",
+		ownerNameLabel:      "pymods",
+	}
+}
+
+// allowingFlux is the operator configuration most of these tests run under.
+func allowingFlux() ExportOptions {
+	return ExportOptions{Namespaces: []string{"flux-system"}, WatchLabels: fluxWatch}
 }
 
 const (
@@ -48,7 +75,7 @@ const (
 func TestAnExportIsRefusedOutsideTheAllowList(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(exportScheme(t)).Build()
 
-	err := ExportRef(context.Background(), c, owner(), exportSpec(), nil, fluxWatch, testDigest, testRef)
+	_, err := ExportRef(context.Background(), c, owner(), exportSpec(), ExportOptions{WatchLabels: fluxWatch}, testDigest, testRef)
 	if err == nil {
 		t.Fatal("an empty allow-list permitted a write to flux-system")
 	}
@@ -69,14 +96,14 @@ func TestAnExportIsRefusedOutsideTheAllowList(t *testing.T) {
 func TestAnExportWritesBothFormsAndTheWatchLabel(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(exportScheme(t)).Build()
 
-	if err := ExportRef(context.Background(), c, owner(), exportSpec(),
-		[]string{"flux-system"}, fluxWatch, testDigest, testRef); err != nil {
+	if _, err := ExportRef(context.Background(), c, owner(), exportSpec(),
+		allowingFlux(), testDigest, testRef); err != nil {
 		t.Fatalf("exporting: %v", err)
 	}
 
 	var cm corev1.ConfigMap
 	if err := c.Get(context.Background(),
-		types.NamespacedName{Namespace: "flux-system", Name: "pymods-ref"}, &cm); err != nil {
+		types.NamespacedName{Namespace: "flux-system", Name: exportedName}, &cm); err != nil {
 		t.Fatalf("reading the export: %v", err)
 	}
 	if cm.Data["PYMODS_REF"] != testRef {
@@ -105,14 +132,14 @@ func TestAnExportWritesBothFormsAndTheWatchLabel(t *testing.T) {
 func TestAnIncompleteReferenceIsNeverWritten(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(exportScheme(t)).Build()
 
-	if err := ExportRef(context.Background(), c, owner(), exportSpec(),
-		[]string{"flux-system"}, fluxWatch, "", ""); err == nil {
+	if _, err := ExportRef(context.Background(), c, owner(), exportSpec(),
+		allowingFlux(), "", ""); err == nil {
 		t.Fatal("an empty reference was exported")
 	}
 
 	var cm corev1.ConfigMap
 	if err := c.Get(context.Background(),
-		types.NamespacedName{Namespace: "flux-system", Name: "pymods-ref"}, &cm); err == nil {
+		types.NamespacedName{Namespace: "flux-system", Name: exportedName}, &cm); err == nil {
 		t.Errorf("a ConfigMap was written anyway: %v", cm.Data)
 	}
 }
@@ -124,21 +151,21 @@ func TestAnExportReplacesRatherThanMerges(t *testing.T) {
 	// TestAForeignConfigMapIsNeverAdopted covers.
 	existing := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "pymods-ref", Namespace: "flux-system",
-			Labels: map[string]string{ManagedByLabel: "kube-oci-composer"},
+			Name: exportedName, Namespace: "flux-system",
+			Labels: ourLabels(),
 		},
 		Data: map[string]string{"PYMODS_REF": "stale", "LEFTOVER": "x"},
 	}
 	c := fake.NewClientBuilder().WithScheme(exportScheme(t)).WithObjects(existing).Build()
 
-	if err := ExportRef(context.Background(), c, owner(), exportSpec(),
-		[]string{"flux-system"}, fluxWatch, testDigest, testRef); err != nil {
+	if _, err := ExportRef(context.Background(), c, owner(), exportSpec(),
+		allowingFlux(), testDigest, testRef); err != nil {
 		t.Fatalf("exporting: %v", err)
 	}
 
 	var cm corev1.ConfigMap
 	if err := c.Get(context.Background(),
-		types.NamespacedName{Namespace: "flux-system", Name: "pymods-ref"}, &cm); err != nil {
+		types.NamespacedName{Namespace: "flux-system", Name: exportedName}, &cm); err != nil {
 		t.Fatal(err)
 	}
 	if _, stale := cm.Data["LEFTOVER"]; stale {
@@ -155,13 +182,13 @@ func TestAnExportReplacesRatherThanMerges(t *testing.T) {
 // Data wholesale -- so adopting one silently destroys whatever else was in it.
 func TestAForeignConfigMapIsNeverAdopted(t *testing.T) {
 	theirs := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: "pymods-ref", Namespace: "flux-system"},
+		ObjectMeta: metav1.ObjectMeta{Name: exportedName, Namespace: "flux-system"},
 		Data:       map[string]string{"SOMETHING_ELSE": "hand written"},
 	}
 	c := fake.NewClientBuilder().WithScheme(exportScheme(t)).WithObjects(theirs).Build()
 
-	err := ExportRef(context.Background(), c, owner(), exportSpec(),
-		[]string{"flux-system"}, fluxWatch, testDigest, testRef)
+	_, err := ExportRef(context.Background(), c, owner(), exportSpec(),
+		allowingFlux(), testDigest, testRef)
 	if err == nil {
 		t.Fatal("a ConfigMap this controller did not create was taken over")
 	}
@@ -171,7 +198,7 @@ func TestAForeignConfigMapIsNeverAdopted(t *testing.T) {
 
 	var after corev1.ConfigMap
 	if err := c.Get(context.Background(),
-		types.NamespacedName{Namespace: "flux-system", Name: "pymods-ref"}, &after); err != nil {
+		types.NamespacedName{Namespace: "flux-system", Name: exportedName}, &after); err != nil {
 		t.Fatal(err)
 	}
 	if after.Data["SOMETHING_ELSE"] != "hand written" {
@@ -196,14 +223,20 @@ func TestExtraMetadataIsAddedButCannotDisableTheFeature(t *testing.T) {
 	}
 	spec.Annotations = map[string]string{"note": "generated"}
 
-	if err := ExportRef(context.Background(), c, owner(), spec,
-		[]string{"flux-system"}, fluxWatch, testDigest, testRef); err != nil {
+	// Every key permitted, so what this test proves is the ORDERING and not the gate: even a key
+	// an operator deliberately allowed cannot turn the feature off.
+	opts := allowingFlux()
+	opts.AllowedLabels = []string{"team", "reconcile.fluxcd.io/watch", ManagedByLabel}
+	opts.AllowedAnnotations = []string{"note"}
+
+	if _, err := ExportRef(context.Background(), c, owner(), spec,
+		opts, testDigest, testRef); err != nil {
 		t.Fatalf("exporting: %v", err)
 	}
 
 	var cm corev1.ConfigMap
 	if err := c.Get(context.Background(),
-		types.NamespacedName{Namespace: "flux-system", Name: "pymods-ref"}, &cm); err != nil {
+		types.NamespacedName{Namespace: "flux-system", Name: exportedName}, &cm); err != nil {
 		t.Fatal(err)
 	}
 	if cm.Labels["team"] != "synapse" {
@@ -228,22 +261,18 @@ func TestExtraMetadataIsAddedButCannotDisableTheFeature(t *testing.T) {
 func TestDeletingTheObjectRemovesItsExport(t *testing.T) {
 	mine := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "pymods-ref", Namespace: "flux-system",
-			Labels: map[string]string{
-				ManagedByLabel:                "kube-oci-composer",
-				"oci.lhns.de/owner-namespace": "synapse",
-				"oci.lhns.de/owner-name":      "pymods",
-			},
+			Name: exportedName, Namespace: "flux-system",
+			Labels: ourLabels(),
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(exportScheme(t)).WithObjects(mine).Build()
 
-	if err := DeleteExportedRef(context.Background(), c, owner(), exportSpec()); err != nil {
+	if err := DeleteExportedRef(context.Background(), c, owner(), wroteTo("flux-system")); err != nil {
 		t.Fatalf("deleting: %v", err)
 	}
 	var gone corev1.ConfigMap
 	if err := c.Get(context.Background(),
-		types.NamespacedName{Namespace: "flux-system", Name: "pymods-ref"}, &gone); err == nil {
+		types.NamespacedName{Namespace: "flux-system", Name: exportedName}, &gone); err == nil {
 		t.Error("the export survived its object")
 	}
 }
@@ -264,16 +293,16 @@ func TestDeletionLeavesSomebodyElsesExportAlone(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			theirs := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
-				Name: "pymods-ref", Namespace: "flux-system", Labels: tc.labels,
+				Name: exportedName, Namespace: "flux-system", Labels: tc.labels,
 			}}
 			c := fake.NewClientBuilder().WithScheme(exportScheme(t)).WithObjects(theirs).Build()
 
-			if err := DeleteExportedRef(context.Background(), c, owner(), exportSpec()); err != nil {
+			if err := DeleteExportedRef(context.Background(), c, owner(), wroteTo("flux-system")); err != nil {
 				t.Fatalf("deleting: %v", err)
 			}
 			var still corev1.ConfigMap
 			if err := c.Get(context.Background(),
-				types.NamespacedName{Namespace: "flux-system", Name: "pymods-ref"}, &still); err != nil {
+				types.NamespacedName{Namespace: "flux-system", Name: exportedName}, &still); err != nil {
 				t.Error("deleted a ConfigMap this object did not export")
 			}
 		})
@@ -301,13 +330,14 @@ func TestTheWatchMarkerIsConfigurable(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := fake.NewClientBuilder().WithScheme(exportScheme(t)).Build()
-			if err := ExportRef(context.Background(), c, owner(), exportSpec(),
-				[]string{"flux-system"}, tc.watch, testDigest, testRef); err != nil {
+			if _, err := ExportRef(context.Background(), c, owner(), exportSpec(),
+				ExportOptions{Namespaces: []string{"flux-system"}, WatchLabels: tc.watch},
+				testDigest, testRef); err != nil {
 				t.Fatalf("exporting: %v", err)
 			}
 			var cm corev1.ConfigMap
 			if err := c.Get(context.Background(),
-				types.NamespacedName{Namespace: "flux-system", Name: "pymods-ref"}, &cm); err != nil {
+				types.NamespacedName{Namespace: "flux-system", Name: exportedName}, &cm); err != nil {
 				t.Fatal(err)
 			}
 			for k, v := range tc.want {

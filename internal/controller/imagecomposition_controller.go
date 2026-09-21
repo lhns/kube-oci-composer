@@ -61,6 +61,11 @@ type ImageCompositionReconciler struct {
 	// disabled changes nothing about the reconcile.
 	Attestor *attest.Attestor
 
+	// Export is what the operator, rather than an object, decides about push.writeRefTo: which
+	// foreign namespaces are permitted, and which metadata keys an object may set. Both empty by
+	// default -- the controller is the boundary here, not RBAC (ADR 0056).
+	Export recon.ExportOptions
+
 	// Transport, when set, trusts an additional CA on top of the system roots. Applies to EVERY
 	// registry this controller talks to, not only the operator's own -- see recon.Transport for
 	// why scoping it per host would break base-image pulls from the bundled registry, which is the
@@ -115,7 +120,7 @@ type ImageCompositionReconciler struct {
 // That costs an informer over all ConfigMaps; the alternative is a controller that appears not
 // to notice edits.
 //
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;delete
 //
 // Flux sources are read for their status.artifact only. Read-only, and only the source kinds a
 // layer can reference.
@@ -245,6 +250,20 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// unprotected.
 	if result.Record != nil {
 		r.refreshNow(ctx, &obj, result.Artifact)
+	}
+
+	// After the status write, so what is exported is exactly what status reports.
+	if err := r.exportRef(ctx, &obj, result.Artifact); err != nil {
+		if recon.IsTerminal(err) {
+			recon.Event(r.Recorder, &obj, corev1.EventTypeWarning, ociv1alpha1.ReasonInvalidSpec, err.Error())
+			return ctrl.Result{}, r.patchStatus(ctx, &obj, func(o *ociv1alpha1.ImageComposition) {
+				recon.SetCondition(o, ociv1alpha1.StalledCondition, metav1.ConditionTrue,
+					ociv1alpha1.ReasonInvalidSpec, err.Error())
+				recon.SetCondition(o, ociv1alpha1.ReadyCondition, metav1.ConditionFalse,
+					ociv1alpha1.ReasonInvalidSpec, err.Error())
+			})
+		}
+		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{RequeueAfter: interval}, nil
@@ -801,10 +820,55 @@ func reasonFor(err error) string {
 	}
 }
 
+// exportRef publishes the reference into the ConfigMap a consumer substitutes from, and records
+// where it went.
+//
+// A composition's reference is computable from its spec hash (ADR 0017), but only by reproducing
+// that hash on the consuming side, which is not trivial -- so this kind exports too (ADR 0056).
+func (r *ImageCompositionReconciler) exportRef(
+	ctx context.Context, obj *ociv1alpha1.ImageComposition, art *ociv1alpha1.ArtifactStatus,
+) error {
+	spec := obj.Spec.Push.GetWriteRefTo()
+	if spec == nil && obj.Status.RefExport == nil {
+		return nil
+	}
+
+	var written *ociv1alpha1.RefExportStatus
+	if spec != nil {
+		if art == nil {
+			return nil
+		}
+		var err error
+		written, err = recon.ExportRef(ctx, r.Client, obj, spec, r.Export, art.Digest, art.Ref)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Removes the previous ConfigMap when the spec moved it, or stopped asking for one: a consumer
+	// substitutes from whatever it finds, so one nobody maintains is worse than none.
+	prev := obj.Status.RefExport
+	if prev != nil && written != nil && *prev == *written {
+		return nil
+	}
+	if err := recon.DeleteExportedRef(ctx, r.Client, obj, prev); err != nil {
+		return err
+	}
+	return r.patchStatus(ctx, obj, func(o *ociv1alpha1.ImageComposition) {
+		o.Status.RefExport = written
+	})
+}
+
 // finalize removes the finalizer. Published artifacts are deliberately left in place: they are
 // content-addressed and may still be referenced by a running workload, so deleting the object
 // that described them is not a reason to break pods that are using them.
+//
+// The export is the exception, and only when it went into ANOTHER namespace: one written into this
+// object's own is owned by it and goes on its own.
 func (r *ImageCompositionReconciler) finalize(ctx context.Context, obj *ociv1alpha1.ImageComposition) (ctrl.Result, error) {
+	if err := recon.DeleteExportedRef(ctx, r.Client, obj, obj.Status.RefExport); err != nil {
+		return ctrl.Result{}, err
+	}
 	patch := client.MergeFrom(obj.DeepCopy())
 	obj.Finalizers = recon.RemoveFinalizer(obj.Finalizers, ociv1alpha1.Finalizer)
 	return ctrl.Result{}, client.IgnoreNotFound(r.Patch(ctx, obj, patch))

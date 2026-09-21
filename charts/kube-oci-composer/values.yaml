@@ -144,6 +144,41 @@ operator:
 crds:
   install: true
 
+# push.writeRefTo, which writes a published image reference into a ConfigMap for a consumer -- a
+# Flux Kustomization's postBuild.substituteFrom -- to substitute. Governs both controllers.
+#
+# An object may always export into ITS OWN namespace; that needs nothing here. These settings are
+# about writing somewhere else, and about what an object may put on a ConfigMap it does not own.
+#
+# The ConfigMap's name is not chosen by the object. It is <kind>-<namespace>-<object name>, e.g.
+# imagebuild-team-a-pymods, which is the name a consumer spells in substituteFrom.
+refExport:
+  # Namespaces an object may export into BESIDES its own. Empty permits none.
+  #
+  # The useful target is the namespace your Kustomizations substitute from, usually flux-system,
+  # which parameterises everything in the cluster. Naming it here permits EVERY ImageBuild and
+  # ImageComposition in the cluster to create a ConfigMap there -- under a name carrying its own
+  # kind and namespace, so it can neither collide with nor overwrite anything else, but there all
+  # the same.
+  #
+  # This list is enforced by the controller, not by RBAC: see ADR 0056 for why, and ADR 0055 for
+  # what the feature costs -- chiefly that the digest becomes state outside git.
+  namespaces: []
+
+  # Labels added to every generated ConfigMap, so whatever watches substitution sources notices a
+  # new digest. Empty adds none, and the change is then seen only at the consumer's next interval.
+  # Flux wants "reconcile.fluxcd.io/watch=Enabled" -- a label, not an annotation, because
+  # kustomize-controller selects these with --watch-configs-label-selector.
+  labels: ""
+
+  # Label and annotation keys an object may set on its exported ConfigMap, exact or with a trailing
+  # "*". Empty permits none, and an unpermitted key is refused rather than quietly dropped.
+  #
+  # These land on an object in a namespace the object may not otherwise touch, which is the whole
+  # reason they are not simply allowed.
+  allowedLabels: []
+  allowedAnnotations: []
+
 # Which components this release runs. All on by default: one install gives a working, entirely
 # local system -- a composer, a builder and a registry for them to publish into.
 #
@@ -157,20 +192,6 @@ imageComposition:
 imageBuild:
   enabled: true
   replicaCount: 1
-
-  # Namespaces that `push.writeRefTo` may write a ConfigMap in. Empty refuses every export, and
-  # also withholds the ConfigMap write verbs from the builder's ClusterRole -- the feature and the
-  # privilege are turned on by the same value.
-  #
-  # The useful target is the namespace your Kustomizations substitute from, usually flux-system,
-  # which parameterises everything in the cluster. Naming it here is the decision; see ADR 0055 for
-  # what it costs, chiefly that the digest becomes state outside git.
-  refExportNamespaces: []
-
-  # Labels on the generated ConfigMap, so whatever watches substitution sources notices a new
-  # digest. Empty adds none, and the change is then seen only at the consumer's next interval.
-  # Flux wants "reconcile.fluxcd.io/watch=Enabled" -- a label, not an annotation.
-  refExportLabels: ""
 
   image:
     repository: ghcr.io/lhns/kube-oci-builder

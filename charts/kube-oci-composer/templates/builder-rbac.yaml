@@ -13,9 +13,10 @@ rules:
   - apiGroups: [oci.lhns.de]
     resources: [imagebuilds]
     verbs: [get, list, watch]
-  # Finalizer, so an ImageBuild that exports a reference can delete the ConfigMap on its way out.
-  # Nothing else it creates needs this -- its Secrets belong to its Job and the Job belongs to the
-  # object -- but a cross-namespace ConfigMap cannot be owner-referenced. ADR 0055.
+  # Finalizer, so an ImageBuild exporting a reference into ANOTHER namespace can delete the
+  # ConfigMap on its way out. Nothing else it creates needs this -- its Secrets belong to its Job
+  # and the Job belongs to the object, and an export into the object's own namespace is likewise
+  # owner-referenced. Only a cross-namespace one cannot be. ADR 0056.
   - apiGroups: [oci.lhns.de]
     resources: [imagebuilds/finalizers]
     verbs: [update]
@@ -45,13 +46,16 @@ rules:
   # interval -- an hour by default, which reads as the controller being broken. That costs an
   # informer over every ConfigMap in the cluster; the composer already pays it for configMap layers.
   #
-  # Read-only, always. Everything this controller writes into a tenant namespace is a Secret, the
-  # Dockerfile copy included. push.writeRefTo does create a ConfigMap, but that is granted as a
-  # namespaced Role in each allow-listed namespace (builder-refexport-rbac.yaml) -- never here,
-  # because a cluster-wide write would reach every namespace including flux-system.
+  # The write verbs are push.writeRefTo's, and they are cluster-wide because RBAC is granted before
+  # an object exists: permitting an export into whatever namespace its object lives in means
+  # permitting it everywhere. So THE CONTROLLER is the boundary, not this rule -- it writes only to
+  # the object's own namespace or one named in --ref-export-namespaces, and deletes only a
+  # ConfigMap carrying its own managed-by and owner labels. ADR 0056 says what that costs.
+  #
+  # No deletecollection, ever: nothing here removes ConfigMaps in bulk.
   - apiGroups: [""]
     resources: [configmaps]
-    verbs: [get, list, watch]
+    verbs: [get, list, watch, create, update, delete]
   - apiGroups: [""]
     resources: [events]
     verbs: [create, patch]

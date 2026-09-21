@@ -64,6 +64,9 @@ spec:
             {{- end }}
             - --keep-builds={{ .Values.operator.keepBuilds }}
             - --retention-refresh-interval={{ .Values.operator.retention.refreshInterval }}
+            {{- with include "kube-oci-composer.refExportArgs" $ | trim }}
+            {{- . | nindent 12 }}
+            {{- end }}
             {{- if .Values.operator.requirePinnedSources }}
             - --require-pinned-sources
             {{- end }}

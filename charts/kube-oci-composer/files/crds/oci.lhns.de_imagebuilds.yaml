@@ -502,7 +502,9 @@ spec:
                       annotations:
                         additionalProperties:
                           type: string
-                        description: Annotations are added to the generated ConfigMap.
+                        description: |-
+                          Annotations are added to the generated ConfigMap. Gated by
+                          --ref-export-allowed-annotations, exactly as Labels is.
                         type: object
                       keys:
                         description: Keys names the ConfigMap keys to write.
@@ -528,26 +530,27 @@ spec:
                         description: |-
                           Labels are added to the generated ConfigMap.
 
-                          reconcile.fluxcd.io/watch=Enabled is set regardless, because without it nothing notices the
-                          value change and the absence is invisible. These are for anything else that selects on the
-                          object -- a different watch selector, or a consumer's own conventions.
+                          Each key must be permitted by --ref-export-allowed-labels, which is empty by default: these
+                          land on an object in a namespace this object may not otherwise touch. An unpermitted key is
+                          refused rather than dropped, because a dropped one leaves a ConfigMap that looks right.
+
+                          The controller's own watch labels and its managed-by and owner labels are written last, so
+                          nothing set here can turn them off.
                         type: object
-                      name:
-                        description: Name of the ConfigMap to write.
-                        minLength: 1
-                        type: string
                       namespace:
                         description: |-
-                          Namespace to write it in. Required, and must be allow-listed on the controller.
+                          Namespace to write the ConfigMap in.
 
-                          No default, deliberately. Substitution sources are read from the consuming Kustomization's
-                          namespace -- usually flux-system, the namespace that parameterises everything -- so this
-                          silently defaulting to the object's own namespace would produce a ConfigMap nothing reads.
+                          Must be the object's OWN namespace, or one the operator allow-listed with
+                          --ref-export-namespaces (ADR 0056). Anything else is refused.
+
+                          No default, deliberately: a substitution source is read from the CONSUMING Kustomization's
+                          namespace, so defaulting this to the object's own would often produce a ConfigMap nothing
+                          reads, silently.
                         minLength: 1
                         type: string
                     required:
                     - keys
-                    - name
                     - namespace
                     type: object
                 type: object
@@ -964,6 +967,21 @@ spec:
                   reflects.
                 format: int64
                 type: integer
+              refExport:
+                description: |-
+                  RefExport is the ConfigMap push.writeRefTo last wrote, so the controller can clean it up
+                  when the spec moves it elsewhere or stops asking for it.
+                properties:
+                  name:
+                    description: Name of the ConfigMap that was written.
+                    type: string
+                  namespace:
+                    description: Namespace it was written in.
+                    type: string
+                required:
+                - name
+                - namespace
+                type: object
             type: object
         required:
         - spec

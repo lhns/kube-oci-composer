@@ -512,6 +512,11 @@ type ImageCompositionStatus struct {
 	// `flux reconcile` works out of the box.
 	// +optional
 	LastHandledReconcileAt string `json:"lastHandledReconcileAt,omitempty"`
+
+	// RefExport is the ConfigMap push.writeRefTo last wrote, so the controller can clean it up
+	// when the spec moves it elsewhere or stops asking for it.
+	// +optional
+	RefExport *RefExportStatus `json:"refExport,omitempty"`
 }
 
 // The keep annotation is emitted into the CRD itself so the chart can install it verbatim.

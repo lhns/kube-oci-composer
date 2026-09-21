@@ -57,14 +57,10 @@ type ImageBuildReconciler struct {
 	// leaving it unprotected until the next scheduled cycle. Optional: nil disables it, which
 	// is what --retention-refresh-interval=0 means.
 	Refresher *retention.Refresher
-	// RefExportNamespaces are the namespaces push.writeRefTo may write a ConfigMap in. Empty
-	// refuses every export: writing a substitution source into the namespace that parameterises a
-	// cluster is a privilege an operator grants deliberately, not a default. ADR 0055.
-	RefExportNamespaces []string
-
-	// RefExportWatchLabels are added to every generated ConfigMap so whatever watches substitution
-	// sources notices it change. Defaults to Flux's marker; empty adds none.
-	RefExportWatchLabels map[string]string
+	// Export is what the operator, rather than an object, decides about push.writeRefTo: which
+	// foreign namespaces are permitted, and which metadata keys an object may set. Both empty by
+	// default -- the controller is the boundary here, not RBAC (ADR 0056).
+	Export recon.ExportOptions
 
 	// Attestor signs the build's output, after the Job has terminated.
 	//
@@ -121,7 +117,7 @@ type ImageBuildReconciler struct {
 // No ConfigMap writes here, deliberately. push.writeRefTo creates one, but the chart grants that
 // as a namespaced Role in each allow-listed namespace -- cluster-wide would reach every namespace,
 // including the one a cluster substitutes from. ADR 0055.
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=gitrepositories;ocirepositories;buckets,verbs=get;list;watch
 
@@ -175,7 +171,10 @@ func (r *ImageBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 // reconcile is the state machine over the owned Job.
 func (r *ImageBuildReconciler) reconcile(ctx context.Context, obj *ociv1alpha1.ImageBuild) (ctrl.Result, error) {
-	if exp := obj.Spec.Push.GetWriteRefTo(); !obj.DeletionTimestamp.IsZero() || exp != nil {
+	// status.RefExport matters as much as the spec here: removing writeRefTo has to clean up what
+	// it wrote, and that branch is the only place that can.
+	if exp := obj.Spec.Push.GetWriteRefTo(); !obj.DeletionTimestamp.IsZero() || exp != nil ||
+		obj.Status.RefExport != nil {
 		res, done, err := r.reconcileExportLifecycle(ctx, obj, exp)
 		if done || err != nil {
 			return res, err
@@ -1091,15 +1090,41 @@ func (r *ImageBuildReconciler) exportRef(ctx context.Context, obj *ociv1alpha1.I
 	if obj.Spec.Push == nil || obj.Spec.Push.WriteRefTo == nil || obj.Status.Artifact == nil {
 		return nil
 	}
-	return recon.ExportRef(ctx, r.Client, obj, obj.Spec.Push.WriteRefTo,
-		r.RefExportNamespaces, r.RefExportWatchLabels,
+	written, err := recon.ExportRef(ctx, r.Client, obj, obj.Spec.Push.WriteRefTo, r.Export,
 		obj.Status.Artifact.Digest, obj.Status.Artifact.Ref)
+	if err != nil {
+		return err
+	}
+	return r.recordExport(ctx, obj, written)
+}
+
+// recordExport remembers the ConfigMap that was written, and removes the previous one when the
+// spec has moved it to another namespace.
+//
+// status is the only record of where it went: the name is derivable from the object, the namespace
+// is not. Without it, moving writeRefTo.namespace strands a ConfigMap a consumer may still be
+// substituting from (ADR 0056).
+func (r *ImageBuildReconciler) recordExport(
+	ctx context.Context, obj *ociv1alpha1.ImageBuild, written *ociv1alpha1.RefExportStatus,
+) error {
+	prev := obj.Status.RefExport
+	if prev != nil && written != nil && *prev == *written {
+		return nil
+	}
+	if err := recon.DeleteExportedRef(ctx, r.Client, obj, prev); err != nil {
+		return err
+	}
+	patch := client.MergeFrom(obj.DeepCopy())
+	obj.Status.RefExport = written
+	return r.Status().Patch(ctx, obj, patch)
 }
 
 // reconcileExportLifecycle keeps the finalizer in step with whether there is anything to clean up.
 //
-// The finalizer is added only when push.writeRefTo is set: putting one on every ImageBuild would
-// make every deletion depend on this controller running, for a feature most objects never use.
+// The finalizer is added only for an export into ANOTHER namespace, where a cross-namespace owner
+// reference is invalid and nothing else would reclaim the ConfigMap. An own-namespace export is
+// owned by this object and goes with it, so most objects that use the feature -- and every object
+// that does not -- keep a deletion that does not depend on this controller running.
 // done is true when the object is going away and this reconcile should stop.
 func (r *ImageBuildReconciler) reconcileExportLifecycle(
 	ctx context.Context, obj *ociv1alpha1.ImageBuild, exp *ociv1alpha1.RefExport,
@@ -1112,7 +1137,7 @@ func (r *ImageBuildReconciler) reconcileExportLifecycle(
 		}
 		// The export is the one thing a build leaves behind: its Secrets belong to its Job and the
 		// Job belongs to this object, so those go on their own.
-		if err := recon.DeleteExportedRef(ctx, r.Client, obj, exp); err != nil {
+		if err := recon.DeleteExportedRef(ctx, r.Client, obj, obj.Status.RefExport); err != nil {
 			return ctrl.Result{}, true, err
 		}
 		patch := client.MergeFrom(obj.DeepCopy())
@@ -1120,12 +1145,27 @@ func (r *ImageBuildReconciler) reconcileExportLifecycle(
 		return ctrl.Result{}, true, client.IgnoreNotFound(r.Patch(ctx, obj, patch))
 	}
 
-	if exp != nil && !has {
-		patch := client.MergeFrom(obj.DeepCopy())
-		obj.Finalizers = append(obj.Finalizers, ociv1alpha1.Finalizer)
-		if err := r.Patch(ctx, obj, patch); err != nil {
-			return ctrl.Result{}, true, fmt.Errorf("adding finalizer: %w", err)
+	// An export that is no longer asked for is removed now rather than at deletion: a consumer
+	// goes on substituting from whatever it finds, so a ConfigMap nobody maintains is worse than
+	// no ConfigMap at all.
+	if exp == nil && obj.Status.RefExport != nil {
+		if err := r.recordExport(ctx, obj, nil); err != nil {
+			return ctrl.Result{}, true, err
 		}
+	}
+
+	wantsFinalizer := exp != nil && exp.Namespace != obj.Namespace
+	if wantsFinalizer == has {
+		return ctrl.Result{}, false, nil
+	}
+	patch := client.MergeFrom(obj.DeepCopy())
+	if wantsFinalizer {
+		obj.Finalizers = append(obj.Finalizers, ociv1alpha1.Finalizer)
+	} else {
+		obj.Finalizers = recon.RemoveFinalizer(obj.Finalizers, ociv1alpha1.Finalizer)
+	}
+	if err := r.Patch(ctx, obj, patch); err != nil {
+		return ctrl.Result{}, true, fmt.Errorf("updating finalizer: %w", err)
 	}
 	return ctrl.Result{}, false, nil
 }

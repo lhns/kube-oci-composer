@@ -24,36 +24,43 @@ may change between minor versions.
   it cannot wedge.
 
 - **`push.writeRefTo`, exporting the published reference into a ConfigMap**
-  ([ADR 0055](docs/adr/0055-exporting-a-reference-a-consumer-cannot-compute.md)). For a Flux
-  `postBuild.substituteFrom` consumer. Off by default, and **refused unless the operator
-  allow-lists the target namespace** with `--ref-export-namespaces` — the useful target is the
-  namespace that parameterises the cluster, so this is a privilege to grant deliberately.
+  ([ADR 0055](docs/adr/0055-exporting-a-reference-a-consumer-cannot-compute.md),
+  [ADR 0056](docs/adr/0056-the-controller-is-the-namespace-boundary.md)). For a Flux
+  `postBuild.substituteFrom` consumer. Off by default, on **both kinds**.
 
-  It exists for `ImageBuild`, whose digest is an observation rather than a function of its spec, so
-  a consumer cannot compute the reference in advance the way a spec-hash tag lets it for
-  `ImageComposition`. Publishing this way needs **no tag at all**, which also means no tag can be
-  remeaned.
+  On `ImageBuild` the reference cannot be known in advance: the digest is an observation rather
+  than a function of the spec. On `ImageComposition` it is computable from the spec hash, but only
+  by reproducing that hash on the consuming side, which is not trivial. Publishing this way needs
+  **no tag at all**, so no tag can be remeaned.
 
-  Writes the full ref as well as the bare digest, sets `reconcile.fluxcd.io/watch: Enabled` itself,
-  and replaces the ConfigMap wholesale so a consumer never sees one key updated and another stale.
-  An incomplete reference is never written — a missing key substitutes the empty string and Flux
-  says nothing.
+  Writes the full ref as well as the bare digest, and replaces the ConfigMap wholesale so a
+  consumer never sees one key updated and another stale. An incomplete reference is never written
+  — a missing key substitutes the empty string and Flux says nothing.
 
-  **No ConfigMap write is granted cluster-wide.** The chart renders a Role and RoleBinding in each
-  namespace you name, with `get`/`create`/`update` only — no `delete`, no `list`. The controller
-  refuses a target outside the list as well, so the API server stops it reaching another namespace
-  and the controller stops it trying.
+  **The ConfigMap name is derived, not chosen**: `<kind>-<namespace>-<object name>`, e.g.
+  `imagebuild-team-a-pymods`. That is the name a consuming Kustomization spells in
+  `substituteFrom`. Two objects therefore cannot ask for the same ConfigMap, so one cannot take
+  over another's export.
 
-  **No watch label is set by default** — `imageBuild.refExportLabels` adds none unless you set it,
-  and the values file shows what Flux wants. It must be a **label**, not an annotation — kustomize-controller selects it with
-  `--watch-configs-label-selector` and a label selector cannot match an annotation. Extra labels
-  and annotations can be supplied, but cannot remove the watch marker or the ownership label.
+  **An object may always export into its own namespace; anywhere else needs
+  `--ref-export-namespaces`.** That list is enforced by the controller, not by RBAC: RBAC is
+  granted before an object exists, so permitting an export into whatever namespace its object
+  lives in would mean permitting it everywhere. Both ClusterRoles therefore carry ConfigMap
+  `create`/`update`/`delete` and the controller is the boundary — see ADR 0056 for what that
+  costs. Allow-listing a namespace permits every object in the cluster to write into it, under a
+  name carrying its own kind and namespace.
 
-  A ConfigMap this controller did not create is **never adopted**: `data` is replaced wholesale,
-  so taking over a hand-written substitution source would destroy it. An `ImageBuild` that exports
-  gains a finalizer to delete its ConfigMap on the way out, since a cross-namespace owner reference
-  is invalid — added only when `writeRefTo` is set, so no other object's deletion depends on the
-  controller.
+  **No watch label is set by default** — `refExport.labels` adds none unless you set it, and the
+  values file shows what Flux wants. It must be a **label**, not an annotation: kustomize-controller
+  selects it with `--watch-configs-label-selector`, and a label selector cannot match an
+  annotation. An object may add its own labels and annotations, but only keys the operator permits
+  with `refExport.allowedLabels` / `refExport.allowedAnnotations`, and never the watch marker or
+  the ownership labels.
+
+  **The export has a lifecycle.** `status.refExport` records what was written, so moving
+  `writeRefTo.namespace` or removing the field removes the ConfigMap rather than stranding it. An
+  export into the object's own namespace is owner-referenced and reclaimed by Kubernetes; only a
+  cross-namespace one adds a finalizer, since that owner reference would be invalid.
 
   **The digest becomes state outside git**, so a revert no longer reverts the running image.
 
