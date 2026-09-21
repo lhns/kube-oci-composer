@@ -2,8 +2,14 @@
 
 ## Status
 
-Accepted. Narrows [ADR 0017](0017-updating-the-consumed-digest.md), which rejected this by name —
-correctly, for the kind it was reasoning about.
+Accepted, and **superseded in part by [ADR 0056](0056-the-controller-is-the-namespace-boundary.md)**.
+Narrows [ADR 0017](0017-updating-the-consumed-digest.md), which rejected this by name — correctly,
+for the kind it was reasoning about.
+
+No longer true, all of it decided in 0056: the per-namespace Role (the ClusterRole carries the verbs
+and the controller is the boundary); `ImageBuild` being the only kind that exports; the finalizer
+being unconditional (own-namespace exports use an owner reference); and the tenant choosing the
+ConfigMap's name, which is now derived.
 
 ## Context
 
