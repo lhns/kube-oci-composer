@@ -14,13 +14,6 @@ import (
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 )
 
-// DefaultWatchLabels is what makes kustomize-controller notice a substitution source changing.
-//
-// A LABEL: it is selected with --watch-configs-label-selector, and a label selector cannot match an
-// annotation. Set by the controller because its absence is invisible; a default rather than a
-// constant because which tool watches is the cluster's business. ADR 0055.
-var DefaultWatchLabels = map[string]string{"reconcile.fluxcd.io/watch": "Enabled"}
-
 // ExportRef writes the published reference into the ConfigMap the object names.
 //
 // Only after a confirmed publish, and all keys or none: a consumer substitutes whatever it finds,
@@ -149,9 +142,6 @@ func DeleteExportedRef(
 	}
 	return client.IgnoreNotFound(c.Delete(ctx, &cm))
 }
-
-// DefaultWatchLabelFlag is DefaultWatchLabels in the form the flag takes.
-const DefaultWatchLabelFlag = "reconcile.fluxcd.io/watch=Enabled"
 
 // ParseLabels turns a comma-separated key=value flag into labels.
 //

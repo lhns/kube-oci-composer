@@ -69,12 +69,10 @@ Each requirement below follows from a failure mode above, and none is optional:
   `--watch-configs-label-selector`, and a label selector cannot match an annotation — as an
   annotation it is inert, and inert in the way this feature is most dangerous: the ConfigMap looks
   correct and nothing rolls out. This was written as an annotation first and caught in review.
-- **The marker is an operator setting, defaulting to Flux's.** [ADR 0009](0009-flux-conventions-without-dependency.md)
-  borrows Flux's conventions without depending on them, and already hardcodes
-  `reconcile.fluxcd.io/requestedAt` — but that one is **read**, where this is **written onto an
-  object in another namespace**. Which tool is watching is a property of the cluster, like
-  `--insecure-registry`, so it is `--ref-export-labels` rather than a constant. Per-object
-  `labels` remain, for additions.
+- **No watch marker by default.** `--ref-export-labels` adds none unless set; the chart shows what
+  Flux wants. [ADR 0009](0009-flux-conventions-without-dependency.md) hardcodes
+  `reconcile.fluxcd.io/requestedAt`, but that one is **read** — this would be **written onto an
+  object in another namespace**, which is further than borrowing a convention goes.
 - **Never adopt a ConfigMap this controller did not create.** `Data` is replaced wholesale, and a
   substitution source is exactly the kind of object a human writes by hand, so taking one over
   would destroy whatever else was in it. An existing ConfigMap without the managed-by label is a
@@ -84,13 +82,15 @@ Each requirement below follows from a failure mode above, and none is optional:
 
 ## Consequences
 
-**The RBAC grant is conditional, and that took a second look.** The builder's ClusterRole was
-read-only on ConfigMaps by a deliberate boundary — *everything this controller writes into a tenant
-namespace is a Secret* — guarded by a test named for it. The chart therefore grants `create` and
-`update` **only when `imageBuild.refExportNamespaces` is set**: the feature and the privilege are
-turned on by the same value, and a default install still ships a controller that cannot write a
-ConfigMap anywhere. The generated role carries the verbs unconditionally, so the chart/role drift
-test renders with the feature on and the default render is asserted separately.
+**The write is granted per namespace, never cluster-wide.** The builder's ClusterRole stays
+read-only on ConfigMaps — the boundary a test is already named for. The chart renders a Role and
+RoleBinding in each namespace in `imageBuild.refExportNamespaces`, with `get`, `create` and
+`update`: no `delete`, and no `list`, which would let it enumerate every substitution source in the
+namespace.
+
+The controller's own allow-list check stays. The API server stops it reaching another namespace and
+the controller stops it trying; a cluster-wide grant guarded only by a flag would have made the
+code the sole boundary.
 
 **The digest becomes state outside git.** A revert commit no longer reverts the running image, and
 that is the property ADR 0017's design exists to preserve. Anyone enabling this trades auditability

@@ -39,7 +39,13 @@ may change between minor versions.
   An incomplete reference is never written — a missing key substitutes the empty string and Flux
   says nothing.
 
-  The watch marker is a **label**, not an annotation — kustomize-controller selects it with
+  **No ConfigMap write is granted cluster-wide.** The chart renders a Role and RoleBinding in each
+  namespace you name, with `get`/`create`/`update` only — no `delete`, no `list`. The controller
+  refuses a target outside the list as well, so the API server stops it reaching another namespace
+  and the controller stops it trying.
+
+  **No watch label is set by default** — `imageBuild.refExportLabels` adds none unless you set it,
+  and the values file shows what Flux wants. It must be a **label**, not an annotation — kustomize-controller selects it with
   `--watch-configs-label-selector` and a label selector cannot match an annotation. Extra labels
   and annotations can be supplied, but cannot remove the watch marker or the ownership label.
 

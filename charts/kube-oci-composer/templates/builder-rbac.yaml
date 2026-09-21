@@ -45,17 +45,13 @@ rules:
   # interval -- an hour by default, which reads as the controller being broken. That costs an
   # informer over every ConfigMap in the cluster; the composer already pays it for configMap layers.
   #
-  # Read-only unless push.writeRefTo is in use. Everything this controller writes into a tenant
-  # namespace is otherwise a Secret, the Dockerfile copy included, and
-  # TestBuilderChartNeverGrantsConfigMapWrites keeps the DEFAULT render that way -- the write verbs
-  # appear only once an operator has named the namespaces an export may target (ADR 0055).
+  # Read-only, always. Everything this controller writes into a tenant namespace is a Secret, the
+  # Dockerfile copy included. push.writeRefTo does create a ConfigMap, but that is granted as a
+  # namespaced Role in each allow-listed namespace (builder-refexport-rbac.yaml) -- never here,
+  # because a cluster-wide write would reach every namespace including flux-system.
   - apiGroups: [""]
     resources: [configmaps]
-    {{- if .Values.imageBuild.refExportNamespaces }}
-    verbs: [get, list, watch, create, update]
-    {{- else }}
     verbs: [get, list, watch]
-    {{- end }}
   - apiGroups: [""]
     resources: [events]
     verbs: [create, patch]

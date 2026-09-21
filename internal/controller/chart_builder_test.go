@@ -58,12 +58,7 @@ func TestBuilderChartRBACMatchesTheGeneratedRole(t *testing.T) {
 		t.Fatalf("reading generated role: %v", err)
 	}
 
-	// Rendered with push.writeRefTo enabled, because the generated role carries its verbs
-	// unconditionally while the chart grants them only when an export is possible. The DEFAULT
-	// render is asserted separately, by TestBuilderChartNeverGrantsConfigMapWrites.
-	chart := clusterRoleFromRender(t,
-		renderBuilder(t, "--set", "imageBuild.refExportNamespaces=flux-system"),
-		"test-release-kube-oci-composer-builder")
+	chart := clusterRoleFromRender(t, renderBuilder(t), "test-release-kube-oci-composer-builder")
 
 	// Leader election lives in a namespaced Role in the chart, as it does for the composer.
 	want := ruleSet(rulesExcluding(generated, "coordination.k8s.io"))
@@ -236,4 +231,58 @@ func TestBuilderChartNeverGrantsConfigMapWrites(t *testing.T) {
 	if !seen {
 		t.Fatal("no configmaps rule at all; a Dockerfile in a ConfigMap could not be read")
 	}
+}
+
+// TestRefExportIsGrantedPerNamespace is the privilege boundary, enforced by the API server rather
+// than only by the controller's allow-list.
+//
+// The useful target for a substitution source is the namespace a cluster substitutes from, so a
+// cluster-wide ConfigMap write would reach everything. It is a Role in each named namespace.
+func TestRefExportIsGrantedPerNamespace(t *testing.T) {
+	t.Run("nothing by default", func(t *testing.T) {
+		for _, d := range docs(t, renderBuilder(t)) {
+			if k, _ := d["kind"].(string); k == "Role" || k == "RoleBinding" {
+				meta, _ := d["metadata"].(map[string]any)
+				if name, _ := meta["name"].(string); strings.Contains(name, "refexport") {
+					t.Errorf("an export Role was rendered without refExportNamespaces: %s", name)
+				}
+			}
+		}
+	})
+
+	t.Run("one per named namespace, and only there", func(t *testing.T) {
+		out := renderBuilder(t, "--set", `imageBuild.refExportNamespaces={flux-system,team-a}`)
+		seen := map[string]bool{}
+		for _, d := range docs(t, out) {
+			k, _ := d["kind"].(string)
+			meta, _ := d["metadata"].(map[string]any)
+			name, _ := meta["name"].(string)
+			if !strings.Contains(name, "refexport") {
+				continue
+			}
+			ns, _ := meta["namespace"].(string)
+			if k == "Role" {
+				seen[ns] = true
+				// No delete, and no list: the controller reads the one ConfigMap it names.
+				rules, _ := d["rules"].([]any)
+				for _, r := range rules {
+					rule, _ := r.(map[string]any)
+					verbs, _ := rule["verbs"].([]any)
+					for _, v := range verbs {
+						if s, _ := v.(string); s == "delete" || s == "list" {
+							t.Errorf("the export Role in %s grants %q", ns, s)
+						}
+					}
+				}
+			}
+		}
+		for _, ns := range []string{"flux-system", "team-a"} {
+			if !seen[ns] {
+				t.Errorf("no export Role in %s", ns)
+			}
+		}
+		if len(seen) != 2 {
+			t.Errorf("export Roles in %v, want exactly the two named namespaces", seen)
+		}
+	})
 }

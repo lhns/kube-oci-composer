@@ -1,0 +1,42 @@
+{{- /*
+Permission to write ConfigMaps in the allow-listed namespaces, and nowhere else.
+
+A Role rather than a ClusterRole because the useful target is the namespace a cluster substitutes
+from. The controller also refuses anything outside --ref-export-namespaces: the API server stops it
+reaching another namespace, the controller stops it trying. Nothing renders when the list is empty.
+*/}}
+{{- if and .Values.imageBuild.enabled .Values.imageBuild.refExportNamespaces }}
+{{- $root := . }}
+{{- range $ns := .Values.imageBuild.refExportNamespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "kube-oci-composer.fullname" $root }}-builder-refexport
+  namespace: {{ $ns }}
+  labels:
+    {{- include "kube-oci-composer.labels" $root | nindent 4 }}
+rules:
+  # No list: the controller reads the one ConfigMap it names. Listing would let it enumerate every
+  # substitution source in the namespace.
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, create, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "kube-oci-composer.fullname" $root }}-builder-refexport
+  namespace: {{ $ns }}
+  labels:
+    {{- include "kube-oci-composer.labels" $root | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "kube-oci-composer.fullname" $root }}-builder-refexport
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kube-oci-composer.builderServiceAccountName" $root }}
+    namespace: {{ $root.Release.Namespace }}
+{{- end }}
+{{- end }}

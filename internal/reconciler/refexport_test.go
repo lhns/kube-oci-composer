@@ -48,7 +48,7 @@ const (
 func TestAnExportIsRefusedOutsideTheAllowList(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(exportScheme(t)).Build()
 
-	err := ExportRef(context.Background(), c, owner(), exportSpec(), nil, DefaultWatchLabels, testDigest, testRef)
+	err := ExportRef(context.Background(), c, owner(), exportSpec(), nil, fluxWatch, testDigest, testRef)
 	if err == nil {
 		t.Fatal("an empty allow-list permitted a write to flux-system")
 	}
@@ -70,7 +70,7 @@ func TestAnExportWritesBothFormsAndTheWatchLabel(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(exportScheme(t)).Build()
 
 	if err := ExportRef(context.Background(), c, owner(), exportSpec(),
-		[]string{"flux-system"}, DefaultWatchLabels, testDigest, testRef); err != nil {
+		[]string{"flux-system"}, fluxWatch, testDigest, testRef); err != nil {
 		t.Fatalf("exporting: %v", err)
 	}
 
@@ -106,7 +106,7 @@ func TestAnIncompleteReferenceIsNeverWritten(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(exportScheme(t)).Build()
 
 	if err := ExportRef(context.Background(), c, owner(), exportSpec(),
-		[]string{"flux-system"}, DefaultWatchLabels, "", ""); err == nil {
+		[]string{"flux-system"}, fluxWatch, "", ""); err == nil {
 		t.Fatal("an empty reference was exported")
 	}
 
@@ -132,7 +132,7 @@ func TestAnExportReplacesRatherThanMerges(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(exportScheme(t)).WithObjects(existing).Build()
 
 	if err := ExportRef(context.Background(), c, owner(), exportSpec(),
-		[]string{"flux-system"}, DefaultWatchLabels, testDigest, testRef); err != nil {
+		[]string{"flux-system"}, fluxWatch, testDigest, testRef); err != nil {
 		t.Fatalf("exporting: %v", err)
 	}
 
@@ -161,7 +161,7 @@ func TestAForeignConfigMapIsNeverAdopted(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(exportScheme(t)).WithObjects(theirs).Build()
 
 	err := ExportRef(context.Background(), c, owner(), exportSpec(),
-		[]string{"flux-system"}, DefaultWatchLabels, testDigest, testRef)
+		[]string{"flux-system"}, fluxWatch, testDigest, testRef)
 	if err == nil {
 		t.Fatal("a ConfigMap this controller did not create was taken over")
 	}
@@ -197,7 +197,7 @@ func TestExtraMetadataIsAddedButCannotDisableTheFeature(t *testing.T) {
 	spec.Annotations = map[string]string{"note": "generated"}
 
 	if err := ExportRef(context.Background(), c, owner(), spec,
-		[]string{"flux-system"}, DefaultWatchLabels, testDigest, testRef); err != nil {
+		[]string{"flux-system"}, fluxWatch, testDigest, testRef); err != nil {
 		t.Fatalf("exporting: %v", err)
 	}
 
@@ -292,7 +292,7 @@ func TestTheWatchMarkerIsConfigurable(t *testing.T) {
 		want  map[string]string
 		gone  []string
 	}{
-		{"flux by default", DefaultWatchLabels,
+		{"flux, when asked for", fluxWatch,
 			map[string]string{"reconcile.fluxcd.io/watch": "Enabled"}, nil},
 		{"something else entirely", map[string]string{"argocd.argoproj.io/watch": "true"},
 			map[string]string{"argocd.argoproj.io/watch": "true"},
@@ -342,3 +342,7 @@ func TestParseLabelsDropsWhatItCannotRead(t *testing.T) {
 		}
 	}
 }
+
+// fluxWatch is what an operator sets for Flux. Not a default: the controller adds no label unless
+// told to.
+var fluxWatch = map[string]string{"reconcile.fluxcd.io/watch": "Enabled"}

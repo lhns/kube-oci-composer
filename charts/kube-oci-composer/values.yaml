@@ -167,13 +167,10 @@ imageBuild:
   # what it costs, chiefly that the digest becomes state outside git.
   refExportNamespaces: []
 
-  # Labels added to every ConfigMap `push.writeRefTo` generates, so whatever watches substitution
-  # sources notices it change. Flux's marker by default; set your own if you run something else, or
-  # empty to add none.
-  #
-  # A LABEL: kustomize-controller selects these with --watch-configs-label-selector, and a label
-  # selector cannot match an annotation. As an annotation it is inert and nothing says so.
-  refExportLabels: "reconcile.fluxcd.io/watch=Enabled"
+  # Labels on the generated ConfigMap, so whatever watches substitution sources notices a new
+  # digest. Empty adds none, and the change is then seen only at the consumer's next interval.
+  # Flux wants "reconcile.fluxcd.io/watch=Enabled" -- a label, not an annotation.
+  refExportLabels: ""
 
   image:
     repository: ghcr.io/lhns/kube-oci-builder

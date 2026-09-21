@@ -115,9 +115,10 @@ func main() {
 			"server on a private address is an ordinary source, and a guard people disable is no guard.")
 	flag.StringVar(&sourceDateEpoch, "source-date-epoch", "0",
 		"SOURCE_DATE_EPOCH stamped into builds. Fixed rather than the wall clock, matching the composer's epoch.")
-	flag.StringVar(&refExportLabels, "ref-export-labels", recon.DefaultWatchLabelFlag,
+	flag.StringVar(&refExportLabels, "ref-export-labels", "",
 		"key=value labels added to every ConfigMap push.writeRefTo generates, so whatever watches "+
-			"substitution sources notices it change. Defaults to Flux's marker; empty adds none.")
+			"substitution sources notices it change. For Flux: "+
+			"reconcile.fluxcd.io/watch=Enabled. Empty adds none.")
 	flag.StringVar(&refExportNamespaces, "ref-export-namespaces", "",
 		"comma-separated namespaces push.writeRefTo may write a ConfigMap in. Empty refuses every "+
 			"export: a substitution source in the namespace that parameterises a cluster is a "+

@@ -118,7 +118,10 @@ type ImageBuildReconciler struct {
 // get;list;watch and NOTHING else. Everything this controller WRITES into a tenant namespace is a
 // Secret -- the Dockerfile copy included -- so no create or update appears here, and that asymmetry
 // is deliberate rather than an oversight.
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update
+// No ConfigMap writes here, deliberately. push.writeRefTo creates one, but the chart grants that
+// as a namespaced Role in each allow-listed namespace -- cluster-wide would reach every namespace,
+// including the one a cluster substitutes from. ADR 0055.
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=gitrepositories;ocirepositories;buckets,verbs=get;list;watch
 
