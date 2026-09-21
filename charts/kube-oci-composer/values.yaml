@@ -178,7 +178,7 @@ retention:
 # about writing somewhere else, and about what an object may put on a ConfigMap it does not own.
 #
 # The ConfigMap's name is not chosen by the object. It is <kind>-<namespace>-<object name>, e.g.
-# imagebuild-team-a-pymods, which is the name a consumer spells in substituteFrom.
+# imagebuild-team-a-app, which is the name a consumer spells in substituteFrom.
 refExport:
   # Namespaces an object may export into BESIDES its own. Empty permits none.
   #

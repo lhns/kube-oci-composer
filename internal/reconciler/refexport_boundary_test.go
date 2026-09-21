@@ -31,22 +31,22 @@ func TestOneObjectCannotTakeOverAnothersExport(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: exportedName, Namespace: "flux-system", Labels: ourLabels(),
 		},
-		Data: map[string]string{"PYMODS_REF": "the first object's image"},
+		Data: map[string]string{"APP_REF": "the first object's image"},
 	}
 	c := fake.NewClientBuilder().WithScheme(exportScheme(t)).WithObjects(theirs).Build()
 
 	intruder := &ociv1alpha1.ImageBuild{
-		ObjectMeta: metav1.ObjectMeta{Name: "intruder", Namespace: "synapse"},
+		ObjectMeta: metav1.ObjectMeta{Name: "intruder", Namespace: "team-a"},
 	}
 	if _, err := ExportRef(context.Background(), c, intruder, exportSpec(), allowingFlux(),
-		testDigest, "registry.example/synapse/intruder@"+testDigest); err != nil {
+		testDigest, "registry.example/team-a/intruder@"+testDigest); err != nil {
 		t.Fatalf("exporting: %v", err)
 	}
 
 	// It landed under its own name, so it could not have collided at all.
 	var mine corev1.ConfigMap
 	if err := c.Get(context.Background(),
-		types.NamespacedName{Namespace: "flux-system", Name: "imagebuild-synapse-intruder"},
+		types.NamespacedName{Namespace: "flux-system", Name: "imagebuild-team-a-intruder"},
 		&mine); err != nil {
 		t.Fatalf("the export did not land under the intruder's own name: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestOneObjectCannotTakeOverAnothersExport(t *testing.T) {
 		types.NamespacedName{Namespace: "flux-system", Name: exportedName}, &victim); err != nil {
 		t.Fatal(err)
 	}
-	if victim.Data["PYMODS_REF"] != "the first object's image" {
+	if victim.Data["APP_REF"] != "the first object's image" {
 		t.Errorf("another object's export was repointed: %v", victim.Data)
 	}
 }
@@ -72,7 +72,7 @@ func TestTheOwnerCheckRefusesEvenAManagedConfigMap(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: exportedName, Namespace: "flux-system", Labels: someoneElses,
 		},
-		Data: map[string]string{"PYMODS_REF": "theirs"},
+		Data: map[string]string{"APP_REF": "theirs"},
 	}
 	c := fake.NewClientBuilder().WithScheme(exportScheme(t)).WithObjects(existing).Build()
 
@@ -90,7 +90,7 @@ func TestTheOwnerCheckRefusesEvenAManagedConfigMap(t *testing.T) {
 		types.NamespacedName{Namespace: "flux-system", Name: exportedName}, &after); err != nil {
 		t.Fatal(err)
 	}
-	if after.Data["PYMODS_REF"] != "theirs" {
+	if after.Data["APP_REF"] != "theirs" {
 		t.Errorf("their content was replaced: %v", after.Data)
 	}
 }
@@ -107,10 +107,10 @@ func TestWhichNamespacesAreWritable(t *testing.T) {
 		allowed []string
 		ok      bool
 	}{
-		{"its own, always", "synapse", nil, true},
+		{"its own, always", "team-a", nil, true},
 		{"one the operator named", "flux-system", []string{"flux-system"}, true},
 		{"one nobody named", "kube-system", []string{"flux-system"}, false},
-		{"its own, even alongside an allow-list", "synapse", []string{"flux-system"}, true},
+		{"its own, even alongside an allow-list", "team-a", []string{"flux-system"}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := fake.NewClientBuilder().WithScheme(exportScheme(t)).Build()
@@ -158,7 +158,7 @@ func TestAnOwnNamespaceExportIsOwnedRatherThanFinalized(t *testing.T) {
 		namespace string
 		wantOwner bool
 	}{
-		{"its own namespace", "synapse", true},
+		{"its own namespace", "team-a", true},
 		{"somebody else's", "flux-system", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -196,9 +196,9 @@ func TestMetadataKeysAreRefusedRatherThanDropped(t *testing.T) {
 		allowed []string
 		ok      bool
 	}{
-		{"exactly permitted", map[string]string{"team": "synapse"}, []string{"team"}, true},
+		{"exactly permitted", map[string]string{"team": "team-a"}, []string{"team"}, true},
 		{"a permitted prefix", map[string]string{"example.com/tier": "prod"}, []string{"example.com/*"}, true},
-		{"nothing permitted", map[string]string{"team": "synapse"}, nil, false},
+		{"nothing permitted", map[string]string{"team": "team-a"}, nil, false},
 		{"outside the prefix", map[string]string{"other.com/x": "1"}, []string{"example.com/*"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -268,7 +268,7 @@ func TestTheExportedNameCarriesTheKind(t *testing.T) {
 func TestAnUnnameableExportIsRefusedWithTheNameItBuilt(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(exportScheme(t)).Build()
 	long := &ociv1alpha1.ImageBuild{
-		ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("a", 250), Namespace: "synapse"},
+		ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("a", 250), Namespace: "team-a"},
 	}
 
 	_, err := ExportRef(context.Background(), c, long, exportSpec(), allowingFlux(),
@@ -279,7 +279,7 @@ func TestAnUnnameableExportIsRefusedWithTheNameItBuilt(t *testing.T) {
 	if !IsTerminal(err) {
 		t.Errorf("must be terminal -- only renaming the object fixes it; got %v", err)
 	}
-	if !strings.Contains(err.Error(), "imagebuild-synapse-aaa") {
+	if !strings.Contains(err.Error(), "imagebuild-team-a-aaa") {
 		t.Errorf("the message must show the name that was built, not the one asked for: %v", err)
 	}
 }
@@ -313,7 +313,7 @@ func TestAnExportDeletedByHandComesBack(t *testing.T) {
 	if err := c.Get(context.Background(), key, &again); err != nil {
 		t.Fatalf("the export was not recreated: %v", err)
 	}
-	if again.Data["PYMODS_REF"] != testRef {
+	if again.Data["APP_REF"] != testRef {
 		t.Errorf("recreated with the wrong content: %v", again.Data)
 	}
 }
@@ -348,7 +348,7 @@ func TestRevokingANamespaceLeavesWhatWasAlreadyWritten(t *testing.T) {
 		types.NamespacedName{Namespace: "flux-system", Name: exportedName}, &still); err != nil {
 		t.Fatalf("the existing export was removed when the namespace was revoked: %v", err)
 	}
-	if still.Data["PYMODS_REF"] != testRef {
+	if still.Data["APP_REF"] != testRef {
 		t.Errorf("the existing export was rewritten: %v", still.Data)
 	}
 }

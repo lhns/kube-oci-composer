@@ -65,7 +65,7 @@ has never had — it creates nothing today, which `_helpers.tpl` states as a pro
 and that statement changes with this.
 
 **The name is derived, not chosen.** `<kind>-<namespace>-<object name>` —
-`imagebuild-team-a-pymods`, `imagecomposition-team-a-base` — with the kind from the object's GVK.
+`imagebuild-team-a-app`, `imagecomposition-team-a-base` — with the kind from the object's GVK.
 The `name` field is removed. Two objects can no longer ask for the same ConfigMap, so hijack becomes
 impossible rather than refused; and because an object's name cannot change, neither can its export's.
 

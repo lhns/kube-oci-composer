@@ -51,11 +51,11 @@ namespace.**
 ```yaml
 push:
   writeRefTo:
-    name: pymods-ref
+    name: app-ref
     namespace: flux-system
     keys:
-      ref: PYMODS_REF          # registry/repo@sha256:...
-      digest: PYMODS_DIGEST    # sha256:...
+      ref: APP_REF          # registry/repo@sha256:...
+      digest: APP_DIGEST    # sha256:...
 ```
 
 Each requirement below follows from a failure mode above, and none is optional:

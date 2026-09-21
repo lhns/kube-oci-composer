@@ -516,7 +516,7 @@ func RevisionMatches(want, got string) bool {
 // trivial, so both kinds export.
 //
 // THE CONFIGMAP'S NAME IS DERIVED, not chosen: <kind>-<namespace>-<object name>, e.g.
-// imagebuild-team-a-pymods. A consuming Kustomization spells that in substituteFrom, so it is API.
+// imagebuild-team-a-app. A consuming Kustomization spells that in substituteFrom, so it is API.
 //
 // Strictly opt-in, and the cost is stated in ADR 0055: the digest becomes state outside git, so a
 // revert no longer reverts the running image.

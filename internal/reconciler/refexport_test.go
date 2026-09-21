@@ -30,19 +30,19 @@ func exportScheme(t *testing.T) *runtime.Scheme {
 
 func owner() *ociv1alpha1.ImageBuild {
 	return &ociv1alpha1.ImageBuild{
-		ObjectMeta: metav1.ObjectMeta{Name: "pymods", Namespace: "synapse"},
+		ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: "team-a"},
 	}
 }
 
 func exportSpec() *ociv1alpha1.RefExport {
 	return &ociv1alpha1.RefExport{
 		Namespace: "flux-system",
-		Keys:      ociv1alpha1.RefExportKeys{Ref: "PYMODS_REF", Digest: "PYMODS_DIGEST"},
+		Keys:      ociv1alpha1.RefExportKeys{Ref: "APP_REF", Digest: "APP_DIGEST"},
 	}
 }
 
 // exportedName is what owner() writes: derived from the object, never chosen.
-const exportedName = "imagebuild-synapse-pymods"
+const exportedName = "imagebuild-team-a-app"
 
 // wroteTo is the status record a previous export would have left.
 func wroteTo(ns string) *ociv1alpha1.RefExportStatus {
@@ -53,8 +53,8 @@ func wroteTo(ns string) *ociv1alpha1.RefExportStatus {
 func ourLabels() map[string]string {
 	return map[string]string{
 		ManagedByLabel:      managedBy,
-		ownerNamespaceLabel: "synapse",
-		ownerNameLabel:      "pymods",
+		ownerNamespaceLabel: "team-a",
+		ownerNameLabel:      "app",
 	}
 }
 
@@ -65,7 +65,7 @@ func allowingFlux() ExportOptions {
 
 const (
 	testDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-	testRef    = "registry.example/synapse/pymods@" + testDigest
+	testRef    = "registry.example/team-a/app@" + testDigest
 )
 
 // TestAnExportIsRefusedOutsideTheAllowList is the privilege boundary.
@@ -106,11 +106,11 @@ func TestAnExportWritesBothFormsAndTheWatchLabel(t *testing.T) {
 		types.NamespacedName{Namespace: "flux-system", Name: exportedName}, &cm); err != nil {
 		t.Fatalf("reading the export: %v", err)
 	}
-	if cm.Data["PYMODS_REF"] != testRef {
-		t.Errorf("ref = %q, want %q", cm.Data["PYMODS_REF"], testRef)
+	if cm.Data["APP_REF"] != testRef {
+		t.Errorf("ref = %q, want %q", cm.Data["APP_REF"], testRef)
 	}
-	if cm.Data["PYMODS_DIGEST"] != testDigest {
-		t.Errorf("digest = %q, want %q", cm.Data["PYMODS_DIGEST"], testDigest)
+	if cm.Data["APP_DIGEST"] != testDigest {
+		t.Errorf("digest = %q, want %q", cm.Data["APP_DIGEST"], testDigest)
 	}
 	// A LABEL. kustomize-controller selects these with --watch-configs-label-selector, and a
 	// label selector cannot match an annotation -- as an annotation this is inert, and inert in
@@ -154,7 +154,7 @@ func TestAnExportReplacesRatherThanMerges(t *testing.T) {
 			Name: exportedName, Namespace: "flux-system",
 			Labels: ourLabels(),
 		},
-		Data: map[string]string{"PYMODS_REF": "stale", "LEFTOVER": "x"},
+		Data: map[string]string{"APP_REF": "stale", "LEFTOVER": "x"},
 	}
 	c := fake.NewClientBuilder().WithScheme(exportScheme(t)).WithObjects(existing).Build()
 
@@ -171,8 +171,8 @@ func TestAnExportReplacesRatherThanMerges(t *testing.T) {
 	if _, stale := cm.Data["LEFTOVER"]; stale {
 		t.Error("a key from a previous export survived, so the ConfigMap describes two publishes")
 	}
-	if cm.Data["PYMODS_REF"] != testRef {
-		t.Errorf("ref = %q, want the new one", cm.Data["PYMODS_REF"])
+	if cm.Data["APP_REF"] != testRef {
+		t.Errorf("ref = %q, want the new one", cm.Data["APP_REF"])
 	}
 }
 
@@ -217,7 +217,7 @@ func TestExtraMetadataIsAddedButCannotDisableTheFeature(t *testing.T) {
 
 	spec := exportSpec()
 	spec.Labels = map[string]string{
-		"team":                      "synapse",
+		"team":                      "team-a",
 		"reconcile.fluxcd.io/watch": "Disabled",
 		ManagedByLabel:              "someone-else",
 	}
@@ -239,7 +239,7 @@ func TestExtraMetadataIsAddedButCannotDisableTheFeature(t *testing.T) {
 		types.NamespacedName{Namespace: "flux-system", Name: exportedName}, &cm); err != nil {
 		t.Fatal(err)
 	}
-	if cm.Labels["team"] != "synapse" {
+	if cm.Labels["team"] != "team-a" {
 		t.Errorf("the extra label was dropped: %v", cm.Labels)
 	}
 	if cm.Annotations["note"] != "generated" {
@@ -286,7 +286,7 @@ func TestDeletionLeavesSomebodyElsesExportAlone(t *testing.T) {
 	}{
 		{"another object's export", map[string]string{
 			ManagedByLabel:                "kube-oci-composer",
-			"oci.lhns.de/owner-namespace": "synapse",
+			"oci.lhns.de/owner-namespace": "team-a",
 			"oci.lhns.de/owner-name":      "something-else",
 		}},
 		{"not ours at all", map[string]string{"owner": "a human"}},

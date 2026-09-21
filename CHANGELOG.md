@@ -93,7 +93,7 @@ may change between minor versions.
   — a missing key substitutes the empty string and Flux says nothing.
 
   **The ConfigMap name is derived, not chosen**: `<kind>-<namespace>-<object name>`, e.g.
-  `imagebuild-team-a-pymods`. That is the name a consuming Kustomization spells in
+  `imagebuild-team-a-app`. That is the name a consuming Kustomization spells in
   `substituteFrom`. Two objects therefore cannot ask for the same ConfigMap, so one cannot take
   over another's export.
 

@@ -73,16 +73,16 @@ func TestTheFinalizerIsRemovedWhenTheForeignExportIsGone(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			obj := exportingBuild([]string{ociv1alpha1.Finalizer})
 			obj.Status.RefExport = &ociv1alpha1.RefExportStatus{
-				Name: "imagebuild-team-a-pymods", Namespace: "flux-system",
+				Name: "imagebuild-team-a-app", Namespace: "flux-system",
 			}
 			obj.Spec.Push.WriteRefTo = tc.then
 
 			export := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
-				Name: "imagebuild-team-a-pymods", Namespace: "flux-system",
+				Name: "imagebuild-team-a-app", Namespace: "flux-system",
 				Labels: map[string]string{
 					recon.ManagedByLabel:          "kube-oci-composer",
 					"oci.lhns.de/owner-namespace": "team-a",
-					"oci.lhns.de/owner-name":      "pymods",
+					"oci.lhns.de/owner-name":      "app",
 				},
 			}}
 			r := exportReconciler(t, obj, export)
@@ -105,14 +105,14 @@ func TestDeletionRemovesTheForeignExportThenTheFinalizer(t *testing.T) {
 	obj := exportingBuild([]string{ociv1alpha1.Finalizer})
 	obj.DeletionTimestamp = &now
 	obj.Status.RefExport = &ociv1alpha1.RefExportStatus{
-		Name: "imagebuild-team-a-pymods", Namespace: "flux-system",
+		Name: "imagebuild-team-a-app", Namespace: "flux-system",
 	}
 	export := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
-		Name: "imagebuild-team-a-pymods", Namespace: "flux-system",
+		Name: "imagebuild-team-a-app", Namespace: "flux-system",
 		Labels: map[string]string{
 			recon.ManagedByLabel:          "kube-oci-composer",
 			"oci.lhns.de/owner-namespace": "team-a",
-			"oci.lhns.de/owner-name":      "pymods",
+			"oci.lhns.de/owner-name":      "app",
 		},
 	}}
 	r := exportReconciler(t, obj, export)
@@ -129,7 +129,7 @@ func TestDeletionRemovesTheForeignExportThenTheFinalizer(t *testing.T) {
 	}
 	var cm corev1.ConfigMap
 	if err := r.Get(context.Background(), client.ObjectKey{
-		Namespace: "flux-system", Name: "imagebuild-team-a-pymods",
+		Namespace: "flux-system", Name: "imagebuild-team-a-app",
 	}, &cm); err == nil {
 		t.Error("the export outlived its object; nothing else will ever remove it")
 	}
@@ -138,7 +138,7 @@ func TestDeletionRemovesTheForeignExportThenTheFinalizer(t *testing.T) {
 func exportingBuild(finalizers []string) *ociv1alpha1.ImageBuild {
 	return &ociv1alpha1.ImageBuild{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "pymods", Namespace: "team-a", Finalizers: finalizers,
+			Name: "app", Namespace: "team-a", Finalizers: finalizers,
 		},
 		Spec: ociv1alpha1.ImageBuildSpec{
 			Push: &ociv1alpha1.Push{

@@ -41,24 +41,24 @@ Keep it to the objects that need it.
 ```yaml
 spec:
   push:
-    repository: registry.example.com/team-a/pymods
+    repository: registry.example.com/team-a/app
     # No tags at all: publish by digest. Nothing is named, so no name can be remeaned.
     writeRefTo:
       namespace: flux-system
       keys:
-        ref: PYMODS_REF        # registry/repo@sha256:...  <- prefer this
-        digest: PYMODS_DIGEST  # sha256:...
+        ref: APP_REF        # registry/repo@sha256:...  <- prefer this
+        digest: APP_DIGEST  # sha256:...
 ```
 
 **The ConfigMap's name is derived, not chosen:** `<kind>-<namespace>-<object name>`. An `ImageBuild`
-called `pymods` in `team-a` writes `imagebuild-team-a-pymods`. That is the name your Kustomization
+called `app` in `team-a` writes `imagebuild-team-a-app`. That is the name your Kustomization
 must spell:
 
 ```yaml
 postBuild:
   substituteFrom:
     - kind: ConfigMap
-      name: imagebuild-team-a-pymods
+      name: imagebuild-team-a-app
 ```
 
 **Prefer `ref` over `digest` alone.** A consumer substituting a bare digest into an image field
