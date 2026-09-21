@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	batchv1 "k8s.io/api/batch/v1"
@@ -119,38 +118,11 @@ func (r *ImageBuildReconciler) checkTagConflict(
 func (r *ImageBuildReconciler) remoteOptions(
 	ctx context.Context, obj *ociv1alpha1.ImageBuild,
 ) ([]remote.Option, error) {
-	opts := []remote.Option{remote.WithContext(ctx)}
-	if r.Transport != nil {
-		opts = append(opts, remote.WithTransport(r.Transport))
-	}
-
-	var ownRef string
-	if p := obj.Spec.Push; p != nil && p.SecretRef != nil {
-		ownRef = p.SecretRef.Name
-	}
-	// The operator's credential goes to the operator's registry and nowhere else, whether or not
-	// this object named the path itself. See recon.DefaultRegistry.CredentialFor.
-	name, namespace := r.Default.CredentialFor(obj.Namespace, ownRef, r.repositoryFor(obj))
-	if name == "" {
-		return append(opts, remote.WithAuth(authn.Anonymous)), nil
-	}
-
-	var secret corev1.Secret
-	key := types.NamespacedName{Namespace: namespace, Name: name}
-	if err := r.Get(ctx, key, &secret); err != nil {
-		if apierrors.IsNotFound(err) {
-			// Waits rather than stalls: the Secret may be on its way from SOPS or a Kustomization
-			// applied moments later, and its creation raises no event on this object.
-			return nil, recon.Pending("push secret %s not found yet", key)
-		}
-		return nil, fmt.Errorf("reading push secret %s: %w", key, err)
-	}
-
-	kc, err := recon.KeychainFromSecret(&secret)
-	if err != nil {
-		return nil, recon.Pending("push secret %s is unusable: %v", key, err)
-	}
-	return append(opts, remote.WithAuthFromKeychain(kc)), nil
+	return recon.RemoteAuth{
+		Reader:    r.Client,
+		Transport: r.Transport,
+		Default:   r.Default,
+	}.Options(ctx, obj.Namespace, r.repositoryFor(obj), obj.Spec.Push)
 }
 
 // cacheAvailable reports whether this object's build cache reference resolves.

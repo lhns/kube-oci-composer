@@ -31,12 +31,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -582,37 +579,17 @@ func bareTag(tag string) string {
 // The same Secret the object already uses to publish. This package never needs more authority than
 // reading, so a credential scoped to pull is enough for it — which is worth knowing when deciding
 // what to put in that Secret.
-func (r *Refresher) remoteOptions(ctx context.Context, namespace, repository string, push *ociv1alpha1.Push) ([]remote.Option, error) {
-	opts := []remote.Option{remote.WithContext(ctx)}
-	if r.Transport != nil {
-		opts = append(opts, remote.WithTransport(r.Transport))
-	}
-
-	var ownRef string
-	if push != nil && push.SecretRef != nil {
-		ownRef = push.SecretRef.Name
-	}
-	// Same rule as the publish path: the operator's credential only ever reaches the operator's own
-	// registry. Refreshing reads, so the blast radius is smaller -- but a credential sent to a host
-	// a tenant chose is exfiltrated whether the request that carries it reads or writes.
-	name, ns := r.Default.CredentialFor(namespace, ownRef, repository)
-	if name == "" {
-		return append(opts, remote.WithAuth(authn.Anonymous)), nil
-	}
-
-	var secret corev1.Secret
-	key := types.NamespacedName{Namespace: ns, Name: name}
-	if err := r.Get(ctx, key, &secret); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, fmt.Errorf("secret %s not found", key)
-		}
-		return nil, fmt.Errorf("reading secret %s: %w", key, err)
-	}
-	kc, err := recon.KeychainFromSecret(&secret)
-	if err != nil {
-		return nil, fmt.Errorf("secret %s is unusable: %w", key, err)
-	}
-	return append(opts, remote.WithAuthFromKeychain(kc)), nil
+func (r *Refresher) remoteOptions(
+	ctx context.Context, namespace, repository string, push *ociv1alpha1.Push,
+) ([]remote.Option, error) {
+	return recon.RemoteAuth{
+		Reader:    r.Client,
+		Transport: r.Transport,
+		Default:   r.Default,
+		// A plain error, not Pending: there is no object here to make pending, and a refresh
+		// failure is counted and escalated rather than surfaced on a status.
+		Soft: fmt.Errorf,
+	}.Options(ctx, namespace, repository, push)
 }
 
 // SetupWithManager registers the refresher as a leader-elected runnable.

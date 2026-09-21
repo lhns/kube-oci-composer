@@ -147,6 +147,23 @@ func resolveConflict(explicit TagConflictPolicy, deprecated *bool) TagConflictPo
 	return ConflictFail
 }
 
+// HistoryLimit resolves how many past builds to retain: this object's own, else the operator's,
+// else the built-in default.
+//
+// One function for both kinds, because there were two and they had already drifted -- one treated
+// history: 0 as "keep nothing" and the other fell through to the operator's value. The CRD's
+// Minimum=1 makes that unreachable through the API server, which is precisely why it went
+// unnoticed: same name, same job, different answer, and nothing able to fail.
+func (p *Push) HistoryLimit(operator int) int {
+	if p != nil && p.History != nil && *p.History > 0 {
+		return int(*p.History)
+	}
+	if operator > 0 {
+		return operator
+	}
+	return DefaultHistoryLimit
+}
+
 // GetTags is nil-safe, because spec.push may be omitted entirely -- an object that names no
 // repository and no tags publishes by digest to the operator's default registry.
 func (p *Push) GetTags() []string {

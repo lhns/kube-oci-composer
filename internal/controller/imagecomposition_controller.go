@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
@@ -609,13 +608,7 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 
 // historyLimit resolves the retention count for one object.
 func (r *ImageCompositionReconciler) historyLimit(obj *ociv1alpha1.ImageComposition) int {
-	if obj.Spec.Push != nil && obj.Spec.Push.History != nil {
-		return int(*obj.Spec.Push.History)
-	}
-	if r.HistoryLimit > 0 {
-		return r.HistoryLimit
-	}
-	return ociv1alpha1.DefaultHistoryLimit
+	return obj.Spec.Push.HistoryLimit(r.HistoryLimit)
 }
 
 // resolveLayer returns a local path holding the layer's content.
@@ -746,42 +739,20 @@ func publishName(obj *ociv1alpha1.ImageComposition) string {
 
 // remoteOptions builds registry auth. Credentials are always read from a referenced Secret,
 // never taken from the spec.
-func (r *ImageCompositionReconciler) remoteOptions(ctx context.Context, obj *ociv1alpha1.ImageComposition) ([]remote.Option, error) {
-	opts := []remote.Option{remote.WithContext(ctx)}
-	if r.Transport != nil {
-		opts = append(opts, remote.WithTransport(r.Transport))
-	}
-
-	var ownRef string
-	if p := obj.Spec.Push; p != nil && p.SecretRef != nil {
-		ownRef = p.SecretRef.Name
-	}
-	// The operator's credential goes to the operator's registry and nowhere else. Resolved through
-	// target() so the host compared is the one actually pushed to.
+func (r *ImageCompositionReconciler) remoteOptions(
+	ctx context.Context, obj *ociv1alpha1.ImageComposition,
+) ([]remote.Option, error) {
+	// Resolved through target() so the host the credential is matched against is the one actually
+	// pushed to.
 	tgt, err := r.target(obj)
 	if err != nil {
 		return nil, err
 	}
-	name, namespace := r.Default.CredentialFor(obj.Namespace, ownRef, tgt.writeRepo)
-	if name == "" {
-		return append(opts, remote.WithAuth(authn.Anonymous)), nil
-	}
-
-	var secret corev1.Secret
-	key := types.NamespacedName{Namespace: namespace, Name: name}
-	if err := r.Get(ctx, key, &secret); err != nil {
-		if apierrors.IsNotFound(err) {
-			// See pullOptions: waits rather than stalls, for the same reason.
-			return nil, recon.Pending("secret %s not found yet", key)
-		}
-		return nil, fmt.Errorf("reading secret %s: %w", key, err)
-	}
-
-	kc, err := recon.KeychainFromSecret(&secret)
-	if err != nil {
-		return nil, recon.Pending("secret %s is unusable: %v", key, err)
-	}
-	return append(opts, remote.WithAuthFromKeychain(kc)), nil
+	return recon.RemoteAuth{
+		Reader:    r.Client,
+		Transport: r.Transport,
+		Default:   r.Default,
+	}.Options(ctx, obj.Namespace, tgt.writeRepo, obj.Spec.Push)
 }
 
 func configFrom(c *ociv1alpha1.ImageConfig) oci.Config {

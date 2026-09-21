@@ -789,13 +789,7 @@ func (r *ImageBuildReconciler) recordSuccess(obj *ociv1alpha1.ImageBuild, inputs
 // artifact from its spec, so retention is a convenience. A build cannot (ADR 0025), so this is how
 // much of the only copy is kept.
 func (r *ImageBuildReconciler) historyLimit(obj *ociv1alpha1.ImageBuild) int {
-	if p := obj.Spec.Push; p != nil && p.History != nil && *p.History > 0 {
-		return int(*p.History)
-	}
-	if r.HistoryLimit > 0 {
-		return r.HistoryLimit
-	}
-	return ociv1alpha1.DefaultHistoryLimit
+	return obj.Spec.Push.HistoryLimit(r.HistoryLimit)
 }
 
 // applyOutcome sets the conditions for whatever just happened.
