@@ -92,7 +92,7 @@ func (o *Registry) Default(namespace string) recon.DefaultRegistry {
 }
 
 // Insecure is the plain-HTTP host list, split.
-func (o *Registry) Insecure() []string { return splitList(o.InsecureRegistries) }
+func (o *Registry) Insecure() []string { return SplitList(o.InsecureRegistries) }
 
 // Transport returns the RoundTripper to talk to registries with, and the CA bytes themselves for
 // callers that must pass them on -- the builder projects them into each build pod.
@@ -133,9 +133,9 @@ func (o *Registry) Attestor(ctx context.Context, namespace string) (*attest.Atte
 	return a, nil
 }
 
-// splitList turns a comma-separated flag into a slice, dropping empties. Both binaries had their
-// own copy.
-func splitList(s string) []string {
+// SplitList turns a comma-separated flag into a slice, dropping empties. Exported because every
+// binary that takes a list flag wants it, and three copies had accumulated.
+func SplitList(s string) []string {
 	var out []string
 	for _, part := range strings.Split(s, ",") {
 		if part = strings.TrimSpace(part); part != "" {

@@ -270,7 +270,7 @@ func main() {
 		Transport:            registryTransport,
 		Attestor:             attestor,
 		Refresher:            refresher,
-		RefExportNamespaces:  splitList(refExportNamespaces),
+		RefExportNamespaces:  opts.SplitList(refExportNamespaces),
 		RefExportWatchLabels: recon.ParseLabels(refExportLabels),
 		//nolint:staticcheck // SA1019: the new events API has no Event method; see the composer.
 		Recorder: mgr.GetEventRecorderFor("imagebuild-controller"),
@@ -375,16 +375,4 @@ func newJobConfig(f jobFlags) buildcontroller.JobConfig {
 		SBOM:               f.SBOM,
 		Provenance:         f.Provenance,
 	}
-}
-
-// splitList turns a comma-separated flag into a list, dropping empties so a trailing comma or an
-// unset flag yields nothing rather than a namespace named "".
-func splitList(v string) []string {
-	var out []string
-	for _, p := range strings.Split(v, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
 }

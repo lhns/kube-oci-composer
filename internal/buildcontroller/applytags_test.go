@@ -2,7 +2,6 @@ package buildcontroller
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
@@ -124,5 +123,3 @@ func TestADigestOnlyPublishNeverConflicts(t *testing.T) {
 		t.Fatalf("a digest-only publish reported a conflict: conflict=%+v err=%v", conflict, err)
 	}
 }
-
-func init() { _ = strings.TrimSpace }

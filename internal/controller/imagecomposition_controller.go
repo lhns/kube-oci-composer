@@ -147,7 +147,7 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return r.finalize(ctx, &obj)
 	}
 
-	if !controllerutilContainsFinalizer(&obj, ociv1alpha1.Finalizer) {
+	if !recon.ContainsFinalizer(&obj, ociv1alpha1.Finalizer) {
 		patch := client.MergeFrom(obj.DeepCopy())
 		obj.Finalizers = append(obj.Finalizers, ociv1alpha1.Finalizer)
 		if err := r.Patch(ctx, &obj, patch); err != nil {
@@ -806,7 +806,7 @@ func reasonFor(err error) string {
 // that described them is not a reason to break pods that are using them.
 func (r *ImageCompositionReconciler) finalize(ctx context.Context, obj *ociv1alpha1.ImageComposition) (ctrl.Result, error) {
 	patch := client.MergeFrom(obj.DeepCopy())
-	obj.Finalizers = removeString(obj.Finalizers, ociv1alpha1.Finalizer)
+	obj.Finalizers = recon.RemoveFinalizer(obj.Finalizers, ociv1alpha1.Finalizer)
 	return ctrl.Result{}, client.IgnoreNotFound(r.Patch(ctx, obj, patch))
 }
 
@@ -826,25 +826,6 @@ func (r *ImageCompositionReconciler) patchStatus(ctx context.Context, obj *ociv1
 	latest.Status.ObservedGeneration = latest.Generation
 	latest.Status.LastHandledReconcileAt = latest.Annotations[ociv1alpha1.ReconcileRequestAnnotation]
 	return r.Status().Patch(ctx, &latest, patch)
-}
-
-func removeString(in []string, s string) []string {
-	out := in[:0]
-	for _, v := range in {
-		if v != s {
-			out = append(out, v)
-		}
-	}
-	return out
-}
-
-func controllerutilContainsFinalizer(o client.Object, f string) bool {
-	for _, v := range o.GetFinalizers() {
-		if v == f {
-			return true
-		}
-	}
-	return false
 }
 
 // compositionsForConfigMap maps a changed ConfigMap to the compositions that reference it.

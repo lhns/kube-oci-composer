@@ -16,26 +16,16 @@ import (
 
 // DefaultWatchLabels is what makes kustomize-controller notice a substitution source changing.
 //
-// A LABEL, not an annotation: kustomize-controller selects these with
-// --watch-configs-label-selector, and a label selector cannot match an annotation. As an
-// annotation it is inert, and inert in the way this feature is most dangerous -- the ConfigMap
-// looks correct and the rollout simply never happens.
-//
-// Set by the controller rather than left to the user, for that reason, and a DEFAULT rather than a
-// constant because which tool is watching is a property of the cluster. ADR 0009 borrows Flux's
-// conventions without depending on them, and already hardcodes reconcile.fluxcd.io/requestedAt --
-// but that one is READ, where this is written onto an object in somebody else's namespace. An
-// operator running something other than Flux sets --ref-export-labels, or empties it.
+// A LABEL: it is selected with --watch-configs-label-selector, and a label selector cannot match an
+// annotation. Set by the controller because its absence is invisible; a default rather than a
+// constant because which tool watches is the cluster's business. ADR 0055.
 var DefaultWatchLabels = map[string]string{"reconcile.fluxcd.io/watch": "Enabled"}
 
 // ExportRef writes the published reference into the ConfigMap the object names.
 //
-// Callers pass the digest and the PULL reference, and only after a confirmed publish. Writing
-// speculatively is the one thing this must never do: a consumer substitutes whatever is there, and
-// a missing key substitutes the empty string silently -- Flux has no server-side strict mode.
-//
-// All keys or none: the ConfigMap is replaced wholesale rather than patched key by key, so a
-// consumer never observes one field updated and another stale.
+// Only after a confirmed publish, and all keys or none: a consumer substitutes whatever it finds,
+// a missing key substitutes the empty string with no complaint, and the ConfigMap is replaced
+// wholesale so one key is never updated while another is stale.
 func ExportRef(
 	ctx context.Context, c client.Client, obj client.Object, spec *ociv1alpha1.RefExport,
 	allowed []string, watch map[string]string, digest, ref string,
@@ -135,13 +125,9 @@ func namespaceAllowed(ns string, allowed []string) bool {
 
 // DeleteExportedRef removes a ConfigMap this controller wrote for an object being deleted.
 //
-// Needed because the ConfigMap cannot be owner-referenced: the useful target is another namespace
-// and a cross-namespace owner reference is invalid, so Kubernetes will not reclaim it. Everything
-// else a build creates IS reclaimed -- its Secrets belong to its Job and the Job belongs to the
-// object (ADR 0050) -- and this is the one thing left behind.
-//
-// Deletes only what this object exported: the managed-by label and the owner labels must both
-// match, so a ConfigMap another object writes, or one a human took over, is left alone.
+// Needed because a cross-namespace owner reference is invalid, so Kubernetes will not reclaim it --
+// everything else a build creates is (ADR 0050). Matches on the managed-by AND owner labels, so
+// another object's export, or one a human took over, is left alone.
 func DeleteExportedRef(
 	ctx context.Context, c client.Client, obj client.Object, spec *ociv1alpha1.RefExport,
 ) error {

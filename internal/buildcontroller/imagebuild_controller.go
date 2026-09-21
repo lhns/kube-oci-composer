@@ -1101,7 +1101,7 @@ func (r *ImageBuildReconciler) exportRef(ctx context.Context, obj *ociv1alpha1.I
 func (r *ImageBuildReconciler) reconcileExportLifecycle(
 	ctx context.Context, obj *ociv1alpha1.ImageBuild, exp *ociv1alpha1.RefExport,
 ) (ctrl.Result, bool, error) {
-	has := containsString(obj.Finalizers, ociv1alpha1.Finalizer)
+	has := recon.ContainsFinalizer(obj, ociv1alpha1.Finalizer)
 
 	if !obj.DeletionTimestamp.IsZero() {
 		if !has {
@@ -1113,7 +1113,7 @@ func (r *ImageBuildReconciler) reconcileExportLifecycle(
 			return ctrl.Result{}, true, err
 		}
 		patch := client.MergeFrom(obj.DeepCopy())
-		obj.Finalizers = removeString(obj.Finalizers, ociv1alpha1.Finalizer)
+		obj.Finalizers = recon.RemoveFinalizer(obj.Finalizers, ociv1alpha1.Finalizer)
 		return ctrl.Result{}, true, client.IgnoreNotFound(r.Patch(ctx, obj, patch))
 	}
 
@@ -1125,23 +1125,4 @@ func (r *ImageBuildReconciler) reconcileExportLifecycle(
 		}
 	}
 	return ctrl.Result{}, false, nil
-}
-
-func containsString(in []string, s string) bool {
-	for _, v := range in {
-		if v == s {
-			return true
-		}
-	}
-	return false
-}
-
-func removeString(in []string, s string) []string {
-	out := in[:0]
-	for _, v := range in {
-		if v != s {
-			out = append(out, v)
-		}
-	}
-	return out
 }
