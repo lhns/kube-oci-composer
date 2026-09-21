@@ -32,13 +32,13 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0022](0022-distro-packages-as-layer-sources.md) | Distro packages are a layer source: `unpack: deb` | Accepted |
 | [0023](0023-more-archive-formats.md) | More archive formats: `unpack: zip` and the compressed-tar family | Accepted |
 | [0024](0024-images-as-layer-sources.md) | An image can be a layer source, flattened | Accepted |
-| [0025](0025-dockerfile-builds-as-a-second-kind.md) | Dockerfile builds, as a second kind with a weaker promise | Accepted, for an alpha |
+| [0025](0025-dockerfile-builds-as-a-second-kind.md) | Dockerfile builds, as a second kind with a weaker promise | Accepted, for an alpha; renamed by 0028 |
 | [0026](0026-a-source-artifact-can-lag-its-own-spec.md) | A source's artifact can lag its own spec, and the tag moved first | Accepted, sharpens 0009 and 0017 |
 | [0027](0027-what-rootless-buildkit-actually-needs.md) | What rootless BuildKit actually needs | Accepted |
 | [0028](0028-the-kind-is-called-imagebuild.md) | The kind is called ImageBuild | Accepted, reverses 0025's naming |
 | [0029](0029-three-valued-tag-conflict-policy.md) | A tag conflict has three answers, not two | Accepted, amends 0017 |
 | [0030](0030-a-real-registry-serves-both-kinds.md) | A real registry serves both kinds, and zot is the one we ship | Accepted, amends 0006 |
-| [0031](0031-the-retention-guarantee.md) | Live objects' images are never reclaimed, by anything | Accepted, sharpens 0011 |
+| [0031](0031-the-retention-guarantee.md) | Live objects' images are never reclaimed, by anything | Accepted, sharpens 0011; corrected by 0057 |
 | [0032](0032-the-embedded-registrys-future.md) | The embedded registry stays, and stops being the default | **Superseded by [0035](0035-a-registry-is-the-only-publication-path.md)** |
 | [0033](0033-one-chart-one-namespace.md) | One chart, one namespace, toggleable components | Accepted, reverses 0004's packaging |
 | [0034](0034-a-default-registry.md) | A default registry, and whose credential is used | Accepted, amends 0030 and 0031 |

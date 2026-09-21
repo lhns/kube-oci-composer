@@ -507,9 +507,11 @@ cat %s > /dev/termination-log
 		Env:                    env,
 		VolumeMounts:           mounts,
 		TerminationMessagePath: corev1.TerminationMessagePathDefault,
-		// The SAME policy the fetcher uses. ReadFile reads only /dev/termination-log, which
-		// buildctl never writes, so t.Message was always empty. The kubelet copies the log tail
-		// instead, which is why this needs no pods/log grant. ADR 0046.
+		// FallbackToLogsOnError, as on the fetcher, but for the opposite reason. On SUCCESS the
+		// wrapper script writes the digest to /dev/termination-log and that is what t.Message
+		// carries -- podBuildDigest reads it. On failure buildctl never reaches the cat, so the
+		// kubelet falls back to the log tail, which is why a cause is available without a
+		// pods/log grant. ADR 0046.
 		TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 		SecurityContext:          rootlessSecurityContext(),
 	}

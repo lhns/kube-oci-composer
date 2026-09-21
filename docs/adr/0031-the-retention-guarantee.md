@@ -4,7 +4,10 @@ Date: 2026-08-19
 
 ## Status
 
-Accepted. Depends on [0030](0030-a-real-registry-serves-both-kinds.md), which makes a real registry
+Accepted, with a correction in the body: a fifth condition added after this was written was inert
+for its whole life, and [0057](0057-the-toolchain-is-an-input.md) says why.
+
+Depends on [0030](0030-a-real-registry-serves-both-kinds.md), which makes a real registry
 the serving surface. Sharpens [0011](0011-content-tags-expire.md) (content tags expire) and depends
 on [0010](0010-workloads-reference-digests.md) (workloads reference digests), which is why untagged
 is not the same as unreferenced.

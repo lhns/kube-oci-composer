@@ -23,24 +23,6 @@ may change between minor versions.
   This was the failing half of a dependency bump that also carried four library updates; those went
   separately and moved no bytes.
 
-### Fixed
-
-- **`keepTags`' `pushedWithin` rule was never evaluated** ([ADR 0057](docs/adr/0057-the-toolchain-is-an-input.md)).
-  It was rendered as a second policy entry whose `patterns` also matched everything, and zot stops
-  at the first matching entry — so only `pulledWithin` was ever in force, while the configuration
-  and its comment said otherwise.
-
-  **A tag that had been pushed and never pulled was protected by nothing**, which is exactly a
-  freshly published spec-hash tag before the refresher first reaches it. What held that line was
-  refresh-at-publish ([ADR 0053](docs/adr/0053-a-publish-is-protected-before-the-reconcile-returns.md)),
-  not this rule.
-
-  Now one entry carrying both rules, which is what zot OR-s. A chart test asserts the **count**,
-  because the previous one asked only whether *some* entry carried each rule — a question both
-  shapes answer yes to, and how this reached a release.
-
-### Changed
-
 - **BREAKING: retention is configured by one value, and the rest is derived.** `retention.window`
   moves to the top level and becomes the base; the refresh interval, the sweep interval and the
   collection delay are computed from it and need no attention.
@@ -71,7 +53,39 @@ may change between minor versions.
   `gcDelay` is the one value that does **not** derive from the window: it guards a wall-clock gap,
   not the retention clock. See Fixed, below.
 
+- **BREAKING: `onConflict` is now evaluated against the digest the build produced, on `ImageBuild`
+  too** ([ADR 0054](docs/adr/0054-name-it-after-you-push-it.md)). The build Job uploads by digest
+  and names nothing; the controller applies the tags afterwards, when the digest exists.
+
+  Previously buildctl pushed *and* named in one operation, so the check ran before the build and
+  substituted the object's **previous** digest for the one it could not know. That substitution
+  exempted a tag holding this object's own previous digest — the ordinary case — so **an object
+  remeaning its own tag was never a conflict**, and `onConflict: Fail` was close to inert here. The
+  CRD and [ADR 0029](docs/adr/0029-three-valued-tag-conflict-policy.md) both described the exact
+  behaviour; only the composer implemented it.
+
+  **A tag meant to move now conflicts under `Fail`.** `latest` published alongside a spec-hash tag,
+  under the default policy, will stall on every change — that is changing what `latest` means. Set
+  `onConflict: Overwrite` on such an object.
+
+  `onConflict: Keep` now records a **real** `dropped` digest instead of an empty field, which
+  ADR 0029 had to accept as unavoidable.
+
 ### Fixed
+
+- **`keepTags`' `pushedWithin` rule was never evaluated** ([ADR 0057](docs/adr/0057-the-toolchain-is-an-input.md)).
+  It was rendered as a second policy entry whose `patterns` also matched everything, and zot stops
+  at the first matching entry — so only `pulledWithin` was ever in force, while the configuration
+  and its comment said otherwise.
+
+  **A tag that had been pushed and never pulled was protected by nothing**, which is exactly a
+  freshly published spec-hash tag before the refresher first reaches it. What held that line was
+  refresh-at-publish ([ADR 0053](docs/adr/0053-a-publish-is-protected-before-the-reconcile-returns.md)),
+  not this rule.
+
+  Now one entry carrying both rules, which is what zot OR-s. A chart test asserts the **count**,
+  because the previous one asked only whether *some* entry carried each rule — a question both
+  shapes answer yes to, and how this reached a release.
 
 - **A build's own image could be collected before the controller could name it.** Publishing by
   digest ([ADR 0054](docs/adr/0054-name-it-after-you-push-it.md)) leaves the manifest **untagged**
@@ -93,6 +107,44 @@ may change between minor versions.
   - `values.yaml` claimed a repository matching no policy is never collected. **That is false** —
     zot's default for an unmatched repository is to delete untagged manifests — and the e2e was
     written trusting it.
+
+- **A freshly published artifact was unprotected until the next refresh cycle**
+  ([ADR 0053](docs/adr/0053-a-publish-is-protected-before-the-reconcile-returns.md)). The retention
+  refresh ran only on a ticker, so between a push and the next cycle — an hour by default — the
+  artifact held no lease at all. A registry that expires on pull recency has no record that
+  anything was pushed, and zot in particular carries an **old** push timestamp onto a new tag when
+  the digest is one it has seen before, so a collection pass inside that window reclaims content
+  that is minutes old. Reported from a live cluster as tags vanishing shortly after publication.
+
+  A publish now renews its own lease before the reconcile returns.
+
+- **A skipped refresh cycle was reported as though it were harmless.** If any object has not been
+  reconciled, the refresher declines the whole cycle — correctly, since a partial view would
+  under-refresh silently — but it said so only at `info`, while a *failed* cycle was escalated.
+  Both protect nothing, and a skip is the worse of the two because it does not clear on its own:
+  one object stuck behind its generation stops the refresh for **every** object in the cluster.
+  Consecutive skips now escalate.
+
+- **The bundled registry is pinned to zot v2.1.21**, up from v2.1.20, which could delete layers
+  that published images still needed. The damage was hard to recognise: the tag kept resolving and
+  the pull failed partway with a missing layer, which reads as a broken image rather than a registry
+  that reclaimed too much. Everything this project publishes was exposed, because BuildKit attaches
+  SBOM and provenance manifests and that makes every artifact an index — the case v2.1.20 got wrong.
+
+  Also in v2.1.20, `retention.dryRun` was not dry. It still deleted blobs, so turning it on to see
+  what collection *would* do destroyed content. The values file said the opposite.
+
+  **It does not fix everything.** zot records an image's push time the first time it sees that
+  digest and never updates it, so republishing identical content does not renew it. That is
+  unchanged in v2.1.21 and shapes the next entry.
+
+- **`keepTags` also keys on `pushedWithin` now**, alongside `pulledWithin`, and a tag survives if
+  either keeps it. Previously an image was protected only once the retention refresher had reached
+  it, leaving it exposed between being built and that first refresh.
+
+  This helps brand-new content only. Because of the push timestamp above, republishing the same
+  digest renews nothing — and an image the refresher is already touching has a more recent pull
+  than push regardless.
 
 ### Added
 
@@ -152,66 +204,6 @@ may change between minor versions.
   cross-namespace one adds a finalizer, since that owner reference would be invalid.
 
   **The digest becomes state outside git**, so a revert no longer reverts the running image.
-
-### Changed
-
-- **BREAKING: `onConflict` is now evaluated against the digest the build produced, on `ImageBuild`
-  too** ([ADR 0054](docs/adr/0054-name-it-after-you-push-it.md)). The build Job uploads by digest
-  and names nothing; the controller applies the tags afterwards, when the digest exists.
-
-  Previously buildctl pushed *and* named in one operation, so the check ran before the build and
-  substituted the object's **previous** digest for the one it could not know. That substitution
-  exempted a tag holding this object's own previous digest — the ordinary case — so **an object
-  remeaning its own tag was never a conflict**, and `onConflict: Fail` was close to inert here. The
-  CRD and [ADR 0029](docs/adr/0029-three-valued-tag-conflict-policy.md) both described the exact
-  behaviour; only the composer implemented it.
-
-  **A tag meant to move now conflicts under `Fail`.** `latest` published alongside a spec-hash tag,
-  under the default policy, will stall on every change — that is changing what `latest` means. Set
-  `onConflict: Overwrite` on such an object.
-
-  `onConflict: Keep` now records a **real** `dropped` digest instead of an empty field, which
-  ADR 0029 had to accept as unavoidable.
-
-### Fixed
-
-- **A freshly published artifact was unprotected until the next refresh cycle**
-  ([ADR 0053](docs/adr/0053-a-publish-is-protected-before-the-reconcile-returns.md)). The retention
-  refresh ran only on a ticker, so between a push and the next cycle — an hour by default — the
-  artifact held no lease at all. A registry that expires on pull recency has no record that
-  anything was pushed, and zot in particular carries an **old** push timestamp onto a new tag when
-  the digest is one it has seen before, so a collection pass inside that window reclaims content
-  that is minutes old. Reported from a live cluster as tags vanishing shortly after publication.
-
-  A publish now renews its own lease before the reconcile returns.
-
-- **A skipped refresh cycle was reported as though it were harmless.** If any object has not been
-  reconciled, the refresher declines the whole cycle — correctly, since a partial view would
-  under-refresh silently — but it said so only at `info`, while a *failed* cycle was escalated.
-  Both protect nothing, and a skip is the worse of the two because it does not clear on its own:
-  one object stuck behind its generation stops the refresh for **every** object in the cluster.
-  Consecutive skips now escalate.
-
-- **The bundled registry is pinned to zot v2.1.21**, up from v2.1.20, which could delete layers
-  that published images still needed. The damage was hard to recognise: the tag kept resolving and
-  the pull failed partway with a missing layer, which reads as a broken image rather than a registry
-  that reclaimed too much. Everything this project publishes was exposed, because BuildKit attaches
-  SBOM and provenance manifests and that makes every artifact an index — the case v2.1.20 got wrong.
-
-  Also in v2.1.20, `retention.dryRun` was not dry. It still deleted blobs, so turning it on to see
-  what collection *would* do destroyed content. The values file said the opposite.
-
-  **It does not fix everything.** zot records an image's push time the first time it sees that
-  digest and never updates it, so republishing identical content does not renew it. That is
-  unchanged in v2.1.21 and shapes the next entry.
-
-- **`keepTags` also keys on `pushedWithin` now**, alongside `pulledWithin`, and a tag survives if
-  either keeps it. Previously an image was protected only once the retention refresher had reached
-  it, leaving it exposed between being built and that first refresh.
-
-  This helps brand-new content only. Because of the push timestamp above, republishing the same
-  digest renews nothing — and an image the refresher is already touching has a more recent pull
-  than push regardless.
 
 ## [0.5.1] - 2026-09-07
 

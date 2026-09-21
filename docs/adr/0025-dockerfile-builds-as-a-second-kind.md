@@ -2,7 +2,12 @@
 
 ## Status
 
-Accepted, for an alpha. Amends [0016](0016-the-scope-line-is-determinism.md); it does **not**
+Accepted, for an alpha. The kind is named `DockerBuild` throughout and was renamed to `ImageBuild`
+by [0028](0028-the-kind-is-called-imagebuild.md); its separate chart and RBAC were folded into one
+chart by [0033](0033-one-chart-one-namespace.md). The record is left as written, because it is
+evidence of what was believed at the time.
+
+Amends [0016](0016-the-scope-line-is-determinism.md); it does **not**
 supersede it. The scope line stays exactly where 0016 put it *for `ImageComposition`*, whose
 guarantees are untouched by this record.
 

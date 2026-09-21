@@ -5,11 +5,10 @@ import (
 	"testing"
 )
 
-// TestSplitList — the blank-dropping is the part that matters. An unset --insecure-registry must
-// produce no hosts at all; a []string{""} would match a repository whose host segment is empty and
-// silently downgrade a push to plain HTTP.
-// TestSplitList — the insecure-registry list is user input from a values file, so an empty entry
-// or stray whitespace must not become a host that matches nothing.
+// TestSplitList — the blank-dropping is the part that matters. This list is user input from a
+// values file, so an empty entry or stray whitespace must not become a host: an unset
+// --insecure-registry must produce no hosts at all, and a []string{""} would match a repository
+// whose host segment is empty and silently downgrade a push to plain HTTP.
 func TestSplitList(t *testing.T) {
 	for _, tc := range []struct {
 		in   string

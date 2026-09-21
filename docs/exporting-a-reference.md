@@ -22,9 +22,10 @@ discovered at rollout. The export is available on both kinds for that reason.
 
 ## What it costs
 
-Stated plainly, because it is a real trade and
-[ADR 0055](adr/0055-exporting-a-reference-a-consumer-cannot-compute.md) rejected it for the kind
-where it is avoidable:
+Stated plainly, because it is a real trade. [ADR 0055](adr/0055-exporting-a-reference-a-consumer-cannot-compute.md)
+added it for `ImageBuild` alone and left compositions out;
+[ADR 0056](adr/0056-the-controller-is-the-namespace-boundary.md) reversed that, on the grounds that
+computable is not the same as convenient:
 
 - **The digest becomes state outside git.** A revert commit no longer reverts the running image. If
   auditability through git is why you chose this project, that is the property you are giving up.

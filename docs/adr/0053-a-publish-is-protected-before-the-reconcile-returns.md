@@ -5,6 +5,10 @@
 Accepted. Extends [ADR 0031](0031-the-retention-guarantee.md), whose lease is renewed on an
 interval and, until now, only on one.
 
+The zot mechanism cited below as the diagnosis of the live-cluster incident is **not** confirmed to
+have been it: [0058](0058-why-the-tags-vanished.md) records that incident as still unexplained.
+This record stands on its own -- the window it closes was real whatever caused the loss.
+
 ## Context
 
 A live cluster reported spec-hash tags vanishing minutes after a successful push, reproducibly,

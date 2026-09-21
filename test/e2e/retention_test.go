@@ -10,10 +10,10 @@
 // So the guarantee test carries a NEGATIVE CONTROL: something not refreshed, asserted to actually
 // disappear. Without it, "the image is still there" is not evidence of anything.
 //
-// The registry is configured with a short window and frequent collection (see
-// manifests/registry.yaml). A real deployment would use 30 days against an hourly refresh; the RATIO
-// between the two is what makes it a guarantee rather than a race, and the ratio is what this file
-// reproduces in miniature.
+// The registry is configured with a short window and frequent collection by the chart install in
+// up.sh. A real deployment would use 30 days against an hourly refresh; the RATIO between the two
+// is what makes it a guarantee rather than a race, and the ratio is what this file reproduces in
+// miniature.
 package e2e
 
 import (
@@ -23,9 +23,9 @@ import (
 	"time"
 )
 
-// retentionWindow mirrors pulledWithin in manifests/registry.yaml, for the failure messages. It is
-// not read by the registry; the two are kept in step by hand, and the negative control is what
-// catches them drifting apart.
+// retentionWindow mirrors E2E_WINDOW in up.sh, for the failure messages. It is not read by the
+// registry; the two are kept in step by hand, and the negative control is what catches them
+// drifting apart.
 const retentionWindow = "30s"
 
 // collectionDeadline is how long a negative control waits for something to actually be collected.
