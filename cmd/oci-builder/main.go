@@ -291,6 +291,7 @@ func main() {
 		}),
 		HistoryLimit:         historyLimit,
 		RequirePinnedSources: requirePinnedSources,
+		BuildPollInterval:    buildPollInterval,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to set up the ImageBuild controller")
 		os.Exit(1)

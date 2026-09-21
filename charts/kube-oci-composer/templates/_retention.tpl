@@ -29,21 +29,48 @@ check therefore runs in both cases -- it used to be skipped when registry.enable
 withheld it from exactly the deployment that gets no other help.
 */}}
 
-{{- /* A Go duration in seconds. -1 means unparseable; the caller skips rather than guesses. */ -}}
+{{- /*
+A Go duration in seconds. -1 means unparseable, and the caller skips rather than guesses.
+
+Every unit is summed, because Go durations are compound: "1h30m" and "1h0m0s" are both ordinary,
+and the second is what time.Duration.String() prints. An earlier version matched only a single
+trailing unit, so "1h30m" took the "m" branch, trimmed it to "1h30", and sprig's float64 swallowed
+the conversion error and returned 0 -- which reads as "no expiry" rather than "unparseable". The
+window was then passed to zot verbatim while every guard here saw 0 and skipped, so
+retention.window: 1h30m gave a registry that expired content after 90 minutes and controllers that
+refreshed hourly: a margin of 1.5x, where the render is supposed to refuse anything under 24x.
+
+Validated by reconstruction: if the units found do not reassemble the input exactly, it is not a
+duration this can be trusted to have understood, and -1 says so.
+*/ -}}
 {{- define "kube-oci-composer.durationSeconds" -}}
-  {{- $d := . | toString -}}
+  {{- $d := . | toString | trim -}}
   {{- if or (eq $d "") (eq $d "0") (eq $d "0s") (eq $d "0m") (eq $d "0h") -}}
     {{- 0.0 -}}
-  {{- else if hasSuffix "h" $d -}}
-    {{- mulf (trimSuffix "h" $d | float64) 3600.0 -}}
-  {{- else if hasSuffix "m" $d -}}
-    {{- mulf (trimSuffix "m" $d | float64) 60.0 -}}
-  {{- else if hasSuffix "s" $d -}}
-    {{- trimSuffix "s" $d | float64 -}}
   {{- else -}}
-    {{- /* A Go duration can also be "1h30m", and rejecting a valid value would be worse than not
-           checking it. */ -}}
-    {{- -1.0 -}}
+    {{- /* ms/us/ns before m/s, or "1500ms" matches the "s" branch. */ -}}
+    {{- $parts := regexFindAll `[0-9]+(\.[0-9]+)?(ms|us|ns|h|m|s)` $d -1 -}}
+    {{- if or (eq (len $parts) 0) (ne (join "" $parts) $d) -}}
+      {{- -1.0 -}}
+    {{- else -}}
+      {{- $total := 0.0 -}}
+      {{- range $p := $parts -}}
+        {{- if hasSuffix "ms" $p -}}
+          {{- $total = addf $total (divf (trimSuffix "ms" $p | float64) 1000.0) -}}
+        {{- else if hasSuffix "us" $p -}}
+          {{- $total = addf $total (divf (trimSuffix "us" $p | float64) 1000000.0) -}}
+        {{- else if hasSuffix "ns" $p -}}
+          {{- $total = addf $total (divf (trimSuffix "ns" $p | float64) 1000000000.0) -}}
+        {{- else if hasSuffix "h" $p -}}
+          {{- $total = addf $total (mulf (trimSuffix "h" $p | float64) 3600.0) -}}
+        {{- else if hasSuffix "m" $p -}}
+          {{- $total = addf $total (mulf (trimSuffix "m" $p | float64) 60.0) -}}
+        {{- else -}}
+          {{- $total = addf $total (trimSuffix "s" $p | float64) -}}
+        {{- end -}}
+      {{- end -}}
+      {{- $total -}}
+    {{- end -}}
   {{- end -}}
 {{- end -}}
 
@@ -167,6 +194,17 @@ Both controllers are checked, because either one going quiet loses its own objec
 {{- define "kube-oci-composer.checkRetention" -}}
 {{- if .Values.retention.window -}}
 {{- $window := include "kube-oci-composer.windowSeconds" . | float64 -}}
+{{- /*
+A window this cannot parse is refused rather than passed through.
+
+It reaches zot verbatim, so leaving it alone would hand the registry a policy it cannot read while
+every check here skips -- the parser answers -1 for "I did not understand this", and -1 is not a
+duration to compare margins against. Failing here says which value is wrong; failing at the
+registry says a policy is invalid, hours later, somewhere else.
+*/ -}}
+{{- if lt $window 0.0 -}}
+{{- fail (printf "retention.window (%s) is not a duration this chart can read. Use a Go duration such as 720h, 30m or 1h30m -- it is passed to the registry as its expiry policy, and the refresh margin is checked against it." $.Values.retention.window) -}}
+{{- end -}}
 {{- $minMargin := 24.0 -}}
 {{- range $c := list
       (dict "name" "imageComposition" "on" .Values.imageComposition.enabled "iv" (include "kube-oci-composer.composerRefreshInterval" .))

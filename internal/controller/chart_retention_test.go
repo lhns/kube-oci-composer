@@ -133,15 +133,72 @@ func TestChartAcceptsRetentionSettingsThatAreMerelyUnusual(t *testing.T) {
 			},
 		},
 		{
-			// Go accepts "1h30m" and the template cannot parse it. Not checking is the right
-			// answer there; refusing a valid duration would be worse than a missed comparison.
-			"a compound duration the check cannot parse",
-			[]string{"--set", "retention.window=1h30m"},
+			// A compound duration, now that the parser sums units instead of matching one trailing
+			// one. This case used to assert the opposite -- that "1h30m" rendered BECAUSE the check
+			// could not read it -- on the reasoning that refusing a valid duration would be worse
+			// than a missed comparison. That was a fair trade only while the parser was the
+			// limitation: it returned 0 for "1h30m", 0 means "no expiry", and the window still
+			// reached zot verbatim. So the missed comparison was not missed evenly; it was missed
+			// exactly where a real 90-minute expiry was configured.
+			"a compound duration, parsed, with a proportionate interval",
+			[]string{
+				"--set", "retention.window=1h30m",
+				"--set", "retention.refreshInterval=1m",
+			},
 		},
 	}
 	for _, tc := range fine {
 		t.Run(tc.name, func(t *testing.T) {
 			render(t, tc.args...)
 		})
+	}
+}
+
+// A compound Go duration must mean what it says, because the window reaches zot verbatim while
+// every guard here reads it through the template's own parser.
+//
+// "1h30m" and "1h0m0s" are ordinary durations -- the second is what time.Duration.String() prints.
+// An earlier parser matched only a single trailing unit, so "1h30m" trimmed to "1h30", sprig's
+// float64 swallowed the error and returned 0, and 0 reads as "no expiry". The registry got a real
+// 90-minute window while checkRetention saw nothing to check: a 1.5x margin rendered happily, where
+// anything under 24x is supposed to be refused.
+func TestCompoundDurationsAreUnderstood(t *testing.T) {
+	// Each pair is the same duration written two ways. Whatever the chart does with one it must do
+	// with the other -- that equivalence is the property, not any particular outcome.
+	for _, tc := range []struct{ compound, simple string }{
+		{"1h30m", "90m"},
+		{"1h0m0s", "60m"},
+		{"0h30m0s", "30m"},
+	} {
+		t.Run(tc.compound, func(t *testing.T) {
+			compound := renderRawExpectingFailure(t, append(append([]string{}, installable...),
+				"--set", "retention.window="+tc.compound)...)
+			simple := renderRawExpectingFailure(t, append(append([]string{}, installable...),
+				"--set", "retention.window="+tc.simple)...)
+
+			// Both are short enough that the derived refresh interval is refused. The messages
+			// quote the window as written, so compare the part that describes the derivation.
+			for _, want := range []string{"derives a refresh interval of"} {
+				if !strings.Contains(compound, want) {
+					t.Errorf("%s was not understood as a duration; the guard did not fire:\n%s",
+						tc.compound, compound)
+				}
+				if !strings.Contains(simple, want) {
+					t.Errorf("%s did not fire the guard either, so this test proves nothing:\n%s",
+						tc.simple, simple)
+				}
+			}
+		})
+	}
+}
+
+// A window this cannot parse must read as unparseable, never as zero -- zero is "no expiry", which
+// switches off the very checks that would have caught the misconfiguration.
+func TestAnUnparseableWindowDoesNotReadAsNoExpiry(t *testing.T) {
+	out := renderExpectingFailure(t, "--set", "retention.window=soon")
+	if !strings.Contains(out, "is not a duration") {
+		t.Errorf("an unparseable window was accepted. It reaches zot verbatim as the expiry "+
+			"policy while every check here skips it, because the parser answers -1 and -1 is not "+
+			"a margin to compare against:\n%s", out)
 	}
 }
