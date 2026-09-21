@@ -197,10 +197,13 @@ func TestExpiryIsNotPrompt(t *testing.T) {
 	repo := keepaliveRepo("cold")
 	digest := pushTinyImage(t, repo)
 
-	sleepInCluster(t, watchFor(t))
+	waited := watchFor(t)
+	sleepInCluster(t, waited)
 
-	t.Logf("after 90s with no pulls against a %s window: content alive=%v, tags now: %s",
-		retentionWindow, manifestExistsByDigest(t, repo, digest), tagsList(t, repo))
+	// The duration is read back rather than written in, because it is derived now -- the message
+	// said "90s" for a while after it had stopped waiting 90s.
+	t.Logf("after %ds with no pulls against a %s window: content alive=%v, tags now: %s",
+		waited, retentionWindow, manifestExistsByDigest(t, repo, digest), tagsList(t, repo))
 }
 
 // Untagged is not unreferenced. ADR 0010 makes referencing images BY DIGEST the recommended usage,
