@@ -63,7 +63,10 @@ spec:
             - --s3-path-style={{ $.Values.operator.s3.pathStyle }}
             {{- end }}
             - --keep-builds={{ .Values.operator.keepBuilds }}
-            - --retention-refresh-interval={{ .Values.operator.retention.refreshInterval }}
+            - --retention-refresh-interval={{ include "kube-oci-composer.composerRefreshInterval" . }}
+            {{- with include "kube-oci-composer.refExportArgs" $ | trim }}
+            {{- . | nindent 12 }}
+            {{- end }}
             {{- if .Values.operator.requirePinnedSources }}
             - --require-pinned-sources
             {{- end }}

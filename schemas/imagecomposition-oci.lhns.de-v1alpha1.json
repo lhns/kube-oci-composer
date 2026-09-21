@@ -383,7 +383,7 @@
               "type": "boolean"
             },
             "onConflict": {
-              "description": "OnConflict decides what happens when a tag already resolves to different content: Fail\n(refuse and stall), Overwrite (move the tag), or Keep (leave it, drop this build, stay\nReady). Defaults to Fail.\n\nRepublishing IDENTICAL content is a no-op regardless of this field, so a steady reconcile\nloop never reaches it -- only a real change of meaning does.\n\nDeliberately carries NO schema default, unlike the `immutable` field it replaces. Structural\ndefaults are applied when an object is read back from storage, so defaulting this would\nrewrite every existing `immutable: false` object into a refusing one the moment the CRD was\nupgraded -- a silent reversal of a setting its author chose on purpose. The effective default\nlives in ResolveConflictPolicy instead, where it can consult `immutable` first.",
+              "description": "OnConflict decides what happens when a tag already resolves to different content: Fail\n(refuse and stall), Overwrite (move the tag), or Keep (leave it, drop this build, stay\nReady). Defaults to Fail.\n\nRepublishing IDENTICAL content is a no-op regardless of this field, so a steady reconcile\nloop never reaches it -- only a real change of meaning does.\n\nEvaluated against the digest actually produced, on both kinds: the build uploads by digest\nand this controller applies the names afterwards (ADR 0054). A tag meant to MOVE therefore\nconflicts under Fail -- that is what Fail asks for -- and wants Overwrite instead.\n\nDeliberately carries NO schema default, unlike the `immutable` field it replaces. Structural\ndefaults are applied when an object is read back from storage, so defaulting this would\nrewrite every existing `immutable: false` object into a refusing one the moment the CRD was\nupgraded -- a silent reversal of a setting its author chose on purpose. The effective default\nlives in ResolveConflictPolicy instead, where it can consult `immutable` first.",
               "enum": [
                 "Fail",
                 "Overwrite",
@@ -422,6 +422,55 @@
               },
               "maxItems": 32,
               "type": "array"
+            },
+            "writeRefTo": {
+              "description": "WriteRefTo exports the published reference into a ConfigMap. Off unless set, and refused\nunless the controller allow-lists the target namespace. See RefExport.",
+              "properties": {
+                "annotations": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "description": "Annotations are added to the generated ConfigMap. Gated by\n--ref-export-allowed-annotations, exactly as Labels is.",
+                  "type": "object"
+                },
+                "keys": {
+                  "description": "Keys names the ConfigMap keys to write.",
+                  "properties": {
+                    "digest": {
+                      "description": "Digest receives the bare sha256:... value.",
+                      "type": "string"
+                    },
+                    "ref": {
+                      "description": "Ref receives the full pullable reference, registry/repository@sha256:...\n\nPrefer this over Digest alone: a consumer substituting a bare digest into an image field\nproduces a trailing \"@\" on an empty string if the key is ever missing, which fails later and\nless legibly than a missing image would.",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object",
+                  "x-kubernetes-validations": [
+                    {
+                      "message": "set at least one of ref or digest",
+                      "rule": "has(self.ref) || has(self.digest)"
+                    }
+                  ]
+                },
+                "labels": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "description": "Labels are added to the generated ConfigMap.\n\nEach key must be permitted by --ref-export-allowed-labels, which is empty by default: these\nland on an object in a namespace this object may not otherwise touch. An unpermitted key is\nrefused rather than dropped, because a dropped one leaves a ConfigMap that looks right.\n\nThe controller's own watch labels and its managed-by and owner labels are written last, so\nnothing set here can turn them off.",
+                  "type": "object"
+                },
+                "namespace": {
+                  "description": "Namespace to write the ConfigMap in.\n\nMust be the object's OWN namespace, or one the operator allow-listed with\n--ref-export-namespaces (ADR 0056). Anything else is refused.\n\nNo default, deliberately: a substitution source is read from the CONSUMING Kustomization's\nnamespace, so defaulting this to the object's own would often produce a ConfigMap nothing\nreads, silently.",
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "keys",
+                "namespace"
+              ],
+              "type": "object"
             }
           },
           "type": "object",
@@ -660,6 +709,24 @@
           "description": "ObservedGeneration is the last spec generation reconciled.",
           "format": "int64",
           "type": "integer"
+        },
+        "refExport": {
+          "description": "RefExport is the ConfigMap push.writeRefTo last wrote, so the controller can clean it up\nwhen the spec moves it elsewhere or stops asking for it.",
+          "properties": {
+            "name": {
+              "description": "Name of the ConfigMap that was written.",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "Namespace it was written in.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "namespace"
+          ],
+          "type": "object"
         }
       },
       "type": "object"

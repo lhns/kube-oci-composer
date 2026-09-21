@@ -57,6 +57,10 @@ The missing third answer is *leave it alone*.
 The field is identical on both kinds, deliberately. An operator moving between them should not have
 to learn a second set of semantics for the same question.
 
+**This was aspirational when written.** `ImageBuild` could not evaluate it exactly, because
+buildctl pushed and named in one operation and the new digest did not exist when the check ran.
+[ADR 0054](0054-name-it-after-you-push-it.md) makes the claim true by uploading before naming.
+
 **`Keep` must record the divergence.** `status.conflict` names the tag, what it resolves to, what
 was dropped, and when. Without it the object reads Ready while *not* having published what its spec
 produces, and nothing anywhere says the two disagree — which is precisely the shape of the incident
@@ -71,6 +75,9 @@ The two kinds fill it in differently, and the difference is not an oversight:
 - On `ImageBuild` no build is run at all, so `dropped` is empty and `status.artifact` is left
   untouched. Synthesising one from what the tag holds would assert that this object produced that
   content, which on this kind is exactly what cannot be known.
+
+  **Superseded by [ADR 0054](0054-name-it-after-you-push-it.md).** The build now completes before
+  the conflict is decided, so `dropped` carries a real digest here too.
 
 **`immutable` is deprecated, not removed.** It is honoured when `onConflict` is unset: `true` means
 `Fail`, `false` means `Overwrite`. Precedence is `onConflict`, then `immutable`, then `Fail`.

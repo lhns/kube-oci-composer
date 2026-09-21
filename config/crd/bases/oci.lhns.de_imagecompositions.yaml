@@ -508,6 +508,10 @@ spec:
                       Republishing IDENTICAL content is a no-op regardless of this field, so a steady reconcile
                       loop never reaches it -- only a real change of meaning does.
 
+                      Evaluated against the digest actually produced, on both kinds: the build uploads by digest
+                      and this controller applies the names afterwards (ADR 0054). A tag meant to MOVE therefore
+                      conflicts under Fail -- that is what Fail asks for -- and wants Overwrite instead.
+
                       Deliberately carries NO schema default, unlike the `immutable` field it replaces. Structural
                       defaults are applied when an object is read back from storage, so defaulting this would
                       rewrite every existing `immutable: false` object into a refusing one the moment the CRD was
@@ -560,6 +564,65 @@ spec:
                       type: string
                     maxItems: 32
                     type: array
+                  writeRefTo:
+                    description: |-
+                      WriteRefTo exports the published reference into a ConfigMap. Off unless set, and refused
+                      unless the controller allow-lists the target namespace. See RefExport.
+                    properties:
+                      annotations:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          Annotations are added to the generated ConfigMap. Gated by
+                          --ref-export-allowed-annotations, exactly as Labels is.
+                        type: object
+                      keys:
+                        description: Keys names the ConfigMap keys to write.
+                        properties:
+                          digest:
+                            description: Digest receives the bare sha256:... value.
+                            type: string
+                          ref:
+                            description: |-
+                              Ref receives the full pullable reference, registry/repository@sha256:...
+
+                              Prefer this over Digest alone: a consumer substituting a bare digest into an image field
+                              produces a trailing "@" on an empty string if the key is ever missing, which fails later and
+                              less legibly than a missing image would.
+                            type: string
+                        type: object
+                        x-kubernetes-validations:
+                        - message: set at least one of ref or digest
+                          rule: has(self.ref) || has(self.digest)
+                      labels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          Labels are added to the generated ConfigMap.
+
+                          Each key must be permitted by --ref-export-allowed-labels, which is empty by default: these
+                          land on an object in a namespace this object may not otherwise touch. An unpermitted key is
+                          refused rather than dropped, because a dropped one leaves a ConfigMap that looks right.
+
+                          The controller's own watch labels and its managed-by and owner labels are written last, so
+                          nothing set here can turn them off.
+                        type: object
+                      namespace:
+                        description: |-
+                          Namespace to write the ConfigMap in.
+
+                          Must be the object's OWN namespace, or one the operator allow-listed with
+                          --ref-export-namespaces (ADR 0056). Anything else is refused.
+
+                          No default, deliberately: a substitution source is read from the CONSUMING Kustomization's
+                          namespace, so defaulting this to the object's own would often produce a ConfigMap nothing
+                          reads, silently.
+                        minLength: 1
+                        type: string
+                    required:
+                    - keys
+                    - namespace
+                    type: object
                 type: object
                 x-kubernetes-validations:
                 - message: 'immutable and onConflict contradict each other: immutable
@@ -808,6 +871,21 @@ spec:
                 description: ObservedGeneration is the last spec generation reconciled.
                 format: int64
                 type: integer
+              refExport:
+                description: |-
+                  RefExport is the ConfigMap push.writeRefTo last wrote, so the controller can clean it up
+                  when the spec moves it elsewhere or stops asking for it.
+                properties:
+                  name:
+                    description: Name of the ConfigMap that was written.
+                    type: string
+                  namespace:
+                    description: Namespace it was written in.
+                    type: string
+                required:
+                - name
+                - namespace
+                type: object
             type: object
         required:
         - spec

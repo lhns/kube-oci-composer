@@ -359,6 +359,11 @@ type ImageBuildStatus struct {
 	// +optional
 	BuildRef *LocalObjectReference `json:"buildRef,omitempty"`
 
+	// RefExport is the ConfigMap push.writeRefTo last wrote, so the controller can clean it up
+	// when the spec moves it elsewhere or stops asking for it.
+	// +optional
+	RefExport *RefExportStatus `json:"refExport,omitempty"`
+
 	// LastAttempt records the most recent execution.
 	// +optional
 	LastAttempt *BuildAttempt `json:"lastAttempt,omitempty"`

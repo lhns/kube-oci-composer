@@ -22,8 +22,8 @@ func TestSplitList(t *testing.T) {
 		{" a.io , b.io ", []string{"a.io", "b.io"}},
 		{"a.io,,b.io,", []string{"a.io", "b.io"}},
 	} {
-		if got := splitList(tc.in); !reflect.DeepEqual(got, tc.want) {
-			t.Errorf("splitList(%q) = %#v, want %#v", tc.in, got, tc.want)
+		if got := SplitList(tc.in); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("SplitList(%q) = %#v, want %#v", tc.in, got, tc.want)
 		}
 	}
 }

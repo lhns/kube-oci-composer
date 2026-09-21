@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // retentionWindow mirrors pulledWithin in manifests/registry.yaml, for the failure messages. It is
@@ -34,19 +35,56 @@ const retentionWindow = "30s"
 // of repositories in the registry, and the bundled registry now holds every image the whole suite
 // produces, build caches included. TestExpiryIsNotPrompt records the same thing from the other side.
 //
-// This is a deadline for "did it happen at all", not a measurement of when. Raising it costs nothing
-// when collection is prompt, because the poll returns as soon as the tag goes.
+// This is a deadline for "did it happen at all", not a measurement of when. Overshooting costs
+// nothing when collection is prompt, because the poll returns as soon as the tag goes.
 //
-// Raised from 420 after it fired on main: the control survived the full 420s, which fails the suite
-// rather than letting every retention assertion pass vacuously. One added ImageBuild -- one more
-// repository in the rotation -- was enough, which says the old value had no margin left rather than
-// that anything broke. The build was folded into an existing one, and this raised as well, because
-// the next repository anyone adds would have done the same thing.
-const collectionDeadline = 600
+// It used to be a constant, raised from 420 to 600 after it fired on main: the control survived the
+// full 420s, which fails the suite rather than letting every retention assertion pass vacuously.
+// ONE added ImageBuild -- one more repository in the rotation -- was enough, which said the value
+// had no margin left rather than that anything had broken.
+//
+// It is now a floor with a computed term above it, and the floor is doing most of the work.
+//
+// The computed term exists so that adding a test which pushes a new repository lengthens this
+// automatically, instead of quietly spending margin somebody else was relying on -- which is how
+// the old constant was outgrown by ONE added ImageBuild.
+//
+// The floor exists because the model behind the computed term is not trustworthy. It assumes a
+// repository is reached every (repositories x gcInterval); a run with a one-second sweep, where
+// that model predicted a 121s deadline would be ample, failed with the control still alive. So the
+// estimate is treated as a lower bound on how long to wait and never as permission to wait less
+// than the value this suite is known to pass on.
+//
+// Overshooting costs nothing when collection is prompt: the poll returns as soon as the tag goes.
+// Undershooting fails the suite and reads like a retention bug.
+func collectionDeadline(t *testing.T) int {
+	t.Helper()
+	const floor = 600
+	if s := int((deployedGCDelay(t) + 4*deployedRotation(t)).Seconds()); s > floor {
+		return s
+	}
+	return floor
+}
 
 // keepaliveRepo scopes these tests to the repository prefix the retention policy applies to, so
 // nothing else in the suite can be collected out from under it.
 func keepaliveRepo(name string) string { return "keepalive-" + name }
+
+// watchFor is how long a survival test watches, derived from what the registry was deployed with
+// rather than picked.
+//
+// Two things have to happen before content can die, so both are in it. Nothing younger than
+// gcDelay is a candidate at all -- watch for less and "it survived" is a statement about the clock,
+// not about retention. And being a candidate is not being collected: the collector has to reach
+// THIS repository, which it does on a rotation, not on every sweep.
+//
+// An earlier version used gcInterval for the second term, which is the sweep and not the rotation.
+// It was right only while the two were close.
+func watchFor(t *testing.T) int {
+	t.Helper()
+	d := 2*deployedGCDelay(t) + 2*deployedRotation(t)
+	return int(d.Seconds())
+}
 
 // The load-bearing measurement: a PULL resets the retention clock.
 //
@@ -58,6 +96,10 @@ func keepaliveRepo(name string) string { return "keepalive-" + name }
 //
 // zot's own vocabulary for this is `pulledWithin`. That it is documented is not evidence; this is.
 func TestPullingAnImageKeepsItFromExpiring(t *testing.T) {
+	// NOT t.Parallel(), unlike the survival-only tests in this package. This one ends in a negative
+	// control that waits for a real deletion, and concurrent tests put more repositories in the
+	// registry at once -- which is the thing the collector's rotation is slowest at. Tried, and it
+	// failed: see the note on E2E_GC_FACTOR in up.sh.
 	refreshed := keepaliveRepo("refreshed")
 	abandoned := keepaliveRepo("abandoned")
 
@@ -81,7 +123,9 @@ func TestPullingAnImageKeepsItFromExpiring(t *testing.T) {
 	//
 	// So the refresh asks for everything it wants kept, because the cost is one small request and
 	// the alternative is depending on which of those two readings is right.
-	refreshBothFor(t, refreshed, "v1", keptDigest, 90)
+	seconds := watchFor(t)
+	requireCollectionPossible(t, time.Duration(seconds)*time.Second, "a refreshed image")
+	refreshBothFor(t, refreshed, "v1", keptDigest, seconds)
 
 	// THE GUARANTEE: content named by a live object is still there.
 	if !manifestExistsByDigest(t, refreshed, keptDigest) {
@@ -109,7 +153,7 @@ func TestPullingAnImageKeepsItFromExpiring(t *testing.T) {
 	// loop and passed — but a separate test that pushed an image and waited the same 90s saw its tag
 	// still present, which is the same scenario with the opposite result. That is what a marginal
 	// assertion looks like from the outside: green, and one slow runner away from red.
-	eventuallyUntagged(t, abandoned, "v1", collectionDeadline)
+	eventuallyUntagged(t, abandoned, "v1", collectionDeadline(t))
 }
 
 // eventuallyUntagged waits for a tag to be collected, and fails loudly if it never is.
@@ -148,13 +192,18 @@ func eventuallyUntagged(t *testing.T, repository, tag string, maxSeconds int) {
 // make an improvement in zot show up here as a regression — and asserting the opposite is what made
 // the negative control marginal in the first place.
 func TestExpiryIsNotPrompt(t *testing.T) {
+	t.Parallel()
+
 	repo := keepaliveRepo("cold")
 	digest := pushTinyImage(t, repo)
 
-	sleepInCluster(t, 90)
+	waited := watchFor(t)
+	sleepInCluster(t, waited)
 
-	t.Logf("after 90s with no pulls against a %s window: content alive=%v, tags now: %s",
-		retentionWindow, manifestExistsByDigest(t, repo, digest), tagsList(t, repo))
+	// The duration is read back rather than written in, because it is derived now -- the message
+	// said "90s" for a while after it had stopped waiting 90s.
+	t.Logf("after %ds with no pulls against a %s window: content alive=%v, tags now: %s",
+		waited, retentionWindow, manifestExistsByDigest(t, repo, digest), tagsList(t, repo))
 }
 
 // Untagged is not unreferenced. ADR 0010 makes referencing images BY DIGEST the recommended usage,
@@ -164,12 +213,21 @@ func TestExpiryIsNotPrompt(t *testing.T) {
 // Distinct from the guarantee test above, where the manifest keeps its tag throughout: here the tag
 // is removed first, so the manifest is protected by `keepUntagged` alone.
 func TestPullingByDigestKeepsAnUntaggedImageAlive(t *testing.T) {
+	t.Parallel()
+
 	repo := keepaliveRepo("untagged")
+
+	// This test has no negative control, so it asserts its own preconditions: untagged collection
+	// must be ON, or nothing here could be collected and the measurement is empty.
+	requireUntaggedCollection(t, repo)
+	seconds := watchFor(t)
+	requireCollectionPossible(t, time.Duration(seconds)*time.Second, "an untagged manifest")
+
 	digest := pushTinyImage(t, repo)
 
 	// Remove the tag, leaving the manifest reachable only by digest.
 	deleteTag(t, repo, "v1")
-	refreshFor(t, repo, digest, 90)
+	refreshFor(t, repo, digest, seconds)
 
 	if !manifestExistsByDigest(t, repo, digest) {
 		t.Fatalf("an untagged manifest was collected while being pulled by digest. ADR 0010 tells "+

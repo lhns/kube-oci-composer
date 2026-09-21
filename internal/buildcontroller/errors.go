@@ -13,10 +13,15 @@ const (
 	// GETs a minute rather than a hot loop.
 	pendingRetryInterval = 30 * time.Second
 
-	// buildPollInterval is how often a running Job is re-observed. A build takes minutes, so
-	// polling faster buys nothing; the Job is also watched, so this is a backstop rather than the
-	// primary signal.
-	buildPollInterval = 15 * time.Second
+	// defaultBuildPollInterval is how often a running Job is re-observed. A build takes minutes,
+	// so polling faster buys nothing; the Job is also watched, so this is a backstop rather than
+	// the primary signal.
+	//
+	// It is configurable because it bounds something else: the image is pushed UNTAGGED and named
+	// when the controller next looks (ADR 0054), so this is how long a build's own output can be
+	// reclaimed by a registry's collector. The chart derives gcDelay from it, and a test that wants
+	// short retention timings shortens this to shorten that.
+	defaultBuildPollInterval = 15 * time.Second
 
 	// maxFailureBackoff caps the retry interval. A ceiling rather than unbounded exponential
 	// backoff: a failing build is usually waiting for a human to push a Dockerfile fix, and the

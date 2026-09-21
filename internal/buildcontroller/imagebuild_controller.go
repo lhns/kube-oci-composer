@@ -57,6 +57,15 @@ type ImageBuildReconciler struct {
 	// leaving it unprotected until the next scheduled cycle. Optional: nil disables it, which
 	// is what --retention-refresh-interval=0 means.
 	Refresher *retention.Refresher
+	// Export is what the operator, rather than an object, decides about push.writeRefTo: which
+	// foreign namespaces are permitted, and which metadata keys an object may set. Both empty by
+	// default -- the controller is the boundary here, not RBAC (ADR 0056).
+	Export recon.ExportOptions
+
+	// BuildPollInterval is how often a running Job is re-observed, and therefore how long a
+	// pushed-but-unnamed manifest can be collected out from under this controller. Zero means the
+	// default; see defaultBuildPollInterval.
+	BuildPollInterval time.Duration
 
 	// Attestor signs the build's output, after the Job has terminated.
 	//
@@ -86,6 +95,7 @@ type ImageBuildReconciler struct {
 
 // +kubebuilder:rbac:groups=oci.lhns.de,resources=imagebuilds,verbs=get;list;watch
 // +kubebuilder:rbac:groups=oci.lhns.de,resources=imagebuilds/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=oci.lhns.de,resources=imagebuilds/finalizers,verbs=update
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // Secrets are read for their resourceVersion only, so a rotation moves the input hash and
@@ -109,7 +119,10 @@ type ImageBuildReconciler struct {
 // get;list;watch and NOTHING else. Everything this controller WRITES into a tenant namespace is a
 // Secret -- the Dockerfile copy included -- so no create or update appears here, and that asymmetry
 // is deliberate rather than an oversight.
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
+// No ConfigMap writes here, deliberately. push.writeRefTo creates one, but the chart grants that
+// as a namespaced Role in each allow-listed namespace -- cluster-wide would reach every namespace,
+// including the one a cluster substitutes from. ADR 0055.
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=gitrepositories;ocirepositories;buckets,verbs=get;list;watch
 
@@ -163,6 +176,16 @@ func (r *ImageBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 // reconcile is the state machine over the owned Job.
 func (r *ImageBuildReconciler) reconcile(ctx context.Context, obj *ociv1alpha1.ImageBuild) (ctrl.Result, error) {
+	// status.RefExport matters as much as the spec here: removing writeRefTo has to clean up what
+	// it wrote, and that branch is the only place that can.
+	if exp := obj.Spec.Push.GetWriteRefTo(); !obj.DeletionTimestamp.IsZero() || exp != nil ||
+		obj.Status.RefExport != nil {
+		res, done, err := r.reconcileExportLifecycle(ctx, obj, exp)
+		if done || err != nil {
+			return res, err
+		}
+	}
+
 	inputs, contextURL, err := r.resolveInputs(ctx, obj)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -205,7 +228,7 @@ func (r *ImageBuildReconciler) reconcile(ctx context.Context, obj *ociv1alpha1.I
 		if err := r.startBuild(ctx, obj, inputs, inputHash, contextURL); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{RequeueAfter: buildPollInterval}, nil
+		return ctrl.Result{RequeueAfter: r.pollInterval()}, nil
 	}
 	return r.observeJob(ctx, obj, job, inputs, inputHash)
 }
@@ -566,10 +589,27 @@ func (r *ImageBuildReconciler) observeJob(ctx context.Context, obj *ociv1alpha1.
 		if err != nil {
 			return ctrl.Result{}, err
 		}
+		// The content is pushed; naming it is this controller's decision, and the only point at
+		// which onConflict can be enforced exactly. ADR 0054.
+		conflict, err := r.applyTags(ctx, obj, digest)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if conflict != nil {
+			// onConflict: Keep. The tag was left alone, so this build is not published under it
+			// and there is no artifact to record -- but what was dropped is now a real digest
+			// rather than the empty field ADR 0029 had to accept.
+			r.recordKept(obj, conflict)
+			return ctrl.Result{RequeueAfter: recon.Interval(obj.Spec.Interval)}, nil
+		}
+
 		r.recordSuccess(obj, inputs, inputHash, digest)
 		// After recordSuccess, so status already names what was built when signing looks at it.
 		obj.Status.Attestations = r.signBuild(ctx, obj, digest)
 		r.refreshNow(ctx, obj)
+		if err := r.exportRef(ctx, obj); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{RequeueAfter: recon.Interval(obj.Spec.Interval)}, nil
 
 	case jobFailed(job):
@@ -605,7 +645,7 @@ func (r *ImageBuildReconciler) observeJob(ctx context.Context, obj *ociv1alpha1.
 		return ctrl.Result{}, fmt.Errorf("build failed: %s", msg)
 
 	default:
-		return ctrl.Result{RequeueAfter: buildPollInterval}, nil
+		return ctrl.Result{RequeueAfter: r.pollInterval()}, nil
 	}
 }
 
@@ -1044,4 +1084,102 @@ func (r *ImageBuildReconciler) refreshNow(ctx context.Context, obj *ociv1alpha1.
 		Object: obj, Push: obj.Spec.Push,
 		Artifact: obj.Status.Artifact, History: obj.Status.History,
 	})
+}
+
+// exportRef publishes the reference into the ConfigMap a consumer substitutes from.
+//
+// After recordSuccess, so what is exported is exactly what status reports, and only on a confirmed
+// publish -- a consumer substitutes whatever it finds, and a missing key substitutes the empty
+// string with no complaint from anything.
+func (r *ImageBuildReconciler) exportRef(ctx context.Context, obj *ociv1alpha1.ImageBuild) error {
+	if obj.Spec.Push == nil || obj.Spec.Push.WriteRefTo == nil || obj.Status.Artifact == nil {
+		return nil
+	}
+	written, err := recon.ExportRef(ctx, r.Client, obj, obj.Spec.Push.WriteRefTo, r.Export,
+		obj.Status.Artifact.Digest, obj.Status.Artifact.Ref)
+	if err != nil {
+		return err
+	}
+	return r.recordExport(ctx, obj, written)
+}
+
+// recordExport remembers the ConfigMap that was written, and removes the previous one when the
+// spec has moved it to another namespace.
+//
+// status is the only record of where it went: the name is derivable from the object, the namespace
+// is not. Without it, moving writeRefTo.namespace strands a ConfigMap a consumer may still be
+// substituting from (ADR 0056).
+func (r *ImageBuildReconciler) recordExport(
+	ctx context.Context, obj *ociv1alpha1.ImageBuild, written *ociv1alpha1.RefExportStatus,
+) error {
+	prev := obj.Status.RefExport
+	if prev != nil && written != nil && *prev == *written {
+		return nil
+	}
+	if err := recon.DeleteExportedRef(ctx, r.Client, obj, prev); err != nil {
+		return err
+	}
+	patch := client.MergeFrom(obj.DeepCopy())
+	obj.Status.RefExport = written
+	return r.Status().Patch(ctx, obj, patch)
+}
+
+// pollInterval is how often a running Job is re-observed, defaulted here rather than at
+// construction so a zero value in a test means "the normal one".
+func (r *ImageBuildReconciler) pollInterval() time.Duration {
+	if r.BuildPollInterval > 0 {
+		return r.BuildPollInterval
+	}
+	return defaultBuildPollInterval
+}
+
+// reconcileExportLifecycle keeps the finalizer in step with whether there is anything to clean up.
+//
+// The finalizer is added only for an export into ANOTHER namespace, where a cross-namespace owner
+// reference is invalid and nothing else would reclaim the ConfigMap. An own-namespace export is
+// owned by this object and goes with it, so most objects that use the feature -- and every object
+// that does not -- keep a deletion that does not depend on this controller running.
+// done is true when the object is going away and this reconcile should stop.
+func (r *ImageBuildReconciler) reconcileExportLifecycle(
+	ctx context.Context, obj *ociv1alpha1.ImageBuild, exp *ociv1alpha1.RefExport,
+) (ctrl.Result, bool, error) {
+	has := recon.ContainsFinalizer(obj, ociv1alpha1.Finalizer)
+
+	if !obj.DeletionTimestamp.IsZero() {
+		if !has {
+			return ctrl.Result{}, true, nil
+		}
+		// The export is the one thing a build leaves behind: its Secrets belong to its Job and the
+		// Job belongs to this object, so those go on their own.
+		if err := recon.DeleteExportedRef(ctx, r.Client, obj, obj.Status.RefExport); err != nil {
+			return ctrl.Result{}, true, err
+		}
+		patch := client.MergeFrom(obj.DeepCopy())
+		obj.Finalizers = recon.RemoveFinalizer(obj.Finalizers, ociv1alpha1.Finalizer)
+		return ctrl.Result{}, true, client.IgnoreNotFound(r.Patch(ctx, obj, patch))
+	}
+
+	// An export that is no longer asked for is removed now rather than at deletion: a consumer
+	// goes on substituting from whatever it finds, so a ConfigMap nobody maintains is worse than
+	// no ConfigMap at all.
+	if exp == nil && obj.Status.RefExport != nil {
+		if err := r.recordExport(ctx, obj, nil); err != nil {
+			return ctrl.Result{}, true, err
+		}
+	}
+
+	wantsFinalizer := exp != nil && exp.Namespace != obj.Namespace
+	if wantsFinalizer == has {
+		return ctrl.Result{}, false, nil
+	}
+	patch := client.MergeFrom(obj.DeepCopy())
+	if wantsFinalizer {
+		obj.Finalizers = append(obj.Finalizers, ociv1alpha1.Finalizer)
+	} else {
+		obj.Finalizers = recon.RemoveFinalizer(obj.Finalizers, ociv1alpha1.Finalizer)
+	}
+	if err := r.Patch(ctx, obj, patch); err != nil {
+		return ctrl.Result{}, true, fmt.Errorf("updating finalizer: %w", err)
+	}
+	return ctrl.Result{}, false, nil
 }

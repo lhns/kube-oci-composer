@@ -97,28 +97,53 @@ data:
         {{- end }}
         {{- if $role.mutator }}
         "gc": true,
-        "gcDelay": {{ $.Values.registry.retention.gcDelay | quote }},
-        "gcInterval": {{ $.Values.registry.retention.gcInterval | quote }},
+        "gcDelay": {{ include "kube-oci-composer.gcDelay" $ | quote }},
+        "gcInterval": {{ include "kube-oci-composer.gcInterval" $ | quote }},
         "retention": {
           "dryRun": {{ $.Values.registry.retention.dryRun }},
           "policies": [
             {
               "repositories": {{ toJson $.Values.registry.retention.repositories }},
-              "deleteUntagged": true,
+              "deleteUntagged": {{ $.Values.registry.retention.deleteUntagged }},
               {{- /*
-              Two entries, and a tag survives if EITHER keeps it. Pull recency alone leaves an image
-              unprotected between being built and the refresher first reaching it.
+              ONE entry carrying BOTH rules, and it has to be one entry.
 
-              This only ever helps brand-new content. zot records a push time the first time it
-              sees a digest and never updates it, so republishing the same digest does not renew
-              anything -- and an image the refresher is already touching has a more recent pull
-              than push regardless.
+              zot's getTagPolicy returns on the FIRST pattern that matches:
+
+                  for idx, tagPolicy := range tagPolicies {
+                      if p.regex.MatchesListOfRegex(tag, tagPolicy.Patterns) {
+                          return tagPolicy, idx, nil
+                      }
+                  }
+
+              so a second entry whose patterns are also ".*" is never reached. This was written as
+              two entries and only pulledWithin was ever in force -- which is not what the config
+              said, and left a tag that had been pushed and never pulled protected by nothing.
+
+              Rules WITHIN an entry are OR-ed ("we retain candidates if any of the below rules are
+              met"), so one entry with both is the configuration that does what two entries looked
+              like they did. Verified against zot v2.1.21; see ADR 0057.
+
+              Push recency only ever helps brand-new content: zot records a push time the first
+              time it sees a digest and never updates it, so republishing the same digest renews
+              nothing, and an image the refresher is already touching has a more recent pull than
+              push regardless.
               */}}
               "keepTags": [
-                { "patterns": [".*"], "pulledWithin": {{ $.Values.registry.retention.window | quote }} },
-                { "patterns": [".*"], "pushedWithin": {{ $.Values.registry.retention.window | quote }} }
+                {
+                  "patterns": [".*"],
+                  "pulledWithin": {{ $.Values.retention.window | quote }},
+                  "pushedWithin": {{ $.Values.retention.window | quote }}
+                }
               ],
-              "keepUntagged": { "pulledWithin": {{ $.Values.registry.retention.window | quote }} }
+              {{- /*
+              Pull recency alone leaves freshly pushed untagged content matching NOTHING, which is
+              what a build publishing by digest produces until the controller names it.
+              */}}
+              "keepUntagged": {
+                "pulledWithin": {{ $.Values.retention.window | quote }},
+                "pushedWithin": {{ $.Values.retention.window | quote }}
+              }
             }
           ]
         }

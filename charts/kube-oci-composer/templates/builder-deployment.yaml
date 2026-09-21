@@ -74,7 +74,11 @@ spec:
             - --source-date-epoch={{ .Values.imageBuild.sourceDateEpoch }}
             {{- include "kube-oci-composer.registryArgs" (dict "ctx" $ "supplyChain" .Values.imageBuild.supplyChain) | trim | nindent 12 }}
             - --keep-builds={{ .Values.imageBuild.keepBuilds }}
-            - --retention-refresh-interval={{ .Values.imageBuild.retention.refreshInterval }}
+            - --retention-refresh-interval={{ include "kube-oci-composer.builderRefreshInterval" . }}
+            - --build-poll-interval={{ .Values.imageBuild.buildPollInterval }}
+            {{- with include "kube-oci-composer.refExportArgs" $ | trim }}
+            {{- . | nindent 12 }}
+            {{- end }}
             {{- if .Values.imageBuild.requirePinnedSources }}
             - --require-pinned-sources
             {{- end }}

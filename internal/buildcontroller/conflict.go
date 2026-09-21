@@ -70,11 +70,13 @@ func (r *ImageBuildReconciler) checkTagConflict(
 		return false, nil, err
 	}
 
-	// What this build WILL produce is unknown -- that is the whole difference from the composer,
-	// whose output is a function of its spec (ADR 0025). So the question is not "does the tag hold
-	// something else than what we are about to push", which is unanswerable here, but "does the tag
-	// already hold something". The digest recorded in status is the one value that is legitimately
-	// ours, so a tag pointing at it is not a conflict.
+	// A PRE-FLIGHT, not the guarantee. applyTags decides this properly after the build, with the
+	// real digest; this exists only to decline burning a build pod on a tag that already holds
+	// something foreign.
+	//
+	// Necessarily approximate: what the build will produce is unknown here, so the digest recorded
+	// in status stands in for it. That makes a tag holding this object's OWN previous digest look
+	// fine, which is the hole ADR 0054 closes downstream -- harmless now that this is advisory.
 	ours := ""
 	if obj.Status.Artifact != nil {
 		ours = obj.Status.Artifact.Digest
@@ -579,4 +581,109 @@ func (r *ImageBuildReconciler) registryFor(
 		access.refOpts = append(access.refOpts, name.Insecure)
 	}
 	return access, nil
+}
+
+// applyTags names what the build pushed, and is where onConflict is actually enforced on this kind.
+//
+// The Job uploads by digest and names nothing, so by the time this runs the digest EXISTS. That is
+// the whole point: the question onConflict asks -- "would this change what the tag means?" -- is
+// answerable only with the new digest in hand. Before, the check ran ahead of the build against
+// `status.artifact.digest`, a stand-in for a value that did not yet exist, and the substitution had
+// a one-directional hole: a tag holding this object's OWN previous digest was exempt, so an object
+// remeaning its own tag was never a conflict. ADR 0054.
+//
+// Returns a conflict record when onConflict: Keep left the tag alone. Refuses terminally under
+// Fail, having tagged nothing -- the pushed manifest is then untagged and the registry's
+// deleteUntagged reclaims it.
+func (r *ImageBuildReconciler) applyTags(
+	ctx context.Context, obj *ociv1alpha1.ImageBuild, digest string,
+) (*ociv1alpha1.TagConflictStatus, error) {
+	p := obj.Spec.Push
+	tags, err := recon.EffectiveTags(p.GetTags(), p.GetRef())
+	if err != nil {
+		return nil, err
+	}
+	if len(tags) == 0 {
+		// Digest-only publication. The name IS the content, so nothing can be remeaned and there
+		// is nothing to apply.
+		return nil, nil
+	}
+
+	reg, err := r.registryFor(ctx, obj)
+	if err != nil {
+		return nil, err
+	}
+	if reg.repo == "" {
+		return nil, recon.Pending(
+			"this build names no push.repository, and no default registry is configured")
+	}
+
+	published, err := recon.ResolvePublished(reg.repo, tags, obj.Status.Artifact, reg.refOpts, reg.opts)
+	if err != nil {
+		return nil, err
+	}
+
+	// The real digest, which is what makes this exact rather than a proxy.
+	if tag, current := published.Conflicts(tags, digest); tag != "" {
+		switch p.ResolveConflictPolicy() {
+		case ociv1alpha1.ConflictFail:
+			return nil, recon.Terminal(
+				"tag %s already resolves to %s and this build produced %s; change the tag, or set "+
+					"onConflict: Overwrite if it is meant to move, or onConflict: Keep to leave it "+
+					"alone", tag, current, digest)
+		case ociv1alpha1.ConflictKeep:
+			now := metav1.Now()
+			// A REAL dropped digest. ADR 0029 recorded its absence here as unavoidable, because
+			// nothing was built before the check; uploading before naming is what makes it
+			// available.
+			return &ociv1alpha1.TagConflictStatus{
+				Tag: tag, Existing: current, Dropped: digest, ObservedAt: &now,
+			}, nil
+		}
+	}
+
+	desc, err := remote.Get(mustDigestRef(reg.repo, digest, reg.refOpts), reg.opts...)
+	switch {
+	case recon.IsNotFound(err):
+		// PENDING, not terminal: nothing about this object's spec would fix it, so stalling would
+		// wait for an event that cannot come. If it never appears the object says so every
+		// interval, rather than failing once and backing off into silence.
+		//
+		// But retrying only helps for one of the two causes, and the message has to say both. The
+		// manifest is UNTAGGED until this function names it, which is exactly what a registry's
+		// collector reclaims -- and if it was the repository's only content, the repository goes
+		// too, which is why this arrives as NAME_UNKNOWN rather than a missing manifest. The chart
+		// refuses a gcDelay short enough for that to be likely; a registry someone else configured
+		// carries no such guarantee.
+		return nil, recon.Pending(
+			"the build produced %s but %s does not serve it; the manifest is untagged until this "+
+				"controller names it, so either the registry has not caught up or its collector "+
+				"reclaimed it first -- check the registry's gcDelay if this persists",
+			digest, reg.repo)
+	case err != nil:
+		return nil, fmt.Errorf("reading the pushed manifest %s: %w", digest, err)
+	}
+	for _, tag := range tags {
+		ref, err := name.NewTag(reg.repo+":"+tag, reg.refOpts...)
+		if err != nil {
+			return nil, recon.Terminal("invalid tag %q: %v", tag, err)
+		}
+		if err := remote.Tag(ref, desc, reg.opts...); err != nil {
+			// Not terminal: the content is pushed and a retry re-applies the same names.
+			return nil, fmt.Errorf("tagging %s as %s: %w", digest, tag, err)
+		}
+	}
+	return nil, nil
+}
+
+// mustDigestRef builds the by-digest reference for content this controller just pushed.
+//
+// The digest comes from buildctl's own metadata file, so a parse failure here is not a user error;
+// the zero value fails the Get with a message naming the reference.
+func mustDigestRef(repo, digest string, opts []name.Option) name.Reference {
+	ref, err := name.NewDigest(repo+"@"+digest, opts...)
+	if err != nil {
+		return name.Digest{}
+	}
+	return ref
 }

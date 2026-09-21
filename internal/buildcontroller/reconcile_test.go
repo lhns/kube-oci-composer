@@ -112,6 +112,18 @@ func gitRepositoryAt(namespace, name, url, digest, revision string) *unstructure
 func harness(t *testing.T, dockerfile string, objs ...client.Object) *ImageBuildReconciler {
 	t.Helper()
 	srv := contextServer(t, contextTarball(t, "", dockerfile))
+
+	// A real registry, because the controller applies the tags now. Objects that name the
+	// placeholder repository are pointed at it so the publish path has somewhere to go.
+	host := startRegistry(t)
+	for _, o := range objs {
+		b, ok := o.(*ociv1alpha1.ImageBuild)
+		if !ok || b.Spec.Push == nil || b.Spec.Push.Repository != "ghcr.io/me/app" {
+			continue
+		}
+		b.Spec.Push.Repository = host + "/me/app"
+	}
+
 	all := append([]client.Object{gitRepository("team-a", "src", srv.URL, "sha256:ctx")}, objs...)
 
 	c := fake.NewClientBuilder().
@@ -120,7 +132,9 @@ func harness(t *testing.T, dockerfile string, objs ...client.Object) *ImageBuild
 		WithStatusSubresource(&ociv1alpha1.ImageBuild{}).
 		Build()
 
-	return &ImageBuildReconciler{Client: c, JobConfig: sampleConfig(), HTTPClient: srv.Client()}
+	cfg := sampleConfig()
+	cfg.InsecureRegistries = []string{host}
+	return &ImageBuildReconciler{Client: c, JobConfig: cfg, HTTPClient: srv.Client()}
 }
 
 func buildOf(t *testing.T, mutate func(*ociv1alpha1.ImageBuild)) *ociv1alpha1.ImageBuild {
@@ -210,7 +224,7 @@ func TestReconcileShortCircuitsOnUnchangedInputs(t *testing.T) {
 	if _, err := reconcileOnce(t, r, obj); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	succeedJob(t, r, obj, "sha256:beef")
+	succeedJob(t, r, obj)
 	if _, err := reconcileOnce(t, r, obj); err != nil {
 		t.Fatalf("reconcile after success: %v", err)
 	}
@@ -241,17 +255,17 @@ func TestSuccessRecordsTheArtifact(t *testing.T) {
 	if _, err := reconcileOnce(t, r, obj); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	succeedJob(t, r, obj, "sha256:cafe")
+	digest := succeedJob(t, r, obj)
 	if _, err := reconcileOnce(t, r, obj); err != nil {
 		t.Fatalf("reconcile after success: %v", err)
 	}
 
 	got := reload(t, r, obj)
-	if got.Status.Artifact == nil || got.Status.Artifact.Digest != "sha256:cafe" {
-		t.Fatalf("artifact = %+v, want digest sha256:cafe", got.Status.Artifact)
+	if got.Status.Artifact == nil || got.Status.Artifact.Digest != digest {
+		t.Fatalf("artifact = %+v, want digest %s", got.Status.Artifact, digest)
 	}
-	if got.Status.Artifact.Ref != "ghcr.io/me/app@sha256:cafe" {
-		t.Errorf("ref = %q", got.Status.Artifact.Ref)
+	if want := obj.Spec.Push.Repository + "@" + digest; got.Status.Artifact.Ref != want {
+		t.Errorf("ref = %q, want %q", got.Status.Artifact.Ref, want)
 	}
 	if len(got.Status.History) != 1 || got.Status.History[0].InputHash == "" {
 		t.Errorf("history = %+v, want one record carrying an input hash", got.Status.History)
@@ -423,8 +437,11 @@ func TestMissingPushIsTerminal(t *testing.T) {
 
 // succeedJob marks the object's Job succeeded and plants a pod reporting the digest the way the
 // build container's termination message does.
-func succeedJob(t *testing.T, r *ImageBuildReconciler, obj *ociv1alpha1.ImageBuild, digest string) {
+func succeedJob(t *testing.T, r *ImageBuildReconciler, obj *ociv1alpha1.ImageBuild) string {
 	t.Helper()
+	// The Job uploads by digest and names nothing; this stands in for that half so the controller
+	// has something real to tag.
+	_, digest := pushByDigest(t, obj.Spec.Push.Repository)
 	jobs := jobsIn(t, r, obj.Namespace)
 	if len(jobs) != 1 {
 		t.Fatalf("want one Job to succeed, got %d", len(jobs))
@@ -454,6 +471,7 @@ func succeedJob(t *testing.T, r *ImageBuildReconciler, obj *ociv1alpha1.ImageBui
 	if err := r.Status().Update(context.Background(), pod); err != nil {
 		t.Fatalf("updating pod status: %v", err)
 	}
+	return digest
 }
 
 // failJob marks the object's Job failed.

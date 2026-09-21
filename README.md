@@ -488,6 +488,8 @@ that were built, measured, and removed. Start with the index.
   mitigated and what is not.
 - [`docs/examples/spec-hash-tag/`](docs/examples/spec-hash-tag/) — deriving a tag from a hash of the
   spec, which is what makes referencing a tag safe.
+- [`docs/exporting-a-reference.md`](docs/exporting-a-reference.md) — `push.writeRefTo`, for when the
+  reference cannot be computed in advance, and what it costs to stop computing it.
 
 ## Licence
 

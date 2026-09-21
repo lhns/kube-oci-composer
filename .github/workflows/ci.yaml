@@ -148,8 +148,16 @@ jobs:
         run: |
           set -euo pipefail
           MODE="--set registry.publish.mode=internalOnly"
-          if helm template t charts/kube-oci-composer $MODE                --set registry.retention.window=2h > /dev/null 2>&1; then
+          if helm template t charts/kube-oci-composer $MODE                --set retention.window=2h --set retention.refreshInterval=1h > /dev/null 2>&1; then
             echo "FAIL: the chart rendered a 2h window against a 1h refresh interval"
+            exit 1
+          fi
+          if helm template t charts/kube-oci-composer $MODE                --set registry.enabled=false --set defaultRegistry.host=ghcr.io/example                --set retention.window=2h --set retention.refreshInterval=1h > /dev/null 2>&1; then
+            echo "FAIL: an EXTERNAL registry escaped the margin check, which is the deployment it helps most"
+            exit 1
+          fi
+          if helm template t charts/kube-oci-composer $MODE                --set registry.retention.gcDelay=1s > /dev/null 2>&1; then
+            echo "FAIL: a gcDelay shorter than the naming gap rendered; a build's own image is collectable"
             exit 1
           fi
           if helm template t charts/kube-oci-composer $MODE                --set operator.retention.refreshInterval=0 > /dev/null 2>&1; then

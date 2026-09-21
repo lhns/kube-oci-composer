@@ -174,7 +174,9 @@ func TestBuildJobArgs(t *testing.T) {
 		"platform=linux/amd64,linux/arm64",
 		"target=runtime",
 		"build-arg:VERSION=1.2.3",
-		"ghcr.io/me/app:v1",
+		// Uploaded, not named. The controller applies tags afterwards, once the digest exists and
+		// onConflict can be evaluated against it rather than against a stand-in. ADR 0054.
+		"name=ghcr.io/me/app,push=true,push-by-digest=true",
 		"push=true",
 		"rewrite-timestamp=true",
 		"SOURCE_DATE_EPOCH=0",
@@ -183,6 +185,11 @@ func TestBuildJobArgs(t *testing.T) {
 		if !strings.Contains(argv, want) {
 			t.Errorf("argv is missing %q\ngot: %s", want, argv)
 		}
+	}
+	// And the Job names no tag. A Job that tagged as it pushed is what made onConflict
+	// unenforceable here: the check then had to run before the digest existed.
+	if strings.Contains(argv, "ghcr.io/me/app:") {
+		t.Errorf("the build Job names a tag; naming belongs to the controller\ngot: %s", argv)
 	}
 }
 

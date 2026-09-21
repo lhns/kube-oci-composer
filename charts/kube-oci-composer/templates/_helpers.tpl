@@ -131,7 +131,8 @@ app.kubernetes.io/component: {{ .component }}
 {{/*
 The builder's names. A separate ServiceAccount and a separate Role, in the same namespace: merging
 the charts must not merge the PERMISSIONS. The builder's role can create Jobs -- that is, run
-arbitrary containers -- and the composer's cannot create a single object. See ADR 0025.
+arbitrary containers -- and the composer's can create only the ConfigMap push.writeRefTo exports.
+See ADR 0025, and ADR 0056 for why that one exception exists.
 */}}
 {{- define "kube-oci-composer.builderFullname" -}}
 {{- printf "%s-builder" (include "kube-oci-composer.fullname" .) | trunc 63 | trimSuffix "-" -}}
@@ -143,6 +144,29 @@ arbitrary containers -- and the composer's cannot create a single object. See AD
 {{- else -}}
 {{- default "default" .Values.imageBuild.serviceAccountName -}}
 {{- end -}}
+{{- end -}}
+
+{{/*
+push.writeRefTo's operator settings. Identical on both controllers, so they are rendered from one
+place: these govern a feature that behaves the same on both kinds, and a copy would drift.
+
+Each renders independently. An export into the object's OWN namespace needs no allow-list, so the
+labels and the permitted metadata keys are not conditional on refExport.namespaces being set --
+which they were while the allow-list was the only way to export at all.
+*/}}
+{{- define "kube-oci-composer.refExportArgs" -}}
+{{- with .Values.refExport.namespaces }}
+- --ref-export-namespaces={{ join "," . }}
+{{- end }}
+{{- with .Values.refExport.labels }}
+- --ref-export-labels={{ . }}
+{{- end }}
+{{- with .Values.refExport.allowedLabels }}
+- --ref-export-allowed-labels={{ join "," . }}
+{{- end }}
+{{- with .Values.refExport.allowedAnnotations }}
+- --ref-export-allowed-annotations={{ join "," . }}
+{{- end }}
 {{- end -}}
 
 {{- define "kube-oci-composer.registryFullname" -}}

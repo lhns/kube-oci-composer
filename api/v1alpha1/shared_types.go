@@ -304,6 +304,10 @@ type Push struct {
 	// Republishing IDENTICAL content is a no-op regardless of this field, so a steady reconcile
 	// loop never reaches it -- only a real change of meaning does.
 	//
+	// Evaluated against the digest actually produced, on both kinds: the build uploads by digest
+	// and this controller applies the names afterwards (ADR 0054). A tag meant to MOVE therefore
+	// conflicts under Fail -- that is what Fail asks for -- and wants Overwrite instead.
+	//
 	// Deliberately carries NO schema default, unlike the `immutable` field it replaces. Structural
 	// defaults are applied when an object is read back from storage, so defaulting this would
 	// rewrite every existing `immutable: false` object into a refusing one the moment the CRD was
@@ -311,6 +315,11 @@ type Push struct {
 	// lives in ResolveConflictPolicy instead, where it can consult `immutable` first.
 	// +optional
 	OnConflict TagConflictPolicy `json:"onConflict,omitempty"`
+
+	// WriteRefTo exports the published reference into a ConfigMap. Off unless set, and refused
+	// unless the controller allow-lists the target namespace. See RefExport.
+	// +optional
+	WriteRefTo *RefExport `json:"writeRefTo,omitempty"`
 }
 
 // TagConflictPolicy decides what happens when a tag already resolves to content other than what
@@ -497,4 +506,87 @@ func RevisionMatches(want, got string) bool {
 	}
 	ref, _, found := strings.Cut(got, "@")
 	return found && ref == want
+}
+
+// RefExport writes what was published into a ConfigMap, for a consumer that substitutes it.
+//
+// On `ImageBuild` the reference cannot be known in advance at all: the digest is an observation
+// rather than a function of the spec (ADR 0025). On `ImageComposition` it is computable from the
+// spec hash (ADR 0017) -- but only by reproducing that hash on the consuming side, which is not
+// trivial, so both kinds export.
+//
+// THE CONFIGMAP'S NAME IS DERIVED, not chosen: <kind>-<namespace>-<object name>, e.g.
+// imagebuild-team-a-app. A consuming Kustomization spells that in substituteFrom, so it is API.
+//
+// Strictly opt-in, and the cost is stated in ADR 0055: the digest becomes state outside git, so a
+// revert no longer reverts the running image.
+type RefExport struct {
+	// Namespace to write the ConfigMap in.
+	//
+	// Must be the object's OWN namespace, or one the operator allow-listed with
+	// --ref-export-namespaces (ADR 0056). Anything else is refused.
+	//
+	// No default, deliberately: a substitution source is read from the CONSUMING Kustomization's
+	// namespace, so defaulting this to the object's own would often produce a ConfigMap nothing
+	// reads, silently.
+	// +kubebuilder:validation:MinLength=1
+	Namespace string `json:"namespace"`
+
+	// Keys names the ConfigMap keys to write.
+	Keys RefExportKeys `json:"keys"`
+
+	// Labels are added to the generated ConfigMap.
+	//
+	// Each key must be permitted by --ref-export-allowed-labels, which is empty by default: these
+	// land on an object in a namespace this object may not otherwise touch. An unpermitted key is
+	// refused rather than dropped, because a dropped one leaves a ConfigMap that looks right.
+	//
+	// The controller's own watch labels and its managed-by and owner labels are written last, so
+	// nothing set here can turn them off.
+	// +optional
+	Labels map[string]string `json:"labels,omitempty"`
+
+	// Annotations are added to the generated ConfigMap. Gated by
+	// --ref-export-allowed-annotations, exactly as Labels is.
+	// +optional
+	Annotations map[string]string `json:"annotations,omitempty"`
+}
+
+// RefExportKeys names what to write under which key. At least one is required.
+//
+// +kubebuilder:validation:XValidation:rule="has(self.ref) || has(self.digest)",message="set at least one of ref or digest"
+type RefExportKeys struct {
+	// Ref receives the full pullable reference, registry/repository@sha256:...
+	//
+	// Prefer this over Digest alone: a consumer substituting a bare digest into an image field
+	// produces a trailing "@" on an empty string if the key is ever missing, which fails later and
+	// less legibly than a missing image would.
+	// +optional
+	Ref string `json:"ref,omitempty"`
+
+	// Digest receives the bare sha256:... value.
+	// +optional
+	Digest string `json:"digest,omitempty"`
+}
+
+// RefExportStatus records the ConfigMap this object last wrote.
+//
+// Needed because an export outlives the spec that asked for it. The name is derivable from the
+// object, but the NAMESPACE it was last written to is not -- so moving writeRefTo.namespace, or
+// removing the field, would otherwise strand a ConfigMap nobody maintains and a consumer may still
+// be substituting from (ADR 0056).
+type RefExportStatus struct {
+	// Name of the ConfigMap that was written.
+	Name string `json:"name"`
+
+	// Namespace it was written in.
+	Namespace string `json:"namespace"`
+}
+
+// GetWriteRefTo is nil-safe, because spec.push may be omitted entirely.
+func (p *Push) GetWriteRefTo() *RefExport {
+	if p == nil {
+		return nil
+	}
+	return p.WriteRefTo
 }

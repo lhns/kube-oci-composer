@@ -26,13 +26,17 @@ import (
 // existence of a live object naming the image. If both halves pass, the controller's refresh is the
 // only thing that can explain the difference.
 func TestALiveObjectKeepsItsImagesAlive(t *testing.T) {
+	// NOT t.Parallel(), unlike the survival-only tests in this package. This one ends in a negative
+	// control that waits for a real deletion, and concurrent tests put more repositories in the
+	// registry at once -- which is the thing the collector's rotation is slowest at. Tried, and it
+	// failed: see the note on E2E_GC_FACTOR in up.sh.
 	repo := keepaliveRepo("live")
 	digest := buildInto(t, "keepalive-live", repo, "v1")
 
 	// Well past the 30s window, with several collection passes in between, and the test touching
 	// nothing. If the object's images are still here, something refreshed them, and the only
 	// candidate is the controller.
-	sleepInCluster(t, 90)
+	sleepInCluster(t, watchFor(t))
 
 	if !manifestExistsByDigest(t, repo, digest) {
 		t.Fatalf("%s@%s was collected while a live ImageBuild still referenced it. The retention "+
@@ -51,7 +55,7 @@ func TestALiveObjectKeepsItsImagesAlive(t *testing.T) {
 	// Without this the assertions above are satisfied by a registry that never collects anything,
 	// which is indistinguishable from a guarantee that works.
 	mustKubectl(t, "-n", buildNamespace, "delete", "imagebuild", "keepalive-live")
-	eventuallyUntagged(t, repo, "v1", collectionDeadline)
+	eventuallyUntagged(t, repo, "v1", collectionDeadline(t))
 }
 
 // Two objects publishing the same digest need no coordination: both refresh it, and it survives
@@ -62,6 +66,11 @@ func TestALiveObjectKeepsItsImagesAlive(t *testing.T) {
 // mark-and-sweep, with all of its failure modes. Here it falls out of the design, and this is the
 // test that says so rather than the ADR merely claiming it.
 func TestTwoObjectsSharingADigestKeepItAliveIndependently(t *testing.T) {
+	// NOT t.Parallel(), unlike the survival-only tests in this package. This one ends in a negative
+	// control that waits for a real deletion, and concurrent tests put more repositories in the
+	// registry at once -- which is the thing the collector's rotation is slowest at. Tried, and it
+	// failed: see the note on E2E_GC_FACTOR in up.sh.
+
 	repo := keepaliveRepo("shared")
 
 	// Same context and Dockerfile, so both builds produce the same digest — which
@@ -90,7 +99,7 @@ func TestTwoObjectsSharingADigestKeepItAliveIndependently(t *testing.T) {
 
 	// One object goes away. The other still names the digest.
 	mustKubectl(t, "-n", buildNamespace, "delete", "imagebuild", "keepalive-shared-a")
-	eventuallyUntagged(t, control, "v1", collectionDeadline)
+	eventuallyUntagged(t, control, "v1", collectionDeadline(t))
 
 	// Recorded rather than asserted, because it is the question that was got wrong: whether a tag
 	// outlives its object when something else keeps the underlying manifest alive. Asserting either
@@ -121,6 +130,8 @@ func TestTwoObjectsSharingADigestKeepItAliveIndependently(t *testing.T) {
 // internal/retention covers this against a fake client. This covers it against a real controller,
 // where the object genuinely goes Stalled and the refresher genuinely has to ignore that.
 func TestAStalledObjectStillHasItsImagesRefreshed(t *testing.T) {
+	t.Parallel()
+
 	repo := keepaliveRepo("stalled")
 	digest := buildInto(t, "keepalive-stalled", repo, "v1")
 

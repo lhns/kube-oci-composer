@@ -8,10 +8,12 @@ rules:
   - ""
   resources:
   - configmaps
-  - pods
   verbs:
+  - create
+  - delete
   - get
   - list
+  - update
   - watch
 - apiGroups:
   - ""
@@ -20,6 +22,14 @@ rules:
   verbs:
   - create
   - patch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
 - apiGroups:
   - ""
   resources:
@@ -46,6 +56,12 @@ rules:
   - get
   - list
   - watch
+- apiGroups:
+  - oci.lhns.de
+  resources:
+  - imagebuilds/finalizers
+  verbs:
+  - update
 - apiGroups:
   - oci.lhns.de
   resources:

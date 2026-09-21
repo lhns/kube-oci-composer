@@ -13,6 +13,13 @@ rules:
   - apiGroups: [oci.lhns.de]
     resources: [imagebuilds]
     verbs: [get, list, watch]
+  # Finalizer, so an ImageBuild exporting a reference into ANOTHER namespace can delete the
+  # ConfigMap on its way out. Nothing else it creates needs this -- its Secrets belong to its Job
+  # and the Job belongs to the object, and an export into the object's own namespace is likewise
+  # owner-referenced. Only a cross-namespace one cannot be. ADR 0056.
+  - apiGroups: [oci.lhns.de]
+    resources: [imagebuilds/finalizers]
+    verbs: [update]
   - apiGroups: [oci.lhns.de]
     resources: [imagebuilds/status]
     verbs: [get, update, patch]
@@ -39,12 +46,16 @@ rules:
   # interval -- an hour by default, which reads as the controller being broken. That costs an
   # informer over every ConfigMap in the cluster; the composer already pays it for configMap layers.
   #
-  # Read-only, and the asymmetry with secrets above is deliberate: everything this controller WRITES
-  # into a tenant namespace is a Secret, the Dockerfile copy included, so no create or update belongs
-  # here. TestBuilderChartNeverGrantsConfigMapWrites keeps it that way.
+  # The write verbs are push.writeRefTo's, and they are cluster-wide because RBAC is granted before
+  # an object exists: permitting an export into whatever namespace its object lives in means
+  # permitting it everywhere. So THE CONTROLLER is the boundary, not this rule -- it writes only to
+  # the object's own namespace or one named in --ref-export-namespaces, and deletes only a
+  # ConfigMap carrying its own managed-by and owner labels. ADR 0056 says what that costs.
+  #
+  # No deletecollection, ever: nothing here removes ConfigMaps in bulk.
   - apiGroups: [""]
     resources: [configmaps]
-    verbs: [get, list, watch]
+    verbs: [get, list, watch, create, update, delete]
   - apiGroups: [""]
     resources: [events]
     verbs: [create, patch]

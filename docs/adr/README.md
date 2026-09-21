@@ -61,6 +61,10 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0051](0051-a-build-that-lost-its-image-rebuilds-it.md) | A build that lost its image rebuilds it | **Accepted** |
 | [0052](0052-a-tag-that-cannot-move-needs-a-source-that-cannot-either.md) | A tag that cannot move needs a source that cannot either | **Accepted** |
 | [0053](0053-a-publish-is-protected-before-the-reconcile-returns.md) | A publish is protected before the reconcile returns | **Accepted** |
+| [0054](0054-name-it-after-you-push-it.md) | Name it after you push it | **Accepted** |
+| [0055](0055-exporting-a-reference-a-consumer-cannot-compute.md) | Exporting a reference a consumer cannot compute | Superseded in part by 0056 |
+| [0056](0056-the-controller-is-the-namespace-boundary.md) | The controller is the namespace boundary | **Accepted** |
+| [0057](0057-the-toolchain-is-an-input.md) | The toolchain is an input to the artifact | **Accepted** |
 
 ## Open questions
 
@@ -80,6 +84,7 @@ first.
 | # | Question | Status |
 |---|---|---|
 | [0019](0019-pod-reference-protection-revisited.md) | Should garbage collection protect Pod-referenced digests? | Open, reopened twice; threat D8 |
+| [0058](0058-why-the-tags-vanished.md) | Why did those tags vanish minutes after a successful push? | Open; needs evidence from the cluster |
 
 
 ## Format
