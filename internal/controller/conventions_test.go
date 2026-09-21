@@ -11,9 +11,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
-	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 )
 
 // These tests assert the behaviours a Flux-ecosystem controller is expected to have. They are
@@ -79,7 +79,7 @@ func TestFinalizerIsAdded(t *testing.T) {
 		t.Fatalf("reconcile: %v", err)
 	}
 	got := reload(t, r, obj)
-	if !recon.ContainsFinalizer(got, ociv1alpha1.Finalizer) {
+	if !controllerutil.ContainsFinalizer(got, ociv1alpha1.Finalizer) {
 		t.Fatalf("finalizer missing: %v", got.Finalizers)
 	}
 }
@@ -234,7 +234,7 @@ func TestDeletionRemovesTheFinalizer(t *testing.T) {
 
 	var out ociv1alpha1.ImageComposition
 	err := r.Get(context.Background(), client.ObjectKeyFromObject(obj), &out)
-	if err == nil && recon.ContainsFinalizer(&out, ociv1alpha1.Finalizer) {
+	if err == nil && controllerutil.ContainsFinalizer(&out, ociv1alpha1.Finalizer) {
 		t.Fatal("finalizer was not removed, so the object can never be deleted")
 	}
 }

@@ -21,6 +21,7 @@ import (
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -1160,7 +1161,7 @@ func (r *ImageBuildReconciler) pollInterval() time.Duration {
 func (r *ImageBuildReconciler) reconcileExportLifecycle(
 	ctx context.Context, obj *ociv1alpha1.ImageBuild, exp *ociv1alpha1.RefExport,
 ) (ctrl.Result, bool, error) {
-	has := recon.ContainsFinalizer(obj, ociv1alpha1.Finalizer)
+	has := controllerutil.ContainsFinalizer(obj, ociv1alpha1.Finalizer)
 
 	if !obj.DeletionTimestamp.IsZero() {
 		if !has {
@@ -1172,7 +1173,7 @@ func (r *ImageBuildReconciler) reconcileExportLifecycle(
 			return ctrl.Result{}, true, err
 		}
 		patch := client.MergeFrom(obj.DeepCopy())
-		obj.Finalizers = recon.RemoveFinalizer(obj.Finalizers, ociv1alpha1.Finalizer)
+		controllerutil.RemoveFinalizer(obj, ociv1alpha1.Finalizer)
 		return ctrl.Result{}, true, client.IgnoreNotFound(r.Patch(ctx, obj, patch))
 	}
 
@@ -1191,9 +1192,9 @@ func (r *ImageBuildReconciler) reconcileExportLifecycle(
 	}
 	patch := client.MergeFrom(obj.DeepCopy())
 	if wantsFinalizer {
-		obj.Finalizers = append(obj.Finalizers, ociv1alpha1.Finalizer)
+		controllerutil.AddFinalizer(obj, ociv1alpha1.Finalizer)
 	} else {
-		obj.Finalizers = recon.RemoveFinalizer(obj.Finalizers, ociv1alpha1.Finalizer)
+		controllerutil.RemoveFinalizer(obj, ociv1alpha1.Finalizer)
 	}
 	if err := r.Patch(ctx, obj, patch); err != nil {
 		return ctrl.Result{}, true, fmt.Errorf("updating finalizer: %w", err)

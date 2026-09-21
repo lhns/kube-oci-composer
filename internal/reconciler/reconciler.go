@@ -21,7 +21,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 )
@@ -226,29 +225,4 @@ func EffectiveTags(tags []string, ref string) ([]string, error) {
 		out = append(out, t)
 	}
 	return out, nil
-}
-
-// ContainsFinalizer reports whether the object carries f.
-//
-// Here rather than in each controller: both had their own copy, under different names, and a
-// finalizer is the one piece of bookkeeping where a subtle difference between two implementations
-// means an object that cannot be deleted.
-func ContainsFinalizer(o client.Object, f string) bool {
-	for _, v := range o.GetFinalizers() {
-		if v == f {
-			return true
-		}
-	}
-	return false
-}
-
-// RemoveFinalizer returns the list without f, preserving order.
-func RemoveFinalizer(in []string, f string) []string {
-	out := in[:0]
-	for _, v := range in {
-		if v != f {
-			out = append(out, v)
-		}
-	}
-	return out
 }

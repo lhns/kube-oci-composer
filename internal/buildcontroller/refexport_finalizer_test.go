@@ -7,6 +7,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
@@ -50,7 +51,7 @@ func TestTheFinalizerTracksWhetherAnythingNeedsCleaningUp(t *testing.T) {
 			} else if done {
 				t.Fatal("stopped the reconcile on a live object")
 			}
-			if got := recon.ContainsFinalizer(obj, ociv1alpha1.Finalizer); got != tc.want {
+			if got := controllerutil.ContainsFinalizer(obj, ociv1alpha1.Finalizer); got != tc.want {
 				t.Errorf("finalizer = %v, want %v", got, tc.want)
 			}
 		})
@@ -90,7 +91,7 @@ func TestTheFinalizerIsRemovedWhenTheForeignExportIsGone(t *testing.T) {
 			if _, _, err := r.reconcileExportLifecycle(context.Background(), obj, tc.then); err != nil {
 				t.Fatalf("lifecycle: %v", err)
 			}
-			if recon.ContainsFinalizer(obj, ociv1alpha1.Finalizer) {
+			if controllerutil.ContainsFinalizer(obj, ociv1alpha1.Finalizer) {
 				t.Error("the finalizer outlived the foreign export it existed for, so this object " +
 					"can now only be deleted while this controller runs")
 			}
@@ -124,7 +125,7 @@ func TestDeletionRemovesTheForeignExportThenTheFinalizer(t *testing.T) {
 	if !done {
 		t.Error("the reconcile continued past a deletion")
 	}
-	if recon.ContainsFinalizer(obj, ociv1alpha1.Finalizer) {
+	if controllerutil.ContainsFinalizer(obj, ociv1alpha1.Finalizer) {
 		t.Error("the finalizer survived, so the object never finishes deleting")
 	}
 	var cm corev1.ConfigMap

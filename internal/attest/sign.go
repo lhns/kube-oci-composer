@@ -57,8 +57,6 @@ const (
 // signing key.
 type Key struct {
 	signer signature.SignerVerifier
-	// PublicPEM is the verifier's half, for the operator to hand to an admission policy.
-	PublicPEM []byte
 }
 
 // LoadKey reads a cosign key pair from a Secret.
@@ -106,7 +104,7 @@ func LoadKey(secret *corev1.Secret) (*Key, error) {
 		return nil, fmt.Errorf("marshalling the public key: %w", err)
 	}
 
-	k := &Key{signer: sv, PublicPEM: pub}
+	k := &Key{signer: sv}
 	// Self-check at load. A key that cannot sign should fail the process at boot rather than at the
 	// first artifact -- the same reasoning the chart applies to an unpinned builder image.
 	if err := k.selfCheck(); err != nil {

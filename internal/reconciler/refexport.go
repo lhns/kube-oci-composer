@@ -3,6 +3,7 @@ package reconciler
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -72,7 +73,7 @@ func ExportRef(
 	if digest == "" || ref == "" {
 		return nil, fmt.Errorf("refusing to export an incomplete reference (digest %q, ref %q)", digest, ref)
 	}
-	if spec.Namespace != obj.GetNamespace() && !contains(opts.Namespaces, spec.Namespace) {
+	if spec.Namespace != obj.GetNamespace() && !slices.Contains(opts.Namespaces, spec.Namespace) {
 		return nil, Terminal(
 			"push.writeRefTo names namespace %q, which is neither this object's own nor permitted "+
 				"by the controller: add it to --ref-export-namespaces", spec.Namespace)
@@ -227,15 +228,6 @@ func keyAllowed(key string, allowed []string) bool {
 			continue
 		}
 		if a == key {
-			return true
-		}
-	}
-	return false
-}
-
-func contains(list []string, v string) bool {
-	for _, e := range list {
-		if e == v {
 			return true
 		}
 	}

@@ -35,7 +35,6 @@ const (
 	ReasonInvalidSpec       = "InvalidSpec"
 	ReasonImmutableConflict = "ImmutableTagConflict"
 	ReasonFetchFailed       = "FetchFailed"
-	ReasonPublishFailed     = "PublishFailed"
 	ReasonAttestationFailed = "AttestationFailed"
 	ReasonSuspended         = "Suspended"
 	// ReasonRetentionDegraded reports that the refresh keeping this object's images from being

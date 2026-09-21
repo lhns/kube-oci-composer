@@ -8,6 +8,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
@@ -104,7 +105,7 @@ func TestASuspendedObjectStillFinishesDeleting(t *testing.T) {
 
 	var got ociv1alpha1.ImageBuild
 	err := c.Get(context.Background(), client.ObjectKeyFromObject(obj), &got)
-	if err == nil && recon.ContainsFinalizer(&got, ociv1alpha1.Finalizer) {
+	if err == nil && controllerutil.ContainsFinalizer(&got, ociv1alpha1.Finalizer) {
 		t.Error("the finalizer survived on a suspended object, so it can never finish deleting: " +
 			"the suspend branch returned before anything looked at DeletionTimestamp")
 	}

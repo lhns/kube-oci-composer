@@ -23,6 +23,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -151,9 +152,9 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return r.finalize(ctx, &obj)
 	}
 
-	if !recon.ContainsFinalizer(&obj, ociv1alpha1.Finalizer) {
+	if !controllerutil.ContainsFinalizer(&obj, ociv1alpha1.Finalizer) {
 		patch := client.MergeFrom(obj.DeepCopy())
-		obj.Finalizers = append(obj.Finalizers, ociv1alpha1.Finalizer)
+		controllerutil.AddFinalizer(&obj, ociv1alpha1.Finalizer)
 		if err := r.Patch(ctx, &obj, patch); err != nil {
 			return ctrl.Result{}, fmt.Errorf("adding finalizer: %w", err)
 		}
@@ -841,7 +842,7 @@ func (r *ImageCompositionReconciler) finalize(ctx context.Context, obj *ociv1alp
 		return ctrl.Result{}, err
 	}
 	patch := client.MergeFrom(obj.DeepCopy())
-	obj.Finalizers = recon.RemoveFinalizer(obj.Finalizers, ociv1alpha1.Finalizer)
+	controllerutil.RemoveFinalizer(obj, ociv1alpha1.Finalizer)
 	return ctrl.Result{}, client.IgnoreNotFound(r.Patch(ctx, obj, patch))
 }
 

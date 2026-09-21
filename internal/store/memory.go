@@ -95,19 +95,3 @@ func (m *Memory) List(_ context.Context, prefix string) ([]Info, error) {
 	return out, nil
 }
 
-// SetModTime backdates an object so age-dependent behaviour can be tested without sleeping.
-func (m *Memory) SetModTime(key string, t time.Time) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if o, ok := m.objects[key]; ok {
-		o.modTime = t
-		m.objects[key] = o
-	}
-}
-
-// Len reports how many objects are stored.
-func (m *Memory) Len() int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return len(m.objects)
-}
