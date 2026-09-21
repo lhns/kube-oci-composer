@@ -89,3 +89,41 @@ func TestFreshlyPushedUntaggedContentIsKept(t *testing.T) {
 			"pulled matches no rule:\n%s", block)
 	}
 }
+
+// The e2e reads gcDelay, gcInterval and deleteUntagged back out of the deployed ConfigMap and
+// refuses to run a retention test whose watch window cannot outlast them. That is what stops a
+// retention test passing while measuring nothing.
+//
+// It depends on this JSON shape. If the chart ever moved or renamed one of these, the helpers would
+// read an empty string, the assertions would never fire, and the tests would go quiet in exactly the
+// way they exist to prevent -- so the shape is asserted here, where no cluster is needed.
+func TestTheRenderedConfigCarriesWhatTheE2EAssertsAgainst(t *testing.T) {
+	storage, ok := registryConfig(t)["storage"].(map[string]any)
+	if !ok {
+		t.Fatal("no storage block; the e2e helpers read gcDelay and gcInterval from it")
+	}
+	for _, key := range []string{"gcDelay", "gcInterval"} {
+		if v, _ := storage[key].(string); v == "" {
+			t.Errorf("storage.%s is absent or not a string, so the e2e would read no value and "+
+				"skip the precondition it exists to enforce", key)
+		}
+	}
+
+	retention, ok := storage["retention"].(map[string]any)
+	if !ok {
+		t.Fatal("no storage.retention block")
+	}
+	policies, ok := retention["policies"].([]any)
+	if !ok || len(policies) == 0 {
+		t.Fatal("no retention policies; the e2e cannot tell whether untagged collection is on")
+	}
+	first, _ := policies[0].(map[string]any)
+	if _, present := first["deleteUntagged"]; !present {
+		t.Error("the policy carries no deleteUntagged key, so the e2e cannot detect the " +
+			"configuration that once left a retention test measuring nothing")
+	}
+	if _, present := first["repositories"]; !present {
+		t.Error("the policy carries no repositories key, so the e2e cannot tell which policy " +
+			"governs the repository it is testing")
+	}
+}
