@@ -1,6 +1,7 @@
 package oci
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -30,8 +31,8 @@ func TestProvenanceSurvivesTheObject(t *testing.T) {
 	if got := mf.Annotations[AnnotationSources]; got != "bundle=sha256:1111" {
 		t.Errorf("sources annotation is %q, want the layer's name and digest", got)
 	}
-	if got := mf.Annotations[AnnotationAssemblyVersion]; got != "2" {
-		t.Errorf("assembly-version annotation is %q, want the current AssemblyVersion", got)
+	if got, want := mf.Annotations[AnnotationAssemblyVersion], strconv.Itoa(AssemblyVersion); got != want {
+		t.Errorf("assembly-version annotation is %q, want the current AssemblyVersion %q", got, want)
 	}
 	// Absent, not empty: a scratch artifact has no base, and an empty string would read as one
 	// whose digest could not be determined.

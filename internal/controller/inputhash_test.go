@@ -239,7 +239,10 @@ func TestInputHashIsPinned(t *testing.T) {
 	// what was previously hardcoded, so the rebuild produces the SAME digest and republishing it
 	// under an unchanged immutable tag is a no-op. On a non-amd64 controller it would not be —
 	// see TestUnsetPlatformMatchesTheOldHardcodedDefault.
-	const want = "sha256:44707f767d306f79c4980c16934438ef5863382380433b2a8963e18a7b97935b"
+	// Re-recorded for AssemblyVersion 3 (Go 1.27 changed compress/flate's output, ADR 0057). This
+	// constant moving IS the migration: it is what makes every cluster rebuild, deliberately,
+	// rather than serve old bytes under an unchanged hash.
+	const want = "sha256:f0faf228562e7c0c249bb4d987ee06877d98cf1944ef1b95027e9a8ee387510c"
 
 	got := oci.InputHash([]oci.LayerInput{
 		{Name: "core", URL: "https://example/x.tgz", Digest: "sha256:1111", Unpack: oci.UnpackTarGz, Target: "/core"},

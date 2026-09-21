@@ -42,7 +42,10 @@ var epoch = time.Unix(0, 0).UTC()
 // a compressed layer 202 -> 204 bytes. Every artifact's digest moves under an unchanged spec-hash
 // tag, so every composition wedges on onConflict: Fail at once. A Go minor upgrade is a migration
 // and bumps this. See ADR 0057.
-const AssemblyVersion = 2
+//
+// v3: that migration, taken. Nothing in this repository changed, which is exactly why this
+// constant has to move by hand.
+const AssemblyVersion = 3
 
 // identity returns what the hash should treat as this entry's content.
 func (in LayerInput) identity() string {
