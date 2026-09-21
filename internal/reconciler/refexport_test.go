@@ -48,7 +48,7 @@ const (
 func TestAnExportIsRefusedOutsideTheAllowList(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(exportScheme(t)).Build()
 
-	err := ExportRef(context.Background(), c, owner(), exportSpec(), nil, testDigest, testRef)
+	err := ExportRef(context.Background(), c, owner(), exportSpec(), nil, DefaultWatchLabels, testDigest, testRef)
 	if err == nil {
 		t.Fatal("an empty allow-list permitted a write to flux-system")
 	}
@@ -70,7 +70,7 @@ func TestAnExportWritesBothFormsAndTheWatchLabel(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(exportScheme(t)).Build()
 
 	if err := ExportRef(context.Background(), c, owner(), exportSpec(),
-		[]string{"flux-system"}, testDigest, testRef); err != nil {
+		[]string{"flux-system"}, DefaultWatchLabels, testDigest, testRef); err != nil {
 		t.Fatalf("exporting: %v", err)
 	}
 
@@ -88,7 +88,7 @@ func TestAnExportWritesBothFormsAndTheWatchLabel(t *testing.T) {
 	// A LABEL. kustomize-controller selects these with --watch-configs-label-selector, and a
 	// label selector cannot match an annotation -- as an annotation this is inert, and inert in
 	// the way the feature is most dangerous: the ConfigMap looks right and nothing rolls out.
-	if cm.Labels[WatchLabel] != "Enabled" {
+	if cm.Labels["reconcile.fluxcd.io/watch"] != "Enabled" {
 		t.Errorf("watch marker is not a label (labels=%v annotations=%v); a label selector cannot "+
 			"match an annotation, so nothing would ever notice this change",
 			cm.Labels, cm.Annotations)
@@ -106,7 +106,7 @@ func TestAnIncompleteReferenceIsNeverWritten(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(exportScheme(t)).Build()
 
 	if err := ExportRef(context.Background(), c, owner(), exportSpec(),
-		[]string{"flux-system"}, "", ""); err == nil {
+		[]string{"flux-system"}, DefaultWatchLabels, "", ""); err == nil {
 		t.Fatal("an empty reference was exported")
 	}
 
@@ -132,7 +132,7 @@ func TestAnExportReplacesRatherThanMerges(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(exportScheme(t)).WithObjects(existing).Build()
 
 	if err := ExportRef(context.Background(), c, owner(), exportSpec(),
-		[]string{"flux-system"}, testDigest, testRef); err != nil {
+		[]string{"flux-system"}, DefaultWatchLabels, testDigest, testRef); err != nil {
 		t.Fatalf("exporting: %v", err)
 	}
 
@@ -161,7 +161,7 @@ func TestAForeignConfigMapIsNeverAdopted(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(exportScheme(t)).WithObjects(theirs).Build()
 
 	err := ExportRef(context.Background(), c, owner(), exportSpec(),
-		[]string{"flux-system"}, testDigest, testRef)
+		[]string{"flux-system"}, DefaultWatchLabels, testDigest, testRef)
 	if err == nil {
 		t.Fatal("a ConfigMap this controller did not create was taken over")
 	}
@@ -190,14 +190,14 @@ func TestExtraMetadataIsAddedButCannotDisableTheFeature(t *testing.T) {
 
 	spec := exportSpec()
 	spec.Labels = map[string]string{
-		"team":         "synapse",
-		WatchLabel:     "Disabled",
-		ManagedByLabel: "someone-else",
+		"team":                      "synapse",
+		"reconcile.fluxcd.io/watch": "Disabled",
+		ManagedByLabel:              "someone-else",
 	}
 	spec.Annotations = map[string]string{"note": "generated"}
 
 	if err := ExportRef(context.Background(), c, owner(), spec,
-		[]string{"flux-system"}, testDigest, testRef); err != nil {
+		[]string{"flux-system"}, DefaultWatchLabels, testDigest, testRef); err != nil {
 		t.Fatalf("exporting: %v", err)
 	}
 
@@ -212,7 +212,7 @@ func TestExtraMetadataIsAddedButCannotDisableTheFeature(t *testing.T) {
 	if cm.Annotations["note"] != "generated" {
 		t.Errorf("the extra annotation was dropped: %v", cm.Annotations)
 	}
-	if cm.Labels[WatchLabel] != "Enabled" {
+	if cm.Labels["reconcile.fluxcd.io/watch"] != "Enabled" {
 		t.Error("a spec label turned the watch marker off, which silently disables the feature")
 	}
 	if cm.Labels[ManagedByLabel] != "kube-oci-composer" {
@@ -277,5 +277,68 @@ func TestDeletionLeavesSomebodyElsesExportAlone(t *testing.T) {
 				t.Error("deleted a ConfigMap this object did not export")
 			}
 		})
+	}
+}
+
+// TestTheWatchMarkerIsConfigurable — ADR 0009 borrows Flux's conventions without depending on
+// them, so the default is Flux's marker and an operator running something else can say so.
+//
+// Written onto an object in somebody ELSE's namespace, which is why this one is settable where
+// reconcile.fluxcd.io/requestedAt, which is only ever read, is not.
+func TestTheWatchMarkerIsConfigurable(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		watch map[string]string
+		want  map[string]string
+		gone  []string
+	}{
+		{"flux by default", DefaultWatchLabels,
+			map[string]string{"reconcile.fluxcd.io/watch": "Enabled"}, nil},
+		{"something else entirely", map[string]string{"argocd.argoproj.io/watch": "true"},
+			map[string]string{"argocd.argoproj.io/watch": "true"},
+			[]string{"reconcile.fluxcd.io/watch"}},
+		{"none at all", nil, nil, []string{"reconcile.fluxcd.io/watch"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := fake.NewClientBuilder().WithScheme(exportScheme(t)).Build()
+			if err := ExportRef(context.Background(), c, owner(), exportSpec(),
+				[]string{"flux-system"}, tc.watch, testDigest, testRef); err != nil {
+				t.Fatalf("exporting: %v", err)
+			}
+			var cm corev1.ConfigMap
+			if err := c.Get(context.Background(),
+				types.NamespacedName{Namespace: "flux-system", Name: "pymods-ref"}, &cm); err != nil {
+				t.Fatal(err)
+			}
+			for k, v := range tc.want {
+				if cm.Labels[k] != v {
+					t.Errorf("label %s = %q, want %q", k, cm.Labels[k], v)
+				}
+			}
+			for _, k := range tc.gone {
+				if _, ok := cm.Labels[k]; ok {
+					t.Errorf("label %s was set although it was not asked for", k)
+				}
+			}
+			// Ownership is never optional: the adoption refusal and the finalizer both key on it.
+			if cm.Labels[ManagedByLabel] != "kube-oci-composer" {
+				t.Error("the export disowned itself")
+			}
+		})
+	}
+}
+
+// TestParseLabelsDropsWhatItCannotRead — an unparseable entry must not stop the controller
+// starting over a cosmetic setting.
+func TestParseLabelsDropsWhatItCannotRead(t *testing.T) {
+	got := ParseLabels("a=1, b=2 ,,garbage,=3,c=")
+	want := map[string]string{"a": "1", "b": "2", "c": ""}
+	if len(got) != len(want) {
+		t.Fatalf("parsed %v, want %v", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s = %q, want %q", k, got[k], v)
+		}
 	}
 }

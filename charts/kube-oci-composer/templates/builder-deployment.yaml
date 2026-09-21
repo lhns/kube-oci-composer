@@ -77,6 +77,7 @@ spec:
             - --retention-refresh-interval={{ .Values.imageBuild.retention.refreshInterval }}
             {{- with .Values.imageBuild.refExportNamespaces }}
             - --ref-export-namespaces={{ join "," . }}
+            - --ref-export-labels={{ $.Values.imageBuild.refExportLabels }}
             {{- end }}
             {{- if .Values.imageBuild.requirePinnedSources }}
             - --require-pinned-sources

@@ -35,6 +35,7 @@ import (
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 	"github.com/lhns/kube-oci-composer/internal/buildcontroller"
 	"github.com/lhns/kube-oci-composer/internal/opts"
+	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 	"github.com/lhns/kube-oci-composer/internal/retention"
 )
 
@@ -81,6 +82,7 @@ func main() {
 		sourceDateEpoch      string
 		refreshInterval      time.Duration
 		refExportNamespaces  string
+		refExportLabels      string
 		historyLimit         int
 		requirePinnedSources bool
 		showVersion          bool
@@ -113,6 +115,9 @@ func main() {
 			"server on a private address is an ordinary source, and a guard people disable is no guard.")
 	flag.StringVar(&sourceDateEpoch, "source-date-epoch", "0",
 		"SOURCE_DATE_EPOCH stamped into builds. Fixed rather than the wall clock, matching the composer's epoch.")
+	flag.StringVar(&refExportLabels, "ref-export-labels", recon.DefaultWatchLabelFlag,
+		"key=value labels added to every ConfigMap push.writeRefTo generates, so whatever watches "+
+			"substitution sources notices it change. Defaults to Flux's marker; empty adds none.")
 	flag.StringVar(&refExportNamespaces, "ref-export-namespaces", "",
 		"comma-separated namespaces push.writeRefTo may write a ConfigMap in. Empty refuses every "+
 			"export: a substitution source in the namespace that parameterises a cluster is a "+
@@ -260,12 +265,13 @@ func main() {
 	}
 
 	if err := (&buildcontroller.ImageBuildReconciler{
-		Client:              mgr.GetClient(),
-		Default:             defaults,
-		Transport:           registryTransport,
-		Attestor:            attestor,
-		Refresher:           refresher,
-		RefExportNamespaces: splitList(refExportNamespaces),
+		Client:               mgr.GetClient(),
+		Default:              defaults,
+		Transport:            registryTransport,
+		Attestor:             attestor,
+		Refresher:            refresher,
+		RefExportNamespaces:  splitList(refExportNamespaces),
+		RefExportWatchLabels: recon.ParseLabels(refExportLabels),
 		//nolint:staticcheck // SA1019: the new events API has no Event method; see the composer.
 		Recorder: mgr.GetEventRecorderFor("imagebuild-controller"),
 		// The controller GETs a user-supplied URL when a fetch context holds the Dockerfile, so it

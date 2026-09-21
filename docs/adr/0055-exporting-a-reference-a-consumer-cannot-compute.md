@@ -69,6 +69,12 @@ Each requirement below follows from a failure mode above, and none is optional:
   `--watch-configs-label-selector`, and a label selector cannot match an annotation — as an
   annotation it is inert, and inert in the way this feature is most dangerous: the ConfigMap looks
   correct and nothing rolls out. This was written as an annotation first and caught in review.
+- **The marker is an operator setting, defaulting to Flux's.** [ADR 0009](0009-flux-conventions-without-dependency.md)
+  borrows Flux's conventions without depending on them, and already hardcodes
+  `reconcile.fluxcd.io/requestedAt` — but that one is **read**, where this is **written onto an
+  object in another namespace**. Which tool is watching is a property of the cluster, like
+  `--insecure-registry`, so it is `--ref-export-labels` rather than a constant. Per-object
+  `labels` remain, for additions.
 - **Never adopt a ConfigMap this controller did not create.** `Data` is replaced wholesale, and a
   substitution source is exactly the kind of object a human writes by hand, so taking one over
   would destroy whatever else was in it. An existing ConfigMap without the managed-by label is a

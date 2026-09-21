@@ -62,6 +62,10 @@ type ImageBuildReconciler struct {
 	// cluster is a privilege an operator grants deliberately, not a default. ADR 0055.
 	RefExportNamespaces []string
 
+	// RefExportWatchLabels are added to every generated ConfigMap so whatever watches substitution
+	// sources notices it change. Defaults to Flux's marker; empty adds none.
+	RefExportWatchLabels map[string]string
+
 	// Attestor signs the build's output, after the Job has terminated.
 	//
 	// The signing key stays in THIS process and is never projected into a build pod -- so code
@@ -1085,7 +1089,8 @@ func (r *ImageBuildReconciler) exportRef(ctx context.Context, obj *ociv1alpha1.I
 		return nil
 	}
 	return recon.ExportRef(ctx, r.Client, obj, obj.Spec.Push.WriteRefTo,
-		r.RefExportNamespaces, obj.Status.Artifact.Digest, obj.Status.Artifact.Ref)
+		r.RefExportNamespaces, r.RefExportWatchLabels,
+		obj.Status.Artifact.Digest, obj.Status.Artifact.Ref)
 }
 
 // reconcileExportLifecycle keeps the finalizer in step with whether there is anything to clean up.
