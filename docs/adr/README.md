@@ -65,6 +65,7 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0055](0055-exporting-a-reference-a-consumer-cannot-compute.md) | Exporting a reference a consumer cannot compute | Superseded in part by 0056 |
 | [0056](0056-the-controller-is-the-namespace-boundary.md) | The controller is the namespace boundary | **Accepted** |
 | [0057](0057-the-toolchain-is-an-input.md) | The toolchain is an input to the artifact | **Accepted** |
+| [0059](0059-what-causes-a-rebuild.md) | What causes a rebuild | **Accepted** |
 
 ## Open questions
 

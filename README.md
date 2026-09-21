@@ -193,6 +193,18 @@ be running right now. Sustained failure raises a `RetentionDegraded` event, beca
 **Reconciling is nearly free.** `status.inputHash` summarises everything that determines the
 output, so a reconcile that changes nothing costs one `HEAD` — no fetch, no assembly.
 
+**What causes a rebuild.** Exactly two things, for both kinds:
+
+| Trigger | Not a trigger |
+|---|---|
+| `status.inputHash` changes — spec, resolved input digests, secret `resourceVersion`, or the operator's own version | `spec.interval` elapsing (that is a re-*check*) |
+| What was published is gone from the registry — the digest, or a tag the spec asks for | A controller restart, leader failover or the reconcile annotation |
+
+Upgrading the operator can move the hash on its own — the assembly and recipe versions, the pinned
+builder and fetcher digests, and the Go toolchain are all inputs — so an upgrade may rebuild every
+object. To force a rebuild, change an input: repoint a tag, or edit the Dockerfile. See
+[ADR 0059](docs/adr/0059-what-causes-a-rebuild.md).
+
 **Old builds are retained, but not forever.** `--keep-builds` (default 10, overridable per object
 via `spec.push.history`) decides how many past builds stay tagged. Expiry is the registry's job now;
 what the controllers guarantee is that images a live object still references are refreshed and so
