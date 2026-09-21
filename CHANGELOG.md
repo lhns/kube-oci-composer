@@ -25,23 +25,26 @@ may change between minor versions.
 
 ### Fixed
 
-- **The bundled registry is pinned to zot v2.1.21**, up from v2.1.20. Two defects in v2.1.20 affect
-  this project directly. Its collector walks an image index shallowly and does not mark the config
-  and layer blobs of the index's children as referenced — and every artifact published here is an
-  index, because BuildKit attaches SBOM and provenance manifests. The symptom is not a lost tag: the
-  tag resolves and the pull fails on a missing layer. Separately, `retention.dryRun` was not dry —
-  only the index rewrite was gated on it, while unreferenced blobs and blob uploads were deleted
-  regardless, so the setting documented as reclaiming nothing destroyed content.
+- **The bundled registry is pinned to zot v2.1.21**, up from v2.1.20, which could delete layers
+  that published images still needed. The damage was hard to recognise: the tag kept resolving and
+  the pull failed partway with a missing layer, which reads as a broken image rather than a registry
+  that reclaimed too much. Everything this project publishes was exposed, because BuildKit attaches
+  SBOM and provenance manifests and that makes every artifact an index — the case v2.1.20 got wrong.
 
-  This does **not** fix the frozen push timestamp: zot writes `PushTimestamp` only when a digest has
-  no Statistics entry, while retention builds candidates per tag, so a republished digest keeps its
-  original timestamp. Unchanged in v2.1.21.
+  Also in v2.1.20, `retention.dryRun` was not dry. It still deleted blobs, so turning it on to see
+  what collection *would* do destroyed content. The values file said the opposite.
 
-- **`keepTags` now also keys on `pushedWithin`**, alongside `pulledWithin`. Survival previously
-  depended entirely on the retention refresher having already run; the entries are OR'ed, so a newly
-  built image is now protected across the gap between its publish and the first refresh. It is a
-  floor, not a second window — because of the frozen timestamp above, a republished digest is not
-  renewed by it, and anything the refresher touches has a later pull than push.
+  **It does not fix everything.** zot records an image's push time the first time it sees that
+  digest and never updates it, so republishing identical content does not renew it. That is
+  unchanged in v2.1.21 and shapes the next entry.
+
+- **`keepTags` also keys on `pushedWithin` now**, alongside `pulledWithin`, and a tag survives if
+  either keeps it. Previously an image was protected only once the retention refresher had reached
+  it, leaving it exposed between being built and that first refresh.
+
+  This helps brand-new content only. Because of the push timestamp above, republishing the same
+  digest renews nothing — and an image the refresher is already touching has a more recent pull
+  than push regardless.
 
 ## [0.5.1] - 2026-09-07
 

@@ -106,12 +106,13 @@ data:
               "repositories": {{ toJson $.Values.registry.retention.repositories }},
               "deleteUntagged": true,
               {{- /*
-              OR'ed. `pulledWithin` alone leaves a newly built image unprotected until the refresher
-              has run at least once.
+              Two entries, and a tag survives if EITHER keeps it. Pull recency alone leaves an image
+              unprotected between being built and the refresher first reaching it.
 
-              A floor, not a second window: zot writes a push timestamp only for a digest it has
-              never seen, so a republish does not renew one, and anything the refresher touches has
-              a later pull than push.
+              This only ever helps brand-new content. zot records a push time the first time it
+              sees a digest and never updates it, so republishing the same digest does not renew
+              anything -- and an image the refresher is already touching has a more recent pull
+              than push regardless.
               */}}
               "keepTags": [
                 { "patterns": [".*"], "pulledWithin": {{ $.Values.registry.retention.window | quote }} },
