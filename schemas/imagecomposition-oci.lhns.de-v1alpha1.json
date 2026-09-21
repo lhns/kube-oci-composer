@@ -426,6 +426,13 @@
             "writeRefTo": {
               "description": "WriteRefTo exports the published reference into a ConfigMap. Off unless set, and refused\nunless the controller allow-lists the target namespace. See RefExport.",
               "properties": {
+                "annotations": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "description": "Annotations are added to the generated ConfigMap.",
+                  "type": "object"
+                },
                 "keys": {
                   "description": "Keys names the ConfigMap keys to write.",
                   "properties": {
@@ -445,6 +452,13 @@
                       "rule": "has(self.ref) || has(self.digest)"
                     }
                   ]
+                },
+                "labels": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "description": "Labels are added to the generated ConfigMap.\n\nreconcile.fluxcd.io/watch=Enabled is set regardless, because without it nothing notices the\nvalue change and the absence is invisible. These are for anything else that selects on the\nobject -- a different watch selector, or a consumer's own conventions.",
+                  "type": "object"
                 },
                 "name": {
                   "description": "Name of the ConfigMap to write.",

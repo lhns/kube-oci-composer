@@ -13,6 +13,12 @@ rules:
   - apiGroups: [oci.lhns.de]
     resources: [imagebuilds]
     verbs: [get, list, watch]
+  # Finalizer, so an ImageBuild that exports a reference can delete the ConfigMap on its way out.
+  # Nothing else it creates needs this -- its Secrets belong to its Job and the Job belongs to the
+  # object -- but a cross-namespace ConfigMap cannot be owner-referenced. ADR 0055.
+  - apiGroups: [oci.lhns.de]
+    resources: [imagebuilds/finalizers]
+    verbs: [update]
   - apiGroups: [oci.lhns.de]
     resources: [imagebuilds/status]
     verbs: [get, update, patch]

@@ -58,6 +58,12 @@ rules:
 - apiGroups:
   - oci.lhns.de
   resources:
+  - imagebuilds/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - oci.lhns.de
+  resources:
   - imagebuilds/status
   verbs:
   - get

@@ -90,6 +90,7 @@ type ImageBuildReconciler struct {
 
 // +kubebuilder:rbac:groups=oci.lhns.de,resources=imagebuilds,verbs=get;list;watch
 // +kubebuilder:rbac:groups=oci.lhns.de,resources=imagebuilds/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=oci.lhns.de,resources=imagebuilds/finalizers,verbs=update
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // Secrets are read for their resourceVersion only, so a rotation moves the input hash and
@@ -167,6 +168,13 @@ func (r *ImageBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 // reconcile is the state machine over the owned Job.
 func (r *ImageBuildReconciler) reconcile(ctx context.Context, obj *ociv1alpha1.ImageBuild) (ctrl.Result, error) {
+	if exp := obj.Spec.Push.GetWriteRefTo(); !obj.DeletionTimestamp.IsZero() || exp != nil {
+		res, done, err := r.reconcileExportLifecycle(ctx, obj, exp)
+		if done || err != nil {
+			return res, err
+		}
+	}
+
 	inputs, contextURL, err := r.resolveInputs(ctx, obj)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -1078,4 +1086,57 @@ func (r *ImageBuildReconciler) exportRef(ctx context.Context, obj *ociv1alpha1.I
 	}
 	return recon.ExportRef(ctx, r.Client, obj, obj.Spec.Push.WriteRefTo,
 		r.RefExportNamespaces, obj.Status.Artifact.Digest, obj.Status.Artifact.Ref)
+}
+
+// reconcileExportLifecycle keeps the finalizer in step with whether there is anything to clean up.
+//
+// The finalizer is added only when push.writeRefTo is set: putting one on every ImageBuild would
+// make every deletion depend on this controller running, for a feature most objects never use.
+// done is true when the object is going away and this reconcile should stop.
+func (r *ImageBuildReconciler) reconcileExportLifecycle(
+	ctx context.Context, obj *ociv1alpha1.ImageBuild, exp *ociv1alpha1.RefExport,
+) (ctrl.Result, bool, error) {
+	has := containsString(obj.Finalizers, ociv1alpha1.Finalizer)
+
+	if !obj.DeletionTimestamp.IsZero() {
+		if !has {
+			return ctrl.Result{}, true, nil
+		}
+		// The export is the one thing a build leaves behind: its Secrets belong to its Job and the
+		// Job belongs to this object, so those go on their own.
+		if err := recon.DeleteExportedRef(ctx, r.Client, obj, exp); err != nil {
+			return ctrl.Result{}, true, err
+		}
+		patch := client.MergeFrom(obj.DeepCopy())
+		obj.Finalizers = removeString(obj.Finalizers, ociv1alpha1.Finalizer)
+		return ctrl.Result{}, true, client.IgnoreNotFound(r.Patch(ctx, obj, patch))
+	}
+
+	if exp != nil && !has {
+		patch := client.MergeFrom(obj.DeepCopy())
+		obj.Finalizers = append(obj.Finalizers, ociv1alpha1.Finalizer)
+		if err := r.Patch(ctx, obj, patch); err != nil {
+			return ctrl.Result{}, true, fmt.Errorf("adding finalizer: %w", err)
+		}
+	}
+	return ctrl.Result{}, false, nil
+}
+
+func containsString(in []string, s string) bool {
+	for _, v := range in {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+func removeString(in []string, s string) []string {
+	out := in[:0]
+	for _, v := range in {
+		if v != s {
+			out = append(out, v)
+		}
+	}
+	return out
 }

@@ -65,8 +65,16 @@ Each requirement below follows from a failure mode above, and none is optional:
 - **An allow-list, empty by default.** `--ref-export-namespaces`. The useful target is the
   consuming Kustomization's namespace — usually `flux-system`, which parameterises everything — so
   this is a real privilege escalation and the default must permit nothing.
-- **Labelled, not owner-referenced.** A cross-namespace owner reference is invalid, and the useful
-  target is another namespace. So the ConfigMap is **not** garbage-collected with the object.
+- **A LABEL, not an annotation**, for the watch marker. kustomize-controller selects these with
+  `--watch-configs-label-selector`, and a label selector cannot match an annotation — as an
+  annotation it is inert, and inert in the way this feature is most dangerous: the ConfigMap looks
+  correct and nothing rolls out. This was written as an annotation first and caught in review.
+- **Never adopt a ConfigMap this controller did not create.** `Data` is replaced wholesale, and a
+  substitution source is exactly the kind of object a human writes by hand, so taking one over
+  would destroy whatever else was in it. An existing ConfigMap without the managed-by label is a
+  terminal spec error.
+- **Labelled, not owner-referenced**, because a cross-namespace owner reference is invalid — so a
+  **finalizer** deletes it instead, and only when the managed-by and owner labels both match.
 
 ## Consequences
 
@@ -86,8 +94,13 @@ for the ability to consume a reference that cannot be computed in advance.
 so golden-output tests and any `grep '\${'` guard in a consuming repo need a documented exemption.
 That is a reason to keep this to the few objects that need it.
 
-**The exported ConfigMap outlives its object.** Deleting the `ImageBuild` leaves it behind, to be
-cleaned up by whatever manages that namespace.
+**An `ImageBuild` that exports gains a finalizer**, so its deletion now depends on this controller
+running. Added only when `push.writeRefTo` is set: putting one on every object would make every
+deletion depend on the controller for a feature most never use.
+
+Nothing else needs it. A build's Secrets belong to its Job and the Job belongs to the object
+([ADR 0050](0050-a-builds-secrets-belong-to-the-build.md)), so those are reclaimed by Kubernetes;
+the export is the one thing that cannot be.
 
 **Nothing changes for an object that does not set it.** The field is absent by default and the
 allow-list is empty, so both halves have to be turned on deliberately.

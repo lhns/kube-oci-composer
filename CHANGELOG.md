@@ -7,7 +7,6 @@ may change between minor versions.
 
 ### Added
 
-<<<<<<< HEAD
 - **A Warning when a layer's source can move but its tags cannot**
   ([ADR 0052](docs/adr/0052-a-tag-that-cannot-move-needs-a-source-that-cannot-either.md)). A
   `sourceRef` layer with no `revision`, in an object publishing tags under `onConflict: Fail` (the
@@ -23,7 +22,7 @@ may change between minor versions.
   use `--require-pinned-sources` to require it cluster-wide, or choose a conflict policy that
   tolerates a moving source. A digest-only publish is never flagged — the name is the content, so
   it cannot wedge.
-=======
+
 - **`push.writeRefTo`, exporting the published reference into a ConfigMap**
   ([ADR 0055](docs/adr/0055-exporting-a-reference-a-consumer-cannot-compute.md)). For a Flux
   `postBuild.substituteFrom` consumer. Off by default, and **refused unless the operator
@@ -40,10 +39,17 @@ may change between minor versions.
   An incomplete reference is never written — a missing key substitutes the empty string and Flux
   says nothing.
 
-  **The digest becomes state outside git**, so a revert no longer reverts the running image; and
-  the ConfigMap is labelled rather than owner-referenced, because a cross-namespace owner reference
-  is invalid, so it is not reclaimed with the object. Both are in the ADR.
->>>>>>> 1129595 (feat(builder): export the published reference into a ConfigMap)
+  The watch marker is a **label**, not an annotation — kustomize-controller selects it with
+  `--watch-configs-label-selector` and a label selector cannot match an annotation. Extra labels
+  and annotations can be supplied, but cannot remove the watch marker or the ownership label.
+
+  A ConfigMap this controller did not create is **never adopted**: `data` is replaced wholesale,
+  so taking over a hand-written substitution source would destroy it. An `ImageBuild` that exports
+  gains a finalizer to delete its ConfigMap on the way out, since a cross-namespace owner reference
+  is invalid — added only when `writeRefTo` is set, so no other object's deletion depends on the
+  controller.
+
+  **The digest becomes state outside git**, so a revert no longer reverts the running image.
 
 ### Changed
 

@@ -533,6 +533,18 @@ type RefExport struct {
 
 	// Keys names the ConfigMap keys to write.
 	Keys RefExportKeys `json:"keys"`
+
+	// Labels are added to the generated ConfigMap.
+	//
+	// reconcile.fluxcd.io/watch=Enabled is set regardless, because without it nothing notices the
+	// value change and the absence is invisible. These are for anything else that selects on the
+	// object -- a different watch selector, or a consumer's own conventions.
+	// +optional
+	Labels map[string]string `json:"labels,omitempty"`
+
+	// Annotations are added to the generated ConfigMap.
+	// +optional
+	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
 // RefExportKeys names what to write under which key. At least one is required.
@@ -550,4 +562,12 @@ type RefExportKeys struct {
 	// Digest receives the bare sha256:... value.
 	// +optional
 	Digest string `json:"digest,omitempty"`
+}
+
+// GetWriteRefTo is nil-safe, because spec.push may be omitted entirely.
+func (p *Push) GetWriteRefTo() *RefExport {
+	if p == nil {
+		return nil
+	}
+	return p.WriteRefTo
 }

@@ -260,19 +260,12 @@ func main() {
 	}
 
 	if err := (&buildcontroller.ImageBuildReconciler{
-<<<<<<< HEAD
-		Client:    mgr.GetClient(),
-		Default:   defaults,
-		Transport: registryTransport,
-		Attestor:  attestor,
-		Refresher: refresher,
-=======
 		Client:              mgr.GetClient(),
 		Default:             defaults,
 		Transport:           registryTransport,
 		Attestor:            attestor,
+		Refresher:           refresher,
 		RefExportNamespaces: splitList(refExportNamespaces),
->>>>>>> 1129595 (feat(builder): export the published reference into a ConfigMap)
 		//nolint:staticcheck // SA1019: the new events API has no Event method; see the composer.
 		Recorder: mgr.GetEventRecorderFor("imagebuild-controller"),
 		// The controller GETs a user-supplied URL when a fetch context holds the Dockerfile, so it
