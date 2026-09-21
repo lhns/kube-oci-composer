@@ -75,6 +75,12 @@ new API. **This is breaking** for anyone relying on the old exemption.
 one, and it is a configuration to avoid rather than to build for: a spec-hash tag never collides
 with itself, so `Overwrite` costs it nothing.
 
+**A manifest the registry does not serve yet is PENDING, not a failure.** The build reports its
+digest from buildctl's metadata file, and the registry may not answer for it the instant afterwards.
+Treating that as terminal gave it exponential backoff -- a handful of retries before an e2e gave
+up -- where ADR 0009's third path is the right one: nothing about this object's spec would fix it,
+so it waits on a short fixed requeue and says what it is waiting for.
+
 **A failed tagging step fails the reconcile after a successful build.** The content is pushed but
 unnamed, so it is not published; retrying re-reads the same Job and re-applies the same names, which
 is idempotent. Content orphaned by a permanent failure is reclaimed as untagged.

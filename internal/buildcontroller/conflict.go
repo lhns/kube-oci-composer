@@ -643,7 +643,16 @@ func (r *ImageBuildReconciler) applyTags(
 	}
 
 	desc, err := remote.Get(mustDigestRef(reg.repo, digest, reg.refOpts), reg.opts...)
-	if err != nil {
+	switch {
+	case recon.IsNotFound(err):
+		// The build reported this digest, so it either has not registered yet or the push did not
+		// land. PENDING, not terminal: nothing about this object's spec would fix it, so stalling
+		// would wait for an event that cannot come, and a registry catching up is the ordinary
+		// reading. If it never appears the object says exactly that, every interval.
+		return nil, recon.Pending(
+			"the build produced %s but the registry does not serve it yet at %s; waiting",
+			digest, reg.repo)
+	case err != nil:
 		return nil, fmt.Errorf("reading the pushed manifest %s: %w", digest, err)
 	}
 	for _, tag := range tags {
