@@ -131,16 +131,55 @@ The controllers hold this up by re-pulling every image a live object still refer
 `--retention-refresh-interval` (default `1h`). The registry keeps what has been pulled recently. That
 is the whole mechanism: a lease the object renews, rather than something inferred from a scan.
 
-**Your part is the window.** It must stay much longer than the refresh interval. The relationship is
-the guarantee — not either number:
+**Your part is the window, and only the window.**
 
-| Refresh interval | Registry window | Margin | |
+```yaml
+retention:
+  window: 720h   # how long your registry keeps content nothing references
+```
+
+Everything else is derived from it — the refresh interval, how often the registry sweeps, how long
+something must be eligible before it goes. You do not have to keep four numbers in step, because
+the chart does not let them drift: shorten the window and the refresh interval shortens with it.
+
+The relationship that matters is the margin, and it is the guarantee — not either number:
+
+| Refresh interval | Window | Margin | |
 |---|---|---|---|
 | `1h` | `720h` (30 days) | 720× | the default, and comfortable |
 | `1h` | `24h` | 24× | workable; an outage of a day loses content |
-| `1h` | `2h` | 2× | **not a guarantee** — one slow cycle is data loss |
+| `1h` | `2h` | 2× | **refused** — one slow cycle is data loss |
 
-If you shorten the window, shorten the interval with it.
+`retention.refreshFactor` is that margin, and the chart refuses to render below 24×. You can pin
+`retention.refreshInterval` yourself, and then you are responsible for the relationship — the check
+still runs.
+
+**This applies whether or not you use the bundled registry.** With your own registry, `window` is a
+*declaration* of what that registry already does, because the refresh cadence has to be derived from
+something and the chart cannot read your policy. Declaring it wrong is not cosmetic: too long and
+the controllers refresh slower than your registry expires. If your registry expires nothing, say so
+with `retention.window: ""`, which switches off the derivation and the checks rather than guessing.
+
+### The other window, which is not about this one
+
+A build pushes its image **by digest, with no tag**, and the controller applies the tags a moment
+later — that is what makes its conflict check exact ([ADR 0054](adr/0054-name-it-after-you-push-it.md)).
+In between, the manifest is untagged, and untagged is what a collector reclaims. Lose that race and
+the build's own output is deleted before it can be named; if it was the repository's only content,
+the repository goes too, and the error reads `NAME_UNKNOWN`.
+
+So `gcDelay` is the one value **not** derived from the window — it guards a wall-clock gap. The
+chart never derives it below three times `imageBuild.buildPollInterval` and refuses an override that
+goes under, so the bundled registry is safe by construction.
+
+**If you run your own registry, this is yours to check.** Any registry that reclaims untagged
+manifests can take a build's output before it is named. Either give it a collection delay
+comfortably longer than `imageBuild.buildPollInterval` (default `15s`), or disable untagged
+collection. The symptom is a build that publishes and then reports, every interval:
+
+> the build produced `sha256:…` but `…` does not serve it; the manifest is untagged until this
+> controller names it, so either the registry has not caught up or its collector reclaimed it
+> first — check the registry's gcDelay if this persists
 
 ## A zot configuration that works
 

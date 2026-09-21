@@ -283,3 +283,72 @@ func TestAnUnnameableExportIsRefusedWithTheNameItBuilt(t *testing.T) {
 		t.Errorf("the message must show the name that was built, not the one asked for: %v", err)
 	}
 }
+
+// TestAnExportDeletedByHandComesBack.
+//
+// The ConfigMap is not the record -- status is. Somebody removing it by hand, or a namespace being
+// recreated, must not leave the object believing an export exists that does not, because the next
+// publish is the only thing that would notice.
+func TestAnExportDeletedByHandComesBack(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(exportScheme(t)).Build()
+
+	if _, err := ExportRef(context.Background(), c, owner(), exportSpec(), allowingFlux(),
+		testDigest, testRef); err != nil {
+		t.Fatalf("exporting: %v", err)
+	}
+	var cm corev1.ConfigMap
+	key := types.NamespacedName{Namespace: "flux-system", Name: exportedName}
+	if err := c.Get(context.Background(), key, &cm); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Delete(context.Background(), &cm); err != nil {
+		t.Fatalf("deleting by hand: %v", err)
+	}
+
+	if _, err := ExportRef(context.Background(), c, owner(), exportSpec(), allowingFlux(),
+		testDigest, testRef); err != nil {
+		t.Fatalf("re-exporting after a hand deletion: %v", err)
+	}
+	var again corev1.ConfigMap
+	if err := c.Get(context.Background(), key, &again); err != nil {
+		t.Fatalf("the export was not recreated: %v", err)
+	}
+	if again.Data["PYMODS_REF"] != testRef {
+		t.Errorf("recreated with the wrong content: %v", again.Data)
+	}
+}
+
+// TestRevokingANamespaceLeavesWhatWasAlreadyWritten.
+//
+// An operator removing a namespace from the allow-list stops NEW exports. It must not also make the
+// controller tear down what a consumer is already substituting from: that would turn a
+// configuration change into an outage, at a moment when nobody is looking at this object.
+//
+// The refusal is terminal, so it says so on the object rather than failing quietly.
+func TestRevokingANamespaceLeavesWhatWasAlreadyWritten(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(exportScheme(t)).Build()
+
+	if _, err := ExportRef(context.Background(), c, owner(), exportSpec(), allowingFlux(),
+		testDigest, testRef); err != nil {
+		t.Fatalf("exporting: %v", err)
+	}
+
+	// The operator revokes it.
+	_, err := ExportRef(context.Background(), c, owner(), exportSpec(),
+		ExportOptions{WatchLabels: fluxWatch}, testDigest, testRef)
+	if err == nil {
+		t.Fatal("exported into a namespace that is no longer permitted")
+	}
+	if !IsTerminal(err) {
+		t.Errorf("must be terminal -- only the spec or the flag fixes it; got %v", err)
+	}
+
+	var still corev1.ConfigMap
+	if err := c.Get(context.Background(),
+		types.NamespacedName{Namespace: "flux-system", Name: exportedName}, &still); err != nil {
+		t.Fatalf("the existing export was removed when the namespace was revoked: %v", err)
+	}
+	if still.Data["PYMODS_REF"] != testRef {
+		t.Errorf("the existing export was rewritten: %v", still.Data)
+	}
+}
