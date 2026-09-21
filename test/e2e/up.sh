@@ -41,8 +41,13 @@ E2E_WINDOW="${E2E_WINDOW:-30s}"
 E2E_REFRESH="${E2E_REFRESH:-1s}"
 E2E_REFRESH_FACTOR="${E2E_REFRESH_FACTOR:-30}"
 
-# gcInterval = window / this.
-E2E_GC_FACTOR="${E2E_GC_FACTOR:-6}"
+# gcInterval = window / this. 30 gives a one-second sweep.
+#
+# The single biggest lever on how long this suite takes, and not for the obvious reason. zot hands
+# out one collection task per repository per sweep and only starts over once every repository has
+# been visited, so any ONE repository is reached about every (repositories x gcInterval). The
+# registry accumulates a repository per test, so at 5s a negative control waited minutes.
+E2E_GC_FACTOR="${E2E_GC_FACTOR:-30}"
 
 # What lets everything else be small. A build's image is untagged from the push until the controller
 # names it (ADR 0054), so the chart never derives gcDelay below three times this -- 45s at the

@@ -79,6 +79,38 @@ func deployedGCInterval(t *testing.T) time.Duration {
 	return d
 }
 
+// deployedRotation estimates how long it takes the collector to come back round to any ONE
+// repository -- which is what a test actually waits for, and is not gcInterval.
+//
+// zot's GCTaskGenerator hands out one task per repository per sweep and only resets once every
+// repository has been processed, so a given repository is visited about every N x gcInterval. N is
+// every repository in the registry, build caches included, and it grows as the suite runs. That is
+// why a negative control takes minutes while gcInterval is seconds, and why hand-tuned deadlines
+// here have already been outgrown once.
+//
+// Counted from the catalog rather than assumed, so adding a test that pushes a new repository
+// lengthens the deadlines automatically instead of eating somebody else's margin.
+func deployedRotation(t *testing.T) time.Duration {
+	t.Helper()
+	out := registryRequest(t, "catalog", "GET", "/v2/_catalog?n=1000", "", "")
+
+	var catalog struct {
+		Repositories []string `json:"repositories"`
+	}
+	if i := strings.LastIndex(out, "{"); i >= 0 {
+		if err := json.Unmarshal([]byte(out[i:]), &catalog); err != nil {
+			t.Fatalf("parsing the registry catalog: %v\n%s", err, out)
+		}
+	}
+	n := len(catalog.Repositories)
+	if n < 1 {
+		// Before anything has been pushed. One repository is the floor, not zero, or every derived
+		// deadline collapses to nothing.
+		n = 1
+	}
+	return time.Duration(n) * deployedGCInterval(t)
+}
+
 // requireCollectionPossible fails when the test could not observe a collection even if retention
 // were completely broken.
 //

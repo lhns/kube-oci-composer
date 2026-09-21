@@ -35,20 +35,29 @@ const retentionWindow = "30s"
 // of repositories in the registry, and the bundled registry now holds every image the whole suite
 // produces, build caches included. TestExpiryIsNotPrompt records the same thing from the other side.
 //
-// This is a deadline for "did it happen at all", not a measurement of when. Raising it costs nothing
-// when collection is prompt, because the poll returns as soon as the tag goes.
+// This is a deadline for "did it happen at all", not a measurement of when. Overshooting costs
+// nothing when collection is prompt, because the poll returns as soon as the tag goes.
 //
-// Raised from 420 after it fired on main: the control survived the full 420s, which fails the suite
-// rather than letting every retention assertion pass vacuously. One added ImageBuild -- one more
-// repository in the rotation -- was enough, which says the old value had no margin left rather than
-// that anything broke. The build was folded into an existing one, and this raised as well, because
-// the next repository anyone adds would have done the same thing.
+// It used to be a constant, raised from 420 to 600 after it fired on main: the control survived the
+// full 420s, which fails the suite rather than letting every retention assertion pass vacuously.
+// ONE added ImageBuild -- one more repository in the rotation -- was enough, which said the value
+// had no margin left rather than that anything had broken.
 //
-// What it has to cover, for whoever raises it next: gcDelay before anything is eligible, plus the
-// rotation's period, which is the part that grows and the part nobody can compute. Unlike watchFor
-// this is NOT derived, because the term that dominates it is the one the cluster will not tell us.
-// A constant with a stated derivation beats a formula missing its largest term.
-const collectionDeadline = 600
+// So it is no longer a constant. The term that dominates it is the rotation, and the rotation is
+// computable once you count the repositories: gcDelay to become eligible, plus several rotations
+// for the collector to arrive. Adding a test that pushes a new repository now lengthens this
+// automatically instead of quietly spending somebody else's margin.
+//
+// The floor is for a nearly empty registry, where four rotations is a few seconds and would fail
+// the moment anything was briefly slow.
+func collectionDeadline(t *testing.T) int {
+	t.Helper()
+	d := deployedGCDelay(t) + 4*deployedRotation(t)
+	if s := int(d.Seconds()); s > 120 {
+		return s
+	}
+	return 120
+}
 
 // keepaliveRepo scopes these tests to the repository prefix the retention policy applies to, so
 // nothing else in the suite can be collected out from under it.
@@ -59,15 +68,14 @@ func keepaliveRepo(name string) string { return "keepalive-" + name }
 //
 // Two things have to happen before content can die, so both are in it. Nothing younger than
 // gcDelay is a candidate at all -- watch for less and "it survived" is a statement about the clock,
-// not about retention. And being a candidate is not being collected: a sweep has to run, several
-// times, because zot reaches repositories on a rotation whose period is NOT bounded by gcInterval
-// and grows with the number of repositories.
+// not about retention. And being a candidate is not being collected: the collector has to reach
+// THIS repository, which it does on a rotation, not on every sweep.
 //
-// So: past the eligibility floor with margin, plus several sweeps for the rotation to arrive.
-// Derived, so compressing the deployment compresses the tests and they stay honest.
+// An earlier version used gcInterval for the second term, which is the sweep and not the rotation.
+// It was right only while the two were close.
 func watchFor(t *testing.T) int {
 	t.Helper()
-	d := 2*deployedGCDelay(t) + 5*deployedGCInterval(t)
+	d := 2*deployedGCDelay(t) + 2*deployedRotation(t)
 	return int(d.Seconds())
 }
 
@@ -81,6 +89,8 @@ func watchFor(t *testing.T) int {
 //
 // zot's own vocabulary for this is `pulledWithin`. That it is documented is not evidence; this is.
 func TestPullingAnImageKeepsItFromExpiring(t *testing.T) {
+	t.Parallel()
+
 	refreshed := keepaliveRepo("refreshed")
 	abandoned := keepaliveRepo("abandoned")
 
@@ -134,7 +144,7 @@ func TestPullingAnImageKeepsItFromExpiring(t *testing.T) {
 	// loop and passed — but a separate test that pushed an image and waited the same 90s saw its tag
 	// still present, which is the same scenario with the opposite result. That is what a marginal
 	// assertion looks like from the outside: green, and one slow runner away from red.
-	eventuallyUntagged(t, abandoned, "v1", collectionDeadline)
+	eventuallyUntagged(t, abandoned, "v1", collectionDeadline(t))
 }
 
 // eventuallyUntagged waits for a tag to be collected, and fails loudly if it never is.

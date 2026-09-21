@@ -26,6 +26,8 @@ import (
 // existence of a live object naming the image. If both halves pass, the controller's refresh is the
 // only thing that can explain the difference.
 func TestALiveObjectKeepsItsImagesAlive(t *testing.T) {
+	t.Parallel()
+
 	repo := keepaliveRepo("live")
 	digest := buildInto(t, "keepalive-live", repo, "v1")
 
@@ -51,7 +53,7 @@ func TestALiveObjectKeepsItsImagesAlive(t *testing.T) {
 	// Without this the assertions above are satisfied by a registry that never collects anything,
 	// which is indistinguishable from a guarantee that works.
 	mustKubectl(t, "-n", buildNamespace, "delete", "imagebuild", "keepalive-live")
-	eventuallyUntagged(t, repo, "v1", collectionDeadline)
+	eventuallyUntagged(t, repo, "v1", collectionDeadline(t))
 }
 
 // Two objects publishing the same digest need no coordination: both refresh it, and it survives
@@ -62,6 +64,8 @@ func TestALiveObjectKeepsItsImagesAlive(t *testing.T) {
 // mark-and-sweep, with all of its failure modes. Here it falls out of the design, and this is the
 // test that says so rather than the ADR merely claiming it.
 func TestTwoObjectsSharingADigestKeepItAliveIndependently(t *testing.T) {
+	t.Parallel()
+
 	repo := keepaliveRepo("shared")
 
 	// Same context and Dockerfile, so both builds produce the same digest — which
@@ -90,7 +94,7 @@ func TestTwoObjectsSharingADigestKeepItAliveIndependently(t *testing.T) {
 
 	// One object goes away. The other still names the digest.
 	mustKubectl(t, "-n", buildNamespace, "delete", "imagebuild", "keepalive-shared-a")
-	eventuallyUntagged(t, control, "v1", collectionDeadline)
+	eventuallyUntagged(t, control, "v1", collectionDeadline(t))
 
 	// Recorded rather than asserted, because it is the question that was got wrong: whether a tag
 	// outlives its object when something else keeps the underlying manifest alive. Asserting either

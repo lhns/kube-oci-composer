@@ -10,8 +10,12 @@ asking four questions whose only correct answers are functions of the first one.
   refreshInterval how often the controllers re-pull what live objects reference.
                   = window / refreshFactor. MUST be much shorter than the window: the margin is
                   the guarantee, not either number (ADR 0031). Refused below 24x.
-  gcInterval      how often the registry sweeps. = window / gcFactor. Promptness only; collecting
-                  late is safe, collecting early is not.
+  gcInterval      how often the registry sweeps. = window / gcFactor. In production this is
+                  promptness only -- collecting late is safe, collecting early is not. In a TEST it
+                  is the dominant cost: zot gives one repository a task per sweep and starts over
+                  only when all of them have been visited, so a repository is reached about every
+                  (repositories x gcInterval), and anything waiting to observe a collection waits
+                  that long.
   gcDelay         how old something must be before it can be collected. Does NOT derive from the
                   window, because it guards a WALL-CLOCK gap: a build's manifest is untagged from
                   the moment it is pushed until this controller names it (ADR 0054), and untagged
