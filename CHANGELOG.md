@@ -5,6 +5,25 @@ may change between minor versions.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A freshly published artifact was unprotected until the next refresh cycle**
+  ([ADR 0053](docs/adr/0053-a-publish-is-protected-before-the-reconcile-returns.md)). The retention
+  refresh ran only on a ticker, so between a push and the next cycle — an hour by default — the
+  artifact held no lease at all. A registry that expires on pull recency has no record that
+  anything was pushed, and zot in particular carries an **old** push timestamp onto a new tag when
+  the digest is one it has seen before, so a collection pass inside that window reclaims content
+  that is minutes old. Reported from a live cluster as tags vanishing shortly after publication.
+
+  A publish now renews its own lease before the reconcile returns.
+
+- **A skipped refresh cycle was reported as though it were harmless.** If any object has not been
+  reconciled, the refresher declines the whole cycle — correctly, since a partial view would
+  under-refresh silently — but it said so only at `info`, while a *failed* cycle was escalated.
+  Both protect nothing, and a skip is the worse of the two because it does not clear on its own:
+  one object stuck behind its generation stops the refresh for **every** object in the cluster.
+  Consecutive skips now escalate.
+
 ### Added
 
 - **A Warning when a layer's source can move but its tags cannot**

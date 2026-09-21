@@ -60,6 +60,7 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0050](0050-a-builds-secrets-belong-to-the-build.md) | A build's Secrets belong to the build | **Accepted** |
 | [0051](0051-a-build-that-lost-its-image-rebuilds-it.md) | A build that lost its image rebuilds it | **Accepted** |
 | [0052](0052-a-tag-that-cannot-move-needs-a-source-that-cannot-either.md) | A tag that cannot move needs a source that cannot either | **Accepted** |
+| [0053](0053-a-publish-is-protected-before-the-reconcile-returns.md) | A publish is protected before the reconcile returns | **Accepted** |
 
 ## Open questions
 

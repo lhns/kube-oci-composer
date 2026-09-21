@@ -225,11 +225,41 @@ func main() {
 		os.Exit(1)
 	}
 
+	var refresher *retention.Refresher
+
+	if refreshInterval > 0 {
+		source := retention.BuildSource{Client: mgr.GetClient()}
+		refresher = &retention.Refresher{
+			Client: mgr.GetClient(),
+			Source: source,
+			// The builder has no Readiness to borrow -- it serves nothing -- so completeness is
+			// answered from generation versus observedGeneration by the source itself.
+			Pending:  source,
+			Interval: refreshInterval,
+			//nolint:staticcheck // SA1019: the new events API has no Event method; same as above.
+			Recorder:           mgr.GetEventRecorderFor("retention"),
+			InsecureRegistries: registry.Insecure(),
+			Transport:          registryTransport,
+			Default:            defaults,
+		}
+		if err := refresher.SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to set up retention refresh")
+			os.Exit(1)
+		}
+		setupLog.Info("retention refresh enabled", "interval", refreshInterval)
+	} else {
+		// Worth saying out loud on this kind in particular. A build cannot be reproduced from its
+		// spec (ADR 0025), so an image a registry reclaims here is gone rather than rebuildable.
+		setupLog.Info("retention refresh DISABLED; a registry with an expiry policy will delete " +
+			"images this operator's builds still reference, and a build cannot be reproduced")
+	}
+
 	if err := (&buildcontroller.ImageBuildReconciler{
 		Client:    mgr.GetClient(),
 		Default:   defaults,
 		Transport: registryTransport,
 		Attestor:  attestor,
+		Refresher: refresher,
 		//nolint:staticcheck // SA1019: the new events API has no Event method; see the composer.
 		Recorder: mgr.GetEventRecorderFor("imagebuild-controller"),
 		// The controller GETs a user-supplied URL when a fetch context holds the Dockerfile, so it
@@ -255,33 +285,6 @@ func main() {
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to set up the ImageBuild controller")
 		os.Exit(1)
-	}
-
-	if refreshInterval > 0 {
-		source := retention.BuildSource{Client: mgr.GetClient()}
-		refresher := &retention.Refresher{
-			Client: mgr.GetClient(),
-			Source: source,
-			// The builder has no Readiness to borrow -- it serves nothing -- so completeness is
-			// answered from generation versus observedGeneration by the source itself.
-			Pending:  source,
-			Interval: refreshInterval,
-			//nolint:staticcheck // SA1019: the new events API has no Event method; same as above.
-			Recorder:           mgr.GetEventRecorderFor("retention"),
-			InsecureRegistries: registry.Insecure(),
-			Transport:          registryTransport,
-			Default:            defaults,
-		}
-		if err := refresher.SetupWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to set up retention refresh")
-			os.Exit(1)
-		}
-		setupLog.Info("retention refresh enabled", "interval", refreshInterval)
-	} else {
-		// Worth saying out loud on this kind in particular. A build cannot be reproduced from its
-		// spec (ADR 0025), so an image a registry reclaims here is gone rather than rebuildable.
-		setupLog.Info("retention refresh DISABLED; a registry with an expiry policy will delete " +
-			"images this operator's builds still reference, and a build cannot be reproduced")
 	}
 
 	// The context endpoint. Runs on every replica, not only the leader: it answers build pods, and
