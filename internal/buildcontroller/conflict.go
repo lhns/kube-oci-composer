@@ -645,12 +645,20 @@ func (r *ImageBuildReconciler) applyTags(
 	desc, err := remote.Get(mustDigestRef(reg.repo, digest, reg.refOpts), reg.opts...)
 	switch {
 	case recon.IsNotFound(err):
-		// The build reported this digest, so it either has not registered yet or the push did not
-		// land. PENDING, not terminal: nothing about this object's spec would fix it, so stalling
-		// would wait for an event that cannot come, and a registry catching up is the ordinary
-		// reading. If it never appears the object says exactly that, every interval.
+		// PENDING, not terminal: nothing about this object's spec would fix it, so stalling would
+		// wait for an event that cannot come. If it never appears the object says so every
+		// interval, rather than failing once and backing off into silence.
+		//
+		// But retrying only helps for one of the two causes, and the message has to say both. The
+		// manifest is UNTAGGED until this function names it, which is exactly what a registry's
+		// collector reclaims -- and if it was the repository's only content, the repository goes
+		// too, which is why this arrives as NAME_UNKNOWN rather than a missing manifest. The chart
+		// refuses a gcDelay short enough for that to be likely; a registry someone else configured
+		// carries no such guarantee.
 		return nil, recon.Pending(
-			"the build produced %s but the registry does not serve it yet at %s; waiting",
+			"the build produced %s but %s does not serve it; the manifest is untagged until this "+
+				"controller names it, so either the registry has not caught up or its collector "+
+				"reclaimed it first -- check the registry's gcDelay if this persists",
 			digest, reg.repo)
 	case err != nil:
 		return nil, fmt.Errorf("reading the pushed manifest %s: %w", digest, err)

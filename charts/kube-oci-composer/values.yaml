@@ -314,10 +314,22 @@ registry:
   retention:
     # Which repositories the policy governs. Everything, by default.
     #
-    # A repository matching no policy is never collected, which is a useful escape hatch: scope this
-    # and anything outside it is kept forever. That is how the e2e compresses the window to seconds
-    # without collecting the images its other tests are using.
+    # Scoping this does NOT protect what falls outside it. zot collects untagged manifests in a
+    # repository matching no policy by default -- HasDeleteUntagged returns true when it finds
+    # none -- so narrowing this makes unmatched repositories less protected, not more. Use
+    # deleteUntagged below to turn that off.
     repositories: ["**"]
+
+    # Whether a manifest with no tag pointing at it is collected.
+    #
+    # Leave it true in production. It is what reclaims an ImageBuild refused under onConflict: Fail,
+    # whose content is uploaded and then deliberately not named (ADR 0054).
+    #
+    # It is also a race with that same mechanism: a build's manifest is untagged until the
+    # controller applies the tags, which takes up to ~15s. gcDelay is the margin, and the chart
+    # refuses a gcDelay under 10m while this is true. Setting this false removes the race rather
+    # than out-running it, which is what a test running a one-second collector wants.
+    deleteUntagged: true
 
     # How long an image survives without being pulled.
     #

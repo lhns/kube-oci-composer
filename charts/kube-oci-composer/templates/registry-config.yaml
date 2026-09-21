@@ -104,7 +104,7 @@ data:
           "policies": [
             {
               "repositories": {{ toJson $.Values.registry.retention.repositories }},
-              "deleteUntagged": true,
+              "deleteUntagged": {{ $.Values.registry.retention.deleteUntagged }},
               {{- /*
               Two entries, and a tag survives if EITHER keeps it. Pull recency alone leaves an image
               unprotected between being built and the refresher first reaching it.
@@ -118,7 +118,14 @@ data:
                 { "patterns": [".*"], "pulledWithin": {{ $.Values.registry.retention.window | quote }} },
                 { "patterns": [".*"], "pushedWithin": {{ $.Values.registry.retention.window | quote }} }
               ],
-              "keepUntagged": { "pulledWithin": {{ $.Values.registry.retention.window | quote }} }
+              {{- /*
+              Pull recency alone leaves freshly pushed untagged content matching NOTHING, which is
+              what a build publishing by digest produces until the controller names it.
+              */}}
+              "keepUntagged": {
+                "pulledWithin": {{ $.Values.registry.retention.window | quote }},
+                "pushedWithin": {{ $.Values.registry.retention.window | quote }}
+              }
             }
           ]
         }

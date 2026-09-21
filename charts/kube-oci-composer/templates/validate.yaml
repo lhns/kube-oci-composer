@@ -10,6 +10,7 @@ inside the include still aborts `helm template`, `helm install` and `helm upgrad
 */}}
 {{- include "kube-oci-composer.checkPublishMode" . -}}
 {{- include "kube-oci-composer.checkRetention" . -}}
+{{- include "kube-oci-composer.checkUntaggedWindow" . -}}
 {{- include "kube-oci-composer.checkRegistryAuth" . -}}
 {{- include "kube-oci-composer.checkRegistryCert" . -}}
 {{- include "kube-oci-composer.checkRegistryReplicas" . -}}

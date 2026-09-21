@@ -36,6 +36,33 @@ Both controllers are checked, because either one going quiet loses its own objec
   {{- end -}}
 {{- end -}}
 
+{{- /*
+The OTHER race, and it is not about the window at all.
+
+A build uploads its image with NO TAG and the controller names it a moment later, which is what
+makes the conflict check exact (ADR 0054). Until that name is applied the manifest is untagged, and
+untagged is precisely what zot's collector reclaims -- keepUntagged cannot save it, because a
+manifest that was just pushed and never pulled matches nothing there. So the build's own output is
+deletable for as long as naming takes.
+
+gcDelay is what stands between the two. The default of 1h against a gap bounded by the controller's
+15s poll is a margin of 240; at 1s it is a coin toss, and the failure looks like NAME_UNKNOWN,
+because once the untagged manifest was the repository's only content the repository goes with it.
+
+Refused rather than warned, for the same reason as the window check: the failure mode is deletion.
+deleteUntagged: false removes the race rather than out-running it, so it is accepted at any delay --
+that is the combination a test wanting a one-second collector should use.
+*/}}
+{{- define "kube-oci-composer.checkUntaggedWindow" -}}
+{{- if and .Values.registry.enabled .Values.registry.retention.deleteUntagged -}}
+{{- $delay := include "kube-oci-composer.durationHours" .Values.registry.retention.gcDelay | float64 -}}
+{{- $min := 0.1666 -}}
+{{- if and (ge $delay 0.0) (lt $delay $min) -}}
+{{- fail (printf `registry.retention.gcDelay (%s) is shorter than 10m while registry.retention.deleteUntagged is true. A build publishes by digest and this controller applies the tags afterwards, so its manifest is UNTAGGED for up to ~15s -- and untagged is what the collector reclaims, taking the repository with it when nothing else is in it. Lengthen gcDelay, or set registry.retention.deleteUntagged=false to remove the race instead of out-running it. See ADR 0054.` $.Values.registry.retention.gcDelay) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "kube-oci-composer.checkRetention" -}}
 {{- if and .Values.registry.enabled .Values.registry.retention.window -}}
 {{- $window := include "kube-oci-composer.durationHours" .Values.registry.retention.window | float64 -}}

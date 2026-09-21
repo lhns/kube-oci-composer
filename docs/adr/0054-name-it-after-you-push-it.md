@@ -75,11 +75,28 @@ new API. **This is breaking** for anyone relying on the old exemption.
 one, and it is a configuration to avoid rather than to build for: a spec-hash tag never collides
 with itself, so `Overwrite` costs it nothing.
 
-**A manifest the registry does not serve yet is PENDING, not a failure.** The build reports its
-digest from buildctl's metadata file, and the registry may not answer for it the instant afterwards.
-Treating that as terminal gave it exponential backoff -- a handful of retries before an e2e gave
-up -- where ADR 0009's third path is the right one: nothing about this object's spec would fix it,
-so it waits on a short fixed requeue and says what it is waiting for.
+**The manifest is UNTAGGED until this controller names it, and untagged is what a collector
+reclaims.** That is the cost of the separation, and it was underestimated when this was written.
+
+zot deletes untagged manifests by default -- including in a repository matching no retention
+policy, where `HasDeleteUntagged` returns true precisely because none was found -- and `keepUntagged`
+cannot save a manifest that was just pushed and never pulled. When the untagged manifest is the
+repository's only content, `cleanRepo` removes the repository with it, so the read-back fails
+`NAME_UNKNOWN` rather than reporting a missing manifest.
+
+The window is push to `applyTags`, bounded by the controller's 15s Job poll. `gcDelay` is the
+margin: the shipped 1h gives 240x, and the e2e's 1s gave none, which is where this was found --
+intermittently, because zot walks repositories on a rotation, so a green run proved nothing.
+
+The chart therefore refuses a `gcDelay` under 10m while `deleteUntagged` is true, and offers
+`registry.retention.deleteUntagged: false` for a configuration that wants a fast collector without
+the race. `keepUntagged` gained `pushedWithin`, which it should have had: pull recency alone
+protects nothing that has only ever been pushed.
+
+**A read-back that fails is PENDING, not a failure.** Nothing about this object's spec would fix
+it, so ADR 0009's third path applies: a short fixed requeue rather than exponential backoff. But
+retrying only helps if the registry is catching up; if a collector took the manifest, the content
+is gone and no number of retries returns it. The message says both, and points at `gcDelay`.
 
 **A failed tagging step fails the reconcile after a successful build.** The content is pushed but
 unnamed, so it is not published; retrying re-reads the same Job and re-applies the same names, which

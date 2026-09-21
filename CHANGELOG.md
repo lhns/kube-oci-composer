@@ -5,6 +5,27 @@ may change between minor versions.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A build's own image could be collected before the controller could name it.** Publishing by
+  digest ([ADR 0054](docs/adr/0054-name-it-after-you-push-it.md)) leaves the manifest **untagged**
+  until the controller applies the tags, and untagged is exactly what a registry's collector
+  reclaims — zot deletes untagged manifests by default, and `keepUntagged` could not save one that
+  had only ever been pushed. When the manifest was the repository's only content the repository
+  went with it, so the read-back failed `NAME_UNKNOWN`.
+
+  Only reachable with a short `registry.retention.gcDelay`: the shipped `1h` against a window
+  bounded by the 15s Job poll is a margin of 240. The e2e ran `1s` and lost builds intermittently.
+
+  - The chart now **refuses a `gcDelay` under 10m while untagged collection is on**.
+  - New `registry.retention.deleteUntagged`, previously hardcoded — set it `false` to remove the
+    race rather than out-run it, which is what a fast collector needs.
+  - `keepUntagged` gained `pushedWithin`. With `pulledWithin` alone, freshly pushed content matched
+    no rule at all.
+  - `values.yaml` claimed a repository matching no policy is never collected. **That is false** —
+    zot's default for an unmatched repository is to delete untagged manifests — and the e2e was
+    written trusting it.
+
 ### Added
 
 - **A Warning when a layer's source can move but its tags cannot**

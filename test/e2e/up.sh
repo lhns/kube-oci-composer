@@ -76,9 +76,18 @@ kind load docker-image "$BUILDER_IMG" --name "$CLUSTER"
 # Compressing the window without compressing the interval with it would be exactly the misconfigured
 # state that check exists to catch, so the e2e must not be the first thing to work around it.
 #
-# SCOPED to keepalive-* repositories, because a repository matching no policy is never collected:
-# that keeps every other test's images safe from a window measured in seconds while the retention
-# tests still get to watch something expire.
+# SCOPED to keepalive-* repositories so the retention tests get to watch something expire without a
+# 30s window reaching every other test's images.
+#
+# That scoping is NOT what protects the others, though it was written believing it was. zot collects
+# untagged manifests in a repository matching no policy BY DEFAULT, so an unmatched repository is
+# less protected, not more -- and a build's manifest is untagged for the moment between being pushed
+# and being named (ADR 0054). With gcDelay=1s the collector won that race, deleted the manifest,
+# then deleted the now-empty repository, and the read-back failed NAME_UNKNOWN. Intermittently,
+# because zot walks repositories on a rotation.
+#
+# deleteUntagged=false is what actually makes a one-second collector safe here. The chart refuses
+# this gcDelay without it.
 # No defaultRegistry.insecure: the controllers never connect to the public name, and the in-cluster
 # Service they DO connect to is marked insecure by the chart automatically.
 helm upgrade --install kube-oci-composer charts/kube-oci-composer \
@@ -96,7 +105,7 @@ helm upgrade --install kube-oci-composer charts/kube-oci-composer \
   --set 'registry.retention.repositories={keepalive-*,keepalive-**}' \
   --set registry.retention.window=30s \
   --set registry.retention.gcInterval=5s \
-  --set registry.retention.gcDelay=1s \
+  --set registry.retention.gcDelay=1s   --set registry.retention.deleteUntagged=false \
   --set registry.logLevel=debug \
   --set operator.retention.refreshInterval=1s \
   --set imageBuild.retention.refreshInterval=1s \
