@@ -84,6 +84,7 @@ first.
 | # | Question | Status |
 |---|---|---|
 | [0019](0019-pod-reference-protection-revisited.md) | Should garbage collection protect Pod-referenced digests? | Open, reopened twice; threat D8 |
+| [0058](0058-why-the-tags-vanished.md) | Why did those tags vanish minutes after a successful push? | Open; needs evidence from the cluster |
 
 
 ## Format
