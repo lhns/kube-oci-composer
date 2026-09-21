@@ -44,10 +44,19 @@ def problems(cfg):
     for entry in keep_tags:
         if not entry.get("patterns"):
             found.append("a keepTags entry has no patterns, so it protects no tag at all")
-    # Entries are OR'ed, so pull recency has to be one of them -- `pushedWithin` alone would expire
-    # every tag a window after its push however often it is fetched.
-    if keep_tags and not any(e.get("pulledWithin") for e in keep_tags):
-        found.append("no keepTags entry keys on pulledWithin, so refreshing cannot protect anything")
+    # ONE entry carrying both rules. Rules within an entry are OR'ed, but zot stops at the first
+    # entry whose patterns match, so a second entry also matching `.*` is dead configuration that
+    # reads as protection -- which is exactly how `pushedWithin` came to be inert. ADR 0057.
+    if len(keep_tags) > 1:
+        found.append(
+            f"{len(keep_tags)} keepTags entries; only the first whose patterns match is ever "
+            "evaluated, so the rest protect nothing"
+        )
+    if keep_tags and not keep_tags[0].get("pulledWithin"):
+        found.append("the keepTags entry does not key on pulledWithin, so refreshing protects nothing")
+    if keep_tags and not keep_tags[0].get("pushedWithin"):
+        found.append("the keepTags entry does not key on pushedWithin, so a tag pushed and never "
+                     "pulled is protected by nothing")
 
     # Tagged and untagged manifests are governed independently, and ADR 0010 has workloads pin
     # digests -- so an untagged manifest may be exactly what a rescheduled pod pulls.

@@ -1,6 +1,6 @@
 {{- if .Values.registry.enabled }}
 {{- /*
-An optional bundled registry, off by default.
+The bundled registry, ON by default.
 
 ADR 0030 makes a real registry the serving surface for both kinds, which would otherwise turn "helm
 install and you are done" into "helm install, then go and run a registry". Bundling one keeps

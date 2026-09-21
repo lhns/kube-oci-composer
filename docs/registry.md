@@ -185,8 +185,11 @@ collection. The symptom is a build that publishes and then reports, every interv
 
 **This is what the chart renders**, reproduced here because it is what you would need if you ran zot
 yourself, and because five details in it are easy to get silently wrong. Verified against zot
-`v2.1.21` by `test/e2e/`; the chart's copy is checked at build time by
-`hack/check-bundled-registry.py`.
+`v2.1.21` by `test/e2e/`.
+
+Abridged: `readTimeout`, TLS and auth are omitted here and covered in their own sections. Note that
+nothing checks this page against the chart -- `hack/check-bundled-registry.py` reads `helm template`
+output, not this file -- so it has drifted before. `helm template` is the source of truth.
 
 ```json
 {
@@ -203,10 +206,16 @@ yourself, and because five details in it are easy to get silently wrong. Verifie
           "repositories": ["**"],
           "deleteUntagged": true,
           "keepTags": [
-            { "patterns": [".*"], "pulledWithin": "720h" },
-            { "patterns": [".*"], "pushedWithin": "720h" }
+            {
+              "patterns": [".*"],
+              "pulledWithin": "720h",
+              "pushedWithin": "720h"
+            }
           ],
-          "keepUntagged": { "pulledWithin": "720h" }
+          "keepUntagged": {
+            "pulledWithin": "720h",
+            "pushedWithin": "720h"
+          }
         }
       ]
     }
@@ -241,11 +250,16 @@ what the config appears to say.
 **`keepTags` needs an explicit `patterns`.** zot retains `patterns` AND (`pulledWithin` OR …), so an
 entry with no `patterns` matches no tags, and every tag becomes a deletion candidate.
 
-**`pushedWithin` is a floor, not a second window.** The entries in `keepTags` are OR'ed, so the
-second one keeps an image that has been built but not yet pulled — the gap between a publish and the
-refresher's first pass. It does not extend retention: zot writes a push timestamp per *digest* and
-only when that digest is new, so republishing an existing digest does not renew it, and anything the
-refresher touches has a later pull than push. Pull recency remains the mechanism.
+**`pushedWithin` goes in the SAME entry as `pulledWithin`, never a second one.** Rules *within* a
+`keepTags` entry are OR'ed, but zot stops at the first entry whose `patterns` match — so a second
+entry also matching `.*` is never evaluated. This project shipped it as two entries and only
+`pulledWithin` was ever in force, which left a tag pushed and never pulled protected by nothing.
+See [ADR 0057](adr/0057-the-toolchain-is-an-input.md).
+
+What push recency buys is the gap between a publish and the refresher's first pass. It does not
+extend retention: zot writes a push timestamp per *digest* and only when that digest is new, so
+republishing an existing digest does not renew it, and anything the refresher touches has a later
+pull than push. Pull recency remains the mechanism.
 
 **`keepUntagged` is a separate rule from `keepTags`.** Tagged and untagged manifests are governed
 independently, which is why the controllers refresh **both** the digest and every tag. Leaving
@@ -257,7 +271,8 @@ manifests; zot's blob GC is separate and reclaims what nothing references. An **
 references nothing, so a digest-only artifact in an unmatched repository can be collected within
 `gcDelay` of being published -- the publish succeeds, and the pull that follows says `not found`.
 
-That is why the shipped policy is `repositories: ["**"]` with `keepUntagged.pulledWithin`: the
+That is why the shipped policy is `repositories: ["**"]` with `keepUntagged` carrying both
+`pulledWithin` and `pushedWithin`: the
 refresher's pull is what keeps a digest-only artifact alive, and it only counts where a policy
 applies. If you narrow `repositories`, narrow it to something that still covers every repository
 the controllers publish to.

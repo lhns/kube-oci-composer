@@ -50,7 +50,9 @@ addressed only by its digest. Then `applyTags` resolves what the tags currently 
 `published.Conflicts(tags, digest)` with the **real** digest, and applies the policy:
 
 - **Fail** — refuse terminally, tag nothing. The pushed manifest is untagged, and the registry's
-  `deleteUntagged` reclaims it.
+  `deleteUntagged` reclaims it. *(Eventually rather than promptly, since `keepUntagged` gained
+  `pushedWithin`: the rule that keeps a build's output alive while it is being named protects a
+  refused build too. See [ADR 0057](0057-the-toolchain-is-an-input.md).)*
 - **Keep** — tag nothing, and record `status.conflict` with a **real `Dropped` digest**. ADR 0029
   documented that field being empty on this kind as unavoidable *"because no build is run at all"*.
   Uploading before naming is what makes it available.

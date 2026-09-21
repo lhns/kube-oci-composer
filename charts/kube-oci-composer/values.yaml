@@ -361,13 +361,17 @@ registry:
 
     # Whether a manifest with no tag pointing at it is collected.
     #
-    # Leave it true in production. It is what reclaims an ImageBuild refused under onConflict: Fail,
-    # whose content is uploaded and then deliberately not named (ADR 0054).
+    # Leave it true in production. It is what eventually reclaims an ImageBuild refused under
+    # onConflict: Fail, whose content is uploaded and then deliberately not named (ADR 0054).
     #
-    # It is also a race with that same mechanism: a build's manifest is untagged until the
-    # controller applies the tags. gcDelay is the margin, and the chart refuses a gcDelay shorter
-    # than that gap while this is true. Setting this false removes the race instead of out-running
-    # it, and is then accepted at any delay.
+    # EVENTUALLY, not promptly, and that is a deliberate trade. keepUntagged carries pushedWithin,
+    # so anything recently pushed is protected whether or not it has a tag -- which is what keeps a
+    # build's output alive during the moment between being pushed and being named. The same rule
+    # protects a refused build, so its content occupies space for a full retention window rather
+    # than going at the next sweep. One window cannot do one without the other.
+    #
+    # Setting this false switches off untagged collection entirely, which also removes the race
+    # gcDelay otherwise guards -- so the chart accepts any gcDelay once it is false.
     deleteUntagged: true
 
     # gcInterval = window / gcFactor. Promptness only: collecting late is safe, collecting early

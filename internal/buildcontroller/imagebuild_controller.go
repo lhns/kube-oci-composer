@@ -116,12 +116,11 @@ type ImageBuildReconciler struct {
 // costs an informer over every ConfigMap in the cluster; the composer already pays it for configMap
 // layers, for exactly this reason. The alternative is a controller that appears not to notice edits.
 //
-// get;list;watch and NOTHING else. Everything this controller WRITES into a tenant namespace is a
-// Secret -- the Dockerfile copy included -- so no create or update appears here, and that asymmetry
-// is deliberate rather than an oversight.
-// No ConfigMap writes here, deliberately. push.writeRefTo creates one, but the chart grants that
-// as a namespaced Role in each allow-listed namespace -- cluster-wide would reach every namespace,
-// including the one a cluster substitutes from. ADR 0055.
+// The write verbs are push.writeRefTo's. Cluster-wide because RBAC is granted before an object
+// exists, so permitting an export into whatever namespace its object lives in means permitting it
+// everywhere -- THE CONTROLLER is the boundary instead: it writes only to the object's own
+// namespace or one in --ref-export-namespaces, and deletes only what carries its managed-by and
+// owner labels. ADR 0056. No deletecollection, ever.
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=gitrepositories;ocirepositories;buckets,verbs=get;list;watch

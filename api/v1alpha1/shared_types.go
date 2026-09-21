@@ -316,8 +316,8 @@ type Push struct {
 	// +optional
 	OnConflict TagConflictPolicy `json:"onConflict,omitempty"`
 
-	// WriteRefTo exports the published reference into a ConfigMap. Off unless set, and refused
-	// unless the controller allow-lists the target namespace. See RefExport.
+	// WriteRefTo exports the published reference into a ConfigMap. Off unless set. The target must
+	// be the object's OWN namespace, or one the controller allow-lists. See RefExport.
 	// +optional
 	WriteRefTo *RefExport `json:"writeRefTo,omitempty"`
 }

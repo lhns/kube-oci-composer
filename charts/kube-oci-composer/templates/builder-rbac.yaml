@@ -1,7 +1,7 @@
 {{- if .Values.imageBuild.enabled }}
 {{/*
 Kept deliberately readable. This role is the difference between this component and the composer,
-whose role cannot create a single object — so it is worth being able to read in one screen.
+whose role can create only the ConfigMap push.writeRefTo exports — so it is worth being able to read in one screen.
 */}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole

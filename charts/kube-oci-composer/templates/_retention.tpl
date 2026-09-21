@@ -15,12 +15,12 @@ asking four questions whose only correct answers are functions of the first one.
                   set how soon any one repository is collected -- zot walks repositories in rounds,
                   and shortening the sweep measurably made collection SLOWER in the e2e rather than
                   faster. Anything tuning this should measure rather than reason.
-  gcDelay         how old something must be before it can be collected. Does NOT derive from the
-                  window, because it guards a WALL-CLOCK gap: a build's manifest is untagged from
-                  the moment it is pushed until this controller names it (ADR 0054), and untagged
-                  is what a collector reclaims. So it takes the derived value or the naming-gap
-                  floor, whichever is larger -- compress the window for a test and gcDelay stops
-                  following it down exactly where it must.
+  gcDelay         how old something must be before it can be collected. Derived like the rest --
+                  from the refresh interval, so indirectly from the window -- but never below the
+                  naming-gap floor, because it also guards a WALL-CLOCK gap: a build's manifest is
+                  untagged from the moment it is pushed until this controller names it (ADR 0054),
+                  and untagged is what a collector reclaims. Compress the window for a test and
+                  gcDelay stops following it down exactly where it must.
 
 The window applies wherever the images live. With the bundled registry the chart both declares and
 configures it; with somebody else's the operator DECLARES what their registry does, because the
@@ -247,10 +247,15 @@ The OTHER race, and it is not about the window at all.
 
 A build uploads its image with NO TAG and the controller names it a moment later, which is what
 makes the conflict check exact (ADR 0054). Until that name is applied the manifest is untagged, and
-untagged is precisely what the collector reclaims -- keepUntagged cannot save it, because a manifest
-just pushed and never pulled matches nothing there. So a build's own output is deletable for as long
-as naming takes, and when it was the repository's only content the repository goes with it, which is
-why losing this race reads as NAME_UNKNOWN rather than a missing manifest.
+untagged is precisely what the collector reclaims. When it was the repository's only content the
+repository goes with it, which is why losing this race reads as NAME_UNKNOWN rather than a missing
+manifest.
+
+keepUntagged.pushedWithin protects a freshly pushed manifest in any repository the policy MATCHES,
+so for the shipped repositories: ["**"] this guard is belt-and-braces. It still earns its place:
+scope repositories to a prefix and everything outside it matches no policy at all, where zot's
+default is to collect untagged manifests and there is no keepUntagged to save them. That is the
+configuration the e2e runs, and the one this was written after.
 
 Refused rather than warned, for the same reason as the window check: the failure mode is deletion.
 deleteUntagged: false removes the race instead of out-running it and is accepted at any delay.
