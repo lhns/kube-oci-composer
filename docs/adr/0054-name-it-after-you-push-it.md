@@ -96,6 +96,11 @@ the whole retention clock and still have tests that measure something.
 without the race at all. `keepUntagged` gained `pushedWithin`, which it should have had: pull
 recency alone protects nothing that has only ever been pushed.
 
+**Correction.** `keepTags` gained `pushedWithin` at the same time and it did nothing, because it
+was added as a second entry whose patterns also matched everything and zot stops at the first
+match. Any claim here that push recency protected tagged content was describing a rule that was not
+running; see [ADR 0057](0057-the-toolchain-is-an-input.md).
+
 **A read-back that fails is PENDING, not a failure.** Nothing about this object's spec would fix
 it, so ADR 0009's third path applies: a short fixed requeue rather than exponential backoff. But
 retrying only helps if the registry is catching up; if a collector took the manifest, the content

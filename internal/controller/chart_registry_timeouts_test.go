@@ -112,28 +112,30 @@ func TestKeepTagsAlsoKeysOnPushRecency(t *testing.T) {
 	policy, _ := policies[0].(map[string]any)
 	keepTags, _ := policy["keepTags"].([]any)
 
-	var pulled, pushed bool
-	for _, e := range keepTags {
-		entry, _ := e.(map[string]any)
-		if patterns, _ := entry["patterns"].([]any); len(patterns) == 0 {
-			t.Errorf("a keepTags entry has no patterns, so it protects no tag: %v", entry)
-		}
-		if entry["pulledWithin"] != nil {
-			pulled = true
-		}
-		if got := entry["pushedWithin"]; got != nil {
-			pushed = true
-			if got != "720h" {
-				t.Errorf("pushedWithin = %v; it tracks registry.retention.window", got)
-			}
-		}
+	// ONE entry, carrying BOTH rules -- and the count is the assertion, not an incidental detail.
+	//
+	// zot's getTagPolicy returns on the first pattern that matches, so a second entry whose patterns
+	// are also ".*" is never evaluated. Written as two entries, only pulledWithin was ever in force
+	// while the config appeared to say otherwise, and a tag pushed but never pulled was protected by
+	// nothing. An earlier version of THIS test accepted either shape -- it asked whether some entry
+	// carried each rule -- which is how that reached a release.
+	if len(keepTags) != 1 {
+		t.Fatalf("keepTags has %d entries; it must have exactly ONE carrying both rules, because "+
+			"zot matches the first pattern and stops. A second .* entry is dead configuration that "+
+			"reads as protection: %v", len(keepTags), keepTags)
 	}
-	if !pulled {
-		t.Errorf("no keepTags entry keys on pulledWithin, so refreshing protects nothing: %v", keepTags)
+	entry, _ := keepTags[0].(map[string]any)
+	if patterns, _ := entry["patterns"].([]any); len(patterns) == 0 {
+		t.Errorf("the keepTags entry has no patterns, so it protects no tag: %v", entry)
 	}
-	if !pushed {
-		t.Errorf("no keepTags entry keys on pushedWithin, so an image built between refreshes is a "+
-			"deletion candidate: %v", keepTags)
+	if entry["pulledWithin"] == nil {
+		t.Errorf("keepTags does not key on pulledWithin, so refreshing protects nothing: %v", entry)
+	}
+	if got := entry["pushedWithin"]; got == nil {
+		t.Errorf("keepTags does not key on pushedWithin, so an image built between refreshes is a "+
+			"deletion candidate: %v", entry)
+	} else if got != "720h" {
+		t.Errorf("pushedWithin = %v; it tracks retention.window", got)
 	}
 
 	storage, _ = registryConfig(t, "--set", "retention.window=48h",

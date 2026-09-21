@@ -36,6 +36,12 @@ var epoch = time.Unix(0, 0).UTC()
 // ordering, header normalisation, media types, the config it stamps. Forgetting to means an
 // upgraded controller looks at an artifact built by the old algorithm, sees an unchanged input
 // hash, and keeps serving it forever.
+//
+// THE TOOLCHAIN COUNTS TOO, which is the part that is easy to miss because it is not in this
+// repository. Go 1.27 changed compress/flate's output: identical diff_id, identical config digest,
+// a compressed layer 202 -> 204 bytes. Every artifact's digest moves under an unchanged spec-hash
+// tag, so every composition wedges on onConflict: Fail at once. A Go minor upgrade is a migration
+// and bumps this. See ADR 0057.
 const AssemblyVersion = 2
 
 // identity returns what the hash should treat as this entry's content.

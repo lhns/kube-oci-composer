@@ -5,6 +5,22 @@ may change between minor versions.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`keepTags`' `pushedWithin` rule was never evaluated** ([ADR 0057](docs/adr/0057-the-toolchain-is-an-input.md)).
+  It was rendered as a second policy entry whose `patterns` also matched everything, and zot stops
+  at the first matching entry — so only `pulledWithin` was ever in force, while the configuration
+  and its comment said otherwise.
+
+  **A tag that had been pushed and never pulled was protected by nothing**, which is exactly a
+  freshly published spec-hash tag before the refresher first reaches it. What held that line was
+  refresh-at-publish ([ADR 0053](docs/adr/0053-a-publish-is-protected-before-the-reconcile-returns.md)),
+  not this rule.
+
+  Now one entry carrying both rules, which is what zot OR-s. A chart test asserts the **count**,
+  because the previous one asked only whether *some* entry carried each rule — a question both
+  shapes answer yes to, and how this reached a release.
+
 ### Changed
 
 - **BREAKING: retention is configured by one value, and the rest is derived.** `retention.window`

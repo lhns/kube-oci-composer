@@ -64,6 +64,7 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0054](0054-name-it-after-you-push-it.md) | Name it after you push it | **Accepted** |
 | [0055](0055-exporting-a-reference-a-consumer-cannot-compute.md) | Exporting a reference a consumer cannot compute | Superseded in part by 0056 |
 | [0056](0056-the-controller-is-the-namespace-boundary.md) | The controller is the namespace boundary | **Accepted** |
+| [0057](0057-the-toolchain-is-an-input.md) | The toolchain is an input to the artifact | **Accepted** |
 
 ## Open questions
 

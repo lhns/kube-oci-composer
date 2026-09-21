@@ -84,6 +84,18 @@ destroy the very thing it exists to preserve, and burn a build pod every cycle d
 
 Each of these can silently defeat the guarantee, and silence is the failure mode that matters.
 
+> **A fifth was added later and was inert for its whole life.** `keepTags` gained a `pushedWithin`
+> rule so that content published between refreshes was protected by push recency as well as pull
+> recency. It was written as a SECOND entry whose patterns also matched everything, and zot stops at
+> the first matching entry -- so only `pulledWithin` was ever in force, and a tag that had been
+> pushed and never pulled was protected by nothing at all.
+>
+> For that period the guarantee rested entirely on the refresher reaching new content in time, which
+> is what [ADR 0053](0053-a-publish-is-protected-before-the-reconcile-returns.md) made prompt. The
+> configuration is corrected in [ADR 0057](0057-the-toolchain-is-an-input.md), and the point
+> generalises: this list exists because a condition can be believed, written down, configured, and
+> still not be running.
+
 1. **A pull must actually renew recency.** If it does not, the refresh is a no-op and live images
    expire quietly. This is the assumption the whole design rests on, and it is measured against the
    bundled version in `test/e2e/retention_test.go` — with a negative control, because a registry
