@@ -32,7 +32,7 @@ func TestALiveObjectKeepsItsImagesAlive(t *testing.T) {
 	// Well past the 30s window, with several collection passes in between, and the test touching
 	// nothing. If the object's images are still here, something refreshed them, and the only
 	// candidate is the controller.
-	sleepInCluster(t, 90)
+	sleepInCluster(t, watchFor(t))
 
 	if !manifestExistsByDigest(t, repo, digest) {
 		t.Fatalf("%s@%s was collected while a live ImageBuild still referenced it. The retention "+
@@ -121,6 +121,8 @@ func TestTwoObjectsSharingADigestKeepItAliveIndependently(t *testing.T) {
 // internal/retention covers this against a fake client. This covers it against a real controller,
 // where the object genuinely goes Stalled and the refresher genuinely has to ignore that.
 func TestAStalledObjectStillHasItsImagesRefreshed(t *testing.T) {
+	t.Parallel()
+
 	repo := keepaliveRepo("stalled")
 	digest := buildInto(t, "keepalive-stalled", repo, "v1")
 

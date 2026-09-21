@@ -62,6 +62,11 @@ type ImageBuildReconciler struct {
 	// default -- the controller is the boundary here, not RBAC (ADR 0056).
 	Export recon.ExportOptions
 
+	// BuildPollInterval is how often a running Job is re-observed, and therefore how long a
+	// pushed-but-unnamed manifest can be collected out from under this controller. Zero means the
+	// default; see defaultBuildPollInterval.
+	BuildPollInterval time.Duration
+
 	// Attestor signs the build's output, after the Job has terminated.
 	//
 	// The signing key stays in THIS process and is never projected into a build pod -- so code
@@ -223,7 +228,7 @@ func (r *ImageBuildReconciler) reconcile(ctx context.Context, obj *ociv1alpha1.I
 		if err := r.startBuild(ctx, obj, inputs, inputHash, contextURL); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{RequeueAfter: buildPollInterval}, nil
+		return ctrl.Result{RequeueAfter: r.pollInterval()}, nil
 	}
 	return r.observeJob(ctx, obj, job, inputs, inputHash)
 }
@@ -640,7 +645,7 @@ func (r *ImageBuildReconciler) observeJob(ctx context.Context, obj *ociv1alpha1.
 		return ctrl.Result{}, fmt.Errorf("build failed: %s", msg)
 
 	default:
-		return ctrl.Result{RequeueAfter: buildPollInterval}, nil
+		return ctrl.Result{RequeueAfter: r.pollInterval()}, nil
 	}
 }
 
@@ -1117,6 +1122,15 @@ func (r *ImageBuildReconciler) recordExport(
 	patch := client.MergeFrom(obj.DeepCopy())
 	obj.Status.RefExport = written
 	return r.Status().Patch(ctx, obj, patch)
+}
+
+// pollInterval is how often a running Job is re-observed, defaulted here rather than at
+// construction so a zero value in a test means "the normal one".
+func (r *ImageBuildReconciler) pollInterval() time.Duration {
+	if r.BuildPollInterval > 0 {
+		return r.BuildPollInterval
+	}
+	return defaultBuildPollInterval
 }
 
 // reconcileExportLifecycle keeps the finalizer in step with whether there is anything to clean up.

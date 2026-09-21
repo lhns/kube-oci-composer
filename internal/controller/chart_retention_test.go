@@ -23,27 +23,54 @@ func TestChartRefusesARetentionMarginThatIsTooThin(t *testing.T) {
 		want string
 	}{
 		{
-			name: "a window barely wider than the interval",
-			args: []string{"--set", "registry.retention.window=2h"},
+			// The check used to be gated on the bundled registry being installed, so the
+			// deployment with the LEAST help from the chart -- somebody else's registry, whose
+			// policy it cannot read -- was the one it declined to check.
+			name: "an external registry whose declared window the refresher cannot outrun",
+			args: []string{
+				"--set", "registry.enabled=false",
+				"--set", "defaultRegistry.host=ghcr.io/example",
+				"--set", "retention.window=2h",
+				"--set", "retention.refreshInterval=1h",
+			},
 			want: "only 2.0x",
+		},
+		{
+			// Needs the interval stated, now that it is normally DERIVED from the window: shrink
+			// the window alone and the interval shrinks with it, so the margin holds and there is
+			// nothing to catch. A thin margin is only reachable by overriding one of the two,
+			// which is the point of deriving them.
+			name: "a window barely wider than an interval someone pinned",
+			args: []string{
+				"--set", "retention.window=2h",
+				"--set", "retention.refreshInterval=1h",
+			},
+			want: "only 2.0x",
+		},
+		{
+			// The failure a bare short window produces instead: 720 is a sensible factor against
+			// 30 days and derives a 10-second refresh against two hours.
+			name: "a window too short to derive a sane interval from",
+			args: []string{"--set", "retention.window=2h"},
+			want: "derives a refresh interval of 10s",
 		},
 		{
 			// Each controller refreshes its own objects' images, so the builder's interval is as
 			// load-bearing as the composer's. An earlier version checked only one.
 			name: "the builder's interval alone",
 			args: []string{"--set", "imageBuild.retention.refreshInterval=48h"},
-			want: "imageBuild.retention.refreshInterval",
+			want: "imageBuild's refresh interval",
 		},
 		{
 			name: "refreshing disabled with a window still set",
 			args: []string{"--set", "operator.retention.refreshInterval=0"},
-			want: "disables refreshing entirely",
+			want: "refreshing is disabled",
 		},
 		{
 			// `--set x=0s` and `--set x=0` reach the template as different types. Both mean off.
 			name: "refreshing disabled, written as 0s",
 			args: []string{"--set", "imageBuild.retention.refreshInterval=0s"},
-			want: "disables refreshing entirely",
+			want: "refreshing is disabled",
 		},
 	}
 	for _, tc := range tooThin {
@@ -68,20 +95,23 @@ func TestChartAcceptsRetentionSettingsThatAreMerelyUnusual(t *testing.T) {
 		args []string
 	}{
 		{"the defaults", nil},
-		{"exactly the minimum margin", []string{"--set", "registry.retention.window=24h"}},
+		{"exactly the minimum margin", []string{"--set", "retention.window=24h"}},
 		{
 			"a compressed but proportionate pair",
 			[]string{
-				"--set", "registry.retention.window=30m",
+				"--set", "retention.window=30m",
 				"--set", "operator.retention.refreshInterval=1m",
 				"--set", "imageBuild.retention.refreshInterval=1m",
 			},
 		},
 		{
-			// Nothing to compare against: the operator's registry has its own policy, or none.
-			"refreshing off when the bundled registry is not installed",
+			// An external registry that expires nothing. The window is a DECLARATION about
+			// whichever registry stores the images, so saying it expires nothing is what makes
+			// turning refreshing off safe -- not the absence of the bundled one.
+			"refreshing off against an external registry that expires nothing",
 			[]string{
 				"--set", "operator.retention.refreshInterval=0",
+				"--set", "retention.window=",
 				"--set", "registry.enabled=false",
 				"--set", "defaultRegistry.host=ghcr.io/example",
 			},
@@ -90,14 +120,14 @@ func TestChartAcceptsRetentionSettingsThatAreMerelyUnusual(t *testing.T) {
 			"refreshing off when the registry expires nothing",
 			[]string{
 				"--set", "operator.retention.refreshInterval=0",
-				"--set", "registry.retention.window=",
+				"--set", "retention.window=",
 			},
 		},
 		{
 			// A controller that is not installed cannot fail to refresh.
 			"a thin margin with both controllers disabled",
 			[]string{
-				"--set", "registry.retention.window=2h",
+				"--set", "retention.window=2h",
 				"--set", "imageComposition.enabled=false",
 				"--set", "imageBuild.enabled=false",
 			},
@@ -106,7 +136,7 @@ func TestChartAcceptsRetentionSettingsThatAreMerelyUnusual(t *testing.T) {
 			// Go accepts "1h30m" and the template cannot parse it. Not checking is the right
 			// answer there; refusing a valid duration would be worse than a missed comparison.
 			"a compound duration the check cannot parse",
-			[]string{"--set", "registry.retention.window=1h30m"},
+			[]string{"--set", "retention.window=1h30m"},
 		},
 	}
 	for _, tc := range fine {

@@ -136,11 +136,11 @@ func TestKeepTagsAlsoKeysOnPushRecency(t *testing.T) {
 			"deletion candidate: %v", keepTags)
 	}
 
-	storage, _ = registryConfig(t, "--set", "registry.retention.window=48h",
+	storage, _ = registryConfig(t, "--set", "retention.window=48h",
 		"--set", "operator.retention.refreshInterval=1h",
 		"--set", "imageBuild.retention.refreshInterval=1h")["storage"].(map[string]any)
 	raw, _ := json.Marshal(storage["retention"])
 	if !strings.Contains(string(raw), `"pushedWithin":"48h"`) {
-		t.Errorf("registry.retention.window did not reach pushedWithin: %s", raw)
+		t.Errorf("retention.window did not reach pushedWithin: %s", raw)
 	}
 }

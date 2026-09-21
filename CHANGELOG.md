@@ -5,6 +5,38 @@ may change between minor versions.
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: retention is configured by one value, and the rest is derived.** `retention.window`
+  moves to the top level and becomes the base; the refresh interval, the sweep interval and the
+  collection delay are computed from it and need no attention.
+
+  ```yaml
+  retention:
+    window: 720h        # the only one to think about
+    refreshFactor: 720  # refreshInterval = window / this
+  registry:
+    retention:
+      gcFactor: 120     # gcInterval = window / this
+  ```
+
+  **The defaults render exactly what they rendered before** — 720h window, 1h refresh, 6h sweep, 1h
+  delay — so this changes how retention is expressed, not what is deployed. Everything stays
+  overridable, and an override that breaks a relationship is refused at render.
+
+  **`registry.retention.window` is now `retention.window`.** It moved because it is not a property
+  of the bundled registry: it describes whichever registry stores your images. With an external
+  registry you now *declare* what that registry does, and the chart derives your refresh cadence
+  from it.
+
+  **The refresh-margin check no longer skips external registries.** It was gated on
+  `registry.enabled`, so the deployment the chart can help least — somebody else's registry, whose
+  policy it cannot read — was the one deployment it declined to check. Setting `retention.window: ""`
+  is how you say "my registry expires nothing", which is what makes disabling refreshing safe.
+
+  `gcDelay` is the one value that does **not** derive from the window: it guards a wall-clock gap,
+  not the retention clock. See Fixed, below.
+
 ### Fixed
 
 - **A build's own image could be collected before the controller could name it.** Publishing by
@@ -17,7 +49,9 @@ may change between minor versions.
   Only reachable with a short `registry.retention.gcDelay`: the shipped `1h` against a window
   bounded by the 15s Job poll is a margin of 240. The e2e ran `1s` and lost builds intermittently.
 
-  - The chart now **refuses a `gcDelay` under 10m while untagged collection is on**.
+  - `gcDelay` is now **derived from `imageBuild.buildPollInterval`** -- never below three times it,
+    since that poll is what bounds the gap -- and the chart **refuses an override that goes below
+    it** while untagged collection is on.
   - New `registry.retention.deleteUntagged`, previously hardcoded — set it `false` to remove the
     race rather than out-run it, which is what a fast collector needs.
   - `keepUntagged` gained `pushedWithin`. With `pulledWithin` alone, freshly pushed content matched

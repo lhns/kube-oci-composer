@@ -15,7 +15,7 @@ import (
 // because zot walks repositories on a rotation, so a green run proved nothing.
 func TestAShortGCDelayIsRefusedWhileUntaggedManifestsAreCollected(t *testing.T) {
 	out := renderExpectingFailure(t, "--set", "registry.retention.gcDelay=1s")
-	for _, want := range []string{"gcDelay", "deleteUntagged", "untagged"} {
+	for _, want := range []string{"gcDelay", "deleteUntagged", "untagged", "buildPollInterval"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the refusal must explain itself in terms of %q, so the reader can act on it:\n%s",
 				want, out)
@@ -42,6 +42,35 @@ func TestTheDefaultRetentionSettingsRender(t *testing.T) {
 	if !strings.Contains(out, `"deleteUntagged": true`) {
 		t.Error("the default no longer collects untagged manifests; a build refused under " +
 			"onConflict: Fail leaves content nothing reclaims")
+	}
+}
+
+// The derived values must reproduce the literals they replaced, or this was a change to what is
+// deployed rather than to how it is expressed -- and nobody asked for a change to what is deployed.
+func TestTheDerivedDefaultsMatchTheValuesTheyReplaced(t *testing.T) {
+	out := render(t)
+	for _, want := range []string{
+		`"gcDelay": "1h"`,
+		`"gcInterval": "6h"`,
+		`"pulledWithin": "720h"`,
+		"--retention-refresh-interval=1h",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the derivation no longer produces %s", want)
+		}
+	}
+}
+
+// Shortening the poll shortens the gcDelay floor with it, which is what lets a test compress the
+// whole clock and still have retention tests that measure something.
+func TestTheNamingGapFloorTracksThePollInterval(t *testing.T) {
+	out := render(t,
+		"--set", "retention.window=30s",
+		"--set", "retention.refreshInterval=1s",
+		"--set", "registry.retention.gcFactor=6",
+		"--set", "imageBuild.buildPollInterval=3s")
+	if !strings.Contains(out, `"gcDelay": "9s"`) {
+		t.Errorf("gcDelay did not follow buildPollInterval down to 3x it:\n%s", out)
 	}
 }
 

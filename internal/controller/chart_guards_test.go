@@ -30,7 +30,24 @@ func TestEveryChartGuardIsActuallyReached(t *testing.T) {
 		},
 		{
 			guard: "retention margin",
-			args:  []string{"--set", "registry.retention.window=2h"},
+			// The interval has to be pinned now that it is derived from the window: shrink the
+			// window alone and the interval shrinks with it, so the margin holds.
+			args: []string{
+				"--set", "retention.window=2h",
+				"--set", "retention.refreshInterval=1h",
+			},
+		},
+		{
+			guard: "derived refresh floor",
+			args:  []string{"--set", "retention.window=2h"},
+		},
+		{
+			guard: "untagged naming gap",
+			args:  []string{"--set", "registry.retention.gcDelay=1s"},
+		},
+		{
+			guard: "sweep slower than the window",
+			args:  []string{"--set", "registry.retention.gcFactor=0.5"},
 		},
 		{
 			guard: "registry credentials",

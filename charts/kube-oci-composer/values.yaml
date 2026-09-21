@@ -110,14 +110,13 @@ operator:
   fetchDenyPrivate: false
 
   retention:
-    # Must stay MUCH shorter than the registry's retention window. The RATIO is the guarantee, not
-    # either number: the default assumes a window of 30 days, which is a margin of 720. Anyone
-    # shortening the window has to shorten this with it.
+    # Empty uses the shared one derived from retention.window. Set it only to make THIS controller
+    # refresh differently from the other.
     #
     # Zero disables refreshing entirely. Correct only when the registry has no expiry policy at
-    # all -- and the chart refuses to render it while registry.retention.window is set, because
-    # that combination guarantees the deletion ADR 0031 exists to prevent.
-    refreshInterval: 1h
+    # all -- and the chart refuses to render it while retention.window is set, because that
+    # combination guarantees the deletion ADR 0031 exists to prevent.
+    refreshInterval: ""
 
 # The bundled registry (zot), ON by default.
 #
@@ -143,6 +142,34 @@ operator:
 # an administrator).
 crds:
   install: true
+
+# How long images are kept. THE setting to think about; everything else derives from it.
+#
+# This describes whoever stores your images. With the bundled registry the chart configures it for
+# you; with your own registry you are DECLARING what that registry already does, because the
+# controllers' refresh cadence has to be derived from something and the chart cannot read your
+# policy. Getting the declaration wrong is not cosmetic: the controllers keep live images alive by
+# re-pulling them, and they need to do that faster than your registry expires them.
+retention:
+  # How long content survives with nothing referencing it. Empty means "my registry never expires
+  # anything", which switches off the derivation and the checks rather than guessing.
+  window: 720h
+
+  # Everything below is DERIVED from the window and needs no attention. Set one only if you have a
+  # reason, and the chart will still refuse combinations that lose images.
+
+  # refreshInterval = window / refreshFactor. The default is a margin of 720: refreshing has to
+  # fail continuously for a month before an image a live object references is at risk.
+  #
+  # The RATIO is the guarantee, not either number (ADR 0031), and the chart refuses anything below
+  # 24 -- a day's worth of refreshes. Lower it only if you understand what you are spending.
+  refreshFactor: 720
+
+  # How often the controllers re-pull what live objects reference. Empty derives it.
+  #
+  # Set explicitly to go below the floor the derivation enforces -- which is how the e2e runs a
+  # one-second refresh against a thirty-second window on purpose.
+  refreshInterval: ""
 
 # push.writeRefTo, which writes a published image reference into a ConfigMap for a consumer -- a
 # Flux Kustomization's postBuild.substituteFrom -- to substitute. Governs both controllers.
@@ -267,7 +294,18 @@ imageBuild:
   requirePinnedSources: false
 
   retention:
-    refreshInterval: 1h
+    # Empty uses the shared one derived from retention.window; see operator.retention.
+    refreshInterval: ""
+
+  # How often a running build Job is re-observed.
+  #
+  # Also how long a build's image can sit UNTAGGED: the Job pushes by digest and this controller
+  # applies the names when it next looks (ADR 0054). Untagged is what a registry's collector
+  # reclaims, so the registry's gcDelay is never derived below three times this.
+  #
+  # Lower it to compress that whole chain -- which is what the e2e does, so its retention tests can
+  # use short timings and still mean something.
+  buildPollInterval: 15s
 
   resources:
     requests: {cpu: 100m, memory: 128Mi}
@@ -309,15 +347,16 @@ registry:
   # a missing layer, which reads as a broken image rather than a registry that reclaimed too much.
   image: ghcr.io/project-zot/zot:v2.1.21@sha256:6b69512c00dceaad05b1144e6079aac6aa7309d7fd200f9947ecb1de09cf48c8
 
-  # Retention. The controllers keep live images alive by re-pulling them; this is the other half of
-  # that bargain, and the two have to be set together.
+  # The registry's own collection settings. All derived from the top-level retention.window, and
+  # all meaningless when this registry is disabled -- the window itself is not, which is why it
+  # lives up there and these live here.
   retention:
     # Which repositories the policy governs. Everything, by default.
     #
-    # Scoping this does NOT protect what falls outside it. zot collects untagged manifests in a
-    # repository matching no policy by default -- HasDeleteUntagged returns true when it finds
-    # none -- so narrowing this makes unmatched repositories less protected, not more. Use
-    # deleteUntagged below to turn that off.
+    # Scoping this protects the repositories outside it ONLY for tagged content -- no expiry window
+    # is applied where no policy matches. Their UNTAGGED manifests are still collected, because
+    # zot's default for a repository it finds no policy for is to delete them. So narrowing this is
+    # an escape hatch for images, not for a build's output between being pushed and being named.
     repositories: ["**"]
 
     # Whether a manifest with no tag pointing at it is collected.
@@ -326,21 +365,26 @@ registry:
     # whose content is uploaded and then deliberately not named (ADR 0054).
     #
     # It is also a race with that same mechanism: a build's manifest is untagged until the
-    # controller applies the tags, which takes up to ~15s. gcDelay is the margin, and the chart
-    # refuses a gcDelay under 10m while this is true. Setting this false removes the race rather
-    # than out-running it, which is what a test running a one-second collector wants.
+    # controller applies the tags. gcDelay is the margin, and the chart refuses a gcDelay shorter
+    # than that gap while this is true. Setting this false removes the race instead of out-running
+    # it, and is then accepted at any delay.
     deleteUntagged: true
 
-    # How long an image survives without being pulled.
+    # gcInterval = window / gcFactor. Promptness only: collecting late is safe, collecting early
+    # is not, so this is the one value here with no failure mode worse than "later than you
+    # expected". Refused if it ever exceeds the window, which would make the window describe
+    # nothing.
+    gcFactor: 120
+    gcInterval: ""
+
+    # How old something must be before collection may take it.
     #
-    # MUST stay much longer than operator.retention.refreshInterval. The RATIO is the guarantee, not
-    # either number: 720h against 1h is a margin of 720, which means refreshing has to fail
-    # continuously for weeks before anything is at risk. Shortening this without shortening the
-    # interval turns the guarantee into a race, and the failure mode is deletion.
-    window: 720h
-    # How often collection runs, and how long something must be eligible before it goes.
-    gcInterval: 6h
-    gcDelay: 1h
+    # Derived, but NOT from the window: it guards a wall-clock gap. A build's manifest is untagged
+    # from the moment it is pushed until the controller names it (ADR 0054), and untagged is what
+    # the collector reclaims -- so this never derives below three times imageBuild.buildPollInterval,
+    # however short the window gets. That floor is what lets a test compress every other timing
+    # safely.
+    gcDelay: ""
     # Report what collection would remove, without removing it. Useful when first tuning the window.
     #
     # Only honoured on v2.1.21 or later. Older versions still delete blobs during a "dry" run, so

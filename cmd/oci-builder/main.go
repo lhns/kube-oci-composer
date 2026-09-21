@@ -80,6 +80,7 @@ func main() {
 		fetchDenyPrivate     bool
 		sourceDateEpoch      string
 		refreshInterval      time.Duration
+		buildPollInterval    time.Duration
 		historyLimit         int
 		requirePinnedSources bool
 		showVersion          bool
@@ -114,6 +115,11 @@ func main() {
 		"SOURCE_DATE_EPOCH stamped into builds. Fixed rather than the wall clock, matching the composer's epoch.")
 	var exportFlags opts.ExportFlags
 	exportFlags.Register(flag.CommandLine)
+	flag.DurationVar(&buildPollInterval, "build-poll-interval", 0,
+		"How often a running build Job is re-observed. Zero uses the built-in default. "+
+			"Also bounds how long a build's image is UNTAGGED: the Job pushes by digest and this "+
+			"controller names it when it next looks, and untagged is what a registry's collector "+
+			"reclaims. The chart derives the registry's gcDelay from this.")
 	flag.DurationVar(&refreshInterval, "retention-refresh-interval", retention.DefaultInterval,
 		"How often to re-pull the images every live ImageBuild still references, so that a registry "+
 			"with an expiry policy does not reclaim them. Zero disables it.\n"+

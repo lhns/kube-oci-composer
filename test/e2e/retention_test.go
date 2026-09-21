@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // retentionWindow mirrors pulledWithin in manifests/registry.yaml, for the failure messages. It is
@@ -42,11 +43,33 @@ const retentionWindow = "30s"
 // repository in the rotation -- was enough, which says the old value had no margin left rather than
 // that anything broke. The build was folded into an existing one, and this raised as well, because
 // the next repository anyone adds would have done the same thing.
+//
+// What it has to cover, for whoever raises it next: gcDelay before anything is eligible, plus the
+// rotation's period, which is the part that grows and the part nobody can compute. Unlike watchFor
+// this is NOT derived, because the term that dominates it is the one the cluster will not tell us.
+// A constant with a stated derivation beats a formula missing its largest term.
 const collectionDeadline = 600
 
 // keepaliveRepo scopes these tests to the repository prefix the retention policy applies to, so
 // nothing else in the suite can be collected out from under it.
 func keepaliveRepo(name string) string { return "keepalive-" + name }
+
+// watchFor is how long a survival test watches, derived from what the registry was deployed with
+// rather than picked.
+//
+// Two things have to happen before content can die, so both are in it. Nothing younger than
+// gcDelay is a candidate at all -- watch for less and "it survived" is a statement about the clock,
+// not about retention. And being a candidate is not being collected: a sweep has to run, several
+// times, because zot reaches repositories on a rotation whose period is NOT bounded by gcInterval
+// and grows with the number of repositories.
+//
+// So: past the eligibility floor with margin, plus several sweeps for the rotation to arrive.
+// Derived, so compressing the deployment compresses the tests and they stay honest.
+func watchFor(t *testing.T) int {
+	t.Helper()
+	d := 2*deployedGCDelay(t) + 5*deployedGCInterval(t)
+	return int(d.Seconds())
+}
 
 // The load-bearing measurement: a PULL resets the retention clock.
 //
@@ -81,7 +104,9 @@ func TestPullingAnImageKeepsItFromExpiring(t *testing.T) {
 	//
 	// So the refresh asks for everything it wants kept, because the cost is one small request and
 	// the alternative is depending on which of those two readings is right.
-	refreshBothFor(t, refreshed, "v1", keptDigest, 90)
+	seconds := watchFor(t)
+	requireCollectionPossible(t, time.Duration(seconds)*time.Second, "a refreshed image")
+	refreshBothFor(t, refreshed, "v1", keptDigest, seconds)
 
 	// THE GUARANTEE: content named by a live object is still there.
 	if !manifestExistsByDigest(t, refreshed, keptDigest) {
@@ -148,10 +173,12 @@ func eventuallyUntagged(t *testing.T, repository, tag string, maxSeconds int) {
 // make an improvement in zot show up here as a regression — and asserting the opposite is what made
 // the negative control marginal in the first place.
 func TestExpiryIsNotPrompt(t *testing.T) {
+	t.Parallel()
+
 	repo := keepaliveRepo("cold")
 	digest := pushTinyImage(t, repo)
 
-	sleepInCluster(t, 90)
+	sleepInCluster(t, watchFor(t))
 
 	t.Logf("after 90s with no pulls against a %s window: content alive=%v, tags now: %s",
 		retentionWindow, manifestExistsByDigest(t, repo, digest), tagsList(t, repo))
@@ -164,12 +191,21 @@ func TestExpiryIsNotPrompt(t *testing.T) {
 // Distinct from the guarantee test above, where the manifest keeps its tag throughout: here the tag
 // is removed first, so the manifest is protected by `keepUntagged` alone.
 func TestPullingByDigestKeepsAnUntaggedImageAlive(t *testing.T) {
+	t.Parallel()
+
 	repo := keepaliveRepo("untagged")
+
+	// This test has no negative control, so it asserts its own preconditions: untagged collection
+	// must be ON, or nothing here could be collected and the measurement is empty.
+	requireUntaggedCollection(t, repo)
+	seconds := watchFor(t)
+	requireCollectionPossible(t, time.Duration(seconds)*time.Second, "an untagged manifest")
+
 	digest := pushTinyImage(t, repo)
 
 	// Remove the tag, leaving the manifest reachable only by digest.
 	deleteTag(t, repo, "v1")
-	refreshFor(t, repo, digest, 90)
+	refreshFor(t, repo, digest, seconds)
 
 	if !manifestExistsByDigest(t, repo, digest) {
 		t.Fatalf("an untagged manifest was collected while being pulled by digest. ADR 0010 tells "+

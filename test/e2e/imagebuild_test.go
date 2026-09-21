@@ -46,11 +46,27 @@ const (
 // panics first and the dump below never runs.
 const buildTimeout = 5 * time.Minute
 
+// refusalTimeout is for an outcome that runs NO Job: a conflict refused by the pre-flight, or a
+// Keep that declines to build at all.
+//
+// Those paths are API reads plus one registry round trip -- resolveInputs uses only the API server
+// -- so they settle in seconds. Giving them the build budget means a genuine stall is
+// indistinguishable from a slow build for five minutes, which is how a stuck reconcile came to
+// read as "the suite is just slow".
+const refusalTimeout = 90 * time.Second
+
 // buildEventually polls like eventually(), but dumps the BUILDER's logs and the build pod's on
 // timeout, since a failure is usually inside the build rather than in the controller.
 func buildEventually(t *testing.T, what string, fn func() error) {
 	t.Helper()
-	deadline := time.Now().Add(buildTimeout)
+	buildEventuallyWithin(t, buildTimeout, what, fn)
+}
+
+// buildEventuallyWithin is buildEventually with the budget stated by the caller, because how long
+// an outcome may legitimately take depends on whether it builds anything.
+func buildEventuallyWithin(t *testing.T, timeout time.Duration, what string, fn func() error) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
 	var last error
 	for time.Now().Before(deadline) {
 		if last = fn(); last == nil {
@@ -439,7 +455,7 @@ func TestImageBuildTagConflictPolicy(t *testing.T) {
 	// A second object, different content, same tag. Under the default it must refuse -- and it must
 	// refuse without ever creating a Job, because a push from inside one cannot be undone.
 	applyBuildTo(t, "e2e-conflict-fail", "Dockerfile.other", repo)
-	buildEventually(t, "the conflicting build to be refused", func() error {
+	buildEventuallyWithin(t, refusalTimeout, "the conflicting build to be refused", func() error {
 		st := buildStatus(t, "e2e-conflict-fail")
 		ready := readyCondition(st)
 		if ready == nil || ready.Status != "False" {
@@ -459,7 +475,7 @@ func TestImageBuildTagConflictPolicy(t *testing.T) {
 	// Keep leaves the tag alone, runs no build, reports Ready -- and records the divergence, which
 	// is the only thing separating this from a silent one.
 	applyBuildTo(t, "e2e-conflict-keep", "Dockerfile.other", repo, "    onConflict: Keep")
-	buildEventually(t, "the kept build to report Ready", func() error {
+	buildEventuallyWithin(t, refusalTimeout, "the kept build to report Ready", func() error {
 		st := buildStatus(t, "e2e-conflict-keep")
 		ready := readyCondition(st)
 		if ready == nil || ready.Status != "True" {

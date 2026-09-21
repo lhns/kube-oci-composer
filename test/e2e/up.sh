@@ -25,6 +25,31 @@ BUILD_NS="${BUILD_NS:-oci-builder-e2e}"
 REGISTRY_HOST="${REGISTRY_HOST:-oci-composer.e2e:5000}"
 NODE_PORT="${NODE_PORT:-30500}"
 
+# The retention clock, compressed from one base the way a deployment derives it.
+#
+# Only the window and the build poll are choices. Everything else the chart derives, and the tests
+# read back what was actually deployed -- so changing a number here cannot leave a test asserting
+# something that is no longer true, which is how a retention test came to pass while measuring
+# nothing.
+E2E_WINDOW="${E2E_WINDOW:-30s}"
+
+# The refresh interval is set EXPLICITLY rather than derived, and that is the one exception here.
+# The chart refuses to DERIVE an interval under 30s -- 720 is a sensible factor against 30 days and
+# a ridiculous one against 30 seconds -- and offers the explicit value as the escape hatch for
+# someone who means it. This is that someone. The 24x margin check still applies, so this cannot
+# drift into the misconfiguration the check exists to catch.
+E2E_REFRESH="${E2E_REFRESH:-1s}"
+E2E_REFRESH_FACTOR="${E2E_REFRESH_FACTOR:-30}"
+
+# gcInterval = window / this.
+E2E_GC_FACTOR="${E2E_GC_FACTOR:-6}"
+
+# What lets everything else be small. A build's image is untagged from the push until the controller
+# names it (ADR 0054), so the chart never derives gcDelay below three times this -- 45s at the
+# shipped 15s, which a 30s window cannot accommodate. Shortening the poll shortens that floor, and
+# the retention tests then derive short watch windows that still mean something.
+E2E_BUILD_POLL="${E2E_BUILD_POLL:-3s}"
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if ! kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
@@ -86,8 +111,10 @@ kind load docker-image "$BUILDER_IMG" --name "$CLUSTER"
 # then deleted the now-empty repository, and the read-back failed NAME_UNKNOWN. Intermittently,
 # because zot walks repositories on a rotation.
 #
-# deleteUntagged=false is what actually makes a one-second collector safe here. The chart refuses
-# this gcDelay without it.
+# gcDelay=1m is what makes this safe, and it is why it is not 1s: nothing younger than gcDelay is
+# ever collected, so the delay has to clear the naming gap. deleteUntagged stays TRUE -- turning it
+# off would also switch off the mechanism TestPullingByDigestKeepsAnUntaggedImageAlive exists to
+# measure, and that test would then pass while proving nothing.
 # No defaultRegistry.insecure: the controllers never connect to the public name, and the in-cluster
 # Service they DO connect to is marked insecure by the chart automatically.
 helm upgrade --install kube-oci-composer charts/kube-oci-composer \
@@ -103,12 +130,12 @@ helm upgrade --install kube-oci-composer charts/kube-oci-composer \
   --set registry.publish.mode=nodePort \
   --set registry.host="$E2E_REGISTRY" \
   --set 'registry.retention.repositories={keepalive-*,keepalive-**}' \
-  --set registry.retention.window=30s \
-  --set registry.retention.gcInterval=5s \
-  --set registry.retention.gcDelay=1s   --set registry.retention.deleteUntagged=false \
+  --set "retention.window=$E2E_WINDOW" \
+  --set "retention.refreshFactor=$E2E_REFRESH_FACTOR" \
+  --set "retention.refreshInterval=$E2E_REFRESH" \
+  --set "registry.retention.gcFactor=$E2E_GC_FACTOR" \
+  --set "imageBuild.buildPollInterval=$E2E_BUILD_POLL" \
   --set registry.logLevel=debug \
-  --set operator.retention.refreshInterval=1s \
-  --set imageBuild.retention.refreshInterval=1s \
   --wait --timeout 5m
 
 # NO CoreDNS entry, and its absence is the assertion.
