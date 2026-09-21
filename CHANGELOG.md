@@ -5,6 +5,24 @@ may change between minor versions.
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: every artifact's digest changes, because the Go toolchain moved to 1.27**
+  ([ADR 0057](docs/adr/0057-the-toolchain-is-an-input.md)). Go 1.27 changes `compress/flate`'s
+  output: identical `diff_id`, identical config digest, a compressed layer 202 → 204 bytes. Nothing
+  in this project changed.
+
+  `AssemblyVersion` moves 2 → 3 in the same change, which is what makes every cluster **rebuild
+  deliberately** rather than serve old bytes under an unchanged input hash.
+
+  **What operators see:** every `ImageComposition` rebuilds once on upgrade and republishes. Where
+  a spec-hash tag is used as recommended, the tag is unchanged and the content under it moves —
+  which `onConflict: Fail`, the default, **refuses**. Expect one stall per object, resolved by the
+  rebuild that follows, and budget storage for one extra copy of everything.
+
+  This was the failing half of a dependency bump that also carried four library updates; those went
+  separately and moved no bytes.
+
 ### Fixed
 
 - **`keepTags`' `pushedWithin` rule was never evaluated** ([ADR 0057](docs/adr/0057-the-toolchain-is-an-input.md)).

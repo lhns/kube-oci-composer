@@ -192,8 +192,8 @@ func TestAssemblePlacesContentAtTarget(t *testing.T) {
 // algorithm.
 func TestAssembleMatchesItsGoldenDigest(t *testing.T) {
 	const (
-		goldenDigest      = "sha256:d0c6f98ca8519b07b0cb2a4e12c7568790e02cfeb9575cea5a9db7aa478b4ed0"
-		goldenAssemblyVer = 2
+		goldenDigest      = "sha256:2ecb3fd3521d9ac10e3ea9b1d749dcf15d24b76fb0088feaadc158bf931edacb"
+		goldenAssemblyVer = 3
 	)
 	if AssemblyVersion != goldenAssemblyVer {
 		t.Fatalf("AssemblyVersion is %d but this golden digest was recorded at %d; re-record the "+
