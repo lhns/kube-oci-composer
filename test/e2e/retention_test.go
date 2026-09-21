@@ -43,20 +43,27 @@ const retentionWindow = "30s"
 // ONE added ImageBuild -- one more repository in the rotation -- was enough, which said the value
 // had no margin left rather than that anything had broken.
 //
-// So it is no longer a constant. The term that dominates it is the rotation, and the rotation is
-// computable once you count the repositories: gcDelay to become eligible, plus several rotations
-// for the collector to arrive. Adding a test that pushes a new repository now lengthens this
-// automatically instead of quietly spending somebody else's margin.
+// It is now a floor with a computed term above it, and the floor is doing most of the work.
 //
-// The floor is for a nearly empty registry, where four rotations is a few seconds and would fail
-// the moment anything was briefly slow.
+// The computed term exists so that adding a test which pushes a new repository lengthens this
+// automatically, instead of quietly spending margin somebody else was relying on -- which is how
+// the old constant was outgrown by ONE added ImageBuild.
+//
+// The floor exists because the model behind the computed term is not trustworthy. It assumes a
+// repository is reached every (repositories x gcInterval); a run with a one-second sweep, where
+// that model predicted a 121s deadline would be ample, failed with the control still alive. So the
+// estimate is treated as a lower bound on how long to wait and never as permission to wait less
+// than the value this suite is known to pass on.
+//
+// Overshooting costs nothing when collection is prompt: the poll returns as soon as the tag goes.
+// Undershooting fails the suite and reads like a retention bug.
 func collectionDeadline(t *testing.T) int {
 	t.Helper()
-	d := deployedGCDelay(t) + 4*deployedRotation(t)
-	if s := int(d.Seconds()); s > 120 {
+	const floor = 600
+	if s := int((deployedGCDelay(t) + 4*deployedRotation(t)).Seconds()); s > floor {
 		return s
 	}
-	return 120
+	return floor
 }
 
 // keepaliveRepo scopes these tests to the repository prefix the retention policy applies to, so
@@ -89,8 +96,10 @@ func watchFor(t *testing.T) int {
 //
 // zot's own vocabulary for this is `pulledWithin`. That it is documented is not evidence; this is.
 func TestPullingAnImageKeepsItFromExpiring(t *testing.T) {
-	t.Parallel()
-
+	// NOT t.Parallel(), unlike the survival-only tests in this package. This one ends in a negative
+	// control that waits for a real deletion, and concurrent tests put more repositories in the
+	// registry at once -- which is the thing the collector's rotation is slowest at. Tried, and it
+	// failed: see the note on E2E_GC_FACTOR in up.sh.
 	refreshed := keepaliveRepo("refreshed")
 	abandoned := keepaliveRepo("abandoned")
 

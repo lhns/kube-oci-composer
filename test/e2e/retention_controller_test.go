@@ -26,8 +26,10 @@ import (
 // existence of a live object naming the image. If both halves pass, the controller's refresh is the
 // only thing that can explain the difference.
 func TestALiveObjectKeepsItsImagesAlive(t *testing.T) {
-	t.Parallel()
-
+	// NOT t.Parallel(), unlike the survival-only tests in this package. This one ends in a negative
+	// control that waits for a real deletion, and concurrent tests put more repositories in the
+	// registry at once -- which is the thing the collector's rotation is slowest at. Tried, and it
+	// failed: see the note on E2E_GC_FACTOR in up.sh.
 	repo := keepaliveRepo("live")
 	digest := buildInto(t, "keepalive-live", repo, "v1")
 
@@ -64,7 +66,10 @@ func TestALiveObjectKeepsItsImagesAlive(t *testing.T) {
 // mark-and-sweep, with all of its failure modes. Here it falls out of the design, and this is the
 // test that says so rather than the ADR merely claiming it.
 func TestTwoObjectsSharingADigestKeepItAliveIndependently(t *testing.T) {
-	t.Parallel()
+	// NOT t.Parallel(), unlike the survival-only tests in this package. This one ends in a negative
+	// control that waits for a real deletion, and concurrent tests put more repositories in the
+	// registry at once -- which is the thing the collector's rotation is slowest at. Tried, and it
+	// failed: see the note on E2E_GC_FACTOR in up.sh.
 
 	repo := keepaliveRepo("shared")
 
