@@ -39,23 +39,16 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
 {{/*
-Port extracted from a ":8080" style bind address, so the container port and the flag can never
-disagree.
+Port of a ":8080" style bind address, so the container port and the flag cannot disagree.
 */}}
 {{- define "kube-oci-composer.port" -}}
 {{- regexReplaceAll "^.*:" . "" -}}
 {{- end -}}
 
 {{/*
-Selector labels for ONE component of this chart.
-
-Three workloads now share a release -- the composer, the builder and the registry -- and
-`selectorLabels` alone does not tell them apart. Without this, every Service in the chart selects
-every pod in the release: the registry pod was backing the composer's Service purely because it
-carried the same two labels.
-
-Callers pass (dict "ctx" . "component" "composer"). The component name is part of the SELECTOR, so
-it cannot be changed on a live release without recreating the Deployment -- selectors are immutable.
+Selector labels for ONE component; without the component every Service would select every pod in
+the release. Part of the selector, so immutable on a live release.
+Call with (dict "ctx" . "component" "composer").
 */}}
 {{- define "kube-oci-composer.componentSelectorLabels" -}}
 {{ include "kube-oci-composer.selectorLabels" .ctx }}
@@ -63,11 +56,9 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 
 {{- /*
-Selects everything that SERVES the registry API: the writer and every read replica.
-
-A separate label rather than a component, because the two roles must stay distinguishable --
-component=registry is the writer's StatefulSet selector and is immutable, so readers cannot share
-it. This is what the read Service, the Ingress and the NetworkPolicy select on.
+Marks every pod that serves the registry API (writer and read replicas); the read Service, the
+Ingress, the NetworkPolicy and the PDB select on it. A label rather than a component because
+component=registry is the writer's immutable StatefulSet selector.
 */}}
 {{- define "kube-oci-composer.registryServeRoleLabel" -}}
 oci-composer.lhns.de/registry-role: serve
@@ -79,13 +70,8 @@ oci-composer.lhns.de/registry-role: serve
 {{- end -}}
 
 {{/*
-Labels for a registry POD -- writer or read replica. Same (dict "ctx" ... "component" ...) shape as
-componentSelectorLabels.
-
-ONE helper, not two includes side by side: componentSelectorLabels and registryServeSelectorLabels
-both carry name and instance, so pairing them emitted duplicate YAML keys. helm accepts that
-(last-wins); Flux's post-renderer refuses the release, and since the CRDs live in templates/ and a
-release is atomic, that blocked every upgrade.
+Labels for a registry pod. One helper rather than two includes: both carry name and instance, and
+duplicate YAML keys make Flux's post-renderer refuse the release.
 */}}
 {{- define "kube-oci-composer.registryPodLabels" -}}
 {{ include "kube-oci-composer.componentSelectorLabels" . }}
@@ -93,14 +79,8 @@ release is atomic, that blocked every upgrade.
 {{- end -}}
 
 {{- /*
-The `from:` list for a policy that admits whole namespaces.
-
-Shared by the registry's policy and the builder's context policy, which had the same block twice:
-the listed namespaces, plus the release's own whenever the list is narrowed. Two copies of a rule
-about who may reach what is the kind that drifts, and the drift is silent -- a policy that admits
-one namespace too few fails as a timeout somewhere else entirely.
-
-Callers pass (dict "allowed" <list> "namespace" .Release.Namespace) and indent the result.
+The `from:` list admitting whole namespaces, shared by the registry and builder-context policies.
+Call with (dict "allowed" <list> "namespace" .Release.Namespace) and indent the result.
 */}}
 {{- define "kube-oci-composer.namespaceIngressFrom" -}}
 {{- if .allowed -}}
@@ -110,15 +90,14 @@ Callers pass (dict "allowed" <list> "namespace" .Release.Namespace) and indent t
       kubernetes.io/metadata.name: {{ . | quote }}
 {{- end }}
 {{- /*
-The release's own namespace, unconditionally when the list is narrowed. Both controllers live
-there, and for the registry omitting it would stop the retention refresh -- whose silence deletes
-images one window later (ADR 0031).
+The release namespace is always admitted: both controllers live there, and blocking the registry's
+retention refresh deletes images one window later (ADR 0031).
 */}}
 - namespaceSelector:
     matchLabels:
       kubernetes.io/metadata.name: {{ .namespace | quote }}
 {{- else }}
-{{- /* Every namespace: a build can land anywhere, and this is a connectivity guarantee. */}}
+{{- /* Every namespace: a build can land anywhere. */}}
 - namespaceSelector: {}
 {{- end }}
 {{- end -}}
@@ -129,10 +108,8 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 
 {{/*
-The builder's names. A separate ServiceAccount and a separate Role, in the same namespace: merging
-the charts must not merge the PERMISSIONS. The builder's role can create Jobs -- that is, run
-arbitrary containers -- and the composer's can create only the ConfigMap push.writeRefTo exports.
-See ADR 0025, and ADR 0056 for why that one exception exists.
+The builder gets its own ServiceAccount and Role: its role can create Jobs, i.e. run arbitrary
+containers, and must not be shared with the composer. ADR 0025, ADR 0056.
 */}}
 {{- define "kube-oci-composer.builderFullname" -}}
 {{- printf "%s-builder" (include "kube-oci-composer.fullname" .) | trunc 63 | trimSuffix "-" -}}
@@ -147,12 +124,8 @@ See ADR 0025, and ADR 0056 for why that one exception exists.
 {{- end -}}
 
 {{/*
-push.writeRefTo's operator settings. Identical on both controllers, so they are rendered from one
-place: these govern a feature that behaves the same on both kinds, and a copy would drift.
-
-Each renders independently. An export into the object's OWN namespace needs no allow-list, so the
-labels and the permitted metadata keys are not conditional on refExport.namespaces being set --
-which they were while the allow-list was the only way to export at all.
+push.writeRefTo flags, identical on both controllers. Each renders independently: exporting into the
+object's own namespace needs no refExport.namespaces.
 */}}
 {{- define "kube-oci-composer.refExportArgs" -}}
 {{- with .Values.refExport.namespaces }}
@@ -174,12 +147,9 @@ which they were while the allow-list was the only way to export at all.
 {{- end -}}
 
 {{- /*
-Where the CONTROLLERS reach the registry. Never registry.host.
-
-registry.host used to fold in here, and that was the defect: one value fed both the address the
-controllers connect to and the address workloads pull from, and no single name can be both. A
-.svc.cluster.local name is unreachable from a kubelet; a node-resolvable name is unreachable from
-cluster DNS. Setting it broke publishing; leaving it unset broke pulling. See publicRegistry.
+Where the CONTROLLERS reach the registry: the in-cluster Service, never registry.host. A cluster DNS
+name is unresolvable from a kubelet and a node name often from cluster DNS, so the push address and
+the pull address (publicRegistry) are kept separate.
 */}}
 {{- define "kube-oci-composer.defaultRegistry" -}}
 {{- if .Values.defaultRegistry.host -}}
@@ -190,11 +160,8 @@ cluster DNS. Setting it broke publishing; leaving it unset broke pulling. See pu
 {{- end -}}
 
 {{- /*
-registry.host with any port stripped.
-
-An Ingress rule and a certificate SAN are HOSTNAMES; registry.host is a registry reference and may
-carry a port, because a NodePort deployment needs one there. Passing "oci.example.com:30500" to a
-rule host produces an Ingress that matches nothing, silently.
+registry.host without its port. Ingress rule hosts and certificate SANs are hostnames; with a port
+the Ingress silently matches nothing.
 */}}
 {{- define "kube-oci-composer.publicHostname" -}}
 {{- $h := .Values.registry.host | default "" -}}
@@ -206,12 +173,8 @@ rule host produces an Ingress that matches nothing, silently.
 {{- end -}}
 
 {{- /*
-What a WORKLOAD is told to pull from, and the one name in this chart that a pod may be unable to
-resolve. It reaches status.artifact.ref and status.artifact.tags; nothing that dials the registry
-may use it.
-
-Empty whenever it would equal the internal name -- an external registry is one name that already
-works from both places, and emitting it twice would only invite the two to drift.
+What WORKLOADS pull from (status.artifact.ref and .tags). Nothing that dials the registry may use
+it. Empty for an external registry, whose one name already works from both places.
 */}}
 {{- define "kube-oci-composer.publicRegistry" -}}
 {{- if and .Values.registry.enabled .Values.registry.host -}}
@@ -231,12 +194,9 @@ The Secret holding the push credential both controllers read from their own name
 {{- end -}}
 
 {{/*
-The generated registry password, stable across upgrades.
-
-Reuses the value already in the cluster when there is one, so `helm upgrade` does not roll a new
-password and lock the controllers out of every image they have published. `lookup` returns nothing
-during `helm template` and `--dry-run`, which is why the generated branch has to be deterministic
-enough to render -- it is only ever WRITTEN on a real install.
+The generated registry password, reused from the cluster so an upgrade does not lock the
+controllers out. `lookup` is empty under `helm template` and `--dry-run`, so those render a fresh
+random one that is never written.
 */}}
 {{- define "kube-oci-composer.registryPassword" -}}
 {{- if .Values.registry.auth.password -}}
@@ -253,32 +213,16 @@ enough to render -- it is only ever WRITTEN on a real install.
 {{- end -}}
 
 {{/*
-Hosts the controllers may reach over plain HTTP.
-
-The bundled registry is added automatically. It serves HTTP inside the cluster -- there is no
-certificate for a .svc.cluster.local name and terminating TLS for one would mean managing a CA -- so
-without this every push to it fails in the TLS handshake, on a default install, with an error that
-points at the registry rather than at the missing flag.
-
-Matched on host, so naming it does not downgrade any other registry the same controller talks to.
+Hosts the controllers (and BuildKit, as registry.insecure=true) may reach over plain HTTP. Matched
+on host, so listing one downgrades nothing else.
 */}}
 {{- define "kube-oci-composer.insecureRegistries" -}}
 {{- $hosts := list -}}
 {{- with .Values.operator.insecureRegistry }}{{- $hosts = concat $hosts (splitList "," .) -}}{{- end -}}
 {{- /*
-The in-cluster Service name, which is what the controllers now always talk to, and which speaks
-plain HTTP until registry.tls is turned on.
-
-registry.host is deliberately NOT added and never was: it may well be an ingress terminating TLS,
-and marking it insecure would force plain HTTP on the deployment that took the trouble to set it
-up. That reasoning was always right about the PUBLIC name -- it was simply being applied to a value
-that was also the internal one. Now that the two are separate, both halves are true at once, and a
-plain-HTTP public host (a NodePort, say) still opts in through defaultRegistry.insecure.
-
-Note what depends on this beyond the controllers: the same list becomes BuildKit's
-`registry.insecure=true`, which means allow plaintext AND skip verification. Leaving the Service
-name here once TLS is on would leave builds pushing credentials in the clear while everything
-looked fixed.
+The bundled registry's Service speaks plain HTTP until registry.tls is on; it must leave this list
+then, or builds keep pushing credentials in the clear. registry.host is never added: it may be a
+TLS-terminating ingress. A plain-HTTP public host opts in via defaultRegistry.insecure.
 */}}
 {{- if and .Values.registry.enabled (not .Values.registry.tls.enabled) (not .Values.defaultRegistry.host) -}}
 {{- $hosts = append $hosts (include "kube-oci-composer.defaultRegistry" .) -}}
@@ -288,9 +232,8 @@ looked fixed.
 {{- end -}}
 
 {{- /*
-The image that runs `oci-builder fetch-context` as each build's init container.
-Defaults to the builder's own image: the fetcher is a subcommand of that binary, so one image
-covers both and the chart already knows a digest for it.
+The image running `oci-builder fetch-context` as each build's init container. Defaults to the
+builder's own image, which contains the fetcher subcommand.
 */}}
 {{- define "kube-oci-composer.fetcherImage" -}}
 {{- if .Values.imageBuild.fetcherImage -}}

@@ -1,12 +1,7 @@
 {{- /*
-Renders nothing. It exists to RUN the validations, which is not something a _partials file can do:
-Helm loads files starting with an underscore as definitions only and never renders them, so an
-`include` at the bottom of one is dead code. That is exactly how the first version of this check
-passed every one of its own falsification cases -- eight configurations that should have failed the
-render, all of them rendering cleanly, because the check was never invoked at all.
-
-Helm drops a template whose output is only whitespace, so nothing lands in the release; `fail`
-inside the include still aborts `helm template`, `helm install` and `helm upgrade` alike.
+Renders nothing; it exists to RUN the checks. Helm never renders _partials, so an `include` inside one
+is dead code, and a template whose output is only whitespace is dropped. `fail` still aborts
+template, install and upgrade.
 */}}
 {{- include "kube-oci-composer.checkPublishMode" . -}}
 {{- include "kube-oci-composer.checkRetention" . -}}
@@ -18,10 +13,7 @@ inside the include still aborts `helm template`, `helm install` and `helm upgrad
 {{- include "kube-oci-composer.checkRegistryReplicas" . -}}
 {{- include "kube-oci-composer.checkRegistryMigration" . -}}
 
-{{- /*
-An empty readTimeout renders no key, and zot then injects its own 60s -- the exact failure ADR 0047
-is about, one plausible edit away. Refused rather than silently restored.
-*/}}
+{{- /* An empty readTimeout renders no key and zot injects 60s (ADR 0047). */}}
 {{- if and .Values.registry.enabled (not .Values.registry.readTimeout) }}
 {{- fail "registry.readTimeout must be set: leaving it empty makes zot apply its own 60s limit to the WHOLE request, including time queued behind the upload lock, so large layers become unpushable. See ADR 0047." }}
 {{- end }}

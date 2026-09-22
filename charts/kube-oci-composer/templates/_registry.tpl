@@ -1,22 +1,14 @@
 {{- /*
-Refusals about the bundled registry's own coherence.
-
-Each one exists because the alternative is a configuration that RENDERS and then does not work --
-which is the failure mode this project keeps deciding to convert into a render error instead. See
-_retention.tpl for the same reasoning applied to the retention margin.
+Refusals about the bundled registry's own coherence: each catches a configuration that would render
+and then not work. See _retention.tpl for the retention checks.
 */}}
 
 {{- define "kube-oci-composer.checkRegistryAuth" -}}
 {{- if and .Values.registry.enabled .Values.registry.auth.enabled -}}
 
 {{- /*
-Bringing your own push credential while the chart still generates the registry's password is not a
-configuration with a right answer -- the two halves are a matched pair and you have replaced one of
-them. The controllers would authenticate with the Secret you supplied while zot expected a password
-generated here, and (worse) that generated password would be a NEW random string on every upgrade,
-because the `-push` Secret `registryPassword` reads back no longer exists.
-
-Refused rather than guessed at, with the three ways out named.
+A supplied push credential with a chart-generated registry password cannot match. Worse, with no
+`-push` Secret to read back, registryPassword mints a new password on every upgrade.
 */}}
 {{- if and .Values.defaultRegistry.existingPushSecret
           (not .Values.registry.auth.password)
@@ -33,14 +25,9 @@ Pick one:
 {{- end -}}
 
 {{- /*
-The registry's TLS material, as one JSON blob.
-
-CALLED FROM EXACTLY ONE PLACE (registry-tls.yaml). See the note at the top of that file for why
-calling it twice produces two unrelated CAs and a cluster that fails on first install.
-
-The lookup-then-generate shape is the same one registryPassword uses: reuse what is already in the
-cluster, generate only when there is nothing. Without the reuse, every `helm upgrade` would mint a
-new CA and every client would have to be restarted to learn it.
+The registry's TLS material as one JSON blob. Call it ONLY from registry-tls.yaml: genCA is random,
+so a second caller would produce an unrelated CA (see that file). Reuses the Secret already in the
+cluster, so an upgrade does not mint a new CA.
 */}}
 {{- define "kube-oci-composer.registryTLSMaterial" -}}
 {{- $svc := printf "%s.%s.svc" (include "kube-oci-composer.registryFullname" .) .Release.Namespace -}}
@@ -50,10 +37,7 @@ new CA and every client would have to be restarted to learn it.
       $svc
       (printf "%s.%s" $svc .Values.registry.clusterDomain)
 -}}
-{{- /*
-The public hostname too, so the same certificate is valid at the edge -- a NodePort deployment
-serves this cert directly to containerd, which verifies the name in the reference.
-*/}}
+{{- /* The public hostname too: a NodePort serves this cert directly to containerd. */}}
 {{- with include "kube-oci-composer.publicHostname" . }}{{- $names = append $names . -}}{{- end -}}
 {{- with .Values.registry.tls.dnsNames }}{{- $names = concat $names . -}}{{- end -}}
 {{- $names = $names | uniq -}}
@@ -75,8 +59,8 @@ serves this cert directly to containerd, which verifies the name in the referenc
 {{- end -}}
 
 {{- /*
-Which Secret holds the certificate. One helper because four places need to agree: the Secret, the
-Certificate, the registry's volume, and the controllers' CA mount.
+The Secret holding the certificate; the Secret, the Certificate, the registry volume and the
+controllers' CA mount must agree on it.
 */}}
 {{- define "kube-oci-composer.registryTLSSecretName" -}}
 {{- if .Values.registry.tls.secretName -}}
@@ -87,22 +71,10 @@ Certificate, the registry's volume, and the controllers' CA mount.
 {{- end -}}
 
 {{- /*
-Refuse a certificate that has expired, or is about to.
-
-This exists because the lookup-reuse pattern above cannot tell. sprig has no PEM parser, so without
-a stored expiry the chart would happily re-emit a certificate that expired last week, forever.
-
-The failure that produces is not an outage, it is deletion: the controllers refuse the expired
-cert, the retention refresh stops running, and a registry with an expiry policy reclaims the images
-live objects still reference one window later (ADR 0031). It fails silently and in the deleting
-direction, which is why this is a `fail` and not a NOTES warning.
-
-The way out is deliberately obstructive, because rotation IS that sequence:
-  kubectl delete secret <release>-kube-oci-composer-registry-tls
-  helm upgrade ...
-  kubectl rollout restart deploy   # all three: zot reads certs once at startup
-
-Anyone who would rather not do that by hand should use tls.mode=certManager, which exists to renew.
+Refuse a self-signed certificate that has expired or is about to. The lookup-reuse above cannot tell
+(sprig has no PEM parser), so the expiry is stored at generation. An expired cert stops the
+retention refresh, which deletes live images one window later (ADR 0031) -- hence `fail`, not a
+NOTES warning. tls.mode=certManager renews instead.
 */}}
 {{- define "kube-oci-composer.checkRegistryCert" -}}
 {{- if and .Values.registry.enabled .Values.registry.tls.enabled (eq .Values.registry.tls.mode "selfSigned") -}}
@@ -114,25 +86,22 @@ Anyone who would rather not do that by hand should use tls.mode=certManager, whi
 {{- if lt (int64 $left) (int64 $failWithin) -}}
 {{- fail (printf `the registry's generated certificate expires at %s, which is too soon to keep serving.
 
-It is NOT renewed automatically: the chart reuses whatever is already in the cluster, and sprig cannot read a PEM to notice. An expired certificate here does not merely break pushes -- it stops the retention refresh, and a registry with an expiry policy then reclaims images your workloads are still running, one window later (ADR 0031).
+It is NOT renewed automatically. An expired certificate here stops the retention refresh, and a registry with an expiry policy then reclaims images your workloads are still running, one window later (ADR 0031).
 
 Rotate it:
   kubectl -n %s delete secret %s
   helm upgrade ...            # mints a new CA and certificate
   kubectl -n %s rollout restart deploy    # zot and both controllers read certs once at startup
 
-Every client has to learn the new CA, including the containerd drop-in on each node. If that is more than you want to do by hand, use registry.tls.mode=certManager instead.` $notAfter .Release.Namespace (include "kube-oci-composer.registryTLSSecretName" .) .Release.Namespace) -}}
+Every client has to learn the new CA, including the containerd drop-in on each node. To avoid doing this by hand, use registry.tls.mode=certManager.` $notAfter .Release.Namespace (include "kube-oci-composer.registryTLSSecretName" .) .Release.Namespace) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
 
 {{- /*
-Whether the controllers need the registry's CA mounted.
-
-Empty means its certificate is already trusted by the controller image: an ACME issuer, a corporate
-CA baked in, or TLS off entirely. Callers use it only as a truthiness test -- registryCAVolume and
-registryCAVolumeMount below emit the YAML.
+Non-empty when the controllers need the registry's CA mounted (TLS on and not already trusted).
+Used only as a truthiness test.
 */}}
 {{- define "kube-oci-composer.registryCAWanted" -}}
 {{- if and .Values.registry.enabled .Values.registry.tls.enabled .Values.registry.tls.trust.enabled -}}
@@ -141,11 +110,8 @@ yes
 {{- end -}}
 
 {{- /*
-Where the CA comes from, as a volume entry.
-
-cert-manager and operator-supplied Secrets both carry it in the Secret's own ca.crt key, so it is
-mounted from there rather than copied into a ConfigMap that could go stale behind a renewal. Only
-the self-signed mode, where the chart generates the CA itself, uses a ConfigMap.
+The CA volume. cert-manager and supplied Secrets carry the CA in their own ca.crt, mounted directly so
+it cannot go stale behind a renewal; only selfSigned uses the chart's ConfigMap.
 */}}
 {{- define "kube-oci-composer.registryCAVolume" -}}
 {{- if include "kube-oci-composer.registryCAWanted" . -}}
@@ -174,29 +140,13 @@ the self-signed mode, where the chart generates the CA itself, uses a ConfigMap.
 {{- end -}}
 {{- end -}}
 
-{{- /*
-Where the CA is mounted, and the file --registry-ca-file names inside it. One definition because
-the mount path and the flag have to agree, in two Deployments.
-*/}}
+{{- /* The CA mount path and the file --registry-ca-file names; both Deployments must agree. */}}
 {{- define "kube-oci-composer.registryCADir" -}}/etc/oci-composer/registry-ca{{- end -}}
 {{- define "kube-oci-composer.registryCAFile" -}}{{ include "kube-oci-composer.registryCADir" . }}/ca.crt{{- end -}}
 
 {{- /*
-Refusals about clustering.
-
-Every one of these is a combination that RENDERS and then does not work, mostly by losing data
-rather than by erroring -- which is why they fail the install instead of warning in NOTES.
-*/}}
-{{- /*
-Whether zot's config has to be a Secret rather than a ConfigMap.
-
-zot's redis driver takes credentials only inside the URL -- redis://user:pass@host -- so a
-credentialed cache URL puts a password in the rendered config. A ConfigMap is readable in every
-`kubectl describe`, which is the rule TestChartCredentialsAreNotFlags already enforces for the
-composer's own S3, so in that case the whole config moves to a Secret.
-
-Kept conditional rather than always-Secret so the ordinary install still has an inspectable
-ConfigMap; nothing is hidden unless there is something to hide.
+Whether zot's config must be a Secret: zot's redis driver takes credentials only inside the URL, and
+a ConfigMap is readable in every `kubectl describe`. Otherwise it stays an inspectable ConfigMap.
 */}}
 {{- define "kube-oci-composer.registryConfigIsSecret" -}}
 {{- if and (eq .Values.registry.cache.driver "redis") (contains "@" .Values.registry.cache.redis.url) -}}
@@ -204,14 +154,13 @@ true
 {{- end -}}
 {{- end -}}
 
+{{- /*
+Refusals about read replicas and storage. Each would render and then lose data or crashloop.
+*/}}
 {{- define "kube-oci-composer.checkRegistryReplicas" -}}
 {{- $r := .Values.registry -}}
 
-{{- /*
-registry.cluster is gone. Helm ignores unknown --set paths in silence, so without this an operator
-carrying `--set registry.cluster.enabled=true` from 0.5.0-rc would get a working install with
-one pod and no indication that their replica count had evaporated.
-*/}}
+{{- /* Helm ignores unknown --set paths, so a leftover registry.cluster would silently mean one pod. */}}
 {{- if $r.cluster -}}
 {{- fail "registry.cluster no longer exists. It ran zot's scale-out mode, which SHARDS: each repository lived on exactly one member, so a member going down took ~1/N of the registry with it. The replacement is registry.readReplicas, which replicates reads instead -- see docs/adr/0041-one-writer-many-readers.md." -}}
 {{- end -}}
@@ -223,22 +172,20 @@ one pod and no indication that their replica count had evaporated.
 {{- if and $r.enabled (gt (int $r.readReplicas) 0) -}}
 
 {{- if eq $r.cache.driver "none" -}}
-{{- fail "registry.readReplicas > 0 requires registry.cache.driver (redis or dynamodb). The default metadata store is BoltDB, a file one process opens exclusively, so replicas cannot share it. Worse than the sharing failure: per-pod metadata would mean `extensions.search` records a pull only on the pod that served it, so a refresh landing on one pod would not save the image from the writer's collector, and retention would delete content that is still in use (ADR 0031)." -}}
+{{- fail "registry.readReplicas > 0 requires registry.cache.driver (redis or dynamodb). The default BoltDB metadata store is a file one process opens exclusively, and per-pod metadata would record a pull only on the pod that served it, so retention would delete content that is still in use (ADR 0031)." -}}
 {{- end -}}
 
 {{- if and $r.persistence.enabled (ne $r.persistence.accessMode "ReadWriteMany") -}}
-{{- fail (printf "registry.readReplicas > 0 needs registry.persistence.accessMode=ReadWriteMany; it is %q. A second pod cannot mount a ReadWriteOnce volume and will sit in Multi-Attach error indefinitely. Note the chart can only check what you ASKED for -- whether the StorageClass really provides multi-writer access is not visible here, so confirm the claim with `kubectl get pvc` before relying on the replicas." $r.persistence.accessMode) -}}
+{{- fail (printf "registry.readReplicas > 0 needs registry.persistence.accessMode=ReadWriteMany; it is %q. A second pod cannot mount a ReadWriteOnce volume and will sit in Multi-Attach error indefinitely. The chart can only check what you ASKED for, so confirm the claim with `kubectl get pvc` before relying on the replicas." $r.persistence.accessMode) -}}
 {{- end -}}
 
 {{- if and (eq $r.storage.driver "local") (not $r.persistence.enabled) -}}
-{{- fail "registry.readReplicas > 0 with registry.storage.driver=local needs registry.persistence.enabled=true. An emptyDir is per-pod, so the replicas would be unrelated registries behind one Service name and a pull would 404 or not depending which one it reached -- and every restart would lose an ImageBuild's only copy (ADR 0025)." -}}
+{{- fail "registry.readReplicas > 0 with registry.storage.driver=local needs registry.persistence.enabled=true. An emptyDir is per-pod, so the replicas would be unrelated registries behind one Service name -- and every restart would lose an ImageBuild's only copy (ADR 0025)." -}}
 {{- end -}}
 
 {{- end -}}
 
-{{- /*
-These apply whether or not there are replicas: an operator may use S3 with a single pod.
-*/}}
+{{- /* These apply with or without replicas. */}}
 {{- if and $r.enabled (eq $r.storage.driver "s3") (not $r.storage.s3.bucket) -}}
 {{- fail "registry.storage.driver=s3 needs registry.storage.s3.bucket." -}}
 {{- end -}}
@@ -268,13 +215,7 @@ Without this, Helm creates the StatefulSet while the Deployment's ReplicaSet sti
 {{- end -}}
 
 {{- /*
-The registry arguments both controllers take.
-
-One definition because they are the same questions for both -- where to publish, what a workload
-pulls, whose credential, what to trust, what to attach -- and a flag added to one and not the other
-is a controller that quietly behaves differently from its sibling.
-
-Call with the supplyChain block, which is the only thing that differs:
+The registry flags both controllers take, so they cannot drift apart. Only supplyChain differs:
 
     {{ include "kube-oci-composer.registryArgs" (dict "ctx" $ "supplyChain" .Values.operator.supplyChain) }}
 */}}

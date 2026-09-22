@@ -1,47 +1,23 @@
 {{- /*
-Retention is ONE decision with several consequences.
+Retention is ONE decision: `retention.window` is the base and everything else derives from it.
 
-An operator has an opinion about how long images are kept -- "30 days" is a thing you can check
-against a backup policy. Nobody has an opinion about how often a collector should sweep. So
-`retention.window` is the base and everything else derives from it, because the alternative is
-asking four questions whose only correct answers are functions of the first one.
-
-  window          how long the registry keeps content nothing references. THE BASE.
+  window          how long the registry keeps content nothing references.
   refreshInterval how often the controllers re-pull what live objects reference.
-                  = window / refreshFactor. MUST be much shorter than the window: the margin is
-                  the guarantee, not either number (ADR 0031). Refused below 24x.
-  gcInterval      how often the registry sweeps. = window / gcFactor. Promptness only: collecting
-                  late is safe, collecting early is not. Note that it does NOT straightforwardly
-                  set how soon any one repository is collected -- zot walks repositories in rounds,
-                  and shortening the sweep measurably made collection SLOWER in the e2e rather than
-                  faster. Anything tuning this should measure rather than reason.
-  gcDelay         how old something must be before it can be collected. Derived like the rest --
-                  from the refresh interval, so indirectly from the window -- but never below the
-                  naming-gap floor, because it also guards a WALL-CLOCK gap: a build's manifest is
-                  untagged from the moment it is pushed until this controller names it (ADR 0054),
-                  and untagged is what a collector reclaims. Compress the window for a test and
-                  gcDelay stops following it down exactly where it must.
+                  = window / refreshFactor. The margin is the guarantee (ADR 0031); refused below 24x.
+  gcInterval      how often the registry sweeps. = window / gcFactor. Promptness only: late is safe,
+                  early is not. It does not simply set how soon a repository is collected (zot walks
+                  repositories in rounds); measure before tuning it.
+  gcDelay         minimum age before collection. Derived from the refresh interval, but never below
+                  the naming-gap floor: a build's manifest is untagged from push until the controller
+                  names it (ADR 0054), and untagged is what a collector reclaims.
 
-The window applies wherever the images live. With the bundled registry the chart both declares and
-configures it; with somebody else's the operator DECLARES what their registry does, because the
-refresh cadence has to derive from something and the chart cannot read their policy. The refresh
-check therefore runs in both cases -- it used to be skipped when registry.enabled was false, which
-withheld it from exactly the deployment that gets no other help.
+With an external registry the operator DECLARES its window, so the refresh check runs in both cases.
 */}}
 
 {{- /*
-A Go duration in seconds. -1 means unparseable, and the caller skips rather than guesses.
-
-Every unit is summed, because Go durations are compound: "1h30m" and "1h0m0s" are both ordinary,
-and the second is what time.Duration.String() prints. An earlier version matched only a single
-trailing unit, so "1h30m" took the "m" branch, trimmed it to "1h30", and sprig's float64 swallowed
-the conversion error and returned 0 -- which reads as "no expiry" rather than "unparseable". The
-window was then passed to zot verbatim while every guard here saw 0 and skipped, so
-retention.window: 1h30m gave a registry that expired content after 90 minutes and controllers that
-refreshed hourly: a margin of 1.5x, where the render is supposed to refuse anything under 24x.
-
-Validated by reconstruction: if the units found do not reassemble the input exactly, it is not a
-duration this can be trusted to have understood, and -1 says so.
+A Go duration in seconds; -1 means unparseable and callers skip rather than guess. Compound
+durations ("1h30m") are summed, and the parse is validated by reassembling the input, so a partial
+match cannot silently become 0 ("no expiry").
 */ -}}
 {{- define "kube-oci-composer.durationSeconds" -}}
   {{- $d := . | toString | trim -}}
@@ -75,9 +51,8 @@ duration this can be trusted to have understood, and -1 says so.
 {{- end -}}
 
 {{- /*
-Seconds back to the largest whole unit, so a derived value reads like one a human would have
-written. 3600 is "1h", not "3600s" -- which also means the derived defaults render identically to
-the literals they replace, and a diff of the rendered output shows nothing at all.
+Seconds back to the largest whole unit ("1h", not "3600s"), so derived values read like the
+literals they replace.
 */ -}}
 {{- define "kube-oci-composer.formatDuration" -}}
   {{- $s := . | float64 | floor | int64 -}}
@@ -96,11 +71,8 @@ the literals they replace, and a diff of the rendered output shows nothing at al
 {{- end -}}
 
 {{- /*
-The refresh interval both controllers use unless one overrides it.
-
-With no window there is nothing to derive from and nothing to outrun -- but an operator who is WRONG
-about their registry having no expiry loses images, and that mistake is the unrecoverable one. So
-this still refreshes, on a plain hourly default, rather than not at all.
+The refresh interval both controllers use unless one overrides it. With no window it still refreshes
+hourly: an operator wrong about "no expiry" would otherwise lose images.
 */ -}}
 {{- define "kube-oci-composer.refreshInterval" -}}
   {{- if .Values.retention.refreshInterval -}}
@@ -116,10 +88,8 @@ this still refreshes, on a plain hourly default, rather than not at all.
 {{- end -}}
 
 {{- /*
-Per-component, so the two may differ; empty means the shared one.
-
-NOT `default`, which treats 0 as absent -- and 0 is a real setting here that means "never refresh".
-Falling back on it would turn the one value the checks must catch into the one they cannot see.
+Per-component override; empty means the shared one. Not `default`, which treats 0 as absent -- and
+0 ("never refresh") is exactly what the checks must see.
 */ -}}
 {{- define "kube-oci-composer.composerRefreshInterval" -}}
   {{- $v := .Values.operator.retention.refreshInterval | toString -}}
@@ -131,7 +101,7 @@ Falling back on it would turn the one value the checks must catch into the one t
   {{- if eq $v "" -}}{{- include "kube-oci-composer.refreshInterval" . -}}{{- else -}}{{- $v -}}{{- end -}}
 {{- end -}}
 
-{{- /* Whether any enabled component actually falls back to the derived interval. */ -}}
+{{- /* Whether any enabled component falls back to the derived interval. */ -}}
 {{- define "kube-oci-composer.usesDerivedRefresh" -}}
   {{- if and .Values.imageComposition.enabled (eq (.Values.operator.retention.refreshInterval | toString) "") -}}yes
   {{- else if and .Values.imageBuild.enabled (eq (.Values.imageBuild.retention.refreshInterval | toString) "") -}}yes
@@ -152,18 +122,15 @@ Falling back on it would turn the one value the checks must catch into the one t
 {{- end -}}
 
 {{- /*
-The naming gap: how long a build's manifest exists with no tag pointing at it.
-
-The controller re-observes a running Job every buildPollInterval, so that bounds how long after the
-push it learns the digest and applies the names. Tripled for the round trips it makes first, and
-because losing this race costs a build.
+The naming gap: how long a build's manifest can sit untagged. The controller names it within one
+buildPollInterval of the push; tripled for its round trips, since losing this race costs a build.
 */ -}}
 {{- define "kube-oci-composer.namingGapSeconds" -}}
   {{- $poll := include "kube-oci-composer.durationSeconds" .Values.imageBuild.buildPollInterval | float64 -}}
   {{- mulf (max $poll 1.0) 3.0 -}}
 {{- end -}}
 
-{{- /* Derived like the rest, but never below the naming gap. See the header. */ -}}
+{{- /* Derived like the rest, but never below the naming gap. */ -}}
 {{- define "kube-oci-composer.gcDelay" -}}
   {{- if .Values.registry.retention.gcDelay -}}
     {{- .Values.registry.retention.gcDelay -}}
@@ -175,33 +142,15 @@ because losing this race costs a build.
 {{- end -}}
 
 {{- /*
-D7: the refresh interval and the retention window have to be set together, and until this chart
-existed they lived in different systems -- a controller flag and a registry's config -- so nothing
-could compare them. Now one render sees both, so it checks.
-
-The RATIO is the guarantee. A window of 720h against an interval of 1h means refreshing has to fail
-continuously for a month before an image a live object still references is at risk. Shrink the
-window without shrinking the interval and that margin quietly becomes a race, whose failure mode is
-deletion -- which is why this fails the render rather than warning in NOTES nobody reads.
-
-MINIMUM MARGIN is 24: the window must be at least a day's worth of refreshes wide. Below that a
-weekend of a broken registry, a controller crash-looping on a bad flag, or a long node drain lands
-inside the window. It is deliberately far below the default's 720, because this exists to catch
-configurations that are WRONG, not to enforce the default on people who have thought about it.
-
-Both controllers are checked, because either one going quiet loses its own objects' images.
+D7: the refresh interval must be far shorter than the window. The RATIO is the guarantee: at 720h
+against 1h, refreshing must fail for a month before a live image is at risk. Minimum margin 24 (a
+day's worth of refreshes) -- far below the default, to catch wrong configurations rather than
+enforce the default. Both controllers are checked; either going quiet loses its own images.
 */}}
 {{- define "kube-oci-composer.checkRetention" -}}
 {{- if .Values.retention.window -}}
 {{- $window := include "kube-oci-composer.windowSeconds" . | float64 -}}
-{{- /*
-A window this cannot parse is refused rather than passed through.
-
-It reaches zot verbatim, so leaving it alone would hand the registry a policy it cannot read while
-every check here skips -- the parser answers -1 for "I did not understand this", and -1 is not a
-duration to compare margins against. Failing here says which value is wrong; failing at the
-registry says a policy is invalid, hours later, somewhere else.
-*/ -}}
+{{- /* An unparseable window is refused: it reaches zot verbatim while every check here would skip it. */ -}}
 {{- if lt $window 0.0 -}}
 {{- fail (printf "retention.window (%s) is not a duration this chart can read. Use a Go duration such as 720h, 30m or 1h30m -- it is passed to the registry as its expiry policy, and the refresh margin is checked against it." $.Values.retention.window) -}}
 {{- end -}}
@@ -225,12 +174,8 @@ registry says a policy is invalid, hours later, somewhere else.
 {{- end -}}
 
 {{- /*
-A window short enough to derive a nonsense refresh interval is refused rather than rendered.
-
-720 is a sensible factor against 30 days and a ridiculous one against two hours, where it derives a
-ten-second refresh and both controllers re-pull every live image six times a minute. The floor
-applies only to the DERIVED value: setting retention.refreshInterval explicitly is the escape hatch,
-and is how the e2e runs a one-second refresh on purpose.
+Refuse a DERIVED refresh interval under 30s (e.g. factor 720 against a 2h window). Setting
+retention.refreshInterval explicitly bypasses this; the e2e does so on purpose.
 */}}
 {{- define "kube-oci-composer.checkDerivedFloors" -}}
 {{- if and .Values.retention.window (not .Values.retention.refreshInterval) (include "kube-oci-composer.usesDerivedRefresh" .) -}}
@@ -243,29 +188,14 @@ and is how the e2e runs a one-second refresh on purpose.
 {{- end -}}
 
 {{- /*
-The OTHER race, and it is not about the window at all.
+The naming-gap race (ADR 0054): a build pushes untagged and the controller names it later, so gcDelay
+must outlast that gap or the collector can take the build's output (seen as NAME_UNKNOWN when it was
+the repository's only content). With keepUntagged off (ADR 0060) this is the only cover, and
+repositories outside a scoped policy are collected by zot's default regardless. Costs a rebuild, not
+data. deleteUntagged: false removes the race and is accepted at any delay.
 
-A build uploads its image with NO TAG and the controller names it a moment later, which is what
-makes the conflict check exact (ADR 0054). Until that name is applied the manifest is untagged, and
-untagged is precisely what the collector reclaims. When it was the repository's only content the
-repository goes with it, which is why losing this race reads as NAME_UNKNOWN rather than a missing
-manifest.
-
-With registry.retention.keepUntagged on, its pushedWithin also covers a freshly pushed manifest in
-any repository the policy matches, and this guard backs it up. With it off -- the target
-configuration, ADR 0060 -- this guard is the only cover the gap has. Either way it matters wherever
-the policy does not reach: scope repositories to a prefix and everything outside it matches no
-policy at all, where zot's default is to collect untagged manifests. That is the configuration the
-e2e runs, and the one this was written after.
-
-Losing the race costs a rebuild, not data: nothing references a build's output before it is named.
-
-Refused rather than warned, for the same reason as the window check: the failure mode is deletion.
-deleteUntagged: false removes the race instead of out-running it and is accepted at any delay.
-
-Gated on registry.enabled because gcDelay is zot's setting. The race is NOT zot-specific -- any
-registry that reclaims untagged manifests can take a build's output before it is named -- so the
-external-registry path documents it instead, and the controller's Pending message names the cause.
+Gated on registry.enabled because gcDelay is zot's setting; for an external registry the race is
+documented instead.
 */}}
 {{- define "kube-oci-composer.checkUntaggedWindow" -}}
 {{- if and .Values.registry.enabled .Values.registry.retention.deleteUntagged .Values.imageBuild.enabled -}}
@@ -278,10 +208,8 @@ external-registry path documents it instead, and the controller's Pending messag
 {{- end -}}
 
 {{- /*
-Sweeping less often than the window makes the window a lower bound rather than a description:
-content stays pullable long after it was due to go, and an operator reading `window` is told
-something untrue. Collecting LATE is safe, so this is a misconfiguration rather than a hazard -- but
-one worth refusing while the render can still say so.
+A sweep less often than the window makes the window describe nothing. Late collection is safe, so
+this is a misconfiguration rather than a hazard, but still refused.
 */}}
 {{- define "kube-oci-composer.checkGcInterval" -}}
 {{- if and .Values.registry.enabled .Values.retention.window -}}
