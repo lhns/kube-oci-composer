@@ -73,9 +73,16 @@ spec:
             - --fetch-deny-private
             {{- end }}
             {{- include "kube-oci-composer.registryArgs" (dict "ctx" $ "supplyChain" .Values.operator.supplyChain) | trim | nindent 12 }}
-          {{- if .Values.operator.s3.existingSecret }}
           env:
-            # Credentials as env, never flags (visible in ps and kubectl describe).
+            # The default push credential is read from the CONTROLLER's namespace: it belongs to
+            # the operator, not to a tenant.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- if .Values.operator.s3.existingSecret }}
+            # Credentials as env, never flags (visible in ps and kubectl describe). In the same
+            # list: a second env: key replaced this one and dropped them.
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
@@ -86,14 +93,7 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.operator.s3.existingSecret }}
                   key: AWS_SECRET_ACCESS_KEY
-          {{- end }}
-          env:
-            # The default push credential is read from the CONTROLLER's namespace: it belongs to
-            # the operator, not to a tenant.
-            - name: POD_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
+            {{- end }}
           ports:
             - name: metrics
               containerPort: {{ include "kube-oci-composer.port" .Values.operator.metricsBindAddress }}
