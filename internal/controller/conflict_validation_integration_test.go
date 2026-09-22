@@ -12,14 +12,11 @@ import (
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 )
 
-// The schema half of onConflict, against a real API server. CEL rules and schema defaults cannot be
-// exercised any other way -- a unit test asserting the marker text would be asserting a string, not
-// a validation.
+// The schema half of onConflict, against a real API server: CEL rules and schema defaults cannot be
+// exercised any other way.
 
-// The rule refuses a spec that says two contradictory things, and ONLY that. Allowing the agreeing
-// combinations matters as much as refusing the contradictory ones: every object stored before this
-// release already carries `immutable: true` materialised by the old schema default, so a rule that
-// refused co-presence outright would stop all of them from adopting the new field.
+// The rule refuses only contradictory combinations. Agreeing ones must pass, because objects stored
+// by older releases carry `immutable: true` from the old schema default.
 func TestIntegrationOnConflictContradictionsAreRefused(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -57,8 +54,8 @@ func TestIntegrationOnConflictContradictionsAreRefused(t *testing.T) {
 	}
 }
 
-// The enum. A misspelling must be refused at admission rather than silently resolving to Fail
-// inside the controller, where the operator would never see it.
+// A misspelling must be refused at admission rather than silently resolving to Fail in the
+// controller.
 func TestIntegrationOnConflictRejectsUnknownValues(t *testing.T) {
 	spec := validBuildSpec()
 	spec.Push.OnConflict = "keep" // lowercase: not one of the three
@@ -67,13 +64,9 @@ func TestIntegrationOnConflictRejectsUnknownValues(t *testing.T) {
 	}
 }
 
-// onConflict deliberately carries NO schema default, and this is the test that says so on purpose.
-//
-// Structural defaults are applied when an object is read back from storage, so defaulting it would
-// rewrite every existing `immutable: false` object into a refusing one the moment the CRD was
-// upgraded -- reversing, silently, a setting its author chose deliberately. The effective default
-// lives in ResolveConflictPolicy instead. If someone adds the marker, this fails and the comment
-// above is the explanation of why.
+// onConflict deliberately has no schema default. Structural defaults apply on read from storage, so
+// one would silently turn every stored `immutable: false` object into a refusing one on CRD
+// upgrade. The effective default lives in ResolveConflictPolicy.
 func TestIntegrationOnConflictHasNoSchemaDefault(t *testing.T) {
 	obj := &ociv1alpha1.ImageBuild{
 		ObjectMeta: metav1.ObjectMeta{Name: "conflict-undefaulted", Namespace: "default"},
@@ -93,14 +86,13 @@ func TestIntegrationOnConflictHasNoSchemaDefault(t *testing.T) {
 			"stays distinguishable from an absent one, which is what the contradiction rule needs",
 			*obj.Spec.Push.Immutable)
 	}
-	// And the resolved answer is still the safe one.
 	if got := obj.Spec.Push.ResolveConflictPolicy(); got != ociv1alpha1.ConflictFail {
 		t.Errorf("an object that says nothing resolves to %q, want Fail", got)
 	}
 }
 
-// The same rule has to exist on the composition side. It is a separate CRD generated from a shared
-// Go struct, so a marker that failed to propagate would leave one kind unvalidated.
+// The composition CRD is generated separately from the shared Go struct, so the rule must be
+// checked there too.
 func TestIntegrationOnConflictIsValidatedOnCompositionsToo(t *testing.T) {
 	obj := &ociv1alpha1.ImageComposition{
 		ObjectMeta: metav1.ObjectMeta{Name: "conflict-composition", Namespace: "default"},

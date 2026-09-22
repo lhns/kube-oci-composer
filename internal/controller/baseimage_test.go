@@ -53,7 +53,7 @@ func publishBaseImage(t *testing.T, host, repo string, layers int, cfg *v1.Confi
 	return host + "/" + repo, digest.String()
 }
 
-// withBase sets the hoisted base image. It is no longer a layer entry — see ADR 0016.
+// withBase sets spec.base, which is hoisted out of the layer list (ADR 0016).
 func withBase(obj *ociv1alpha1.ImageComposition, repository, digest string) {
 	obj.Spec.Base = &ociv1alpha1.BaseImage{Image: repository, Digest: digest}
 }

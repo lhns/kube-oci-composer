@@ -7,14 +7,9 @@ import (
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 )
 
-// Keep is the value the old two-valued immutable could not express, and it is the one the pattern
-// this project actually recommends needs: with a tag derived from a hash of the spec, a tag that
-// already exists means the content is ALREADY PUBLISHED and correct. Fail stalls over a
-// non-problem; Overwrite rewrites bytes that were already right.
-//
-// The dangerous part of Keep is that the object reports Ready while NOT having published what its
-// spec produces. That is the shape of the incident behind ADR 0026 -- healthy status, diverged
-// content -- so the divergence has to be recorded, and these tests are what hold that line.
+// Keep suits a tag derived from a hash of the spec, where an existing tag means the content is
+// already published. Its hazard is reporting Ready while not publishing what the spec produces
+// (the shape of ADR 0026's incident), so the divergence must be recorded.
 func TestKeepLeavesTheExistingTagAndRecordsWhatWasDropped(t *testing.T) {
 	urlA, digestA := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	urlB, digestB := contentServer(t, map[string]string{"lib/a.jar": "bbb"})
@@ -94,8 +89,7 @@ func TestAPublishThatDoesNotConflictClearsTheRecord(t *testing.T) {
 	}
 }
 
-// Fail is the default and must survive the rename of the field that used to express it. The message
-// is asserted because reasonFor classifies on it -- see reasonFor's own comment.
+// Fail is the default. The message is asserted because reasonFor classifies on it.
 func TestFailIsTheDefaultWhenNothingIsSaid(t *testing.T) {
 	urlA, digestA := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	urlB, digestB := contentServer(t, map[string]string{"lib/a.jar": "bbb"})
