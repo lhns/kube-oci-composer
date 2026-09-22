@@ -1,16 +1,11 @@
 //go:build e2e
 
-// The retention guarantee, driven by the CONTROLLER rather than by the test.
+// The retention guarantee driven by the CONTROLLER rather than the test.
 //
-// retention_test.go establishes the registry's behaviour: that pulling an image renews its recency,
-// with a negative control proving the registry does collect things. This file is the other half —
-// that the controller actually does that pulling, for the right objects, and stops when it should.
-//
-// The distinction matters because the two can fail independently. A registry that renews on pull
-// proves nothing if the controller never pulls; a controller that pulls diligently proves nothing if
-// the registry ignores it. Everything here therefore does NOTHING to the registry itself: the test
-// creates objects, waits, and looks. Anything it pulled would keep alive the very thing it is asking
-// about, which is how a test of this shape passes while the feature is inert.
+// retention_test.go shows the registry renews on pull; this file shows the controller does the
+// pulling, for the right objects, and stops when it should. The two fail independently. So these
+// tests never touch the registry except to observe: anything they pulled would keep alive the very
+// thing they ask about.
 package e2e
 
 import (
@@ -19,29 +14,21 @@ import (
 	"testing"
 )
 
-// The whole guarantee, end to end: an image a live object still references is not reclaimed.
-//
-// The negative control is the same image after its object is DELETED. That is a sharper control than
-// retention_test.go's, because it holds everything constant except the one thing under test — the
-// existence of a live object naming the image. If both halves pass, the controller's refresh is the
-// only thing that can explain the difference.
+// TestALiveObjectKeepsItsImagesAlive -- an image a live object references is not reclaimed. The
+// negative control is the same image after its object is deleted: everything else held constant, so
+// the controller's refresh is the only explanation for the difference.
 func TestALiveObjectKeepsItsImagesAlive(t *testing.T) {
-	// NOT t.Parallel(), unlike the survival-only tests in this package. This one ends in a negative
-	// control that waits for a real deletion, and concurrent tests put more repositories in the
-	// registry at once -- which is the thing the collector's rotation is slowest at. Tried, and it
-	// failed: see the note on E2E_GC_FACTOR in up.sh.
+	// Not parallel: it ends waiting for a real deletion, and concurrent tests add repositories that
+	// slow the collector's rotation.
 	repo := keepaliveRepo("live")
 	digest := buildInto(t, "keepalive-live", repo, "v1")
 
-	// Well past the 30s window, with several collection passes in between, and the test touching
-	// nothing. If the object's images are still here, something refreshed them, and the only
-	// candidate is the controller.
+	// Past the window with the test touching nothing; only the controller can have refreshed it.
 	sleepInCluster(t, watchFor(t))
 
-	if !manifestExistsByDigest(t, repo, digest) {
-		t.Fatalf("%s@%s was collected while a live ImageBuild still referenced it. The retention "+
-			"guarantee is not being kept: an object that is Ready, unchanged and running had the "+
-			"content it published deleted underneath it.\ntags now: %s%s",
+	if !manifestExists(t, repo, digest) {
+		t.Fatalf("%s@%s was collected while a live ImageBuild still referenced it: a Ready, unchanged "+
+			"object had its published content deleted.\ntags now: %s%s",
 			repo, digest, tagsList(t, repo), registryLogs(t))
 	}
 	if !manifestExists(t, repo, "v1") {
@@ -50,32 +37,21 @@ func TestALiveObjectKeepsItsImagesAlive(t *testing.T) {
 			repo, tagsList(t, repo))
 	}
 
-	// THE NEGATIVE CONTROL. Delete the object and the refreshing stops with it.
-	//
-	// Without this the assertions above are satisfied by a registry that never collects anything,
-	// which is indistinguishable from a guarantee that works.
+	// THE NEGATIVE CONTROL: without the object, the refreshing stops and the tag goes. Otherwise a
+	// registry that never collects would pass the assertions above.
 	mustKubectl(t, "-n", buildNamespace, "delete", "imagebuild", "keepalive-live")
 	eventuallyUntagged(t, repo, "v1", collectionDeadline(t))
 }
 
-// Two objects publishing the same digest need no coordination: both refresh it, and it survives
-// while EITHER lives (ADR 0031).
-//
-// This is the case that makes delete-on-eviction the wrong mechanism. There, one object's eviction
-// destroys the other's content unless something tracks cross-object references — a distributed
-// mark-and-sweep, with all of its failure modes. Here it falls out of the design, and this is the
-// test that says so rather than the ADR merely claiming it.
+// TestTwoObjectsSharingADigestKeepItAliveIndependently -- two objects publishing one digest both
+// refresh it, so it survives while EITHER lives (ADR 0031), with no cross-object bookkeeping.
 func TestTwoObjectsSharingADigestKeepItAliveIndependently(t *testing.T) {
-	// NOT t.Parallel(), unlike the survival-only tests in this package. This one ends in a negative
-	// control that waits for a real deletion, and concurrent tests put more repositories in the
-	// registry at once -- which is the thing the collector's rotation is slowest at. Tried, and it
-	// failed: see the note on E2E_GC_FACTOR in up.sh.
+	// Not parallel: it ends waiting for a real deletion (see TestALiveObjectKeepsItsImagesAlive).
 
 	repo := keepaliveRepo("shared")
 
-	// Same context and Dockerfile, so both builds produce the same digest — which
-	// TestRebuildingTheSameContextReproducesTheDigest already establishes. Different tags, so
-	// neither trips the other's tag-conflict policy.
+	// Same context and Dockerfile, so the same digest (see
+	// TestRebuildingTheSameContextReproducesTheDigest); different tags, so no tag conflict.
 	digestA := buildInto(t, "keepalive-shared-a", repo, "a")
 	digestB := buildInto(t, "keepalive-shared-b", repo, "b")
 
@@ -85,32 +61,23 @@ func TestTwoObjectsSharingADigestKeepItAliveIndependently(t *testing.T) {
 			"(ADR 0025), so this is a skip rather than a failure.", digestA, digestB)
 	}
 
-	// A control in its OWN repository, with its object deleted immediately, so nothing anywhere
-	// refreshes it. Waiting for THIS to be collected is what proves collection actually ran during
-	// the test — without which the assertions below would hold simply because nothing had been
-	// collected yet.
-	//
-	// The obvious control was tag `a` itself, and it was wrong. Tag `a` survives: object B keeps
-	// pulling the shared DIGEST, and zot appears to track pull recency per manifest, so protecting
-	// the manifest protects every tag pointing at it. Using it as the control asserted a property
-	// nobody had established and failed for a reason that had nothing to do with this test's claim.
+	// The control is an image in its OWN repository with no object: seeing it collected proves a
+	// collection ran during the test. Not tag `a`: B's refresh of the shared digest may keep every
+	// tag on it alive, which is not what this test is about.
 	control := keepaliveRepo("shared-control")
 	pushTinyImage(t, control)
 
-	// One object goes away. The other still names the digest.
 	mustKubectl(t, "-n", buildNamespace, "delete", "imagebuild", "keepalive-shared-a")
 	eventuallyUntagged(t, control, "v1", collectionDeadline(t))
 
-	// Recorded rather than asserted, because it is the question that was got wrong: whether a tag
-	// outlives its object when something else keeps the underlying manifest alive. Asserting either
-	// answer would pin down a registry behaviour this project does not depend on.
+	// Recorded, not asserted: whether tag `a` outlives its object is registry behaviour this project
+	// does not depend on.
 	t.Logf("after deleting the object owning tag `a`, with the digest still refreshed by another "+
 		"object: tags now %s", tagsList(t, repo))
 
-	if !manifestExistsByDigest(t, repo, digestA) {
-		t.Fatalf("%s@%s was collected after ONE of the two objects referencing it was deleted. "+
-			"Shared content is being reclaimed on the first eviction, which is the failure mode "+
-			"delete-on-eviction was rejected for.\ntags now: %s%s",
+	if !manifestExists(t, repo, digestA) {
+		t.Fatalf("%s@%s was collected after ONE of the two objects referencing it was deleted: shared "+
+			"content is reclaimed on the first eviction.\ntags now: %s%s",
 			repo, digestA, tagsList(t, repo), registryLogs(t))
 	}
 	if !manifestExists(t, repo, "b") {
@@ -119,24 +86,17 @@ func TestTwoObjectsSharingADigestKeepItAliveIndependently(t *testing.T) {
 	}
 }
 
-// CONDITION 2 of ADR 0031, and the mistake it names as most likely: refresh must be driven by
-// status.history, never by a successful reconcile.
-//
-// An object Stalled on a spec error has images that may be running right now, and stalling is
-// exactly when nobody is watching the object. A refresh gated on reconcile success would delete the
-// images of every broken object one retention window after it broke — silently, and long after the
-// change that caused it.
-//
-// internal/retention covers this against a fake client. This covers it against a real controller,
-// where the object genuinely goes Stalled and the refresher genuinely has to ignore that.
+// TestAStalledObjectStillHasItsImagesRefreshed -- ADR 0031 condition 2: refresh follows
+// status.history, never reconcile success. A Stalled object's images may still be running, and a
+// success-gated refresh would delete them one window after the spec broke. internal/retention covers
+// this against a fake client; this uses a real controller.
 func TestAStalledObjectStillHasItsImagesRefreshed(t *testing.T) {
 	t.Parallel()
 
 	repo := keepaliveRepo("stalled")
 	digest := buildInto(t, "keepalive-stalled", repo, "v1")
 
-	// Break the spec in a way the controller refuses outright rather than retries. A source in
-	// another namespace is a tenancy violation and therefore terminal, which is what Stalled means.
+	// A cross-namespace source is a tenancy violation, so terminal: Stalled, not retried.
 	applyBuildSpec(t, "keepalive-stalled", "Dockerfile", buildRegistry+"/"+repo, "v1",
 		"      namespace: someone-elses-namespace")
 
@@ -154,11 +114,10 @@ func TestAStalledObjectStillHasItsImagesRefreshed(t *testing.T) {
 
 	sleepInCluster(t, 90)
 
-	if !manifestExistsByDigest(t, repo, digest) {
-		t.Fatalf("%s@%s was collected while its object was Stalled. Refreshing is gated on a "+
-			"successful reconcile, so every object with a broken spec loses the images it already "+
-			"published -- one retention window after the spec broke, with nothing connecting the "+
-			"two.\ntags now: %s%s", repo, digest, tagsList(t, repo), registryLogs(t))
+	if !manifestExists(t, repo, digest) {
+		t.Fatalf("%s@%s was collected while its object was Stalled: refreshing is gated on a "+
+			"successful reconcile, so a broken spec loses its published images one window later."+
+			"\ntags now: %s%s", repo, digest, tagsList(t, repo), registryLogs(t))
 	}
 }
 
@@ -177,11 +136,8 @@ func buildInto(t *testing.T, name, repository, tag string) string {
 	return buildStatus(t, name).Artifact.Digest
 }
 
-// applyBuildSpec is applyBuildTo with the tag chosen too, which the retention tests need in order to
-// point two objects at one repository without them colliding on a tag.
-//
-// extraContext is appended under spec.context.sourceRef, already indented, for the one test that has
-// to break the reference deliberately.
+// applyBuildSpec is applyBuildTo with one chosen tag. extraContext is appended under
+// spec.context.sourceRef, already indented, for the test that breaks the reference.
 func applyBuildSpec(t *testing.T, name, dockerfile, repository, tag string, extraContext ...string) {
 	t.Helper()
 	applyStdin(t, fmt.Sprintf(`
