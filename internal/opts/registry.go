@@ -1,9 +1,5 @@
-// Package opts holds the startup options both controllers share.
-//
-// It exists because they genuinely share them: where to publish, whose credential to use, what to
-// trust, and what supply-chain material to attach are the same questions for an ImageComposition
-// and an ImageBuild, and the answers have to mean the same thing in both binaries. Defined twice,
-// the help text drifts and the two controllers quietly disagree about a flag they both accept.
+// Package opts holds the startup options both controllers share, so a flag both binaries accept
+// means the same thing in each.
 package opts
 
 import (
@@ -94,10 +90,9 @@ func (o *Registry) Default(namespace string) recon.DefaultRegistry {
 // Insecure is the plain-HTTP host list, split.
 func (o *Registry) Insecure() []string { return SplitList(o.InsecureRegistries) }
 
-// Transport returns the RoundTripper to talk to registries with, and the CA bytes themselves for
-// callers that must pass them on -- the builder projects them into each build pod.
-//
-// Both are nil when no CA is configured, which is the ordinary case.
+// Transport returns the RoundTripper to talk to registries with, and the CA bytes for callers that
+// pass them on (the builder projects them into each build pod). Both are nil when no CA is
+// configured.
 func (o *Registry) Transport() (http.RoundTripper, []byte, error) {
 	if o.CAFile == "" {
 		return nil, nil, nil
@@ -115,8 +110,7 @@ func (o *Registry) Transport() (http.RoundTripper, []byte, error) {
 
 // Attestor builds the supply-chain attacher, loading the signing key if one is named.
 //
-// The key is read HERE, at startup, so a key that cannot sign fails the process rather than the
-// first artifact -- the same reasoning the chart applies to an unpinned builder image.
+// The key is read at startup, so a key that cannot sign fails the process, not the first artifact.
 func (o *Registry) Attestor(ctx context.Context, namespace string) (*attest.Attestor, error) {
 	a := &attest.Attestor{SBOM: o.SBOM, Provenance: o.Provenance}
 	if o.SigningKeySecret == "" {
@@ -133,8 +127,7 @@ func (o *Registry) Attestor(ctx context.Context, namespace string) (*attest.Atte
 	return a, nil
 }
 
-// SplitList turns a comma-separated flag into a slice, dropping empties. Exported because every
-// binary that takes a list flag wants it, and three copies had accumulated.
+// SplitList turns a comma-separated flag into a slice, trimming entries and dropping empties.
 func SplitList(s string) []string {
 	var out []string
 	for _, part := range strings.Split(s, ",") {

@@ -6,10 +6,7 @@ import (
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 )
 
-// ExportFlags registers push.writeRefTo's operator settings on a FlagSet.
-//
-// Shared by both binaries because the feature is identical on both kinds, and four flag
-// descriptions maintained twice would drift -- the way the ConfigMap grant did.
+// ExportFlags registers push.writeRefTo's operator settings on a FlagSet, shared by both binaries.
 type ExportFlags struct {
 	namespaces         string
 	labels             string

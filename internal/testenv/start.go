@@ -13,20 +13,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 )
 
-// Run starts an API server, runs the package's tests against it, and tears it down.
+// Run starts an API server with the given CRDs, stores its config in *store, runs the package's
+// tests against it, and tears it down. It returns the exit code for os.Exit.
 //
-// Both controller packages need one, and their bootstraps were substantially identical -- the
-// builder's carried a comment saying "See the twin in internal/controller", so the duplication was
-// known rather than accidental. What legitimately differs is the CRD directories and the reason
-// each package needs a real API server at all; the first is a parameter and the second stays in
-// each package's own file, where it is the most useful thing written there.
-//
-// Returns the exit code for the caller to pass to os.Exit, rather than exiting itself, so a caller
-// can still do work either side of it.
-//
-// after runs once the API server is up and before any test does, for a package that wants a shared
-// client. An error from it fails the run with the environment torn down -- the case both files
-// used to spell out by hand, and the one where forgetting the teardown leaks an API server.
+// after runs once the API server is up and before any test, e.g. to build a shared client; an
+// error from it fails the run with the environment torn down.
 func Run(m *testing.M, crdPaths []string, store **rest.Config, after ...func() error) int {
 	env := &envtest.Environment{
 		CRDDirectoryPaths:     crdPaths,
@@ -47,7 +38,6 @@ func Run(m *testing.M, crdPaths []string, store **rest.Config, after ...func() e
 		if err := env.Stop(); err != nil {
 			fmt.Fprintf(os.Stderr, "stopping envtest: %v\n", err)
 		}
-		// Stop() cannot signal its children on Windows, so the reap closes that gap.
 		ReapChildren()
 	}
 
@@ -62,7 +52,7 @@ func Run(m *testing.M, crdPaths []string, store **rest.Config, after ...func() e
 		}
 	}
 
-	// Ctrl+C has to reach the same teardown, or an interrupted run leaks the pair.
+	// An interrupted run must tear down too, or it leaks the processes.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
@@ -71,8 +61,7 @@ func Run(m *testing.M, crdPaths []string, store **rest.Config, after ...func() e
 		os.Exit(130)
 	}()
 
-	// Deferred inside a wrapper rather than written after m.Run(): a panic in any test would
-	// otherwise skip the stop entirely, which is how this leaked in the first place.
+	// Deferred, so a panicking test still stops the environment.
 	return func() (rc int) {
 		defer stop()
 		return m.Run()

@@ -8,38 +8,25 @@ import (
 	"time"
 )
 
-// Threat-model gap I6: an SSRF via a `fetch` URL.
+// Threat-model gap I6: SSRF via a spec's fetch.url. Digest verification limits what comes back,
+// not where the request goes.
 //
-// `fetch.url` comes from a spec, so anyone with `create` on an ImageComposition chooses where the
-// controller sends a GET, from the controller's network position. Digest verification limits what
-// can come BACK -- a response that does not match the declared digest never becomes a layer -- but
-// it does nothing about the request itself, and a blind GET is enough to reach a cloud metadata
-// endpoint or an internal service that acts on one.
+//   - Link-local (169.254.0.0/16, fe80::/10, including the cloud metadata endpoint) is ALWAYS
+//     blocked.
+//   - Other private ranges only with --fetch-deny-private: an in-cluster artifact server on a
+//     private address is the ordinary deployment.
 //
-// The obvious mitigation, blocking every private range, would break the project's most ordinary
-// deployment: an artifact server on a private address inside the same cluster. Fetching from RFC1918
-// is not a smell here, it is the normal case. So the two are separated by how defensible each is:
-//
-//   - Link-local (169.254.0.0/16, fe80::/10) is ALWAYS blocked. 169.254.169.254 is the cloud
-//     metadata endpoint on AWS, GCP, Azure and Hetzner alike, and it hands out credentials to
-//     anything that asks. No legitimate layer source lives there.
-//   - Everything else private is blocked only when the operator asks for it, because on many
-//     clusters that would refuse the sources people actually use.
-//
-// Enforced in a DialContext rather than by parsing the URL, which is what makes it hold: a host
-// name resolving to 169.254.169.254, a redirect to it, and a DNS rebind that answers differently
-// the second time all arrive at the dialer, and none of them can be seen by inspecting the string.
+// Enforced in the dialer, not by parsing the URL, so DNS names, redirects and DNS rebinding are
+// all covered.
 
 // DialGuard refuses connections to addresses a layer source has no business being at.
 type DialGuard struct {
 	// DenyPrivate additionally refuses RFC1918, loopback, CGNAT and unique-local addresses.
-	// Off by default: see above.
 	DenyPrivate bool
 }
 
-// ErrBlockedAddress is returned when a fetch is refused for its destination rather than its
-// content. Distinct so the caller can report *why* clearly -- "connection refused" for a blocked
-// metadata endpoint is the kind of message that sends someone debugging their network for an hour.
+// ErrBlockedAddress is returned when a fetch is refused for its destination, so the caller can
+// report why rather than a bare connection error.
 type ErrBlockedAddress struct {
 	Host   string
 	IP     string
@@ -64,8 +51,7 @@ func (g DialGuard) blocked(ip net.IP) string {
 	case ip.IsPrivate():
 		return "private addresses are refused by --fetch-deny-private"
 	case ip.To4() != nil && ip[len(ip)-4] == 100 && ip[len(ip)-3]&0xc0 == 64:
-		// 100.64.0.0/10, CGNAT. net has no IsPrivate for it, and it is where several managed
-		// Kubernetes providers put node and service networks.
+		// 100.64.0.0/10, CGNAT, which IsPrivate misses; some managed Kubernetes providers use it.
 		return "carrier-grade NAT addresses are refused by --fetch-deny-private"
 	default:
 		return ""
@@ -74,9 +60,8 @@ func (g DialGuard) blocked(ip net.IP) string {
 
 // DialContext is an http.Transport.DialContext that applies the guard.
 //
-// The check runs in Control, after the address is resolved and immediately before connect(2), so
-// there is no window between deciding an address is safe and using it -- which is precisely the
-// window a DNS rebind needs.
+// The check runs in Control, after resolution and immediately before connect(2), leaving no window
+// for a DNS rebind.
 func (g DialGuard) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
