@@ -20,12 +20,9 @@ import (
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 	"github.com/lhns/kube-oci-composer/internal/attest"
-	"k8s.io/client-go/tools/record"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-// pathRecorder notes every GET path, so a test can prove a referrer was actually pulled rather
-// than merely that nothing errored.
+// pathRecorder notes every GET path, so a test can prove a referrer was actually pulled.
 type pathRecorder struct {
 	inner http.RoundTripper
 	mu    sync.Mutex
@@ -70,8 +67,7 @@ func artifact(t *testing.T) (name.Repository, v1.Descriptor) {
 	return repo, v1.Descriptor{MediaType: mt, Digest: digest, Size: size}
 }
 
-// artifactWithAttestation is the same, with one attestation attached through the code path the
-// controllers use.
+// artifactWithAttestation is artifact plus one attestation attached the way the controllers do it.
 func artifactWithAttestation(t *testing.T) (name.Repository, v1.Hash, v1.Hash) {
 	t.Helper()
 	repo, desc := artifact(t)
@@ -84,16 +80,9 @@ func artifactWithAttestation(t *testing.T) (name.Repository, v1.Hash, v1.Hash) {
 	return repo, desc.Digest, attestation
 }
 
-// TestReferrersAreRefreshedToo guards a failure that would arrive a retention window after anyone
-// enabled attestations, silently, in the deleting direction.
-//
-// The registry policy this project ships uses `deleteUntagged` with `keepUntagged.pulledWithin`,
-// and a referrer manifest is UNTAGGED. So an SBOM or a provenance statement stays alive only if
-// something pulls it — and the refresher pulled the artifact's digest and its tags, which is not
-// the same thing. That is threat D6 on a new object type.
-//
-// Signatures need nothing here: cosign's `.sig` is a tag, so `keepTags` already covers it. That is
-// a small, real argument for the tag convention chosen in internal/attest/sign.go.
+// TestReferrersAreRefreshedToo: referrer manifests are UNTAGGED, so under the shipped
+// deleteUntagged policy an attestation survives only if something pulls it (threat D6). Cosign's
+// .sig is a tag and needs nothing here.
 func TestReferrersAreRefreshedToo(t *testing.T) {
 	repo, digest, attestation := artifactWithAttestation(t)
 
@@ -117,8 +106,7 @@ func TestReferrersAreRefreshedToo(t *testing.T) {
 	}
 }
 
-// TestRefreshingReferrersIsHarmlessWithoutAny — the ordinary case, and the one that must not turn a
-// working retention refresh into a reported failure on a registry with no Referrers API at all.
+// TestRefreshingReferrersIsHarmlessWithoutAny: no referrers must not count as a failure.
 func TestRefreshingReferrersIsHarmlessWithoutAny(t *testing.T) {
 	repo, desc := artifact(t)
 
@@ -130,8 +118,7 @@ func TestRefreshingReferrersIsHarmlessWithoutAny(t *testing.T) {
 	}
 }
 
-// TestOnlyDigestsHaveReferrers — a tag reference is refreshed as a tag, and asking a registry for
-// the referrers of a tag is not a question the API answers.
+// TestOnlyDigestsHaveReferrers: the Referrers API takes digests, so a tag is not attempted.
 func TestOnlyDigestsHaveReferrers(t *testing.T) {
 	repo, _, _ := artifactWithAttestation(t)
 
@@ -143,17 +130,12 @@ func TestOnlyDigestsHaveReferrers(t *testing.T) {
 	}
 }
 
-// TestTheRefreshLoopActuallyRefreshesReferrers is the call-site guard, and it exists because
-// removing the call from refreshObject left every other test in this file passing.
-//
-// The helper tests above prove refreshReferrers works. This proves the refresher USES it, which is
-// a different claim and the one that matters: an attestation nothing pulls is an attestation the
-// registry reclaims a window later, silently, while the image it describes lives on.
+// TestTheRefreshLoopActuallyRefreshesReferrers guards the call site: the tests above pass even if
+// refreshObject never calls refreshReferrers.
 func TestTheRefreshLoopActuallyRefreshesReferrers(t *testing.T) {
 	repo, digest, attestation := artifactWithAttestation(t)
 
-	// Built directly rather than with buildWith, which takes the recording registry this test does
-	// not use: the real attest.Push needs a registry that speaks the Referrers API.
+	// Not buildWith: this needs a real registry that speaks the Referrers API.
 	obj := &ociv1alpha1.ImageBuild{
 		ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: "team-a"},
 	}
@@ -162,16 +144,9 @@ func TestTheRefreshLoopActuallyRefreshesReferrers(t *testing.T) {
 	obj.Generation = 1
 	obj.Status.ObservedGeneration = 1
 
-	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithObjects(obj).Build()
 	rec := &pathRecorder{inner: remote.DefaultTransport}
-	r := &Refresher{
-		Client:             c,
-		Source:             sourceFor(obj, c),
-		Pending:            allReconciled{},
-		Recorder:           record.NewFakeRecorder(50),
-		InsecureRegistries: []string{repo.RegistryStr()},
-		Transport:          rec,
-	}
+	r, _ := refresherFor(t, repo.RegistryStr(), obj)
+	r.Transport = rec
 
 	if _, err := r.RefreshOnce(context.Background()); err != nil {
 		t.Fatalf("refreshing: %v", err)

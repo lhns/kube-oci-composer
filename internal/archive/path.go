@@ -8,8 +8,8 @@ import (
 
 // Placement is where one archive entry lands.
 //
-// Dest and Selected are the answer; the two unexported fields are the evidence Walk tallies to tell
-// "selected nothing" apart from "selected an empty directory".
+// The unexported fields are what Walk tallies to tell "selected nothing" from "selected an empty
+// directory".
 type Placement struct {
 	// Dest is the entry's path relative to the destination root.
 	Dest string
@@ -26,10 +26,7 @@ type Placement struct {
 
 // Mapping decides where entries land: how many leading path components to remove, and which
 // subdirectory to take. ONE implementation, shared by the composer's assembler and the builder's
-// fetcher -- ADR 0045.
-//
-// Deliberately NOT the place for safety policy: the two sinks differ there for recorded reasons,
-// because it depends on whether anything is written to a filesystem. Where an entry lands does not.
+// fetcher (ADR 0045). Safety policy is not here: it differs between the two sinks.
 type Mapping struct {
 	// Strip is how many leading path components to remove, before Subpath is considered.
 	Strip int
@@ -48,12 +45,10 @@ func NewMapping(strip int, subpath string) Mapping {
 
 // Map places one entry.
 //
-// name must use forward slashes already. Normalising separators is the caller's job: a backslash is
-// a legal filename character in a tar and a separator in a zip written on Windows, and only the
-// caller knows which it holds.
+// name must already use forward slashes: only the caller knows whether a backslash is a filename
+// character (tar) or a separator (a zip written on Windows).
 //
-// STRIP FIRST, THEN SUBPATH -- `subpath` names the tree as it will be seen, not as the archive
-// stored it, so a spec never has to describe a layout it also asked to remove.
+// STRIP FIRST, THEN SUBPATH: subpath names the tree as it will be seen, not as stored.
 func (m Mapping) Map(name string) Placement {
 	clean := strings.TrimPrefix(path.Clean(name), "./")
 	if clean == "." || clean == "/" || clean == "" {
@@ -64,9 +59,8 @@ func (m Mapping) Map(name string) Placement {
 	for range m.Strip {
 		_, rest, ok := strings.Cut(clean, "/")
 		if !ok {
-			// Shallower than the strip depth, so nothing of it remains. Not a survivor, which is
-			// what lets the caller refuse a strip that emptied the whole archive rather than
-			// producing a silently empty tree.
+			// Shallower than the strip depth: not a survivor, so Walk can refuse a strip that
+			// emptied the archive.
 			return Placement{}
 		}
 		clean = rest
@@ -89,9 +83,7 @@ func (m Mapping) Map(name string) Placement {
 	return Placement{Dest: rest, Selected: true, inSubpath: true, survived: true}
 }
 
-// Walk is a Mapping plus the tally needed to refuse a selection that emptied the archive. Shared
-// for the same reason Mapping is: both sinks had grown their own counters and their own copies of
-// these two errors.
+// Walk is a Mapping plus the tally needed to refuse a selection that emptied the archive.
 type Walk struct {
 	mapping   Mapping
 	declared  string
@@ -116,8 +108,8 @@ func (w *Walk) Map(name string) Placement {
 	return place
 }
 
-// Err reports a selection that contributed nothing. A silently empty tree surfaces as a broken
-// build somewhere else entirely, so a typo stalls here instead.
+// Err reports a selection that contributed nothing, so a typo fails here rather than as a broken
+// build elsewhere.
 func (w *Walk) Err() error {
 	if w.mapping.Strip > 0 && w.survivors == 0 {
 		return fmt.Errorf("stripComponents %d removed every entry in the archive", w.mapping.Strip)

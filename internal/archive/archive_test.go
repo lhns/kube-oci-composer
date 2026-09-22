@@ -97,8 +97,7 @@ func TestExtractPlacesFiles(t *testing.T) {
 	}
 }
 
-// TestSubpathStripsThePrefix — a release tarball wraps its tree in a version-named directory, and
-// naming it must leave the CONTENTS at the root rather than the directory itself.
+// TestSubpathStripsThePrefix: naming a directory places its CONTENTS at the root.
 func TestSubpathStripsThePrefix(t *testing.T) {
 	dest := t.TempDir()
 	blob := tarball(t, true,
@@ -117,8 +116,7 @@ func TestSubpathStripsThePrefix(t *testing.T) {
 	}
 }
 
-// TestASubpathThatMatchesNothingIsRefused — otherwise a typo hands BuildKit an empty context and
-// the build fails somewhere unrelated. The composer refuses the same thing in collector.done.
+// TestASubpathThatMatchesNothingIsRefused: a typo must not hand BuildKit an empty context.
 func TestASubpathThatMatchesNothingIsRefused(t *testing.T) {
 	dest := t.TempDir()
 	blob := tarball(t, false, entry{name: "app/Dockerfile", body: "FROM scratch\n"})
@@ -132,8 +130,7 @@ func TestASubpathThatMatchesNothingIsRefused(t *testing.T) {
 	}
 }
 
-// TestASubpathPresentButEmptyIsAccepted — the directory entry alone proves the subpath exists, so
-// this must not be confused with a typo.
+// TestASubpathPresentButEmptyIsAccepted: the directory entry alone proves the subpath exists.
 func TestASubpathPresentButEmptyIsAccepted(t *testing.T) {
 	dest := t.TempDir()
 	blob := tarball(t, false, entry{name: "app/", typeflag: tar.TypeDir})
@@ -143,13 +140,8 @@ func TestASubpathPresentButEmptyIsAccepted(t *testing.T) {
 	}
 }
 
-// TestAnArchivesPathsAreThePaths is the bug this rule was rewritten for.
-//
-// The fetcher used to remove one leading component for every sourceRef context, on the belief that
-// source-controller wraps its tree in a directory. It does not -- its entries are at the root -- so
-// every root-level file was taken for "the wrapper directory itself" and dropped, and every nested
-// path moved up a level. The subtest below existed and was named for exactly this, and called
-// Extract with stripping OFF, so it passed while the shipped path was broken.
+// TestAnArchivesPathsAreThePaths: with no strip, a Flux artifact's root-level and nested entries
+// land exactly where the archive puts them (source-controller does not wrap its tree).
 func TestAnArchivesPathsAreThePaths(t *testing.T) {
 	dest := t.TempDir()
 	blob := tarball(t, true,
@@ -168,8 +160,7 @@ func TestAnArchivesPathsAreThePaths(t *testing.T) {
 	}
 }
 
-// TestASubpathSelectsAFluxArtifactsDirectory — the other reported symptom. With paths left alone,
-// a subpath names what the archive actually contains.
+// TestASubpathSelectsAFluxArtifactsDirectory: a subpath names what the archive actually contains.
 func TestASubpathSelectsAFluxArtifactsDirectory(t *testing.T) {
 	dest := t.TempDir()
 	blob := tarball(t, true,
@@ -185,8 +176,7 @@ func TestASubpathSelectsAFluxArtifactsDirectory(t *testing.T) {
 	}
 }
 
-// TestStripComponentsRemovesLeadingLevels — what a release tarball needs, and the reason this is a
-// spec field rather than something inferred from the source kind.
+// TestStripComponentsRemovesLeadingLevels: what a release tarball with a wrapper directory needs.
 func TestStripComponentsRemovesLeadingLevels(t *testing.T) {
 	dest := t.TempDir()
 	blob := tarball(t, true,
@@ -201,8 +191,7 @@ func TestStripComponentsRemovesLeadingLevels(t *testing.T) {
 	}
 }
 
-// TestStrippingHappensBeforeSubpath is the one part of this a user could get wrong: `subpath` names
-// a path in the tree as the build sees it, not as the archive stored it.
+// TestStrippingHappensBeforeSubpath: subpath names a path as the build sees it, after stripping.
 func TestStrippingHappensBeforeSubpath(t *testing.T) {
 	dest := t.TempDir()
 	blob := tarball(t, true,
@@ -220,8 +209,7 @@ func TestStrippingHappensBeforeSubpath(t *testing.T) {
 	}
 }
 
-// TestStrippingEverythingIsRefused — a silently empty tree is the failure this whole rule was made
-// of, so it fails loudly instead.
+// TestStrippingEverythingIsRefused: an emptied tree fails loudly.
 func TestStrippingEverythingIsRefused(t *testing.T) {
 	dest := t.TempDir()
 	blob := tarball(t, true, entry{name: "Dockerfile", body: "FROM scratch\n"})
@@ -235,8 +223,7 @@ func TestStrippingEverythingIsRefused(t *testing.T) {
 	}
 }
 
-// TestTraversalIsRefused — a build context is attacker-influenced by definition, since it is
-// whatever the referenced archive happens to contain.
+// TestTraversalIsRefused: archive contents are attacker-influenced.
 func TestTraversalIsRefused(t *testing.T) {
 	for _, name := range []string{"../escape", "../../etc/passwd", "/etc/passwd", "a/../../escape"} {
 		t.Run(name, func(t *testing.T) {
@@ -258,8 +245,8 @@ func TestTraversalIsRefused(t *testing.T) {
 	}
 }
 
-// TestSymlinksOutOfTheTreeAreRefused — the traversal check on names alone would miss this, because
-// the entry itself lands inside the tree and only what it POINTS AT leaves it.
+// TestSymlinksOutOfTheTreeAreRefused: the entry lands inside the tree; only its target leaves it,
+// which a name check alone would miss.
 func TestSymlinksOutOfTheTreeAreRefused(t *testing.T) {
 	for _, link := range []string{"/etc/passwd", "../../secret"} {
 		t.Run(link, func(t *testing.T) {
@@ -273,9 +260,8 @@ func TestSymlinksOutOfTheTreeAreRefused(t *testing.T) {
 	}
 
 	t.Run("a link inside the tree is kept", func(t *testing.T) {
-		// Creating a symlink needs a privilege Windows does not grant by default, so this asserts
-		// the code path only where the OS allows it. The REFUSAL cases above run everywhere,
-		// because they fail before any symlink is created.
+		// Windows needs extra privilege to create symlinks. The refusals above run everywhere,
+		// because they fail before creating one.
 		if !canSymlink(t) {
 			t.Skip("this OS does not permit creating symlinks without extra privilege")
 		}
@@ -290,8 +276,7 @@ func TestSymlinksOutOfTheTreeAreRefused(t *testing.T) {
 	})
 }
 
-// TestAnUnknownModeIsRefused — failing loudly rather than producing an empty directory, which would
-// look like a build whose context simply had nothing in it.
+// TestAnUnknownModeIsRefused: fail loudly rather than produce an empty context.
 func TestAnUnknownModeIsRefused(t *testing.T) {
 	err := Extract(bytes.NewReader(nil), Mode("zip"), t.TempDir(), "", 0)
 	if err == nil {

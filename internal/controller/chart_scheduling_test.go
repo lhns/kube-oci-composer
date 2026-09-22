@@ -26,11 +26,8 @@ func registryPodSpec(t *testing.T, out string) corev1.PodSpec {
 	return corev1.PodSpec{}
 }
 
-// TestTheRegistryCanBeSteeredAwayFromDrainedNodes.
-//
-// The defect this closes: the registry pod spec had no placement fields at all, so there was no
-// supported way to keep it off the nodes being cordoned. It was rescheduled alongside the very
-// pods that needed to pull from it, and they sat in ErrImagePull while it moved.
+// TestTheRegistryCanBeSteeredAwayFromDrainedNodes: the registry's placement values reach its pod,
+// so it can be kept off nodes being drained along with the pods that pull from it.
 func TestTheRegistryCanBeSteeredAwayFromDrainedNodes(t *testing.T) {
 	out := render(t,
 		"--set", "registry.nodeSelector.storage=yes",
@@ -65,12 +62,8 @@ func TestTheRegistryCanBeSteeredAwayFromDrainedNodes(t *testing.T) {
 	}
 }
 
-// TestTheRegistrysPlacementIsNotTheControllers.
-//
-// The asymmetry that caused the incident: the controllers honoured the top-level scheduling values
-// and the registry honoured nothing. Fixing it by pointing the registry at the SAME values would
-// be the other half of the same mistake — the usual reason to steer the registry is that it should
-// be somewhere the controllers are not.
+// TestTheRegistrysPlacementIsNotTheControllers: the top-level scheduling values are the
+// controllers'; the registry usually needs to be somewhere else.
 func TestTheRegistrysPlacementIsNotTheControllers(t *testing.T) {
 	out := render(t, "--set", "nodeSelector.role=controllers", "--set", "priorityClassName=controllers")
 	spec := registryPodSpec(t, out)
@@ -83,11 +76,8 @@ func TestTheRegistrysPlacementIsNotTheControllers(t *testing.T) {
 	}
 }
 
-// TestABudgetThatCannotBeMetIsNeverRendered.
-//
-// The assertion that matters is the SECOND one. minAvailable 1 against a single replica can never
-// be satisfied, so it blocks every drain forever: the node never cordons, a cluster upgrade stalls,
-// and nothing in the events names a PodDisruptionBudget as the cause.
+// TestABudgetThatCannotBeMetIsNeverRendered: minAvailable 1 against a single pod blocks every drain
+// forever, so the PDB renders only with read replicas.
 func TestABudgetThatCannotBeMetIsNeverRendered(t *testing.T) {
 	if pdb, ok := registryPDB(t, render(t)); ok {
 		t.Errorf("a PodDisruptionBudget rendered with a single pod (%s); it would block every drain", pdb.Name)
@@ -127,9 +117,7 @@ func registryPDB(t *testing.T, out string) (policyv1.PodDisruptionBudget, bool) 
 	return policyv1.PodDisruptionBudget{}, false
 }
 
-// TestEveryWorkloadCanUseAPullSecret — builder-deployment.yaml read `.Values.imagePullSecrets`,
-// which is not a key this chart has, so the block rendered nothing and the builder could never pull
-// from a private registry. The registry pod had no block at all.
+// TestEveryWorkloadCanUseAPullSecret: image.pullSecrets reaches every Deployment and StatefulSet.
 func TestEveryWorkloadCanUseAPullSecret(t *testing.T) {
 	out := render(t, "--set", "image.pullSecrets[0].name=regcred")
 

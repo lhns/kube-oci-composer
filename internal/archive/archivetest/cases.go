@@ -1,8 +1,7 @@
 // Package archivetest holds the shared truth table for where an archive entry lands.
 //
-// Its own package because a _test.go file cannot be imported: the composer's assembler and the
-// builder's fetcher must both drive their extractors from THIS list, or the thing ADR 0045 was
-// written about happens again.
+// A non-test package so both the composer's assembler and the builder's fetcher can drive their
+// extractors from this one list (ADR 0045).
 package archivetest
 
 // PathCase is one entry mapped by one Mapping.

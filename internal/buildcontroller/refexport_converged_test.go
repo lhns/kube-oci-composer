@@ -11,18 +11,8 @@ import (
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 )
 
-// Turning on push.writeRefTo must work on an object that has already built.
-//
-// It did not, and nothing noticed. exportRef was reached only from the build-succeeded branch, and
-// writeRefTo is not part of the input hash -- adding it changes nothing about what to build -- so a
-// Ready object took the cheap path and returned before ever reaching the export. The ConfigMap a
-// consuming Kustomization substitutes from was simply never written, until something unrelated
-// forced a rebuild.
-//
-// That is the ordinary way to adopt the feature: you have a working build, and you want its digest
-// somewhere a consumer can read. So the common case was the broken one, and it was invisible --
-// every existing test either built first and exported in the same pass, or tested the export
-// helper directly.
+// TestEnablingTheExportOnAConvergedObjectWritesIt: writeRefTo is not in the input hash, so adding
+// it to an already-built object must still write the ConfigMap on the converged path.
 func TestEnablingTheExportOnAConvergedObjectWritesIt(t *testing.T) {
 	obj := buildOf(t, nil)
 	r := harness(t, pinnedFrom, obj)
@@ -56,8 +46,7 @@ func TestEnablingTheExportOnAConvergedObjectWritesIt(t *testing.T) {
 		t.Fatalf("reconcile after enabling the export: %v", err)
 	}
 
-	// The premise: this object is still on the cheap path. If the hash moved, the export would
-	// have been written by the publish branch and this test would prove nothing.
+	// Premise: still on the converged path, or the publish branch wrote the export.
 	after := reload(t, r, obj)
 	if after.Status.InputHash != before {
 		t.Fatalf("adding writeRefTo moved the input hash (%s -> %s); the cheap path was not "+
@@ -81,11 +70,8 @@ func TestEnablingTheExportOnAConvergedObjectWritesIt(t *testing.T) {
 	}
 }
 
-// Moving the export is the same problem one step on: the spec changes, the input hash does not.
-//
-// Without the cheap-path call the old ConfigMap stays where it was and the new one never appears,
-// so a consumer goes on substituting from a reference nothing maintains -- which is the failure
-// the lifecycle in ADR 0056 exists to prevent.
+// TestMovingTheExportOnAConvergedObjectFollowsIt: moving writeRefTo leaves the hash alone, yet the
+// ConfigMap must move with it (ADR 0056).
 func TestMovingTheExportOnAConvergedObjectFollowsIt(t *testing.T) {
 	obj := buildOf(t, func(b *ociv1alpha1.ImageBuild) {
 		b.Spec.Push.WriteRefTo = &ociv1alpha1.RefExport{
@@ -141,19 +127,9 @@ func assertExportIn(t *testing.T, r *ImageBuildReconciler, namespace, name strin
 	}
 }
 
-// An export must not cost the object its own status.
-//
-// recordExport used to take its own status patch mid-reconcile. controller-runtime writes the
-// server's response back into the object, and at that moment the server still held the status from
-// BEFORE this reconcile -- so Artifact and InputHash, set in memory by recordSuccess and not yet
-// persisted, were silently replaced with nothing.
-//
-// The object then never converged. Every pass rebuilt, produced a different digest (this kind is
-// not reproducible), and rewrote the very ConfigMap the export exists to publish -- so anything
-// consuming it rolled continuously, for as long as the object existed.
-//
-// Nothing caught it because every test either set no export, or asserted the ConfigMap rather than
-// the status. The export was written correctly the whole time.
+// TestExportingDoesNotCostTheObjectItsStatus: recordExport must not patch status mid-reconcile,
+// which would drop the unpersisted Artifact and InputHash so the object never converges and
+// rewrites the export every pass.
 func TestExportingDoesNotCostTheObjectItsStatus(t *testing.T) {
 	obj := buildOf(t, func(b *ociv1alpha1.ImageBuild) {
 		b.Spec.Push.WriteRefTo = &ociv1alpha1.RefExport{

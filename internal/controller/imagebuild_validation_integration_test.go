@@ -11,11 +11,8 @@ import (
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 )
 
-// ImageBuild's schema, against a real API server.
-//
-// Lives in internal/controller rather than internal/buildcontroller only because the envtest
-// harness — the API server, the CRD directory, the client — is already set up here and standing a
-// second one up would double the slowest part of the suite for no coverage.
+// ImageBuild's schema, against a real API server. It lives here rather than in
+// internal/buildcontroller only to reuse this package's envtest harness.
 
 // applyBuild creates an ImageBuild and returns the API server's error, if any.
 func applyBuild(t *testing.T, name string, spec ociv1alpha1.ImageBuildSpec) error {
@@ -64,10 +61,8 @@ func TestIntegrationImageBuildDefaults(t *testing.T) {
 	if obj.Spec.Interval == nil || obj.Spec.Interval.Duration.Hours() != 1 {
 		t.Errorf("interval defaulted to %v, want 1h", obj.Spec.Interval)
 	}
-	// Deliberately NOT defaulted by the schema: a structural default is written into the stored
-	// object, which would make has(self.path) true for every object and the exactly-one rule on
-	// DockerfileSource unsatisfiable. The default lives in EffectiveDockerfile instead, so what is
-	// asserted is that the field stays absent AND still resolves.
+	// Not schema-defaulted: a stored default would make has(self.path) always true and the
+	// exactly-one rule on DockerfileSource unsatisfiable. EffectiveDockerfile supplies it instead.
 	if obj.Spec.Dockerfile != nil {
 		t.Errorf("dockerfile was defaulted into the object as %+v; it must stay absent", obj.Spec.Dockerfile)
 	}
@@ -82,9 +77,8 @@ func TestIntegrationImageBuildDefaults(t *testing.T) {
 	}
 }
 
-// TestIntegrationImageBuildPlatformsAreRequired — unlike ImageComposition's, where an unset list
-// resolves to the base's platform. Neither of that field's defaults is available here, so the spec
-// has to say it rather than the controller guessing.
+// TestIntegrationImageBuildPlatformsAreRequired — unlike ImageComposition, a build has no base
+// platform to fall back on, so the spec must say it.
 func TestIntegrationImageBuildPlatformsAreRequired(t *testing.T) {
 	spec := validBuildSpec()
 	spec.Platforms = nil
@@ -99,17 +93,9 @@ func TestIntegrationImageBuildPlatformsAreRequired(t *testing.T) {
 	}
 }
 
-// TestIntegrationImageBuildPushIsOptional — it was required, and is not any more.
-//
-// A build still always publishes to a registry: the Job runs in another pod and cannot reach the
-// controller's loopback-only endpoint (ADR 0025). What changed is that WHICH registry can come from
-// the operator's default instead of from every object, so a default install needs no spec to name a
-// host at all.
-//
-// The schema therefore has to accept an ImageBuild with no push block. Whether one is REACHABLE is a
-// runtime question the controller answers with Pending, because the answer depends on the
-// controller's flags rather than on the object -- and stalling on operator configuration would wedge
-// every build until someone edited specs that were never wrong.
+// TestIntegrationImageBuildPushIsOptional — the registry can come from the operator's default, so
+// the schema must accept no push block. Whether a default is configured is a runtime question the
+// controller answers with Pending, since it depends on flags rather than the object.
 func TestIntegrationImageBuildPushIsOptional(t *testing.T) {
 	spec := validBuildSpec()
 	spec.Push = nil
@@ -117,8 +103,7 @@ func TestIntegrationImageBuildPushIsOptional(t *testing.T) {
 		t.Fatalf("an ImageBuild without push was refused: %v", err)
 	}
 
-	// And with a push block that names no repository, which is how an object opts into the default
-	// registry while still setting tags or a conflict policy.
+	// A push block without a repository uses the default registry while still setting tags.
 	spec = validBuildSpec()
 	spec.Push = &ociv1alpha1.Push{Tags: []string{"v1"}}
 	if err := applyBuild(t, "no-repository", spec); err != nil {
@@ -160,8 +145,7 @@ func TestIntegrationImageBuildArgNames(t *testing.T) {
 	}
 }
 
-// TestIntegrationImageBuildAndCompositionCoexist — two kinds in one group, and the whole point of
-// ADR 0004's split is that a reader can tell which promise they have by the kind alone.
+// TestIntegrationImageBuildAndCompositionCoexist — two kinds in one group (ADR 0004).
 func TestIntegrationImageBuildAndCompositionCoexist(t *testing.T) {
 	if err := applyBuild(t, "coexist-build", validBuildSpec()); err != nil {
 		t.Fatalf("ImageBuild rejected: %v", err)

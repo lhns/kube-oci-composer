@@ -15,8 +15,7 @@ import (
 
 // imageLayer builds one image layer from the given entries, in order.
 //
-// Entry names are written verbatim so a fixture can carry a whiteout (".wh." prefix), which is how
-// OCI expresses deletion and the thing flattening has to honour.
+// Entry names are written verbatim so a fixture can carry a ".wh." whiteout.
 func imageLayer(t *testing.T, files []tarFile) v1.Layer {
 	t.Helper()
 	raw := buildTar(t, files)
@@ -39,8 +38,7 @@ func imageOf(t *testing.T, layers ...v1.Layer) v1.Image {
 	return img
 }
 
-// TestExtractImageFlattensToOneLayer — a three-layer source must still contribute exactly one
-// layer, or the verb reinstates the exception ADR 0016 removed.
+// TestExtractImageFlattensToOneLayer: a multi-layer source contributes exactly one layer (ADR 0016).
 func TestExtractImageFlattensToOneLayer(t *testing.T) {
 	src := imageOf(t,
 		imageLayer(t, []tarFile{{name: "a.txt", body: "one"}}),
@@ -70,9 +68,7 @@ func TestExtractImageFlattensToOneLayer(t *testing.T) {
 	}
 }
 
-// TestExtractImageAppliesWhiteouts — flattening must produce the filesystem a runtime would see.
-// A later layer deleting a file from an earlier one is expressed as a ".wh." sibling, and carrying
-// that marker through instead of applying it would put a literal ".wh.secret" file in the layer.
+// TestExtractImageAppliesWhiteouts: flattening applies ".wh." markers rather than copying them.
 func TestExtractImageAppliesWhiteouts(t *testing.T) {
 	src := imageOf(t,
 		imageLayer(t, []tarFile{
@@ -97,8 +93,7 @@ func TestExtractImageAppliesWhiteouts(t *testing.T) {
 	}
 }
 
-// TestExtractImageLastLayerWins — the other half of flattening: an overwritten file takes the
-// later layer's content.
+// TestExtractImageLastLayerWins: an overwritten file takes the later layer's content.
 func TestExtractImageLastLayerWins(t *testing.T) {
 	src := imageOf(t,
 		imageLayer(t, []tarFile{{name: "conf.ini", body: "old"}}),
@@ -111,9 +106,7 @@ func TestExtractImageLastLayerWins(t *testing.T) {
 	}
 }
 
-// TestExtractImageSubpathAndTarget — an image layer is ordinary content, so the options that mean
-// something for every other verb mean the same here. "give me /usr/local/bin from this image, at
-// /opt/tools" is the shape this verb was added for.
+// TestExtractImageSubpathAndTarget: subpath and target work as for any other content.
 func TestExtractImageSubpathAndTarget(t *testing.T) {
 	src := imageOf(t, imageLayer(t, []tarFile{
 		{name: "usr/local/bin/tool", body: "ELF"},
@@ -136,8 +129,7 @@ func TestExtractImageSubpathAndTarget(t *testing.T) {
 	}
 }
 
-// TestExtractImageNormalisesModes — the same normalisation every other source gets, so an image
-// built with odd permissions cannot vary the output digest through them.
+// TestExtractImageNormalisesModes: the same mode normalisation as every other source.
 func TestExtractImageNormalisesModes(t *testing.T) {
 	src := imageOf(t, imageLayer(t, []tarFile{
 		{name: "bin/tool", body: "ELF"},
@@ -155,8 +147,7 @@ func TestExtractImageNormalisesModes(t *testing.T) {
 	}
 }
 
-// TestAssembleImageLayerIsDeterministic — the property the whole project rests on has to hold for
-// this verb too: the same source image assembles to the same digest every time.
+// TestAssembleImageLayerIsDeterministic: the same source image assembles to the same digest.
 func TestAssembleImageLayerIsDeterministic(t *testing.T) {
 	src := imageOf(t,
 		imageLayer(t, []tarFile{{name: "lib/a.so", body: "aaa"}}),
@@ -172,9 +163,7 @@ func TestAssembleImageLayerIsDeterministic(t *testing.T) {
 	}
 }
 
-// TestImageLayerAndTarballAgree — an image and a tarball of the same content must produce the same
-// layer. Different packaging, same bytes: if these diverge, the verb is doing something to the
-// content that the other sources do not.
+// TestImageLayerAndTarballAgree: an image and a tarball of the same content produce the same layer.
 func TestImageLayerAndTarballAgree(t *testing.T) {
 	files := []tarFile{
 		{name: "lib/a.so", body: "aaa"},

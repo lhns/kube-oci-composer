@@ -11,25 +11,17 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// The chart is treated as a testable artifact, not just a pile of templates.
-//
-// The failure these guard against is drift: a flag renamed in Go, or an RBAC marker changed, while
-// the chart keeps rendering the old thing. Nothing catches that until a cluster behaves
-// differently from the repository, which is exactly the sort of bug that eats an afternoon.
+// Chart tests guard against drift between the Go code (flags, RBAC markers) and what the chart
+// renders.
 
 const chartDir = "../../charts/kube-oci-composer"
 
-// installable is the smallest set of values that make the chart render at all.
-//
-// registry.publish.mode has no default on purpose — the chart refuses to install until an operator
-// says how workloads reach the registry, because guessing produces images nothing can pull. Every
-// test that is not ABOUT that question wants a valid install, so the helpers supply one. `--set`
-// later wins, so a test can still override the mode; `renderRaw` exists for the tests that must
-// see the unset case.
+// installable is the smallest set of values that make the chart render: registry.publish.mode has
+// no default on purpose. A later `--set` still wins; the renderRaw variants omit it for tests about
+// the unset case.
 var installable = []string{"--set", "registry.publish.mode=internalOnly"}
 
-// render runs `helm template`, skipping the test if helm is unavailable rather than failing —
-// a missing local tool is not a defect in the code under test.
+// render runs `helm template` with the installable defaults, skipping if helm is not installed.
 func render(t *testing.T, args ...string) string {
 	t.Helper()
 	return renderRaw(t, append(append([]string{}, installable...), args...)...)
@@ -38,58 +30,50 @@ func render(t *testing.T, args ...string) string {
 // renderRaw is render without the installable defaults, for tests about what the chart REFUSES.
 func renderRaw(t *testing.T, args ...string) string {
 	t.Helper()
-	if _, err := exec.LookPath("helm"); err != nil {
-		t.Skip("helm not installed; skipping chart render")
-	}
-
-	base := []string{"template", "test-release", chartDir, "--namespace", "oci-composer"}
-	out, err := exec.Command("helm", append(base, args...)...).CombinedOutput()
+	out, err := helmTemplate(t, "oci-composer", args...)
 	if err != nil {
 		t.Fatalf("helm template failed: %v\n%s", err, out)
 	}
-	return helmOut(out)
+	return out
 }
 
-// helmOut turns helm's bytes into a string the assertions can match.
-//
-// Normalises CRLF, because helm.exe emits Windows line endings. Every assertion written as
-// Contains(out, "…\n") therefore fails on Windows while passing on Linux CI -- so a real chart
-// guard reads as broken locally, and the reflex is to weaken the assertion rather than the
-// line ending. TestACredentialedCacheURLNeverLandsInAConfigMap is where that surfaced.
-func helmOut(b []byte) string {
-	return strings.ReplaceAll(string(b), "\r\n", "\n")
-}
-
-// renderExpectingFailure returns helm's output when the render is supposed to fail.
-//
-// Carries the installable defaults for the same reason render does: a test asserting that the
-// chart refuses a thin retention margin must fail for THAT reason, not because it forgot to say
-// how workloads reach the registry.
+// renderExpectingFailure returns helm's output for a render that must fail. It carries the
+// installable defaults so the failure is the one under test, not the missing publish mode.
 func renderExpectingFailure(t *testing.T, args ...string) string {
 	t.Helper()
 	return renderRawExpectingFailure(t, append(append([]string{}, installable...), args...)...)
 }
 
-// renderRawExpectingFailure is renderExpectingFailure with nothing supplied.
+// renderRawExpectingFailure is renderExpectingFailure without the installable defaults.
 func renderRawExpectingFailure(t *testing.T, args ...string) string {
+	t.Helper()
+	out, err := helmTemplate(t, "oci-composer", args...)
+	if err == nil {
+		t.Fatalf("expected the render to fail, but it succeeded:\n%s", out)
+	}
+	return out
+}
+
+// helmTemplate runs `helm template` on the chart, skipping the test if helm is not installed: a
+// missing local tool is not a defect in the code under test.
+func helmTemplate(t *testing.T, namespace string, args ...string) (string, error) {
 	t.Helper()
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed; skipping chart render")
 	}
-
-	base := []string{"template", "test-release", chartDir, "--namespace", "oci-composer"}
+	base := []string{"template", "test-release", chartDir, "--namespace", namespace}
 	out, err := exec.Command("helm", append(base, args...)...).CombinedOutput()
-	if err == nil {
-		t.Fatalf("expected the render to fail, but it succeeded:\n%s", out)
-	}
-	return helmOut(out)
+	return helmOut(out), err
 }
 
-// TestChartRBACMatchesTheGeneratedRole is the drift guard that matters most.
-//
-// The chart hand-writes its RBAC so it can be namespaced and templated, which means it can quietly
-// diverge from the kubebuilder markers. Too few verbs and the controller fails at runtime in a way
-// that looks like a bug; too many and it silently holds permissions nobody reviewed.
+// helmOut normalises CRLF: helm.exe emits Windows line endings, which would break every
+// Contains(out, "…\n") assertion on Windows only.
+func helmOut(b []byte) string {
+	return strings.ReplaceAll(string(b), "\r\n", "\n")
+}
+
+// TestChartRBACMatchesTheGeneratedRole: the chart hand-writes its RBAC, so it can diverge from the
+// kubebuilder markers. Too few verbs fail at runtime; too many are unreviewed permissions.
 func TestChartRBACMatchesTheGeneratedRole(t *testing.T) {
 	generated, err := readClusterRole(filepath.Join("..", "..", "config", "rbac", "role.yaml"))
 	if err != nil {
@@ -99,8 +83,7 @@ func TestChartRBACMatchesTheGeneratedRole(t *testing.T) {
 	out := render(t)
 	chart := clusterRoleFromRender(t, out, "test-release-kube-oci-composer")
 
-	// Leader-election rules live in a namespaced Role in the chart, so exclude them from the
-	// cluster-scoped comparison.
+	// Leader-election rules live in a namespaced Role in the chart.
 	generatedRules := rulesExcluding(generated, "coordination.k8s.io")
 
 	want := ruleSet(generatedRules)
@@ -147,26 +130,8 @@ func TestChartFlagsMatchTheBinary(t *testing.T) {
 
 	known := knownFlags(t, "../../cmd/oci-composer")
 
-	// Scoped to the COMPOSER's container. One chart renders both controllers, so scanning the whole
-	// document would check the builder's flags against the composer's binary.
-	var seen int
-	for _, line := range strings.Split(containerArgs(t, out, "test-release-kube-oci-composer"), "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "- --") {
-			continue
-		}
-		flag := strings.TrimPrefix(line, "- --")
-		if i := strings.Index(flag, "="); i >= 0 {
-			flag = flag[:i]
-		}
-		if _, ok := known[flag]; !ok {
-			t.Errorf("chart renders --%s, which the binary does not define", flag)
-		}
-		seen++
-	}
-	if seen == 0 {
-		t.Fatal("no flags found in the rendered output; the assertion proves nothing")
-	}
+	// Only the composer's container: the builder's flags belong to a different binary.
+	assertFlagsKnown(t, containerArgs(t, out, "test-release-kube-oci-composer"), known)
 }
 
 // TestChartRejectsIncoherentValues — misconfiguration should fail at template time, where the
@@ -225,7 +190,7 @@ func TestChartCredentialsAreNotFlags(t *testing.T) {
 // --- helpers ---
 
 func readClusterRole(path string) (*rbacv1.ClusterRole, error) {
-	raw, err := readFile(path)
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -297,11 +262,30 @@ func containsString(haystack []string, needle string) bool {
 	return false
 }
 
-func readFile(path string) ([]byte, error) { return os.ReadFile(path) }
+// assertFlagsKnown fails for every `- --flag` line in args that the binary does not define.
+func assertFlagsKnown(t *testing.T, args string, known map[string]struct{}) {
+	t.Helper()
+	var seen int
+	for _, line := range strings.Split(args, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "- --") {
+			continue
+		}
+		flag := strings.TrimPrefix(line, "- --")
+		if i := strings.Index(flag, "="); i >= 0 {
+			flag = flag[:i]
+		}
+		if _, ok := known[flag]; !ok {
+			t.Errorf("chart renders --%s, which the binary does not define", flag)
+		}
+		seen++
+	}
+	if seen == 0 {
+		t.Fatal("no flags found in the rendered output; the assertion proves nothing")
+	}
+}
 
-// knownFlags asks the binary itself which flags it defines, rather than keeping a list here that
-// would need updating in lockstep — the very drift these tests exist to catch.
-// knownFlags lists the flags a binary defines, so a chart cannot render one that does not exist.
+// knownFlags asks the binary itself which flags it defines, so the list here cannot drift.
 func knownFlags(t *testing.T, cmdPath string) map[string]struct{} {
 	t.Helper()
 
@@ -330,15 +314,9 @@ func knownFlags(t *testing.T, cmdPath string) map[string]struct{} {
 	return flags
 }
 
-// TestMoreThanOneComposerReplicaStillRenders.
-//
-// What this asserts is now much smaller than its ancestor did, and that is the point: with no blob
-// store there is nothing for a second replica to disagree about. It reconciles nothing until it
-// wins the lease, and the volume it may or may not have is a layer cache, where a cold start costs
-// a refetch rather than a failed pull.
-//
-// Kept because "extra replicas are harmless" is a claim, and an untested claim about replica counts
-// is how the shared-storage guards came to exist in the first place.
+// TestMoreThanOneComposerReplicaStillRenders: with no blob store, extra composer replicas are
+// harmless (they wait for the lease; the volume is only a layer cache), so the chart must accept
+// them.
 func TestMoreThanOneComposerReplicaStillRenders(t *testing.T) {
 	render(t,
 		"--set", "replicaCount=2",
@@ -350,13 +328,9 @@ func TestMoreThanOneComposerReplicaStillRenders(t *testing.T) {
 		"--set", "operator.s3.bucket=blobs")
 }
 
-// TestEachServiceSelectsOnlyItsOwnComponent — one chart now deploys three workloads into one
-// namespace, and this is the bug that shipped when the registry was added.
-//
-// Every pod carried the chart's two selector labels and nothing else, so the composer's Service
-// selected the registry pod as well: a pull routed to the wrong container, from a Service that
-// reports itself perfectly healthy. Harmless while the registry was off by default; shipping it on
-// would have made it everyone's default.
+// TestEachServiceSelectsOnlyItsOwnComponent: several workloads share one namespace and the chart's
+// selector labels, so a Service without the component label routes to the wrong pod while looking
+// healthy.
 func TestEachServiceSelectsOnlyItsOwnComponent(t *testing.T) {
 	out := render(t)
 
@@ -380,9 +354,8 @@ func TestEachServiceSelectsOnlyItsOwnComponent(t *testing.T) {
 	}
 }
 
-// TestBothControllersAreWiredToTheDefaultRegistry — the point of bundling one. If either controller
-// misses the flags, objects that name no repository sit Pending forever with a message about
-// configuration rather than about themselves.
+// TestBothControllersAreWiredToTheDefaultRegistry: without the flags, objects that name no
+// repository sit Pending forever.
 func TestBothControllersAreWiredToTheDefaultRegistry(t *testing.T) {
 	out := render(t)
 
@@ -400,8 +373,8 @@ func TestBothControllersAreWiredToTheDefaultRegistry(t *testing.T) {
 	}
 }
 
-// TestTheGeneratedCredentialMatchesTheRegistrysHtpasswd — two Secrets rendered from one password.
-// If they drift, every push is rejected by a registry the chart itself installed.
+// TestTheGeneratedCredentialMatchesTheRegistrysHtpasswd: two Secrets are rendered from one
+// password; if they drift, the bundled registry rejects every push.
 func TestTheGeneratedCredentialMatchesTheRegistrysHtpasswd(t *testing.T) {
 	out := render(t)
 
@@ -415,8 +388,7 @@ func TestTheGeneratedCredentialMatchesTheRegistrysHtpasswd(t *testing.T) {
 	if !strings.Contains(push, `\"username\":\"`+user+`\"`) && !strings.Contains(push, `"username":"`+user+`"`) {
 		t.Errorf("the push credential is not for %q:\n%s", user, push)
 	}
-	// The registry must actually require it, or the generated credential is decoration and the
-	// write path is open to anything that can reach the Service.
+	// The registry must actually require it, or the write path is open to anyone.
 	config := documentNamed(t, out, "ConfigMap", "test-release-kube-oci-composer-registry")
 	for _, want := range []string{"htpasswd", "anonymousPolicy", `"read"`} {
 		if !strings.Contains(config, want) {
@@ -445,10 +417,7 @@ func podLabelsByWorkload(t *testing.T, rendered string) map[string]map[string]st
 				} `json:"template"`
 			} `json:"spec"`
 		}
-		// StatefulSets too: the registry became one so that clustering could not be a kind switch
-		// under an operator's feet (ADR 0039). A helper that looked only at Deployments would have
-		// quietly stopped covering it, and this test would have passed by finding no workload at
-		// all rather than by finding one.
+		// StatefulSets too: the registry is one (ADR 0039).
 		if err := yaml.Unmarshal([]byte(doc), &d); err != nil ||
 			(d.Kind != "Deployment" && d.Kind != "StatefulSet") {
 			continue
@@ -516,12 +485,7 @@ func documentNamed(t *testing.T, rendered, kind, name string) string {
 	return ""
 }
 
-// TestBothControllersAreScrapable.
-//
-// The builder had no metrics Service at all, so its :8080 was unreachable while the composer's was
-// scraped — an asymmetry with no reason behind it, and the kind that survives because nobody
-// notices a metric that was never there. The builder is the component that creates Jobs; its
-// reconcile errors and queue depth are exactly what you want when builds stop happening.
+// TestBothControllersAreScrapable: each controller, the builder included, has a metrics Service.
 func TestBothControllersAreScrapable(t *testing.T) {
 	out := render(t)
 
@@ -540,8 +504,8 @@ func TestBothControllersAreScrapable(t *testing.T) {
 	}
 }
 
-// TestATurnedOffComponentExposesNothing — a Service left behind by a disabled component selects no
-// pods and reports itself healthy, which is a worse failure than an absent one.
+// TestATurnedOffComponentExposesNothing: a Service left behind by a disabled component selects no
+// pods yet looks healthy.
 func TestATurnedOffComponentExposesNothing(t *testing.T) {
 	for _, tc := range []struct{ toggle, absent string }{
 		{"imageBuild.enabled=false", "builder-metrics"},
@@ -562,12 +526,8 @@ func TestATurnedOffComponentExposesNothing(t *testing.T) {
 	}
 }
 
-// TestTheServiceMonitorScrapesBothControllersAndNotTheRegistry.
-//
-// The registry's Service carries the same two chart labels as the controllers', so a selector on
-// those alone would have Prometheus scrape /metrics on a registry that serves the OCI API there —
-// a scrape that fails quietly and that nobody investigates, because a ServiceMonitor that exists
-// looks like monitoring that works.
+// TestTheServiceMonitorScrapesBothControllersAndNotTheRegistry: the registry's Service carries the
+// same chart labels as the controllers', and scraping it fails quietly.
 func TestTheServiceMonitorScrapesBothControllersAndNotTheRegistry(t *testing.T) {
 	out := render(t, "--set", "metrics.serviceMonitor.enabled=true")
 

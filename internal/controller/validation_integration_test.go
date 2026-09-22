@@ -26,8 +26,7 @@ func integrationScheme() *runtime.Scheme {
 	return s
 }
 
-// apply creates an object and returns the API server's error, if any. The rules under test are
-// CEL, which only a real API server evaluates — a fake client accepts everything.
+// apply creates an object and returns the API server's error, if any.
 func apply(t *testing.T, name string, spec ociv1alpha1.ImageCompositionSpec) error {
 	t.Helper()
 	obj := &ociv1alpha1.ImageComposition{
@@ -62,8 +61,7 @@ func TestIntegrationValidSpecIsAccepted(t *testing.T) {
 	}
 }
 
-// TestIntegrationVerbUnionIsEnforced — exactly one of fetch, configMap, sourceRef, remove. This
-// keeps the discriminated union honest, and nothing else checks it.
+// TestIntegrationVerbUnionIsEnforced — exactly one of fetch, configMap, sourceRef, remove.
 func TestIntegrationVerbUnionIsEnforced(t *testing.T) {
 	t.Run("no verb", func(t *testing.T) {
 		err := apply(t, "no-verb", ociv1alpha1.ImageCompositionSpec{
@@ -92,7 +90,7 @@ func TestIntegrationVerbUnionIsEnforced(t *testing.T) {
 }
 
 // TestIntegrationPlacementRules — `to` is required for content and forbidden for remove, and
-// owner/mode do not apply to remove. One CEL rule covers all of it; this checks each arm.
+// owner/mode do not apply to remove. Checks each arm of the one CEL rule.
 func TestIntegrationPlacementRules(t *testing.T) {
 	t.Run("content without to is rejected", func(t *testing.T) {
 		if err := apply(t, "no-to", ociv1alpha1.ImageCompositionSpec{
@@ -170,9 +168,8 @@ func TestIntegrationBaseNeedsADigest(t *testing.T) {
 	}
 }
 
-// TestIntegrationBaseSpellings — `ref` and `image`+`digest` are the two ways to name a base, and
-// the CEL rules exist to stop a spec being ambiguous or half-written. The pair must go together,
-// and naming the base twice must be refused rather than silently preferring one.
+// TestIntegrationBaseSpellings — a base is named by `ref` or by `image`+`digest`. The pair must go
+// together, and naming the base twice is refused rather than silently preferring one.
 func TestIntegrationBaseSpellings(t *testing.T) {
 	const pinned = "quay.io/strimzi/kafka:0.43.0@" + validDigest
 
@@ -213,9 +210,8 @@ func TestIntegrationBaseSpellings(t *testing.T) {
 	}
 }
 
-// TestIntegrationImageLayer — the image verb joins the layer union, so it must be accepted alone
-// and refused alongside another verb. An unpinned ref must be refused too: an image layer is
-// content-addressed like everything else (ADR 0002).
+// TestIntegrationImageLayer — the image verb is accepted alone and refused alongside another verb
+// or unpinned: it is content-addressed like everything else (ADR 0002).
 func TestIntegrationImageLayer(t *testing.T) {
 	const pinned = "ghcr.io/lhns/app:v1@" + validDigest
 
@@ -250,8 +246,8 @@ func TestIntegrationImageLayer(t *testing.T) {
 	}
 }
 
-// TestIntegrationInheritNeedsABase — there is nothing to inherit from otherwise, and a silently
-// empty config would leave a non-runnable image with no explanation.
+// TestIntegrationInheritNeedsABase — otherwise a silently empty config would leave a non-runnable
+// image.
 func TestIntegrationInheritNeedsABase(t *testing.T) {
 	err := apply(t, "inherit-no-base", ociv1alpha1.ImageCompositionSpec{
 		Layers: []ociv1alpha1.Layer{fetchLayer("core")},
@@ -287,12 +283,7 @@ func TestIntegrationBaseWithInheritIsAccepted(t *testing.T) {
 	}
 }
 
-// The push/publish mutual-exclusion rule is gone with publish itself (ADR 0035). It refused a spec
-// that named two destinations, leaving it ambiguous where the artifact went; there is one
-// destination now, so the ambiguity it guarded cannot be expressed.
-
-// TestIntegrationEmptyLayersIsRejected — an empty list is far more likely to be a templating
-// accident than a deliberate empty artifact.
+// TestIntegrationEmptyLayersIsRejected — an empty list is likelier a templating accident than intent.
 func TestIntegrationEmptyLayersIsRejected(t *testing.T) {
 	if err := apply(t, "no-layers", ociv1alpha1.ImageCompositionSpec{
 		Push: &ociv1alpha1.Push{Tags: []string{"main"}},
@@ -320,10 +311,7 @@ func TestIntegrationMalformedValuesAreRejected(t *testing.T) {
 			Name: "x", To: "relative/path",
 			Fetch: &ociv1alpha1.FetchSource{URL: "https://example.com/a.tgz", Digest: validDigest},
 		},
-		// "rpm" rather than something arbitrary: it looks exactly like a mode that ought to work,
-		// which is what makes it a good canary, and it stays invalid for as long as RPM support is
-		// declined (issue #9, ADR 0022). This slot previously held "zip", which stopped being a
-		// useful canary the moment zip was implemented.
+		// "rpm": plausible-looking, and invalid while RPM support is declined (issue #9, ADR 0022).
 		"unknown unpack mode": {
 			Name: "x", To: "/x",
 			Fetch: &ociv1alpha1.FetchSource{
@@ -354,16 +342,10 @@ func TestIntegrationMalformedValuesAreRejected(t *testing.T) {
 	}
 }
 
-// TestIntegrationEveryUnpackModeIsAccepted — the CRD's enum and the controller's switch are
-// separate hand-maintained lists, and this is the half only a real API server can check. Forget the
-// kubebuilder marker and the mode is unusable no matter how complete the implementation is; the
-// symptom is a rejection at apply time that every unit test passes straight through.
-//
-// Paired with TestUnknownUnpackModeIsTerminal in internal/oci, which covers the other direction.
+// TestIntegrationEveryUnpackModeIsAccepted — the half of the enum/switch parity only a real API
+// server can check. TestUnknownUnpackModeIsTerminal in internal/oci covers the other direction.
 func TestIntegrationEveryUnpackModeIsAccepted(t *testing.T) {
-	// allUnpackModes, not a local copy: unpackparity_test.go carries no build tag, so it compiles
-	// into this build too. A second list here would be one that silently falls behind, quietly
-	// dropping coverage of whichever mode was added to only one of them.
+	// allUnpackModes (unpackparity_test.go) rather than a local copy that could fall behind.
 	for _, mode := range allUnpackModes {
 		t.Run(string(mode), func(t *testing.T) {
 			err := apply(t, "unpack-"+strings.ReplaceAll(string(mode), ".", "-"),
@@ -382,18 +364,14 @@ func TestIntegrationEveryUnpackModeIsAccepted(t *testing.T) {
 	}
 }
 
-// TestIntegrationDefaultsAreApplied — the defaults are part of the contract. If interval silently
-// became zero the controller would requeue in a tight loop.
+// TestIntegrationDefaultsAreApplied — the defaults are part of the contract; a zero interval would
+// requeue in a tight loop.
 func TestIntegrationDefaultsAreApplied(t *testing.T) {
 	obj := &ociv1alpha1.ImageComposition{
 		ObjectMeta: metav1.ObjectMeta{Name: "defaults", Namespace: "default"},
 		Spec: ociv1alpha1.ImageCompositionSpec{
-			Layers: []ociv1alpha1.Layer{{
-				Name:  "core",
-				Fetch: &ociv1alpha1.FetchSource{URL: "https://example.com/a.tgz", Digest: validDigest},
-				To:    "/x",
-			}},
-			Push: &ociv1alpha1.Push{},
+			Layers: []ociv1alpha1.Layer{fetchLayer("core")},
+			Push:   &ociv1alpha1.Push{},
 		},
 	}
 	if err := k8s.Create(integrationCtx(t), obj); err != nil {
@@ -407,37 +385,25 @@ func TestIntegrationDefaultsAreApplied(t *testing.T) {
 	if obj.Spec.Layers[0].Fetch.Unpack != ociv1alpha1.UnpackNone {
 		t.Errorf("unpack defaulted to %q, want none", obj.Spec.Layers[0].Fetch.Unpack)
 	}
-	// No tags by default: publishing by digest alone is the safe floor, and inventing a "latest"
-	// nobody asked for would make an unreferenced mutable tag appear on every object.
+	// No tags by default: publishing by digest alone is the safe floor.
 	if len(obj.Spec.Push.Tags) != 0 {
 		t.Errorf("publish tags defaulted to %v, want none", obj.Spec.Push.Tags)
 	}
-	// ...but the conflict policy resolves to Fail, so a tag cannot be silently remeaned by
-	// accident. Asserted through the resolver rather than through a materialised field value,
-	// because onConflict deliberately has no schema default -- see
-	// TestIntegrationOnConflictHasNoSchemaDefault for why.
+	// The conflict policy resolves to Fail. Asserted through the resolver because onConflict has no
+	// schema default (see TestIntegrationOnConflictHasNoSchemaDefault).
 	if got := obj.Spec.Push.ResolveConflictPolicy(); got != ociv1alpha1.ConflictFail {
 		t.Errorf("an object that says nothing resolves to %q, want Fail", got)
 	}
 }
 
-// TestIntegrationImmutableFalseSurvivesTheRoundTrip — immutable is a *bool precisely so that an
-// explicit false is not swallowed. A plain bool with omitempty would serialise false as absent and
-// a deliberately moving tag would start failing its own builds. Exactly the bug this project
-// already hit once with interval.
-//
-// Still worth running now that the field is deprecated, and arguably more so: this is the shape of
-// every object written before onConflict existed, and the whole claim of the deprecation is that
-// they keep working untouched.
+// TestIntegrationImmutableFalseSurvivesTheRoundTrip — immutable is a *bool so an explicit false is
+// not dropped by omitempty. Though deprecated, it is the shape of every object written before
+// onConflict existed, and those must keep working untouched.
 func TestIntegrationImmutableFalseSurvivesTheRoundTrip(t *testing.T) {
 	obj := &ociv1alpha1.ImageComposition{
 		ObjectMeta: metav1.ObjectMeta{Name: "moving-pointer", Namespace: "default"},
 		Spec: ociv1alpha1.ImageCompositionSpec{
-			Layers: []ociv1alpha1.Layer{{
-				Name:  "core",
-				Fetch: &ociv1alpha1.FetchSource{URL: "https://example.com/a.tgz", Digest: validDigest},
-				To:    "/x",
-			}},
+			Layers: []ociv1alpha1.Layer{fetchLayer("core")},
 			Push: &ociv1alpha1.Push{
 				Tags:      []string{"main"},
 				Immutable: ptr.To(false),

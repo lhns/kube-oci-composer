@@ -9,10 +9,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-// Built on apimachinery rather than controller-runtime's scheme.Builder, which is deprecated for
-// precisely the reason that applies here: an api package should be cheap to import, and reaching
-// for controller-runtime to register types makes every consumer of these types depend on the
-// controller machinery as well.
+// Built on apimachinery rather than controller-runtime's deprecated scheme.Builder, so importing
+// these types does not pull in the controller machinery.
 
 var (
 	// GroupVersion is the group/version used to register these objects.

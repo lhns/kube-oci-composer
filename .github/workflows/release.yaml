@@ -3,21 +3,13 @@ name: release
 # Two modes, same job:
 #   release  - a `v*` tag. Multi-arch, tagged `latest`, gated on the full ci+e2e pipeline,
 #              and it creates the GitHub Release.
-#   dev      - any other branch push, or run by hand. Single-arch amd64 (arm64 under QEMU is
-#              the slowest step here by far, and nothing consuming a dev build is arm64),
-#              published as `sha-<short>` plus a chart `0.0.0-dev.<short>` so a branch can be
-#              installed in a real cluster before it is merged. No GitHub Release.
-#
-# The dev half exists because without it there was NO way to run a branch anywhere: the image
-# job in ci builds with `push: false`, so the only artifact this repo ever produced came from a
-# tag. Testing an unmerged change meant either cutting a throwaway release tag or building by
-# hand. kube-vnet and kube-pv-reaper already publish per-commit; this repo was the exception.
+#   dev      - any other branch push, or run by hand. amd64 only (arm64 under QEMU is slow and
+#              unused for dev), published as `sha-<short>` plus a chart `0.0.0-dev.g<short>`, so an
+#              unmerged branch can be installed in a real cluster. No GitHub Release.
 on:
   push:
     tags:     ['v*']
-    # Not dependabot's branches. A dependabot-triggered run gets a read-only GITHUB_TOKEN,
-    # so the publish steps fail with a 403 from ghcr and the PR shows a red check that says
-    # nothing about the bump. Nobody wants a dev image of a dependency bump anyway.
+    # Not dependabot's: its runs get a read-only GITHUB_TOKEN and the ghcr push fails with 403.
     branches: ['**', '!dependabot/**']
   workflow_dispatch:
 
@@ -28,28 +20,15 @@ concurrency:
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
 
 permissions:
-  # write, not read: the last step creates a GitHub Release, which needs it. With `read` every
-  # other step succeeds — the image and chart are pushed — and only the release object fails,
-  # which looks like a broken release when the artifacts are in fact fine.
+  # write: the last step creates the GitHub Release.
   contents: write
   packages: write
   id-token: write
 
 jobs:
-  # The whole pipeline, reused rather than re-declared. This is the fix for a real hole: release
-  # used to run `make test` alone and call that "tests gate the release". `make test` passes on
-  # drifted codegen, an unrenderable chart and a broken e2e -- so v0.2.0 and v0.2.1 both published
-  # green while the test workflow had been red on every push for a week.
-  #
-  # kube-vnet instead keeps release test-free and relies on main being green when you tag. That
-  # works, but it is a convention rather than a mechanism: nothing stops `git tag` on a red commit.
-  # Calling the workflows costs the e2e wall-clock once per release and makes it impossible.
-  #
-  # Tags only. A dev build deliberately does not re-run them: ci already runs on pull_request and
-  # on main under the concurrency group `ci-<ref>`, so calling it again for the same ref would put
-  # two invocations in one cancel-in-progress group and they would kill each other -- the exact
-  # failure the group name in ci.yaml was renamed to avoid. A dev image is for trying something
-  # out; the PR's own checks are what say whether it is correct.
+  # A release is gated on the full ci and e2e pipelines, reused rather than re-declared, so a
+  # tag on a red commit cannot publish. Tags only: for a dev build, a second ci run for the same ref
+  # would share ci's cancel-in-progress group and the two would cancel each other.
   ci:
     if: startsWith(github.ref, 'refs/tags/v')
     uses: ./.github/workflows/ci.yaml
@@ -65,9 +44,8 @@ jobs:
   release:
     runs-on: ubuntu-latest
     needs: [ci, e2e]
-    # `needs` on a skipped job would otherwise skip this one too, so dev mode never runs. always()
-    # re-enables it, and the two contains() checks put back exactly what needs was doing -- a
-    # failed or cancelled gate still blocks. Plain always() alone would publish on red.
+    # always() so skipped gates (dev mode) do not skip this job; the contains() checks still block
+    # on a failed or cancelled gate.
     if: always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     steps:
       - uses: actions/checkout@v7
@@ -100,21 +78,14 @@ jobs:
             } >> "$GITHUB_OUTPUT"
           else
             SHORT="${GITHUB_SHA::7}"
-            # A branch name may contain characters an OCI tag may not, so anything outside
-            # [a-zA-Z0-9-] becomes a dash. The sha tag is the one to depend on; the branch tag
-            # moves under you as the branch does.
+            # Characters an OCI tag may not contain become dashes. The branch tag moves; depend
+            # on the sha tag.
             BRANCH=$(echo "${GITHUB_REF_NAME}" | tr -c 'a-zA-Z0-9-' '-' | sed 's/-\+/-/g; s/^-//; s/-$//')
             {
               echo "mode=dev"
-              # g-prefixed, git-describe style, and NOT decoration. A semver prerelease identifier
-              # made only of digits is NUMERIC, and a numeric identifier may not carry a leading
-              # zero -- so a commit whose short sha happens to be all digits and starts with one
-              # (0054012, say) produced 0.0.0-dev.0054012, which every semver parser rejects and the
-              # chart push refused with "version segment starts with 0".
-              #
-              # Roughly one push in a few hundred, which is exactly often enough to look like a
-              # flake and rare enough never to be chased. The image TAGS keep the bare sha, since
-              # they are not semver and something may already reference them.
+              # The g prefix is required: an all-digit sha with a leading zero (0054012) is an
+              # invalid numeric semver identifier and the chart push rejects it. Image tags keep
+              # the bare sha.
               echo "version=0.0.0-dev.g${SHORT}"
               echo "platforms=linux/amd64"
               echo "extra_tags=ghcr.io/lhns/kube-oci-composer:sha-${SHORT},ghcr.io/lhns/kube-oci-composer:${BRANCH}"
@@ -139,8 +110,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # The builder, from the same Dockerfile with a different CMD. Published alongside rather
-      # than instead of: installing one must never imply the other (ADR 0004).
+      # The builder: same Dockerfile, different CMD.
       - uses: docker/build-push-action@v7
         with:
           context: .
@@ -169,11 +139,8 @@ jobs:
           helm push bin/kube-oci-composer-*.tgz oci://ghcr.io/lhns/charts
 
       - name: Publish the release manifests
-        # registry.publish.mode has no default: the chart refuses to install until an operator says
-        # how workloads reach the registry (ADR 0037). A flat manifest cannot ask, so it renders the
-        # one mode that asserts nothing about the cluster -- and says so at the top, because an
-        # install.yaml that silently produces images nothing can pull is exactly the failure that
-        # required value exists to prevent.
+        # A flat manifest cannot ask for registry.publish.mode (ADR 0037), so it renders
+        # internalOnly and says so at the top.
         run: |
           mkdir -p release
           cat > release/install.yaml <<'HEADER'
@@ -194,8 +161,7 @@ jobs:
             --namespace oci-composer --include-crds \
             --set registry.publish.mode=internalOnly >> release/install.yaml
 
-      # Release mode only. A dev build has no release notes worth generating and would clutter
-      # the release list with one entry per commit; the image and chart are the deliverable.
+      # Release mode only; a dev build's deliverable is its image and chart.
       - uses: softprops/action-gh-release@v3
         if: steps.version.outputs.mode == 'release'
         with:

@@ -7,13 +7,8 @@ import (
 	"github.com/lhns/kube-oci-composer/internal/build"
 )
 
-// status.history[].sources is in the CRD for both kinds, and until now only the composer ever wrote
-// it. A build's record therefore carried a digest and no way to learn which revision produced it —
-// exactly the question ADR 0026's incident was stuck on, where a layer's content and its apparent
-// version disagreed and nothing in status could adjudicate.
-//
-// This asserts through recordSuccess rather than through the type, because a field that exists and
-// is never assigned is precisely the failure being fixed.
+// TestABuildRecordsWhereItsContentCameFrom pins that recordSuccess fills status.history[].sources,
+// so a build's digest can be traced to the revision that produced it (ADR 0026).
 func TestABuildRecordsWhereItsContentCameFrom(t *testing.T) {
 	obj := &ociv1alpha1.ImageBuild{}
 	obj.Spec.Context = &ociv1alpha1.BuildContext{
@@ -49,10 +44,8 @@ func TestABuildRecordsWhereItsContentCameFrom(t *testing.T) {
 	}
 }
 
-// The revision is deliberately NOT part of the input hash: the digest already identifies the
-// content, so hashing both would rebuild on a repack that changed nothing. If this ever starts
-// failing, provenance has been wired into convergence and every source-controller repack becomes a
-// rebuild.
+// TestTheRecordedRevisionDoesNotDriveRebuilds: the revision is provenance, not an input. The
+// digest identifies the content, so a source-controller repack must not rebuild.
 func TestTheRecordedRevisionDoesNotDriveRebuilds(t *testing.T) {
 	base := build.Inputs{ContextDigest: "sha256:aaaa", ContextRevision: "v1@sha1:1111"}
 	moved := base

@@ -18,8 +18,7 @@ import (
 	"time"
 )
 
-// writeCA writes the httptest server's own certificate as a PEM file, which is what an operator
-// would mount from the chart.
+// writeCA writes the httptest server's certificate as a PEM file, as the chart would mount it.
 func writeCA(t *testing.T, srv *httptest.Server) string {
 	t.Helper()
 	cert := srv.Certificate()
@@ -31,8 +30,8 @@ func writeCA(t *testing.T, srv *httptest.Server) string {
 	return path
 }
 
-// TestTheTransportTrustsTheSuppliedCA — the whole point. A registry serving a certificate signed by
-// a CA nothing knows must become reachable, and must not be reachable without it.
+// TestTheTransportTrustsTheSuppliedCA — a registry signed by an unknown CA becomes reachable with
+// the CA, and only with it.
 func TestTheTransportTrustsTheSuppliedCA(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -55,26 +54,15 @@ func TestTheTransportTrustsTheSuppliedCA(t *testing.T) {
 	resp.Body.Close()
 }
 
-// TestTheTransportStillVerifies is the guard against the two ways to make this "work" by weakening
-// it: starting from an empty pool, or turning verification off.
-//
-// An empty base pool would serve the operator's own registry perfectly and break every pull from
-// ghcr.io, Docker Hub and any registry an object named for itself — and only for the installs that
-// set the flag, which is to say only in production.
-//
-// Note what is NOT asserted here: that the system roots are present. `x509.CertPool.Subjects` is
-// deprecated precisely because it does not report system roots, and proving a public certificate
-// verifies would need the network. What the code does instead is start from `x509.SystemCertPool`
-// and fail startup if that errors, rather than falling back to an empty pool — see Transport.
+// TestTheTransportStillVerifies guards against "working" by weakening: verification turned off, or
+// an empty base pool. System roots are not asserted directly (CertPool.Subjects omits them and a
+// public cert needs the network); Transport fails rather than fall back to an empty pool.
 func TestTheTransportStillVerifies(t *testing.T) {
 	trusted := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer trusted.Close()
 
-	// A second server with a certificate this test generates itself.
-	//
-	// NOT a second httptest.NewTLSServer: those all present the SAME built-in certificate, so
-	// trusting one trusts them all and the negative control below would pass for the wrong reason.
-	// That is exactly what happened when this test was first written.
+	// Not a second httptest.NewTLSServer: those all share one built-in certificate, so the negative
+	// control below would pass for the wrong reason.
 	other := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	other.TLS = &tls.Config{Certificates: []tls.Certificate{selfSigned(t)}, MinVersion: tls.VersionTLS12}
 	other.StartTLS()
@@ -92,7 +80,7 @@ func TestTheTransportStillVerifies(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	// The one that matters: adding a root must not have disabled verification for everything else.
+	// Adding a root must not have disabled verification for everything else.
 	if _, err := client.Get(other.URL); err == nil { //nolint:noctx,bodyclose // the request must fail
 		t.Fatal("a certificate from an unrelated CA was accepted; verification is off, not extended")
 	}
@@ -112,8 +100,7 @@ func TestTheTransportStillVerifies(t *testing.T) {
 	}
 }
 
-// TestTheTransportRefusesJunk — a mounted file that is not a certificate must fail at startup, not
-// at the first artifact. A controller that cannot trust its registry has nothing useful to do.
+// TestTheTransportRefusesJunk — a bad CA file must fail at startup, not at the first artifact.
 func TestTheTransportRefusesJunk(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ca.crt")
 	if err := os.WriteFile(path, []byte("this is not a certificate"), 0o600); err != nil {
@@ -132,8 +119,7 @@ func TestTheTransportRefusesJunk(t *testing.T) {
 	}
 }
 
-// selfSigned returns a certificate signed by a CA that exists only inside this call, so nothing
-// else in the process can be persuaded to trust it.
+// selfSigned returns a certificate from a CA that exists only inside this call.
 func selfSigned(t *testing.T) tls.Certificate {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)

@@ -11,13 +11,7 @@ metadata:
     {{- toYaml . | nindent 4 }}
     {{- end }}
 spec:
-  {{- /*
-  BOTH controllers, not just the composer.
-  
-  matchExpressions rather than two ServiceMonitors: the registry's Service carries the same two
-  chart labels, so selecting on those alone would have Prometheus scrape /metrics on a registry
-  that serves the OCI API there -- a scrape that fails in a way nobody investigates.
-  */}}
+  {{- /* Both controllers; the component filter keeps the registry's Services out. */}}
   selector:
     matchLabels:
       {{- include "kube-oci-composer.selectorLabels" . | nindent 6 }}

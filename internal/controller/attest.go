@@ -17,9 +17,8 @@ import (
 
 // attestSources maps what the composer resolved into the neutral shape internal/attest takes.
 //
-// Identity rather than Digest where the two differ, for the reason InputHash gives: a Flux
-// artifact's tarball digest moves when source-controller re-packs, while the revision it describes
-// does not. The revision answers "what produced this"; the tarball digest does not.
+// Version is the Identity (a Flux revision), not the tarball digest, which moves when
+// source-controller re-packs.
 func attestSources(inputs []oci.LayerInput) []attest.Source {
 	out := make([]attest.Source, 0, len(inputs))
 	for _, in := range inputs {
@@ -37,9 +36,8 @@ func attestSources(inputs []oci.LayerInput) []attest.Source {
 // attestPublished attaches the SBOM, provenance and signature to an artifact that has just been
 // published, or confirms what is already there.
 //
-// FAILURE IS NOT FATAL, and that follows the precedent already in this file for the manifest
-// record: the artifact is published and pullable right now, so reporting a build that succeeded as
-// failed would be the larger error. It surfaces as a Warning event and Ready stays true.
+// FAILURE IS NOT FATAL: the artifact is already published and pullable, so a failure is a Warning
+// event and Ready stays true.
 func (r *ImageCompositionReconciler) attestPublished(
 	ctx context.Context,
 	obj *ociv1alpha1.ImageComposition,
@@ -73,8 +71,8 @@ func (r *ImageCompositionReconciler) attestPublished(
 
 	rec, err := r.Attestor.Ensure(ctx, repo, *desc, attest.Payloads{
 		BuildType: attest.BuildTypeComposition,
-		// The SAME field set the input hash covers. Provenance narrower than the hash would claim
-		// less than the artifact actually depends on, which is the shape of ADR 0026's incident.
+		// The SAME field set the input hash covers, so provenance never claims less than the
+		// artifact depends on (ADR 0026).
 		External: externalParameters(obj),
 		Internal: map[string]any{"assemblyVersion": oci.AssemblyVersion},
 		Base:     base,
@@ -123,9 +121,8 @@ func (r *ImageCompositionReconciler) noteAttestationFailure(obj *ociv1alpha1.Ima
 		fmt.Sprintf("the artifact is published, but attaching supply-chain material failed: %v", err))
 }
 
-// attestRecord converts the API shape to the one internal/attest reasons about. Two types rather
-// than one because internal/attest must not depend on the API package: it is used by two
-// controllers and shared with neither's types.
+// attestRecord converts the API shape to internal/attest's, which must not depend on the API
+// package.
 func attestRecord(st *ociv1alpha1.AttestationStatus) *attest.Record {
 	if st == nil {
 		return nil

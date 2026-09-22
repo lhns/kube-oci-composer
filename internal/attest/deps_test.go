@@ -6,24 +6,10 @@ import (
 	"testing"
 )
 
-// TestTheSigstoreTreeStaysSmall is a drift guard, in the shape of
-// TestBuilderChartNeverGrantsSecretListOrWatch and for the same reason: the property it protects is
-// invisible until someone imports the convenient helper.
-//
-// Signing needs about seventy-five lines of sigstore — a signer, a PEM decoder, and cosign's
-// SimpleSigning payload marshaller. Each of the modules below would arrive by importing something
-// that looks reasonable:
-//
-//   - sigstore/cosign/v2: the obvious import for "sign a container image". Drags rekor, fulcio,
-//     go-tuf, go-jose, coreos/go-oidc, grpc and cloud SDKs — on the order of 150-250 modules, into
-//     two binaries that run in-cluster.
-//   - sigstore/sigstore/pkg/signature/kms/{aws,gcp,azure,hashivault}: subdirectories of a module
-//     we already use, each pulling a whole cloud SDK.
-//   - sigstore/sigstore/pkg/oauthflow: pulls go-rod, a headless-Chrome driver. Into a Kubernetes
-//     controller. This is the most surprising one in the tree and the reason this test names
-//     specific modules rather than counting them.
-//   - rekor / fulcio / go-tuf: keyless infrastructure, which ADR 0008 rejected outright because it
-//     would publish private image names and digests to a public transparency log.
+// TestTheSigstoreTreeStaysSmall is a drift guard: signing needs only a signer, a PEM decoder and
+// cosign's payload marshaller, but reasonable-looking imports (cosign itself, sigstore's kms or
+// oauthflow subpackages, keyless rekor/fulcio/go-tuf, rejected by ADR 0008) drag in hundreds of
+// modules. The reasons are in the table below.
 func TestTheSigstoreTreeStaysSmall(t *testing.T) {
 	raw, err := os.ReadFile("../../go.mod")
 	if err != nil {
@@ -51,8 +37,7 @@ func TestTheSigstoreTreeStaysSmall(t *testing.T) {
 		}
 	}
 
-	// The control. If the tree the guard protects is not present at all, every case above passes
-	// vacuously and the test says nothing.
+	// The control: without these, every case above passes vacuously.
 	for _, want := range []string{
 		"github.com/sigstore/sigstore ",
 		"github.com/secure-systems-lab/go-securesystemslib",

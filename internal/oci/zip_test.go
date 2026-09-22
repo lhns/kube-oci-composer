@@ -15,8 +15,7 @@ type zipEntry struct {
 	body string
 	link string      // non-empty makes it a symlink; the target is stored as the body
 	mode fs.FileMode // zero means 0o644, or 0o755|ModeDir for a trailing-slash name
-	// dosOnly writes the entry with an MS-DOS creator and no unix mode, the way a zip made on
-	// Windows arrives.
+	// dosOnly writes the entry with an MS-DOS creator and no unix mode, as Windows zips arrive.
 	dosOnly bool
 	// store writes the entry uncompressed instead of deflated.
 	store bool
@@ -24,9 +23,8 @@ type zipEntry struct {
 
 // buildZip assembles an archive in memory, in the given order.
 //
-// SetMode is what records a unix creator version in the header, which is what makes f.Mode()
-// decode permissions and the symlink bit on the way back out — so symlinks are testable here,
-// unlike the bzip2 branch in compress.go.
+// SetMode records a unix creator version, which makes f.Mode() decode permissions and the symlink
+// bit on the way back out.
 func buildZip(t *testing.T, entries []zipEntry) []byte {
 	t.Helper()
 	var buf bytes.Buffer
@@ -77,7 +75,7 @@ func openZip(t *testing.T, entries []zipEntry) *os.File {
 	return openBytes(t, "input.zip", buildZip(t, entries))
 }
 
-// zipPath is openZip's sibling for the tests that go through Assemble, which takes a path.
+// zipPath writes a built archive to disk, for tests that go through Assemble.
 func zipPath(t *testing.T, entries []zipEntry) string {
 	t.Helper()
 	return writeBytes(t, "input.zip", buildZip(t, entries))
@@ -94,9 +92,7 @@ func openBytes(t *testing.T, name string, body []byte) *os.File {
 	return f
 }
 
-// Zip header signatures. Spelled as byte literals rather than string escapes because two of the
-// four bytes are unprintable, and a control character sitting invisibly in a string literal is
-// worse to read than the numbers it stands for.
+// Zip header signatures, as byte literals because two of the four bytes are unprintable.
 var (
 	zipLocalHeader   = []byte{'P', 'K', 3, 4}
 	zipCentralHeader = []byte{'P', 'K', 1, 2}
@@ -104,8 +100,7 @@ var (
 
 // patchZipField overwrites a little-endian uint16 at a fixed offset in every header carrying sig.
 //
-// Used to forge archives archive/zip cannot WRITE — an encrypted entry and an unsupported
-// compression method — since only the header field has to be plausible for the refusal to fire.
+// Used to forge archives archive/zip cannot WRITE: an encrypted entry, an unsupported method.
 func patchZipField(raw, sig []byte, offset int, val uint16) {
 	for i := 0; ; {
 		j := bytes.Index(raw[i:], sig)
@@ -118,10 +113,8 @@ func patchZipField(raw, sig []byte, offset int, val uint16) {
 	}
 }
 
-// TestExtractZipMapsEntryKinds — zip has no typeflag, so every kind is inferred from a mode word
-// and a trailing slash. The symlink assertion is the one that matters: a symlink is an ordinary
-// entry whose body is the link target, so reading entries as files produces a layer that looks
-// completely plausible and is wrong in a way nothing downstream can detect.
+// TestExtractZipMapsEntryKinds: zip kinds are inferred from a mode word and a trailing slash. A
+// symlink misread as a file would produce a plausible, undetectably wrong layer.
 func TestExtractZipMapsEntryKinds(t *testing.T) {
 	src := openZip(t, []zipEntry{
 		{name: "lib/"},
@@ -163,8 +156,7 @@ func TestExtractZipMapsEntryKinds(t *testing.T) {
 	}
 }
 
-// TestExtractZipSynthesisesParentDirs — plenty of writers store no directory entries at all, and a
-// tar whose files have no parents is not reliably extractable.
+// TestExtractZipSynthesisesParentDirs: many writers store no directory entries.
 func TestExtractZipSynthesisesParentDirs(t *testing.T) {
 	entries, err := extractZip(openZip(t, []zipEntry{
 		{name: "a/b/c.txt", body: "x"},
@@ -199,9 +191,7 @@ func TestExtractZipSynthesisesParentDirs(t *testing.T) {
 	}
 }
 
-// TestExtractZipNormalisesBackslashSeparators — the format specifies "/", but zips written on
-// Windows do arrive with "\", and treating it as a literal filename character produces one junk
-// file instead of a directory tree.
+// TestExtractZipNormalisesBackslashSeparators: zips written on Windows may use "\".
 func TestExtractZipNormalisesBackslashSeparators(t *testing.T) {
 	entries, err := extractZip(openZip(t, []zipEntry{
 		{name: `dir\sub\file.txt`, body: "x"},
@@ -215,9 +205,8 @@ func TestExtractZipNormalisesBackslashSeparators(t *testing.T) {
 	}
 }
 
-// TestExtractZipRefusesTraversal — the backslash cases are the point. Normalising separators has to
-// happen BEFORE the traversal check, or "..\..\etc\passwd" reads as a single odd filename and
-// sails past a guard that only looks for "../".
+// TestExtractZipRefusesTraversal: the backslash cases pin that separators are normalised BEFORE
+// the traversal check.
 func TestExtractZipRefusesTraversal(t *testing.T) {
 	for _, name := range []string{
 		"../etc/passwd",
@@ -238,9 +227,8 @@ func TestExtractZipRefusesTraversal(t *testing.T) {
 	}
 }
 
-// TestExtractZipRefusesDuplicateNames — duplicates are legal in a zip and common in repacked jars.
-// Picking one silently would mean the layer depended on which, so this refuses; directory repeats
-// stay ordinary.
+// TestExtractZipRefusesDuplicateNames: picking one of two same-named files would be arbitrary.
+// Directory repeats are fine.
 func TestExtractZipRefusesDuplicateNames(t *testing.T) {
 	_, err := extractZip(openZip(t, []zipEntry{
 		{name: "a.txt", body: "first"},
@@ -262,12 +250,10 @@ func TestExtractZipRefusesDuplicateNames(t *testing.T) {
 	}
 }
 
-// TestExtractZipRefusesEncryptedEntries — archive/zip neither supports encryption nor checks the
-// flag, so without this an encrypted entry becomes a layer full of ciphertext.
+// TestExtractZipRefusesEncryptedEntries: archive/zip would otherwise hand back ciphertext.
 func TestExtractZipRefusesEncryptedEntries(t *testing.T) {
 	raw := buildZip(t, []zipEntry{{name: "secret.txt", body: "x"}})
-	// Flags sit at offset 6 in a local header and offset 8 in a central directory header. Only the
-	// latter is read, but both are set so the fixture is not self-contradictory.
+	// Flags sit at offset 6 in a local header and 8 in a central directory header; both are set.
 	patchZipField(raw, zipLocalHeader, 6, zipEncryptedFlag)
 	patchZipField(raw, zipCentralHeader, 8, zipEncryptedFlag)
 
@@ -280,9 +266,7 @@ func TestExtractZipRefusesEncryptedEntries(t *testing.T) {
 	}
 }
 
-// TestExtractZipRefusesUnsupportedMethods — LZMA and friends exist in the wild (7-Zip and some
-// .NET writers emit them); the message should name the method rather than surfacing a bare library
-// error.
+// TestExtractZipRefusesUnsupportedMethods: the error names the compression method.
 func TestExtractZipRefusesUnsupportedMethods(t *testing.T) {
 	const methodLZMA = 14
 	raw := buildZip(t, []zipEntry{{name: "a.txt", body: "x", store: true}})
@@ -299,13 +283,9 @@ func TestExtractZipRefusesUnsupportedMethods(t *testing.T) {
 	}
 }
 
-// TestExtractZipNormalisesWindowsModes — a zip made on Windows records no unix permissions, so
-// archive/zip reports 0666 and normaliseMode lands everything at 0644, executables included.
-//
-// This is pinned deliberately rather than worked around. It is fully reproducible — the input is
-// digest-pinned — just surprising, and the fix belongs in the spec (mode: {file: "0755"}) rather
-// than in a heuristic here, since sniffing content would make the output depend on something other
-// than the declared spec.
+// TestExtractZipNormalisesWindowsModes pins that a Windows zip (no unix permissions) lands
+// everything at 0644, executables included. Deliberate: the fix is `mode` in the spec, not a
+// content-sniffing heuristic.
 func TestExtractZipNormalisesWindowsModes(t *testing.T) {
 	entries, err := extractZip(openZip(t, []zipEntry{
 		{name: "tool.exe", body: "MZ", dosOnly: true},
@@ -322,8 +302,7 @@ func TestExtractZipNormalisesWindowsModes(t *testing.T) {
 	}
 }
 
-// TestExtractZipSubpathAndTarget — the composition users actually write: strip a version-named
-// wrapper directory and land its contents somewhere specific.
+// TestExtractZipSubpathAndTarget: select a wrapper directory's contents and place them at a target.
 func TestExtractZipSubpathAndTarget(t *testing.T) {
 	src := openZip(t, []zipEntry{
 		{name: "plugin-1.2.3/"},
@@ -349,14 +328,13 @@ func TestExtractZipSubpathAndTarget(t *testing.T) {
 		}
 	}
 
-	// A subpath matching nothing is a stall, not a silently empty layer.
+	// A subpath matching nothing is an error, not an empty layer.
 	if _, err := extractZip(src, "opt", "nope", 0); err == nil {
 		t.Error("a subpath matching nothing was accepted")
 	}
 }
 
-// TestAssembleUnpackZip wires the mode through the layer path the reconciler actually uses, rather
-// than testing extractZip alone — collectEntries' switch is where a new mode gets forgotten.
+// TestAssembleUnpackZip goes through collectEntries, where a new mode gets forgotten.
 func TestAssembleUnpackZip(t *testing.T) {
 	src := zipPath(t, []zipEntry{
 		{name: "plugin-1.2.3/lib/a.jar", body: "aaa"},
@@ -374,13 +352,9 @@ func TestAssembleUnpackZip(t *testing.T) {
 	t.Errorf("zip payload did not reach the layer, got %v", entries)
 }
 
-// TestAssembleUnpackZipIsDeterministic is the load-bearing test for this format.
-//
-// The first half is the obvious property: the same archive assembles to the same digest. The second
-// is the one that matters, because zip carries far more incidental variation than tar — entry
-// order, compression method, timestamps, redundant directory entries and permission bits nobody
-// looks at. Two archives with the same logical content must produce the same layer, or the whole
-// premise that the output is a function of the content fails for this format.
+// TestAssembleUnpackZipIsDeterministic: the same archive assembles to the same digest, and so do two
+// archives with the same logical content but different entry order, compression, timestamps,
+// directory entries and ignored permission bits.
 func TestAssembleUnpackZipIsDeterministic(t *testing.T) {
 	digestOf := func(entries []zipEntry) string {
 		t.Helper()

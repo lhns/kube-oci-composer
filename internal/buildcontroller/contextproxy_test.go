@@ -81,11 +81,7 @@ func TestTheRightTokenGetsTheContext(t *testing.T) {
 	}
 }
 
-// TestOneBuildsTokenCannotFetchAnothers is the guard this endpoint exists for.
-//
-// The whole point of proxying is that a build reaches its OWN source and nothing else. If a token
-// minted for one build opened another, this would be exactly the unauthenticated read it replaced,
-// with an extra hop.
+// TestOneBuildsTokenCannotFetchAnothers: a token opens only the build it was minted for.
 func TestOneBuildsTokenCannotFetchAnothers(t *testing.T) {
 	srv := artifact(t, "MINE")
 	mine := buildWithSource("ns", "mine", "src")
@@ -139,8 +135,7 @@ func TestAStaleHashIsRefused(t *testing.T) {
 	}
 }
 
-// TestAnUnknownBuildIs404 — and says nothing more, because enumerating which ImageBuilds exist is
-// itself a small leak and it is free not to.
+// TestAnUnknownBuildIs404, and says nothing more, so ImageBuilds cannot be enumerated.
 func TestAnUnknownBuildIs404(t *testing.T) {
 	p := proxyFor(t)
 	if resp := ask(t, p, "ns", "nope", testHash, "any"); resp.StatusCode != http.StatusNotFound {
@@ -148,8 +143,7 @@ func TestAnUnknownBuildIs404(t *testing.T) {
 	}
 }
 
-// TestASourceRefBuildNeverNamesSourceController is the other half of the guarantee: the endpoint is
-// pointless if the Job still hands the pod a flux-system URL.
+// TestASourceRefBuildNeverNamesSourceController: the Job must point the fetcher at the proxy.
 func TestASourceRefBuildNeverNamesSourceController(t *testing.T) {
 	cfg := sampleConfig()
 	cfg.ContextBaseURL = "http://oci-builder-context.oci-composer.svc:8090"
@@ -171,9 +165,8 @@ func TestASourceRefBuildNeverNamesSourceController(t *testing.T) {
 	}
 }
 
-// TestOnlyTheFetcherHoldsTheToken — the build container runs the user's Dockerfile, and a
-// credential to the context endpoint in its filesystem would hand every RUN line the reach this
-// arrangement exists to remove.
+// TestOnlyTheFetcherHoldsTheToken: the build container runs the user's Dockerfile and must not
+// see it.
 func TestOnlyTheFetcherHoldsTheToken(t *testing.T) {
 	cfg := sampleConfig()
 	cfg.ContextBaseURL = "http://ctx:8090"
@@ -200,9 +193,8 @@ func TestOnlyTheFetcherHoldsTheToken(t *testing.T) {
 	}
 }
 
-// TestFetchAndImageContextsStayDirect is the negative control for the scoping decision. Proxying an
-// arbitrary user URL would make the controller an SSRF amplifier, which is what internal/netguard
-// exists to prevent; those kinds are external by nature and the pod fetches them itself.
+// TestFetchAndImageContextsStayDirect: proxying arbitrary user URLs would make the controller an
+// SSRF amplifier, so those kinds are fetched by the pod itself.
 func TestFetchAndImageContextsStayDirect(t *testing.T) {
 	cfg := sampleConfig()
 	cfg.ContextBaseURL = "http://ctx:8090"

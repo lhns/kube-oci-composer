@@ -10,20 +10,9 @@ import (
 	"testing"
 )
 
-// The two kinds are separate components on purpose (ADR 0004), but they answer the same questions:
-// which failures stall, which wait, how a reference is scoped, how a message is recorded. Nothing
-// made those answers agree, and each way of disagreeing has already happened:
-//
-//   - `event` truncated messages in one controller and not the other, so an over-long message was
-//     rejected by the API server for one kind and shortened for the other. The difference was
-//     invisible because each helper was correct on its own terms.
-//   - the same-namespace refusal and the revision check went into both controllers but were tested
-//     for one, so the second was claimed rather than verified.
-//
-// This is unpackparity_test.go's argument applied to the controllers instead of the unpack modes:
-// a property held in two hand-maintained places needs something that reads both. These tests are
-// deliberately STRUCTURAL — they read the source — because the alternative is standing up two
-// controllers and asserting behaviour twice, which is the duplication being guarded against.
+// The two kinds are separate components (ADR 0004) but must answer the same questions the same
+// way: which failures stall, how references are scoped, how messages are recorded. These tests are
+// deliberately structural (they read both packages' source); behaviour is tested per kind.
 
 // packageOf names which controller a source file belongs to. The composer's package is read from
 // ".", so filepath.Dir is no help.
@@ -58,9 +47,8 @@ func controllerSources(t *testing.T) map[string]string {
 	return out
 }
 
-// TestBothKindsScopeReferencesToTheirOwnNamespace — the tenancy boundary is the same for both, and
-// it is enforced in code rather than in CEL because a CRD validation rule cannot read
-// metadata.namespace. That means nothing but this checks that BOTH controllers do it.
+// TestBothKindsScopeReferencesToTheirOwnNamespace — enforced in code because CEL cannot read
+// metadata.namespace, so only this checks both controllers do it.
 func TestBothKindsScopeReferencesToTheirOwnNamespace(t *testing.T) {
 	want := map[string]string{
 		"resolve.go":               "the composer's layer sourceRef",
@@ -84,8 +72,7 @@ func TestBothKindsScopeReferencesToTheirOwnNamespace(t *testing.T) {
 }
 
 // TestBothKindsHonourAPinnedRevision — sourceRef.revision and spec.context.revision are the same
-// field on the same type. A pin honoured by one kind and ignored by the other is worse than one
-// nobody implements, because the spec looks identical.
+// field on the same type, so both kinds must honour it.
 func TestBothKindsHonourAPinnedRevision(t *testing.T) {
 	found := map[string]bool{}
 	for file, body := range controllerSources(t) {
@@ -102,18 +89,12 @@ func TestBothKindsHonourAPinnedRevision(t *testing.T) {
 }
 
 // TestNeitherKindKeepsItsOwnCopyOfTheSharedHelpers — the plumbing both loops need lives in
-// internal/reconciler. A local re-implementation is how they drifted last time: two `event`
-// helpers, one of which truncated.
+// internal/reconciler; a local copy in either controller can drift.
 func TestNeitherKindKeepsItsOwnCopyOfTheSharedHelpers(t *testing.T) {
-	// Names that belong to internal/reconciler now. A package-level func with one of these names
-	// in either controller is a copy that can drift.
 	shared := map[string]bool{
 		"setCondition": true, "removeCondition": true, "truncate": true,
 		"terminal": true, "pending": true, "isTerminal": true, "isPending": true,
 		"recordHistory": true, "interval": true,
-		// Added with the tag-conflict policy: both kinds now ask a registry what a tag holds, and
-		// both read credentials out of a dockerconfigjson Secret. Two answers to "which host does
-		// this credential cover" is the same class of drift as two `event` helpers.
 		"publishedState": true, "resolvePublished": true, "keychainFromSecret": true,
 		"normaliseHost": true,
 	}
@@ -137,9 +118,8 @@ func TestNeitherKindKeepsItsOwnCopyOfTheSharedHelpers(t *testing.T) {
 	}
 }
 
-// TestBothKindsRecordEventsThroughTheSharedHelper — the API server rejects an over-long event
-// outright rather than truncating it, and the messages that get long are the failures worth
-// reading. One controller truncated and the other did not.
+// TestBothKindsRecordEventsThroughTheSharedHelper — recon.Event truncates, and the API server
+// rejects an over-long event outright.
 func TestBothKindsRecordEventsThroughTheSharedHelper(t *testing.T) {
 	for file, body := range controllerSources(t) {
 		if !strings.Contains(body, "Recorder.Event(") {
@@ -150,18 +130,8 @@ func TestBothKindsRecordEventsThroughTheSharedHelper(t *testing.T) {
 	}
 }
 
-// The Publish/Push parity guard is gone with Publish itself (ADR 0035). It existed because two
-// structs described the same idea and drifted -- push had no history, no ref -- and the fix for that
-// class of bug is now structural: there is one struct, so there is nothing to keep in step.
-
-// TestBothKindsHonourOnConflict — the policy is the same field with the same three values on both
-// kinds, and it must not be enforced on only one.
-//
-// It already was enforced on only one, for the whole life of the ImageBuild kind: `push.immutable`
-// sat in that CRD, defaulted to true, and nothing in internal/buildcontroller read it. An operator
-// who set it believed a tag could not be silently remeaned, and it could (ADR 0029). Structural,
-// because the behavioural half is covered per-kind — what this catches is the enforcement being
-// deleted from one side while the field stays in the schema.
+// TestBothKindsHonourOnConflict — the policy is the same field on both kinds and must be enforced
+// on both (ADR 0029). Catches enforcement deleted from one side while the field stays in the schema.
 func TestBothKindsHonourOnConflict(t *testing.T) {
 	want := map[string]string{
 		"imagecomposition_controller.go": "the composer, which checks before writing any tag",
@@ -190,10 +160,8 @@ func TestBothKindsHonourOnConflict(t *testing.T) {
 	}
 }
 
-// TestBothKindsNameEverythingAfterItsDigest — ADR 0060 is enforced on both kinds or it protects
-// neither reliably: the chart stops configuring keepUntagged on the strength of it, and an untagged
-// manifest from the kind that forgot is then reclaimed by age under a live object. Structural, like
-// the onConflict guard above; the behaviour is tested per kind.
+// TestBothKindsNameEverythingAfterItsDigest — ADR 0060 must hold on both kinds: with keepUntagged
+// off, an untagged manifest from a kind that forgot is reclaimed under a live object.
 func TestBothKindsNameEverythingAfterItsDigest(t *testing.T) {
 	want := map[string]bool{"controller": false, "buildcontroller": false}
 	backfill := map[string]bool{"controller": false, "buildcontroller": false}
@@ -223,9 +191,8 @@ func TestBothKindsNameEverythingAfterItsDigest(t *testing.T) {
 	}
 }
 
-// TestBothKindsRecordAKeptTagInStatus — Keep is the one outcome where an object is Ready while NOT
-// having published what its spec produces. Without a record in status that is a silent divergence,
-// which is the ADR 0026 failure shape exactly.
+// TestBothKindsRecordAKeptTagInStatus — under Keep an object is Ready without publishing what its
+// spec produces; without a status record that is a silent divergence (ADR 0026).
 func TestBothKindsRecordAKeptTagInStatus(t *testing.T) {
 	found := map[string]bool{}
 	for file, body := range controllerSources(t) {
@@ -242,17 +209,9 @@ func TestBothKindsRecordAKeptTagInStatus(t *testing.T) {
 	}
 }
 
-// TestNeitherBinaryCachesSecrets — both controllers read Secrets by name and neither has RBAC to
-// list or watch them.
-//
-// A controller-runtime cached client WATCHES the type it is asked to Get, so a cached Secret read
-// does not merely waste memory holding every Secret in the cluster: it fails outright against RBAC
-// that grants only get, and it fails at the reflector rather than at the call, which surfaces as a
-// controller that starts, reports healthy, and never reconciles.
-//
-// The composer disabled this from the start; the builder did not, and got away with it only because
-// nothing in it read a Secret until the default push credential existed. Then every build failed
-// with `secrets is forbidden`, and the message named the reflector rather than the read.
+// TestNeitherBinaryCachesSecrets — both controllers have RBAC to get Secrets but not list/watch.
+// A cached client watches the type it Gets, so a cached Secret read fails at the reflector: the
+// controller looks healthy and never reconciles.
 func TestNeitherBinaryCachesSecrets(t *testing.T) {
 	for _, main := range []string{"../../cmd/oci-composer/main.go", "../../cmd/oci-builder/main.go"} {
 		body, err := os.ReadFile(main)

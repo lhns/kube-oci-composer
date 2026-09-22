@@ -17,13 +17,8 @@ import (
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 )
 
-// push.immutable was in this kind's CRD from the day it shipped and NOTHING read it. BuildKit
-// pushed type=image,push=true over whatever the tag held, so an operator who set it believed a tag
-// could not be remeaned while it silently could. These tests are what make the field real; each
-// asserts the behaviour rather than the presence of the code.
-//
-// The registry is stubbed rather than run, because what is under test is which decision the
-// controller reaches from a given registry answer.
+// Tests for spec.push.onConflict on ImageBuild. The registry is stubbed: what is under test is the
+// decision the controller reaches from a given registry answer.
 
 // tagRegistry answers HEAD for the tags it is given and 404s for everything else.
 func tagRegistry(t *testing.T, tags map[string]string) *httptest.Server {
@@ -66,9 +61,7 @@ func pushingTo(t *testing.T, r *ImageBuildReconciler, srv *httptest.Server) stri
 
 const otherDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 
-// Fail must refuse BEFORE the Job exists. Checking afterwards would be no check at all: BuildKit
-// pushes from inside the Job, so by the time a result comes back the tag has already moved and
-// there is no undo.
+// TestFailRefusesAConflictingTagAndStartsNoJob: the pre-flight refuses before any Job exists.
 func TestFailRefusesAConflictingTagAndStartsNoJob(t *testing.T) {
 	reg := tagRegistry(t, map[string]string{"v1": otherDigest})
 	obj := buildOf(t, func(b *ociv1alpha1.ImageBuild) {
@@ -97,8 +90,7 @@ func TestFailRefusesAConflictingTagAndStartsNoJob(t *testing.T) {
 	}
 }
 
-// The deprecated field must keep working, or upgrading silently unprotects every object that set it
-// before onConflict existed.
+// TestTheDeprecatedImmutableFieldStillRefuses, or upgrading silently unprotects old objects.
 func TestTheDeprecatedImmutableFieldStillRefuses(t *testing.T) {
 	reg := tagRegistry(t, map[string]string{"v1": otherDigest})
 	obj := buildOf(t, func(b *ociv1alpha1.ImageBuild) {
@@ -118,9 +110,7 @@ func TestTheDeprecatedImmutableFieldStillRefuses(t *testing.T) {
 	}
 }
 
-// Overwrite is the old immutable:false and must still move the tag. It also must not ask the
-// registry anything: a permissive policy that broke when reads failed would be a regression for
-// every object already using it.
+// TestOverwriteBuildsOverAnExistingTag: Overwrite (the old immutable: false) still moves the tag.
 func TestOverwriteBuildsOverAnExistingTag(t *testing.T) {
 	reg := tagRegistry(t, map[string]string{"v1": otherDigest})
 	obj := buildOf(t, func(b *ociv1alpha1.ImageBuild) {
@@ -139,9 +129,8 @@ func TestOverwriteBuildsOverAnExistingTag(t *testing.T) {
 	}
 }
 
-// Keep leaves the tag alone, runs no build at all, and reports Ready -- and records the divergence,
-// because an object that is Ready while not doing what its spec says is the ADR 0026 failure shape
-// unless something in status says so.
+// TestKeepLeavesTheTagAloneAndSaysSo: no build, Ready, and status.conflict records the divergence
+// (ADR 0026).
 func TestKeepLeavesTheTagAloneAndSaysSo(t *testing.T) {
 	reg := tagRegistry(t, map[string]string{"v1": otherDigest})
 	obj := buildOf(t, func(b *ociv1alpha1.ImageBuild) {
@@ -178,8 +167,7 @@ func TestKeepLeavesTheTagAloneAndSaysSo(t *testing.T) {
 	}
 }
 
-// A tag that does not exist yet is the ordinary first build, and must not be mistaken for a
-// conflict. Getting this wrong would wedge every new object under the default policy.
+// TestAnAbsentTagIsNotAConflict: the ordinary first build must not wedge under the default policy.
 func TestAnAbsentTagIsNotAConflict(t *testing.T) {
 	reg := tagRegistry(t, nil)
 	obj := buildOf(t, func(b *ociv1alpha1.ImageBuild) {
@@ -198,8 +186,8 @@ func TestAnAbsentTagIsNotAConflict(t *testing.T) {
 	}
 }
 
-// A tag pointing at THIS object's own recorded digest is its own last build, not somebody else's
-// content. Treating it as a conflict would make every rebuild after a spec change terminal.
+// TestATagHoldingOurOwnDigestIsNotAConflict for the pre-flight, or every rebuild after a spec
+// change would be terminal. applyTags decides exactly afterwards.
 func TestATagHoldingOurOwnDigestIsNotAConflict(t *testing.T) {
 	const ours = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
 	reg := tagRegistry(t, map[string]string{"v1": ours})
@@ -220,7 +208,8 @@ func TestATagHoldingOurOwnDigestIsNotAConflict(t *testing.T) {
 	}
 }
 
-// The precedence rule, which is what makes the upgrade non-breaking in both directions.
+// TestOnConflictWinsOverTheDeprecatedField pins the precedence rule that keeps upgrades
+// non-breaking.
 func TestOnConflictWinsOverTheDeprecatedField(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -249,8 +238,7 @@ func TestOnConflictWinsOverTheDeprecatedField(t *testing.T) {
 	}
 }
 
-// The shared helper the policy is applied through. Map iteration order must not leak into which tag
-// gets reported, or an unchanged object would name a different tag on each reconcile.
+// TestConflictReportingIsDeterministic: map order must not change which tag is reported.
 func TestConflictReportingIsDeterministic(t *testing.T) {
 	p := recon.Published{
 		Tags:   map[string]string{"a": otherDigest, "b": otherDigest, "c": otherDigest},
@@ -274,16 +262,8 @@ func mustUpdate(t *testing.T, r *ImageBuildReconciler, obj *ociv1alpha1.ImageBui
 	}
 }
 
-// A missing build cache must never fail a build, and for as long as the e2e ran against registry:2
-// this was true only by accident.
-//
-// BuildKit configures the registry cache importer eagerly and treats a reference it cannot resolve
-// as a fatal error rather than a warning. registry:2's answer for a missing manifest happened to be
-// one BuildKit tolerated; zot's is not, and every FIRST build failed the moment the e2e registry
-// changed -- with an error about a cache, on a build that had no cache because it had never run.
-//
-// Asserted on the rendered argv rather than through a registry, because what went wrong was which
-// flags were passed, not what any registry replied.
+// TestAMissingCacheIsNotImported: BuildKit fails the build on an unresolvable cache import, which
+// broke every first build against zot. Asserted on the argv.
 func TestAMissingCacheIsNotImported(t *testing.T) {
 	obj := buildOf(t, nil)
 
@@ -303,12 +283,8 @@ func TestAMissingCacheIsNotImported(t *testing.T) {
 	}
 }
 
-// BuildKit emits DOCKER media types unless told otherwise, and an OCI-native registry answers a
-// manifest PUT with 415 Unsupported Media Type. That is what zot did, and it failed every build.
-//
-// The Docker types were never chosen here -- they were BuildKit's default and nothing had
-// contradicted it. The composer already writes OCI manifests, so this also stops the two kinds
-// putting different media types into one registry.
+// TestBuildsPushOCIMediaTypes: BuildKit's default Docker media types are rejected by OCI-native
+// registries such as zot (415).
 func TestBuildsPushOCIMediaTypes(t *testing.T) {
 	argv := strings.Join(buildctlArgs(buildOf(t, nil), sampleConfig(), sampleRepo, true), " ")
 
@@ -322,13 +298,8 @@ func TestBuildsPushOCIMediaTypes(t *testing.T) {
 	}
 }
 
-// The build pod cannot mount the operator's credential directly: a pod only mounts Secrets from its
-// own namespace, and the build runs in the OBJECT's namespace because that is where its build
-// secrets and its code live.
-//
-// So the controller copies it, and the copy's lifetime is the point. Owned by the ImageBuild and
-// named after the Job, it is garbage-collected when the object goes rather than left behind as a
-// permanent per-namespace copy of the operator's registry password.
+// TestTheOperatorCredentialIsCopiedForTheBuildAndOwnedByIt: a pod mounts Secrets only from its own
+// namespace, so the credential is copied there, and its owner reference bounds its lifetime.
 func TestTheOperatorCredentialIsCopiedForTheBuildAndOwnedByIt(t *testing.T) {
 	reg := tagRegistry(t, nil)
 	obj := buildOf(t, func(b *ociv1alpha1.ImageBuild) { b.Spec.Push.Tags = []string{"v1"} })
@@ -363,8 +334,7 @@ func TestTheOperatorCredentialIsCopiedForTheBuildAndOwnedByIt(t *testing.T) {
 			copied.Namespace)
 	}
 
-	// The ownership is what bounds the exposure. Without it this is a permanent copy of the
-	// operator's registry credential in a tenant namespace.
+	// Ownership is what bounds the exposure.
 	owners := copied.GetOwnerReferences()
 	if len(owners) != 1 || owners[0].Kind != "ImageBuild" || owners[0].Name != obj.Name {
 		t.Fatalf("owner references = %+v, want the ImageBuild; without one the credential outlives "+
@@ -376,8 +346,8 @@ func TestTheOperatorCredentialIsCopiedForTheBuildAndOwnedByIt(t *testing.T) {
 	}
 }
 
-// A build publishing somewhere the operator's credential has no business going gets nothing, and the
-// controller must not leave a copy of that credential lying in the namespace either.
+// TestNoCredentialIsCopiedForARegistryTheObjectChose: no copy of the operator's credential for a
+// registry it does not own.
 func TestNoCredentialIsCopiedForARegistryTheObjectChose(t *testing.T) {
 	reg := tagRegistry(t, nil)
 	obj := buildOf(t, func(b *ociv1alpha1.ImageBuild) {

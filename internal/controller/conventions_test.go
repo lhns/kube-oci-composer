@@ -16,9 +16,8 @@ import (
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 )
 
-// These tests assert the behaviours a Flux-ecosystem controller is expected to have. They are
-// easy to get subtly wrong and nothing else would notice: a missing observedGeneration makes
-// `kubectl wait` lie, and a Stalled object that still requeues turns a bad spec into a hot loop.
+// Behaviours a Flux-ecosystem controller is expected to have, which nothing else would catch
+// regressing.
 
 func reconcileOnce(t *testing.T, r *ImageCompositionReconciler, obj *ociv1alpha1.ImageComposition) (ctrl.Result, error) {
 	t.Helper()
@@ -84,9 +83,8 @@ func TestFinalizerIsAdded(t *testing.T) {
 	}
 }
 
-// TestStalledDoesNotRequeue is the split that most defines whether a controller feels
-// Flux-shaped. A terminal error must not be retried on a timer — the fix is a spec change, and
-// the resulting watch event is what wakes it.
+// TestStalledDoesNotRequeue — a terminal error must not be retried on a timer: the fix is a spec
+// change, and its watch event is the wake-up.
 func TestStalledDoesNotRequeue(t *testing.T) {
 	url, _ := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("stalled", urlLayer("core", url, "sha256:"+strings.Repeat("0", 64), "/core"))
@@ -96,9 +94,7 @@ func TestStalledDoesNotRequeue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a terminal error must not be returned to the queue: %v", err)
 	}
-	// An empty Result is the whole assertion: no requeue of any kind. Comparing the struct rather
-	// than named fields also keeps this honest as ctrl.Result evolves — Requeue is deprecated in
-	// favour of RequeueAfter, and checking either one alone would quietly stop covering the other.
+	// Compare the whole struct so both Requeue and RequeueAfter are covered.
 	if res != (ctrl.Result{}) {
 		t.Fatalf("stalled object requeued: %+v", res)
 	}
@@ -184,11 +180,8 @@ func TestReconcileRequestAnnotationIsEchoed(t *testing.T) {
 }
 
 // TestFailedReconcileStillEchoesAndObserves — both fields describe the pass, not its outcome.
-//
-// Echoing only on success makes `flux reconcile` wait for a token that never arrives and then
-// report a timeout, hiding the failure the object is already describing. A stale
-// observedGeneration reads to kstatus as "still working" rather than "failed". Both are worst
-// exactly when something is broken, which is when someone is looking.
+// Otherwise `flux reconcile` times out instead of reporting the failure, and kstatus reads a
+// stale observedGeneration as "still working".
 func TestFailedReconcileStillEchoesAndObserves(t *testing.T) {
 	url, _ := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("failed-echo", urlLayer("core", url, "sha256:"+strings.Repeat("0", 64), "/core"))

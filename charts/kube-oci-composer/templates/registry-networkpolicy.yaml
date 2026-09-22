@@ -1,18 +1,9 @@
 {{- if and .Values.registry.enabled .Values.registry.networkPolicy.enabled }}
 {{- /*
-A CONNECTIVITY guarantee, not a security control.
-
-Restricting which namespace may reach the registry adds no authority: reads are anonymous by design
-(threat I5, because a kubelet pulls without credentials) and writes need the generated password.
-What it buys is builds that work -- a build Job runs in its OBJECT's namespace, so every build
-crosses a namespace boundary to push, and a default-deny cluster blocks it. Hence the permissive
-default.
-
-Before narrowing it, two things. Once any policy selects the registry pod, that pod goes from
-"everything allowed" to "only what is listed", so this file must be COMPLETE rather than merely
-correct. And image pulls come from the KUBELET, in the node's network namespace, which no
-podSelector can ever match -- that is what nodeCIDRs is for, and omitting it where pods and nodes
-sit on different networks turns every pull into a timeout that looks like a broken registry.
+A CONNECTIVITY guarantee, not a security control (reads are anonymous by design, threat I5; writes
+need the password): build Jobs push from their object's namespace. Once selected, the registry pod
+admits only what is listed, so this must be complete. Kubelet pulls come from the node network and
+need nodeCIDRs.
 */}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -24,11 +15,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      {{- /*
-      Every pod serving the registry API, writer and read replicas alike. Selecting only the writer
-      would leave the replicas with no policy at all -- which in a default-deny cluster means no
-      pulls reach them, and the Service would blackhole a share of every request.
-      */}}
+      {{- /* Writer and read replicas alike, or default-deny blackholes the replicas. */}}
       {{- include "kube-oci-composer.registryServeSelectorLabels" . | nindent 6 }}
   policyTypes:
     - Ingress
@@ -40,9 +27,7 @@ spec:
         {{- include "kube-oci-composer.namespaceIngressFrom"
             (dict "allowed" .Values.registry.networkPolicy.allowedNamespaces
                   "namespace" .Release.Namespace) | trim | nindent 8 }}
-        {{- /*
-        Node traffic, for kubelet image pulls. Not a pod, so not selectable any other way.
-        */}}
+        {{- /* Node traffic, for kubelet image pulls. */}}
         {{- range .Values.registry.networkPolicy.nodeCIDRs }}
         - ipBlock:
             cidr: {{ . | quote }}

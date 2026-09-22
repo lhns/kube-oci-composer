@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """Assert the chart's bundled retention policy actually protects something.
 
-Every one of these four settings fails by silently protecting NOTHING rather than by erroring, which
-is how they were found: seven e2e runs that read like the registry was broken, when the policy simply
-matched nothing. A rendered config that looks plausible is not evidence. See ADR 0031.
-
-Reads `helm template` output on stdin.
+Each setting checked here fails by silently protecting nothing rather than by erroring (ADR 0031).
+Reads `helm template` output on stdin; an optional argument is a Markdown file whose first ```json
+block must agree with the rendered config.
 """
 
 import io
@@ -16,9 +14,7 @@ import yaml
 
 
 def config_from(stream):
-    # Read stdin to EOF before parsing. Returning early leaves the writer with a closed pipe, and
-    # `helm template ... | this` then dies of SIGPIPE -- exit 141, under `set -o pipefail`, after
-    # this script has already printed OK. The failure looks like the check failing when it passed.
+    # Read to EOF first: returning early would SIGPIPE `helm template` and fail a pipefail pipeline.
     for doc in yaml.safe_load_all(stream.read()):
         if not doc or doc.get("kind") != "ConfigMap":
             continue
@@ -35,23 +31,20 @@ def problems(cfg):
     policy = policy_of(cfg)
     found = []
 
-    # Pull recency is only recorded when the metadata database exists. Without it every tag expires
-    # however often it is fetched, and the refresh becomes a no-op that logs success.
+    # Without the search extension no pull is recorded, and every tag expires however often pulled.
     if not cfg.get("extensions", {}).get("search", {}).get("enable"):
         found.append(
             "extensions.search is off, so no pull is ever recorded and pulledWithin matches nothing"
         )
 
-    # zot retains `patterns` AND (pulledWithin OR ...), so an entry without patterns matches no tags.
+    # zot keeps `patterns` AND (pulledWithin OR ...): an entry without patterns matches no tag.
     keep_tags = policy.get("keepTags") or []
     if not keep_tags:
         found.append("no keepTags entry, so every tag is a deletion candidate")
     for entry in keep_tags:
         if not entry.get("patterns"):
             found.append("a keepTags entry has no patterns, so it protects no tag at all")
-    # ONE entry carrying both rules. Rules within an entry are OR'ed, but zot stops at the first
-    # entry whose patterns match, so a second entry also matching `.*` is dead configuration that
-    # reads as protection -- which is exactly how `pushedWithin` came to be inert. ADR 0057.
+    # ONE entry with both rules: zot stops at the first entry whose patterns match. ADR 0057.
     if len(keep_tags) > 1:
         found.append(
             f"{len(keep_tags)} keepTags entries; only the first whose patterns match is ever "
@@ -63,10 +56,8 @@ def problems(cfg):
         found.append("the keepTags entry does not key on pushedWithin, so a tag pushed and never "
                      "pulled is protected by nothing")
 
-    # The controllers name everything they publish after its own digest (ADR 0060), so nothing live
-    # is untagged -- and configuring keepUntagged is what made zot keep every retired manifest
-    # forever: the last tag going deletes the digest's statistics, and a statistics-less untagged
-    # manifest is then retained without being evaluated. So the shipped policy must not have it.
+    # Nothing live is untagged (ADR 0060), and a configured keepUntagged keeps every retired
+    # manifest forever, so the default policy must not have it.
     if "keepUntagged" in policy:
         found.append("keepUntagged is configured, which keeps every manifest whose last tag expired "
                      "-- and every layer it references -- forever (ADR 0060)")
@@ -74,8 +65,7 @@ def problems(cfg):
     if policy.get("deleteUntagged") is not True:
         found.append("deleteUntagged is not true, so a manifest whose last tag expired is never "
                      "reclaimed")
-    # gcDelay is the ONLY cover for a build's output between being pushed and being named
-    # (ADR 0054). zot's default is shorter than that gap under load.
+    # gcDelay is the only cover for a build's output between push and naming (ADR 0054).
     if not cfg["storage"].get("gcDelay"):
         found.append("gcDelay is not set, so nothing covers a build's output between its push and "
                      "the controller naming it")
@@ -100,10 +90,7 @@ def documented_config(path):
 def documented_drift(doc, rendered, path=""):
     """Every key the doc shows must equal what the chart renders.
 
-    A SUBSET match, deliberately: the page is abridged -- readTimeout, TLS and auth have sections of
-    their own -- so omitting a key is fine and contradicting one is not. It published the dead
-    two-entry keepTags shape for a while under the words "This is what the chart renders", which an
-    operator running their own zot would have copied.
+    A subset match: the page is abridged, so omitting a key is fine and contradicting one is not.
     """
     found = []
     if isinstance(doc, dict):

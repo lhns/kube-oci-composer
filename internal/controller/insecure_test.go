@@ -6,18 +6,10 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 )
 
-// TestPlainHTTPPushesNeedTheOperatorToSaySo is the regression test for a defect the unit suite was
-// structurally incapable of catching.
-//
-// Removing the embedded serving endpoint (ADR 0035) removed the only plaintext push path this
-// controller had: pushes were previously either loopback -- always HTTP -- or to a real registry
-// over HTTPS, so there was no third case and the controller never consulted --insecure-registry.
-// The default case is now a bundled registry on a Service or a NodePort, neither of which has a
-// certificate, so every publish failed with "server gave HTTP response to HTTPS client".
-//
-// The whole suite stayed green through that, because go-containerregistry treats localhost and
-// 127.0.0.1 as insecure on its own and every unit test's registry is an httptest server on
-// loopback. Testing the DECISION rather than the transport is what makes this checkable here.
+// TestPlainHTTPPushesNeedTheOperatorToSaySo pins that plain HTTP is used exactly for hosts on
+// --insecure-registry. It tests the decision rather than the transport because
+// go-containerregistry treats loopback as insecure on its own, so every other unit test's
+// httptest registry would pass regardless.
 func TestPlainHTTPPushesNeedTheOperatorToSaySo(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -32,7 +24,6 @@ func TestPlainHTTPPushesNeedTheOperatorToSaySo(t *testing.T) {
 			want:     true,
 		},
 		{
-			// The failure that reached a cluster: the flag rendered, and nothing read it.
 			name:     "nothing configured",
 			insecure: nil,
 			repo:     "oci.internal:5000/team-a/app",
@@ -66,8 +57,7 @@ func TestPlainHTTPPushesNeedTheOperatorToSaySo(t *testing.T) {
 			if got != tc.want {
 				t.Fatalf("plain HTTP allowed = %v, want %v for %q", got, tc.want, tc.repo)
 			}
-			// And the option really produces an http scheme, so this asserts the outcome rather
-			// than the presence of an opaque value in a slice.
+			// Assert the resulting scheme, not just that some option was returned.
 			if tc.want {
 				repo, err := name.NewRepository(tc.repo, r.refOptions(tc.repo)...)
 				if err != nil {

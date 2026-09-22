@@ -15,12 +15,8 @@ import (
 )
 
 // runFetchContext is the init container: it puts an ImageBuild's context on disk for buildctl.
-//
-// Its own flag set, not the controller's: one binary so one image covers both and the fetcher's
-// digest is the operator's own, but no shared configuration -- this process has no cluster access.
-//
-// Flags rather than a serialised plan, so `kubectl describe pod` shows exactly what this build was
-// told to fetch. Nothing secret is ever passed here.
+// Its own flag set: this process has no cluster access. Flags rather than a serialised plan, so
+// `kubectl describe pod` shows what was fetched; nothing secret is passed as a flag.
 func runFetchContext(args []string) {
 	fs := flag.NewFlagSet("fetch-context", flag.ExitOnError)
 	var opts fetchcontext.Options
@@ -39,8 +35,7 @@ func runFetchContext(args []string) {
 		"File holding the bearer token for the controller's context endpoint.")
 	_ = fs.Parse(args)
 
-	// Read from a file, never passed as a flag: argv is visible in `kubectl describe pod` and in
-	// every process listing inside the pod, and this is a credential.
+	// A file, never a flag: argv is visible in `kubectl describe pod` and process listings.
 	if *tokenFile != "" {
 		raw, err := os.ReadFile(*tokenFile)
 		if err != nil {
@@ -53,8 +48,7 @@ func runFetchContext(args []string) {
 	if err := fetchcontext.Run(context.Background(), opts); err != nil {
 		fmt.Fprintln(os.Stderr, "fetching the build context:", err)
 
-		// A digest mismatch exits distinguishably, so the controller can report it as a spec
-		// problem rather than as "the build failed". Everything else is an ordinary failure.
+		// A digest mismatch exits distinguishably, as a spec problem.
 		var mismatch *fetchcontext.MismatchError
 		if errors.As(err, &mismatch) {
 			os.Exit(fetchcontext.ExitDigestMismatch)
@@ -63,15 +57,10 @@ func runFetchContext(args []string) {
 	}
 }
 
-// guardedClient is the HTTP client the CONTROLLER uses to read a Dockerfile out of a context.
-//
-// Link-local is refused unconditionally -- that is where every major cloud serves credentials --
-// and the rest of the private ranges only under --fetch-deny-private. Same balance as the composer:
-// an artifact server on a private address is an ordinary source, and a guard that refuses those is
-// a guard people switch off. See ADR 0036.
-//
-// Enforced in the dialer rather than by inspecting the URL, so a hostname resolving to a blocked
-// address, a redirect to one, and a DNS rebind are all caught. None of those is visible in the URL.
+// guardedClient is the HTTP client the controller uses to read a Dockerfile out of a context.
+// Link-local is always refused (cloud metadata credentials); other private ranges only under
+// --fetch-deny-private. Enforced in the dialer, so resolved names, redirects and DNS rebinds are
+// all caught. ADR 0036.
 func guardedClient(denyPrivate bool) *http.Client {
 	return &http.Client{
 		Timeout:   2 * time.Minute,

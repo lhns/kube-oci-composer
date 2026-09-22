@@ -17,12 +17,8 @@ func withCache(t *testing.T, r *ImageCompositionReconciler, remote store.Store) 
 	r.Cache = c
 }
 
-// TestRestartRebuildsFromCacheNotUpstream is the cold-start case the remote tier exists for.
-//
-// A restarted controller has an empty serving store, so it must rebuild and republish before it
-// can serve anything. Without a shared cache that means pulling every layer from upstream again,
-// which for a real artifact is tens of megabytes and the difference between a pod being unready
-// for seconds and for minutes.
+// TestRestartRebuildsFromCacheNotUpstream pins the cold start the remote cache tier exists for: a
+// restarted controller with an empty serving store rebuilds from the shared cache, not upstream.
 func TestRestartRebuildsFromCacheNotUpstream(t *testing.T) {
 	origin := newCountingOrigin(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("restart-cache", urlLayer("core", origin.url, origin.digest, "/core"))

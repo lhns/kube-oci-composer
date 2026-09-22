@@ -1,27 +1,9 @@
 {{- if .Values.registry.enabled }}
 {{- /*
-The bundled registry, ON by default.
-
-ADR 0030 makes a real registry the serving surface for both kinds, which would otherwise turn "helm
-install and you are done" into "helm install, then go and run a registry". Bundling one keeps
-installation a single command for anyone who has not already got one.
-
-WHAT THE OPERATOR OWNS once this is on: the volume, and backing it up. For ImageComposition that is a
-convenience, since every artifact is rebuildable from its spec. For ImageBuild the registry is a
-SYSTEM OF RECORD -- a rebuild may not reproduce the digest (ADR 0025) -- so losing this volume loses
-those images. See docs/registry.md.
-
-TWO CONFIGURATIONS, and the difference between them is the whole of ADR 0041.
-
-zot serialises repository writes with an IN-PROCESS mutex: a push is a read-modify-write of
-<repo>/index.json, and nothing coordinates two processes doing it at once. Measured, three instances
-over one store lost 2-4% of tags that had returned 201 (test/spike). Garbage collection is a writer
-too -- it rewrites index.json to drop untagged manifests -- so an instance that only serves pulls is
-still a mutator if it collects.
-
-So exactly one instance may mutate: it takes every push, and it is the only one with `gc` and a
-retention policy. Read replicas get the same store and the same metadata database with `gc` off and
-no policy, and they only ever serve.
+zot's configuration, one per role (ADR 0041). zot serialises repository writes with an in-process
+mutex, so two processes writing one store lose tags (measured 2-4%, test/spike), and GC is a write
+too. So exactly one instance mutates -- it takes every push and alone has `gc` and the retention
+policy -- and read replicas get the same store and metadata database with `gc` off.
 */}}
 {{- $roles := list (dict "name" (include "kube-oci-composer.registryFullname" .) "component" "registry" "mutator" true) }}
 {{- if gt (int .Values.registry.readReplicas) 0 }}
@@ -55,12 +37,7 @@ data:
         {{- /* Runs inside zot's registry-wide write lock; the knob for slow concurrent pushes (ADR 0047). */}}
         "dedupe": {{ $.Values.registry.storage.dedupe }},
         {{- if eq $.Values.registry.storage.driver "s3" }}
-        {{- /*
-        No accesskey/secretkey here. The driver honours the standard AWS environment chain, and the
-        credentials are injected as env from a Secret -- a ConfigMap is visible in every
-        `kubectl describe`, which is the same rule TestChartCredentialsAreNotFlags enforces for the
-        composer's own S3.
-        */}}
+        {{- /* No keys here: credentials come from the AWS env chain via a Secret, never a ConfigMap. */}}
         "storageDriver": {
           "name": "s3",
           "rootdirectory": {{ $.Values.registry.storage.s3.rootDirectory | quote }},
@@ -101,18 +78,9 @@ data:
         "gcInterval": {{ include "kube-oci-composer.gcInterval" $ | quote }},
         {{- with $.Values.registry.retention.gcMaxSchedulerDelay }}
         {{- /*
-        How long a collection task may be held back before it runs. zot draws a fresh random delay
-        up to this for EVERY repository's task, so a full pass over the registry takes roughly
-        (repositories x this / 2) -- which is why it is the thing that decides how soon anything is
-        actually collected, far more than gcInterval.
-
-        Unset in production on purpose: the jitter exists so a registry holding thousands of
-        repositories does not collect them all at once.
-
-        zot marks the field "not configurable by the end user". It is reachable because the config
-        is unmarshalled with viper/mapstructure, which maps by field name and ignores the yaml tag
-        that hides it -- not because it is a supported interface. Setting it is a test's business,
-        and if a zot upgrade removes it the only consequence is waiting the default 30s again.
+        Test-only. zot marks this field not user-configurable; it is reachable only because
+        viper/mapstructure ignores the yaml tag hiding it. If an upgrade removes it, the default
+        30s applies again.
         */}}
         "gcMaxSchedulerDelay": {{ . | quote }},
         {{- end }}
@@ -123,28 +91,10 @@ data:
               "repositories": {{ toJson $.Values.registry.retention.repositories }},
               "deleteUntagged": {{ $.Values.registry.retention.deleteUntagged }},
               {{- /*
-              ONE entry carrying BOTH rules, and it has to be one entry.
-
-              zot's getTagPolicy returns on the FIRST pattern that matches:
-
-                  for idx, tagPolicy := range tagPolicies {
-                      if p.regex.MatchesListOfRegex(tag, tagPolicy.Patterns) {
-                          return tagPolicy, idx, nil
-                      }
-                  }
-
-              so a second entry whose patterns are also ".*" is never reached. This was written as
-              two entries and only pulledWithin was ever in force -- which is not what the config
-              said, and left a tag that had been pushed and never pulled protected by nothing.
-
-              Rules WITHIN an entry are OR-ed ("we retain candidates if any of the below rules are
-              met"), so one entry with both is the configuration that does what two entries looked
-              like they did. Verified against zot v2.1.21; see ADR 0057.
-
-              Push recency only ever helps brand-new content: zot records a push time the first
-              time it sees a digest and never updates it, so republishing the same digest renews
-              nothing, and an image the refresher is already touching has a more recent pull than
-              push regardless.
+              ONE keepTags entry carrying both rules. zot's getTagPolicy returns the FIRST entry
+              whose patterns match, so a second ".*" entry is never reached; rules within an entry
+              are OR-ed. Verified against zot v2.1.21, ADR 0057. pushedWithin only helps brand-new
+              content: zot records a digest's push time once and never renews it.
               */}}
               "keepTags": [
                 {
@@ -155,14 +105,9 @@ data:
               ]
               {{- if $.Values.registry.retention.keepUntagged }},
               {{- /*
-              Only when asked for, because configuring it at all is what makes zot keep, forever,
-              every manifest that ever carried a tag: removing the last tag deletes the digest's
-              statistics, and with keepUntagged configured a statistics-less untagged manifest is
-              retained without being evaluated. The layers it references are never freed. See
-              values.yaml and ADR 0060.
-
-              Pull recency alone would leave freshly pushed untagged content matching NOTHING, so
-              when it is configured it carries push recency too.
+              Only when asked for: configured at all, zot keeps every formerly tagged manifest (and
+              its layers) forever. See values.yaml and ADR 0060. Push recency is included so fresh
+              untagged content matches something.
               */}}
               "keepUntagged": {
                 "pulledWithin": {{ $.Values.retention.window | quote }},
@@ -173,11 +118,7 @@ data:
           ]
         }
         {{- else }}
-        {{- /*
-        A read replica collects nothing. Collection rewrites index.json, which would make this a
-        second mutator and reintroduce exactly the loss ADR 0041 measured -- content reclaimed while
-        it was being actively refreshed.
-        */}}
+        {{- /* A read replica must not collect: that would make it a second mutator (ADR 0041). */}}
         "gc": false
         {{- end }}
       },
@@ -185,31 +126,22 @@ data:
         "address": "0.0.0.0",
         "port": "5000",
         {{- /*
-        Emitted ALWAYS: absent, zot's CLI injects 60s, and Go's ReadTimeout bounds the whole request
-        including time queued behind the registry-wide upload lock, so large layers stop being
-        pushable at all. ADR 0047.
+        Always emitted: absent, zot injects 60s for the WHOLE request, including time queued behind
+        the upload lock, and large layers become unpushable. ADR 0047.
         */}}
         "readTimeout": {{ $.Values.registry.readTimeout | quote }}
         {{- if $.Values.registry.tls.enabled }},
         {{- /*
-        http.tls, NOT http.tls.cacert.
-
-        One word apart and opposite meanings. This is the server's own certificate. `cacert` in the
-        same block is zot's CLIENT CA -- setting it demands a client certificate from every caller,
-        including the kubelet, which has none, and every pull in the cluster stops.
+        http.tls is the server certificate. Do NOT set http.tls.cacert: that is zot's CLIENT CA and
+        demands a client certificate from every caller, including the kubelet.
         */}}
         "tls": { "cert": "/etc/zot/tls/tls.crt", "key": "/etc/zot/tls/tls.key" }
         {{- end }}
         {{- if $.Values.registry.auth.enabled }},
         "auth": { "htpasswd": { "path": "/etc/zot/auth/htpasswd" } },
         {{- /*
-          Anonymous READ, authenticated WRITE, enforced by the registry itself with no proxy in
-          front. Reads are open in the cluster exactly as the embedded serving endpoint's were --
-          a kubelet pulls without credentials, so anything else breaks image pulls.
-
-          Kept on read replicas too. They are not supposed to receive writes -- no Service routes
-          any to them -- but a replica that would ACCEPT an anonymous push if something reached it
-          directly is a replica one port-forward away from being a second mutator.
+          Anonymous read (a kubelet pulls without credentials), authenticated write. Kept on read
+          replicas too, so one reached directly still refuses anonymous pushes.
         */}}
         "accessControl": {
           "repositories": {
@@ -227,13 +159,9 @@ data:
         {{- end }}
       },
       {{- /*
-        NOT optional, and the single easiest thing to remove while believing it is decoration.
-        Pull-recency retention needs the registry to have RECORDED a pull, and that metadata lives
-        here. Without it `pulledWithin` matches nothing and every tag expires however often it is
-        fetched -- silently, and in the direction that deletes.
-
-        On a read replica it is what makes a workload's pull count: the timestamp goes to the shared
-        metadata database, where the mutator's collector reads it.
+        Required, not decoration: the search extension records pulls, and without it `pulledWithin`
+        matches nothing and every tag expires however often it is pulled. On a read replica it
+        writes the pull to the shared metadata database, where the writer's collector sees it.
       */}}
       "extensions": { "search": { "enable": true } },
       "log": { "level": {{ $.Values.registry.logLevel | quote }} }

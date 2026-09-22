@@ -7,23 +7,16 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 )
 
-// The finalizer has to track what actually needs cleaning up, which is narrower than "this object
-// exports something".
-//
-// A cross-namespace owner reference is invalid, so only a FOREIGN export needs the controller to
-// remove it. An own-namespace export is owner-referenced and reclaimed by Kubernetes, and putting a
-// finalizer on that object would make its deletion depend on this controller running for no reason.
-//
-// Tested as a toggle rather than a state, because the transitions are where this goes wrong: a
-// finalizer that is added and never removed wedges deletion, which is the same class of failure as
-// the missing ConfigMap delete verb that blocked this feature in the first place.
+// TestTheFinalizerTracksWhetherAnythingNeedsCleaningUp: only a foreign-namespace export needs a
+// finalizer; an own-namespace export is owner-referenced, and a needless finalizer would make
+// deletion depend on this controller running.
 func TestTheFinalizerTracksWhetherAnythingNeedsCleaningUp(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -58,9 +51,8 @@ func TestTheFinalizerTracksWhetherAnythingNeedsCleaningUp(t *testing.T) {
 	}
 }
 
-// And it is REMOVED when the reason for it goes away -- moving an export home, or withdrawing it.
-// Without this the object keeps a finalizer that only this controller can clear, so uninstalling
-// the operator would strand every object that had ever exported across a namespace.
+// TestTheFinalizerIsRemovedWhenTheForeignExportIsGone: otherwise uninstalling the operator strands
+// every object that ever exported across namespaces.
 func TestTheFinalizerIsRemovedWhenTheForeignExportIsGone(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -99,8 +91,8 @@ func TestTheFinalizerIsRemovedWhenTheForeignExportIsGone(t *testing.T) {
 	}
 }
 
-// Deleting the object removes the ConfigMap it wrote and then clears the finalizer. The order is
-// the point: clearing first would let the object vanish with its only record of what to clean up.
+// TestDeletionRemovesTheForeignExportThenTheFinalizer: in that order, or the object vanishes with
+// its only record of what to clean up.
 func TestDeletionRemovesTheForeignExportThenTheFinalizer(t *testing.T) {
 	now := metav1.Now()
 	obj := exportingBuild([]string{ociv1alpha1.Finalizer})

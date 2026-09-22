@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sort"
 	"sync"
-	"time"
 
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -13,24 +12,13 @@ import (
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 )
 
-// Readiness tracks which objects this process has reconciled.
-//
-// It used to gate the pod's readiness probe on the served blob store being warm, so the pod stayed
-// out of the Service until it had something to serve. There is no store and no Service now
-// (ADR 0035), so that role is gone and readyz is a bare ping.
-//
-// What remains is the completeness question, which retention needs: an object this process has not
-// observed contributes nothing to the live set, and refreshing on a partial view under-protects the
-// objects missing from it -- invisibly, with the symptom arriving one retention window later.
+// Readiness tracks which objects this process has reconciled, so retention can tell whether its
+// view is complete: an unobserved object contributes nothing to the live set, and refreshing on a
+// partial view silently under-protects it. (It no longer gates readyz; ADR 0035.)
 type Readiness struct {
-	// Client lists the objects that must be accounted for. The manager's cached client is
-	// correct here: before the cache syncs the list call fails or blocks, and "not synced" is
-	// genuinely not ready.
+	// Client lists the objects that must be accounted for. The manager's cached client is correct:
+	// before the cache syncs the list fails or blocks, and "not synced" is genuinely not ready.
 	Client client.Client
-
-	// Timeout bounds the list so a wedged cache surfaces as unready rather than as a probe that
-	// never answers.
-	Timeout time.Duration
 
 	mu   sync.Mutex
 	seen map[types.NamespacedName]struct{}
@@ -38,10 +26,8 @@ type Readiness struct {
 
 // Observe records that an object has been through a reconcile.
 //
-// Deliberately recorded on ATTEMPT, not on success. A single ImageComposition with a bad digest
-// is permanently Stalled, and gating readiness on success would let it hold the entire endpoint
-// out of the Service — one broken object taking down every unrelated artifact. The gate exists
-// to cover the startup window, not to assert that everything is healthy; conditions do that.
+// Recorded on ATTEMPT, not success: a permanently Stalled object must not hold the gate closed.
+// The gate covers the startup window; conditions report health.
 func (r *Readiness) Observe(key types.NamespacedName) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -65,12 +51,8 @@ func (r *Readiness) observed(key types.NamespacedName) bool {
 	return ok
 }
 
-// Pending returns the locally served objects that have not yet been through a reconcile.
-//
-// Also the safety gate for garbage collection. The collector decides what to delete by marking
-// what every object references, so an object it has not seen contributes nothing to the live set
-// and its content looks like garbage. An empty result means the controller's view is complete
-// and marking can be trusted.
+// Pending returns the ImageCompositions that have not yet been through a reconcile. An empty
+// result means the controller's view is complete and a live set marked from it can be trusted.
 func (r *Readiness) Pending(ctx context.Context) ([]string, error) {
 	var list ociv1alpha1.ImageCompositionList
 	if err := r.Client.List(ctx, &list); err != nil {
@@ -80,12 +62,8 @@ func (r *Readiness) Pending(ctx context.Context) ([]string, error) {
 	var pending []string
 	for i := range list.Items {
 		obj := &list.Items[i]
-		// No push-mode exemption any more, and its removal is load-bearing rather than tidying.
-		// It existed because an object pushing to an external registry was not served from here, so
-		// it could not hold READINESS back. Every object publishes to a registry now, so keeping it
-		// would have made Pending return nothing, always -- and the retention refresher would read
-		// an empty list as "the view is complete" while having observed nothing at all. Exactly the
-		// under-refresh ADR 0031 calls out, arriving as missing images a window later.
+		// Every object counts, whatever registry it pushes to: exempting any would let retention
+		// read a partial view as complete (ADR 0031).
 		if !obj.DeletionTimestamp.IsZero() {
 			continue
 		}

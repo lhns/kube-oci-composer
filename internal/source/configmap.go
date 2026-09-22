@@ -1,10 +1,8 @@
 // Package source resolves layer entries that are not plain URLs into local content plus a digest.
 //
-// Both kinds here are content-addressed by the cluster rather than by a human: a Flux source
-// publishes an artifact digest, and a ConfigMap's content can be hashed directly. The controller
-// resolves the digest instead of the spec declaring it, which keeps the guarantee in ADR 0002
-// intact — output is a pure function of *resolved* inputs — while not asking anyone to paste a
-// digest for content they are editing in the same commit.
+// Both kinds are content-addressed by the cluster: a Flux source publishes an artifact digest, and
+// a ConfigMap's content is hashed. The controller resolves the digest rather than the spec
+// declaring it, keeping output a pure function of resolved inputs (ADR 0002).
 package source
 
 import (
@@ -43,16 +41,11 @@ type ErrNotFound struct{ What string }
 
 func (e *ErrNotFound) Error() string { return e.What + " not found" }
 
-// epoch matches the assembly package's fixed timestamp. Content synthesised here goes through the
-// same normalisation as everything else, or the digest would vary run to run and the whole
-// short-circuit would stop working.
+// epoch matches the assembly package's fixed timestamp, so the synthesised tar is deterministic.
 var epoch = time.Unix(0, 0).UTC()
 
-// ConfigMap turns a ConfigMap's entries into a deterministic tar.
-//
-// Each key becomes one file. ConfigMap keys cannot contain "/", so this deliberately produces a
-// flat directory rather than pretending otherwise — anything needing nested paths wants a
-// sourceRef.
+// ConfigMap turns a ConfigMap's entries into a deterministic tar, one file per key in a flat
+// directory (keys cannot contain "/").
 func ConfigMap(ctx context.Context, c client.Client, namespace, name string, optional bool, workDir string) (Resolved, error) {
 	var cm corev1.ConfigMap
 	key := types.NamespacedName{Namespace: namespace, Name: name}
@@ -66,9 +59,7 @@ func ConfigMap(ctx context.Context, c client.Client, namespace, name string, opt
 		return Resolved{}, fmt.Errorf("reading ConfigMap %s: %w", key, err)
 	}
 
-	// Both maps, merged and sorted. Iteration order over a Go map is randomised, so without the
-	// sort the produced tar — and therefore the artifact digest — would differ between reconciles
-	// of identical content.
+	// Both maps, merged and sorted, so the tar and its digest are deterministic.
 	entries := make(map[string][]byte, len(cm.Data)+len(cm.BinaryData))
 	for k, v := range cm.Data {
 		entries[k] = []byte(v)
@@ -83,8 +74,7 @@ func ConfigMap(ctx context.Context, c client.Client, namespace, name string, opt
 	names := make([]string, 0, len(entries))
 	for k := range entries {
 		if strings.ContainsAny(k, `/\`) {
-			// Kubernetes should reject these already; refusing rather than sanitising means a
-			// surprising key never silently lands somewhere unexpected in the image.
+			// Refused rather than sanitised.
 			return Resolved{}, fmt.Errorf("ConfigMap %s: key %q contains a path separator", key, k)
 		}
 		names = append(names, k)

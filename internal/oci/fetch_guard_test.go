@@ -9,15 +9,11 @@ import (
 	"github.com/lhns/kube-oci-composer/internal/netguard"
 )
 
-// The guard reached THROUGH the fetcher. The guard's own classification is tested in
-// internal/netguard; these two are about the fetcher installing it, which is the part that would
-// silently stop being true if a constructor changed.
+// These test that the fetcher installs the guard; its classification is tested in
+// internal/netguard.
 
-// TestPrivateAddressesAreReachableByDefault is the other half, and the reason DenyPrivate exists
-// as a flag rather than as the default.
-//
-// An artifact server on a private address in the same cluster is this project's most ordinary
-// layer source. A guard that refused it would be turned off, and then it would protect nothing.
+// TestPrivateAddressesAreReachableByDefault: an in-cluster artifact server on a private address is
+// the ordinary layer source, so DenyPrivate is opt-in.
 func TestPrivateAddressesAreReachableByDefault(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("hello"))
@@ -47,6 +43,3 @@ func TestDenyPrivateRefusesLoopback(t *testing.T) {
 		t.Fatalf("the error should name the flag that caused it: %v", err)
 	}
 }
-
-// TestTheGuardClassifiesAddressesCorrectly exercises the ranges directly, because reaching some of
-// them from a test would mean making the connections this code exists to prevent.

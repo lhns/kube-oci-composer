@@ -2,10 +2,8 @@ package v1alpha1
 
 import "testing"
 
-// TestBaseImageRepositoryAcceptsBothSpellings — `ref` and `image`+`digest` name the same base, and
-// the accessor is what makes them interchangeable. If they ever disagreed, the input hash would
-// move when a spec was rewritten from one spelling to the other, rebuilding and republishing every
-// artifact for no change in content.
+// TestBaseImageRepositoryAcceptsBothSpellings: `ref` and `image`+`digest` must resolve alike, or
+// switching spelling would move the input hash.
 func TestBaseImageRepositoryAcceptsBothSpellings(t *testing.T) {
 	const digest = "sha256:" + "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
@@ -24,9 +22,7 @@ func TestBaseImageRepositoryAcceptsBothSpellings(t *testing.T) {
 	}
 }
 
-// TestSplitPinnedRef — the registry-port case is the one that bites. "registry:5000/repo@sha256:…"
-// has a colon that is not a tag separator, and stripping at the last colon regardless would turn
-// the reference into "registry", which resolves to something else entirely.
+// TestSplitPinnedRef: a registry port's colon is not a tag separator.
 func TestSplitPinnedRef(t *testing.T) {
 	const digest = "sha256:" + "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
@@ -55,7 +51,7 @@ func TestSplitPinnedRef(t *testing.T) {
 	}
 }
 
-// TestImageSourceRepository — the same parsing, reached through the layer verb.
+// TestImageSourceRepository: the same parsing, through the layer verb.
 func TestImageSourceRepository(t *testing.T) {
 	const digest = "sha256:" + "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 

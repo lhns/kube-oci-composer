@@ -8,13 +8,8 @@ import (
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 )
 
-// TestOnConflictIsExactOnceTheDigestExists is what this change is for.
-//
-// The Job uploads by digest and names nothing, so the controller holds the NEW digest when it
-// decides whether a tag may take it. Before, the check ran ahead of the build against
-// status.artifact.digest -- a stand-in for a value that did not yet exist -- and the substitution
-// had a one-directional hole: a tag holding this object's OWN previous digest was exempt, so an
-// object remeaning its own tag was never a conflict. ADR 0054.
+// TestOnConflictIsExactOnceTheDigestExists: applyTags decides with the new digest, so a tag holding
+// this object's own previous digest is a conflict too. ADR 0054.
 func TestOnConflictIsExactOnceTheDigestExists(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -27,7 +22,7 @@ func TestOnConflictIsExactOnceTheDigestExists(t *testing.T) {
 		wantTag  bool
 	}{
 		{name: "free tag is taken", holder: "none", wantTag: true},
-		// The case the old check could not see. Same object, same tag, new content.
+		// Same object, same tag, new content.
 		{name: "own previous digest, Fail", holder: "ours", policy: ociv1alpha1.ConflictFail, wantErr: true},
 		{name: "own previous digest, Overwrite", holder: "ours", policy: ociv1alpha1.ConflictOverwrite, wantTag: true},
 		{name: "own previous digest, Keep", holder: "ours", policy: ociv1alpha1.ConflictKeep, wantKeep: true},
@@ -74,8 +69,7 @@ func TestOnConflictIsExactOnceTheDigestExists(t *testing.T) {
 				if now := tagResolvesTo(t, repo, "v1"); now != before {
 					t.Errorf("the tag moved despite Fail: %s -> %s", before, now)
 				}
-				// Refused content must stay untagged, so the registry reclaims it. Naming it after
-				// its own digest would make it permanent -- the leak ADR 0060 exists to close.
+				// Refused content stays untagged, so the registry reclaims it (ADR 0060).
 				if own := tagResolvesTo(t, repo, recon.DigestTag(built)); own != "" {
 					t.Errorf("Fail gave the refused digest its own tag, so nothing will reclaim it")
 				}
@@ -86,8 +80,7 @@ func TestOnConflictIsExactOnceTheDigestExists(t *testing.T) {
 				if conflict == nil {
 					t.Fatal("Keep recorded no conflict, so the divergence is invisible")
 				}
-				// The improvement ADR 0029 had to forgo: a REAL dropped digest, because the
-				// content existed before the decision.
+				// A real dropped digest: the content exists before the decision.
 				if conflict.Dropped != built {
 					t.Errorf("dropped = %q, want the digest this build produced (%s)",
 						conflict.Dropped, built)
@@ -116,10 +109,8 @@ func TestOnConflictIsExactOnceTheDigestExists(t *testing.T) {
 	}
 }
 
-// TestADigestOnlyPublishNeverConflicts — the name IS the content, so nothing can be remeaned.
-//
-// And it is still named after its own digest (ADR 0060). Left untagged, it is exactly what a
-// registry's collector reclaims by age, whoever is pulling it by digest.
+// TestADigestOnlyPublishNeverConflicts, and still gets its digest's own tag, or a collector would
+// reclaim it by age (ADR 0060).
 func TestADigestOnlyPublishNeverConflicts(t *testing.T) {
 	host := startRegistry(t)
 	repo := host + "/team-a/app"
@@ -142,12 +133,9 @@ func TestADigestOnlyPublishNeverConflicts(t *testing.T) {
 	}
 }
 
-// TestTheDigestsOwnTagSurvivesARollingTagMoving is the property ADR 0060 is for, one level down.
-//
-// This registry keeps a manifest addressable when its only tag moves, so it cannot reproduce the
-// zot behaviour (zot#4444) -- test/e2e/retention_tagmove_test.go does, against the real thing.
-// What it can pin is the mechanism: after the rolling tag moves, the previous build still has a
-// name of its own, which is what keeps zot from dropping it out of the index.
+// TestTheDigestsOwnTagSurvivesARollingTagMoving: after the rolling tag moves, the previous build
+// keeps a name of its own. This registry cannot reproduce zot dropping it (zot#4444);
+// test/e2e/retention_tagmove_test.go does.
 func TestTheDigestsOwnTagSurvivesARollingTagMoving(t *testing.T) {
 	host := startRegistry(t)
 	repo := host + "/team-a/app"

@@ -36,12 +36,9 @@ import (
 
 // ImageBuildReconciler runs a Job per build and records what it produced.
 //
-// The reconcile is deliberately the composer's three-phase shape: resolve everything from the API
-// without transferring anything, hash it, and only past that point do expensive work. That is what
-// answers ADR 0001's objection — "the reconcile loop would have to rebuild to discover whether a
-// rebuild was needed" — because every input here is resolvable from the API server. What it cannot
-// do is the composer's SECOND check, against the real output digest, because there is nothing to
-// compare against until a build has run. See ADR 0025.
+// Like the composer, it resolves every input from the API server and hashes it before doing any
+// expensive work. Unlike the composer it cannot verify against the output digest, since there is
+// none until a build has run. ADR 0025.
 type ImageBuildReconciler struct {
 	client.Client
 	JobConfig JobConfig
@@ -50,47 +47,35 @@ type ImageBuildReconciler struct {
 	// their own. See recon.DefaultRegistry.
 	Default recon.DefaultRegistry
 
-	// Recorder surfaces failures as Events. A build failure's detail lives in the pod's logs,
-	// which vanish with the pod, so the Event is often the only durable trace of why.
+	// Recorder surfaces failures as Events, often the only durable trace once the pod is gone.
 	Recorder record.EventRecorder
 
-	// Refresher renews the lease on an artifact the moment it is published, rather than
-	// leaving it unprotected until the next scheduled cycle. Optional: nil disables it, which
-	// is what --retention-refresh-interval=0 means.
+	// Refresher renews an artifact's lease the moment it is published. Nil disables it
+	// (--retention-refresh-interval=0).
 	Refresher *retention.Refresher
-	// Export is what the operator, rather than an object, decides about push.writeRefTo: which
-	// foreign namespaces are permitted, and which metadata keys an object may set. Both empty by
-	// default -- the controller is the boundary here, not RBAC (ADR 0056).
+	// Export is the operator's policy for push.writeRefTo: permitted foreign namespaces and
+	// metadata keys. The controller is the boundary here, not RBAC (ADR 0056).
 	Export recon.ExportOptions
 
-	// BuildPollInterval is how often a running Job is re-observed, and therefore how long a
-	// pushed-but-unnamed manifest can be collected out from under this controller. Zero means the
-	// default; see defaultBuildPollInterval.
+	// BuildPollInterval is how often a running Job is re-observed, and so how long a pushed but
+	// untagged manifest is exposed to collection. Zero means defaultBuildPollInterval.
 	BuildPollInterval time.Duration
 
-	// Attestor signs the build's output, after the Job has terminated.
-	//
-	// The signing key stays in THIS process and is never projected into a build pod -- so code
-	// that came out of a git repository never runs in the same container as the key. The SBOM and
-	// provenance come from BuildKit instead, in-band, because only the build can see what it
-	// installed.
+	// Attestor signs the build's output after the Job has terminated. The key stays in this
+	// process and is never projected into a build pod; SBOM and provenance come from BuildKit.
 	Attestor *attest.Attestor
 
-	// Transport, when set, trusts an additional CA on top of the system roots. Same object the
-	// other controllers use; see recon.Transport.
+	// Transport, when set, trusts an additional CA on top of the system roots. See recon.Transport.
 	Transport http.RoundTripper
 
-	// HTTPClient fetches the build context for the Dockerfile check. Nil uses a default with a
-	// timeout; the build itself never streams through this process.
+	// HTTPClient fetches the build context for the Dockerfile check. Nil uses http.DefaultClient.
 	HTTPClient *http.Client
 
 	// HistoryLimit is how many past builds are retained in status.
 	HistoryLimit int
 
-	// RequirePinnedSources refuses a spec.context that names no revision (threat T1). Off by
-	// default, and it matters more here than on the composer: an unpinned context means the build
-	// runs whatever code the branch happens to be at, and a build's output cannot be reproduced
-	// from its spec (ADR 0025), so there is nothing to check it against afterwards.
+	// RequirePinnedSources refuses a spec.context that names no revision (threat T1). A build's
+	// output cannot be reproduced from its spec (ADR 0025), so an unpinned context is unauditable.
 	RequirePinnedSources bool
 }
 
@@ -99,29 +84,15 @@ type ImageBuildReconciler struct {
 // +kubebuilder:rbac:groups=oci.lhns.de,resources=imagebuilds/finalizers,verbs=update
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
-// Secrets are read for their resourceVersion only, so a rotation moves the input hash and
-// rebuilds. The VALUE is never read here — it is projected straight into the build pod — which is
-// why this is get and not list or watch, matching the composer's reasoning about blast radius.
-// create and update are for ONE thing: a short-lived copy of the operator's registry credential in
-// the namespace a build runs in, because a pod can only mount Secrets from its own namespace and the
-// build must run beside the tenant's own build secrets and code. The copy is owned by the ImageBuild
-// and goes with it.
-//
-// This is a real widening and it is not narrowable by RBAC: `create` cannot be restricted to a name.
-// So this controller can create a Secret in any namespace, and update ones it names. What it still
-// cannot do is LIST or WATCH them -- it can only touch Secrets whose names it already knows.
+// Secrets: get reads only the resourceVersion (for the input hash); values are projected straight
+// into the build pod. create/update are for per-build copies of the operator's credentials in the
+// build's namespace, since a pod mounts Secrets only from its own. `create` cannot be restricted by
+// name, but without list/watch the controller only touches Secrets whose names it knows.
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;update
 //
-// ConfigMaps ARE cached, unlike Secrets, because a Dockerfile can live in one and it is watched --
-// an edit must rebuild promptly rather than at the next interval, which defaults to an hour. That
-// costs an informer over every ConfigMap in the cluster; the composer already pays it for configMap
-// layers, for exactly this reason. The alternative is a controller that appears not to notice edits.
-//
-// The write verbs are push.writeRefTo's. Cluster-wide because RBAC is granted before an object
-// exists, so permitting an export into whatever namespace its object lives in means permitting it
-// everywhere -- THE CONTROLLER is the boundary instead: it writes only to the object's own
-// namespace or one in --ref-export-namespaces, and deletes only what carries its managed-by and
-// owner labels. ADR 0056. No deletecollection, ever.
+// ConfigMaps are watched (unlike Secrets) so an edited Dockerfile rebuilds promptly. The write
+// verbs are push.writeRefTo's; cluster-wide because the controller, not RBAC, enforces the allowed
+// namespaces and deletes only what carries its labels. ADR 0056. No deletecollection.
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=gitrepositories;ocirepositories;buckets,verbs=get;list;watch
@@ -133,18 +104,9 @@ func (r *ImageBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.Get(ctx, req.NamespacedName, &obj); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	// Suspended objects say so, rather than going quiet and looking stalled.
-	//
-	// NOT while the object is being deleted, and observedGeneration is advanced here as well --
-	// both because the composer does them and this kind quietly did not.
-	//
-	// Deletion first: a cross-namespace export puts a finalizer on this object, and the only code
-	// that removes it is below. Returning here on a suspended object left it Terminating forever.
-	//
-	// observedGeneration because suspending bumps the generation. Leaving status behind makes the
-	// retention refresher report this object as not yet reconciled, and RefreshOnce skips a cycle
-	// when ANY object is pending -- so one suspended ImageBuild stopped every image in the cluster
-	// from being refreshed, with nothing to resolve it and a retention window counting down.
+	// Not while deleting: the finalizer is only removed below, so returning here would leave the
+	// object Terminating forever. observedGeneration must advance too, or the retention refresher
+	// sees this object as pending and skips its whole cycle for every image in the cluster.
 	if obj.Spec.Suspend && obj.DeletionTimestamp.IsZero() {
 		patch := client.MergeFrom(obj.DeepCopy())
 		recon.SetCondition(&obj, ociv1alpha1.ReadyCondition, metav1.ConditionFalse,
@@ -162,9 +124,7 @@ func (r *ImageBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// must not hang because the build it asked for failed (ADR 0009).
 	obj.Status.LastHandledReconcileAt = obj.Annotations[ociv1alpha1.ReconcileRequestAnnotation]
 	r.applyOutcome(&obj, err)
-	// IgnoreNotFound: the last finalizer may have just been removed, in which case the object is
-	// already gone and there is no status left to patch. Reporting that as an error logged one on
-	// every deletion.
+	// IgnoreNotFound: removing the last finalizer may already have deleted the object.
 	if perr := client.IgnoreNotFound(r.Status().Patch(ctx, &obj, patch)); perr != nil {
 		return ctrl.Result{}, fmt.Errorf("patching status: %w", perr)
 	}
@@ -178,11 +138,10 @@ func (r *ImageBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		recon.Event(r.Recorder, &obj, corev1.EventTypeWarning, ociv1alpha1.ReasonInvalidSpec, err.Error())
 		return ctrl.Result{}, nil
 	case recon.IsPending(err):
-		return ctrl.Result{RequeueAfter: pendingRetryInterval}, nil
+		return ctrl.Result{RequeueAfter: recon.PendingRetryInterval}, nil
 	default:
-		// A build failure, or anything else transient. Capped backoff rather than exponential
-		// forever, because the fix is usually a push to the Dockerfile's repository and the retry
-		// is what notices it.
+		// Transient, including build failures. Capped backoff: the fix is usually an upstream push
+		// that only a retry will notice.
 		logger.Error(err, "build failed", "failures", obj.Status.Failures)
 		recon.Event(r.Recorder, &obj, corev1.EventTypeWarning, ociv1alpha1.ReasonBuildFailed, err.Error())
 		return ctrl.Result{RequeueAfter: failureBackoff(obj.Status.Failures)}, nil
@@ -191,8 +150,7 @@ func (r *ImageBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 // reconcile is the state machine over the owned Job.
 func (r *ImageBuildReconciler) reconcile(ctx context.Context, obj *ociv1alpha1.ImageBuild) (ctrl.Result, error) {
-	// status.RefExport matters as much as the spec here: removing writeRefTo has to clean up what
-	// it wrote, and that branch is the only place that can.
+	// status.RefExport too: removing writeRefTo must still clean up what it wrote.
 	if exp := obj.Spec.Push.GetWriteRefTo(); !obj.DeletionTimestamp.IsZero() || exp != nil ||
 		obj.Status.RefExport != nil {
 		res, done, err := r.reconcileExportLifecycle(ctx, obj, exp)
@@ -207,22 +165,13 @@ func (r *ImageBuildReconciler) reconcile(ctx context.Context, obj *ociv1alpha1.I
 	}
 	inputHash := inputs.Hash()
 
-	// Unchanged inputs are not enough: what was published has to still BE there. This kind used to
-	// stop at the inputs, and a lost image therefore stayed lost while the object reported Ready --
-	// which is how a repository that had lost every tag went three days without saying so.
-	//
-	// The rebuild produces a DIFFERENT digest, because this kind is not reproducible. That is the
-	// price, it is why ADR 0025 assumed durability instead, and it is recorded in ADR 0051. Loud
-	// rather than silent, because anything pinned to the old digest is not helped by the new one.
+	// Unchanged inputs are not enough: the published image must still exist. A rebuild yields a
+	// different digest (builds are not reproducible), hence the warning Event. ADR 0051.
 	if obj.Status.Artifact != nil && obj.Status.InputHash == inputHash {
 		if r.stillPublished(ctx, obj) {
 			r.backfillDigestTags(ctx, obj)
-			// The export runs on the converged path too, which is the only place it CAN run for an
-			// object that is already built. push.writeRefTo is not part of the input hash -- adding
-			// it changes nothing about what to build -- so an object that has converged never
-			// reaches the publish path again, and the ConfigMap a consumer substitutes from was
-			// never written. Same for moving it, or for someone deleting it by hand. The composer
-			// calls its equivalent unconditionally for this reason.
+			// writeRefTo is not in the input hash, so a converged object must export here or a
+			// newly added, moved or deleted export would never be (re)written.
 			if err := r.exportRef(ctx, obj); err != nil {
 				return ctrl.Result{}, err
 			}
@@ -240,8 +189,7 @@ func (r *ImageBuildReconciler) reconcile(ctx context.Context, obj *ociv1alpha1.I
 		return ctrl.Result{}, err
 	}
 	if job == nil {
-		// Before anything executes. A Job that has started cannot be un-pushed, so a conflict
-		// noticed afterwards is a conflict that has already happened.
+		// Before anything executes: a started Job cannot be un-pushed.
 		stop, conflict, err := r.checkTagConflict(ctx, obj)
 		if err != nil {
 			return ctrl.Result{}, err
@@ -266,8 +214,7 @@ func (r *ImageBuildReconciler) resolveInputs(ctx context.Context, obj *ociv1alph
 		return build.Inputs{}, "", recon.Terminal("spec.push is required: the built image is produced by a Job in another pod, which cannot write to the controller's loopback-only serving endpoint")
 	}
 
-	// Validated before a Job exists: a malformed ref must not reach buildctl as a broken push
-	// target, and editing this spec is what fixes it.
+	// Validated before a Job exists so a malformed ref never reaches buildctl.
 	if _, err := recon.EffectiveTags(spec.Push.GetTags(), spec.Push.GetRef()); err != nil {
 		return build.Inputs{}, "", err
 	}
@@ -277,8 +224,8 @@ func (r *ImageBuildReconciler) resolveInputs(ctx context.Context, obj *ociv1alph
 		return build.Inputs{}, "", err
 	}
 
-	// Secret identities, never values. status.inputHash is world-readable to anyone with get, and
-	// a hash of a low-entropy secret is an oracle.
+	// Secret identities, never values: status.inputHash is readable by anyone with get, and a hash
+	// of a low-entropy secret is an oracle.
 	ids := make([]string, 0, len(spec.Secrets))
 	for _, s := range spec.Secrets {
 		var secret corev1.Secret
@@ -341,27 +288,20 @@ type contextInputs struct {
 	art     source.FluxArtifact
 }
 
-// resolveContext resolves whichever member spec.context names.
-//
-// No context is a legal, empty tree: addressed by construction, so the "unaddressed context"
-// objection never applied to it. CEL has already refused the one combination that cannot work --
-// no context and a Dockerfile that is a path into one.
+// resolveContext resolves whichever member spec.context names. No context is a legal empty tree;
+// CEL refuses no context combined with a Dockerfile path.
 func (r *ImageBuildReconciler) resolveContext(ctx context.Context, obj *ociv1alpha1.ImageBuild) (contextInputs, error) {
 	switch c := obj.Spec.Context; {
 	case c.GetImage() != nil:
 		img := c.GetImage()
-		// The digest IS the reference, so there is nothing to resolve. Split out rather than
-		// hashing the whole ref: the tag is decorative, as it is for spec.base.ref, and hashing it
-		// would rebuild on a retag that pulls the same bytes.
+		// Hash only the digest: the tag is decorative, and a retag must not rebuild.
 		_, digest, _ := strings.Cut(img.Ref, "@")
 		return contextInputs{kind: "image", subpath: img.Subpath,
 			art: source.FluxArtifact{URL: img.Ref, Digest: digest}}, nil
 
 	case c.GetFetch() != nil:
 		f := c.GetFetch()
-		// Nothing to resolve: the digest is DECLARED, which is what makes an arbitrary URL a legal
-		// build input. The bytes are verified against it in the build pod, before anything is
-		// unpacked -- see internal/fetchcontext.
+		// The digest is declared; the build pod verifies the bytes against it (internal/fetchcontext).
 		return contextInputs{kind: "fetch", subpath: f.Subpath, strip: f.StripComponents,
 			unpack: string(f.Unpack),
 			art:    source.FluxArtifact{URL: f.URL, Digest: f.Digest}}, nil
@@ -376,17 +316,13 @@ func (r *ImageBuildReconciler) resolveContext(ctx context.Context, obj *ociv1alp
 
 func (r *ImageBuildReconciler) resolveSourceRef(ctx context.Context, obj *ociv1alpha1.ImageBuild,
 	ref *ociv1alpha1.SourceRefSource) (contextInputs, error) {
-	// Same namespace only, for the reason the composer refuses it: the RBAC is cluster-wide, so
-	// naming another namespace's source would let anyone who can create an ImageBuild read content
-	// they have no access to.
+	// Same namespace only: RBAC is cluster-wide, so a foreign source would leak its content.
 	if ref.Namespace != "" && ref.Namespace != obj.Namespace {
 		return contextInputs{}, recon.Terminal(
 			"build context %s/%s is in namespace %q: a context must be in the same namespace as "+
 				"the ImageBuild that consumes it", ref.Kind, ref.Name, ref.Namespace)
 	}
-	// Threat-model gap T1: an unpinned context builds whatever the branch is at now, and an
-	// ImageBuild's output is an observation rather than a function of its spec (ADR 0025), so
-	// nothing afterwards can tell you what went in. Terminal -- editing this spec is the fix.
+	// Threat T1. Terminal: editing this spec is the fix.
 	if r.RequirePinnedSources && ref.Revision == "" {
 		return contextInputs{}, recon.Terminal(
 			"build context %s/%s names no revision, and this controller runs with "+
@@ -404,8 +340,7 @@ func (r *ImageBuildReconciler) resolveSourceRef(ctx context.Context, obj *ociv1a
 		return contextInputs{}, fmt.Errorf("build context: %w", err)
 	}
 
-	// Same rule as the composer's layers: an explicit revision waits for the source to reach it
-	// rather than building from whatever is currently published.
+	// An explicit revision waits for the source to reach it.
 	if !ociv1alpha1.RevisionMatches(ref.Revision, art.Revision) {
 		return contextInputs{}, recon.Pending(
 			"build context %s/%s is at revision %q, waiting for %q",
@@ -421,11 +356,8 @@ type dockerfileInputs struct {
 	digest string
 }
 
-// resolveDockerfile decides what identifies the recipe.
-//
-// A path needs no content hashing: it lives inside the context, which ContextDigest already
-// addresses, so an edit moves the hash and no fetch happens on a reconcile about to short-circuit.
-// The other two forms ride in no tarball, so their bytes are hashed directly.
+// resolveDockerfile decides what identifies the Dockerfile. A path is covered by ContextDigest;
+// inline and ConfigMap content is hashed directly.
 func (r *ImageBuildReconciler) resolveDockerfile(ctx context.Context, obj *ociv1alpha1.ImageBuild) (dockerfileInputs, error) {
 	df := obj.Spec.Dockerfile
 
@@ -434,9 +366,7 @@ func (r *ImageBuildReconciler) resolveDockerfile(ctx context.Context, obj *ociv1
 		return dockerfileInputs{kind: "inline", digest: sha256Hex([]byte(df.Inline))}, nil
 
 	case df != nil && df.ConfigMapRef != nil:
-		// A ConfigMap is mutable by construction, so it can never satisfy the pinning flag. Refused
-		// rather than ignored: a flag that silently does not apply to one source is worse than one
-		// that says so.
+		// A ConfigMap is mutable, so it can never satisfy the pinning flag; refuse loudly.
 		if r.RequirePinnedSources {
 			return dockerfileInputs{}, recon.Terminal(
 				"spec.dockerfile.configMapRef cannot be pinned and this controller runs with " +
@@ -472,11 +402,9 @@ func (r *ImageBuildReconciler) currentJob(ctx context.Context, obj *ociv1alpha1.
 	return &job, nil
 }
 
-// dockerfileBytes returns the Dockerfile this build will run, and whether it came from the spec.
-//
-// One function so the FROM check has exactly one input to guard, whatever the source. The flag is
-// returned rather than re-derived at the call site because it decides terminality, and a second
-// place deciding that is a second place to get it wrong.
+// dockerfileBytes returns the Dockerfile this build will run, and whether it is inline in the spec
+// (which decides whether a bad FROM is terminal). Nil content means an image context, which the
+// fetcher checks instead.
 func (r *ImageBuildReconciler) dockerfileBytes(ctx context.Context, obj *ociv1alpha1.ImageBuild,
 	contextURL string) (content []byte, inline bool, err error) {
 
@@ -484,18 +412,14 @@ func (r *ImageBuildReconciler) dockerfileBytes(ctx context.Context, obj *ociv1al
 		return []byte(df.Inline), true, nil
 	}
 	if df := obj.Spec.Dockerfile; df != nil && df.ConfigMapRef != nil {
-		// Read again rather than threaded down from resolveInputs: the second read is what the Job
-		// gets, so a ConfigMap edit in between just moves the hash on the next pass. Threading it
-		// would add a parameter whose only job is to be kept in step.
+		// Re-read: these bytes are what the Job gets; an edit since resolveInputs moves the hash
+		// next pass.
 		content, err := r.dockerfileFromConfigMap(ctx, obj)
-		// Not inline: the fix for an unpinned FROM here is editing the ConfigMap, which raises no
-		// generation change on this object, exactly like a Dockerfile in the context.
 		return content, false, err
 	}
 
-	// An image context is checked by the fetcher instead -- reading one file out of an image here
-	// would mean registry credentials for arbitrary user-named repositories in a controller shared
-	// by every namespace. The guard moves rather than being skipped; see internal/fetchcontext.
+	// Checked by the fetcher instead: reading an image here would need registry credentials for
+	// arbitrary repositories in a shared controller. See internal/fetchcontext.
 	if obj.Spec.Context.GetImage() != nil {
 		return nil, false, nil
 	}
@@ -506,8 +430,7 @@ func (r *ImageBuildReconciler) dockerfileBytes(ctx context.Context, obj *ociv1al
 		subpath = ref.Subpath
 	}
 	if f := obj.Spec.Context.GetFetch(); f != nil {
-		// Only a fetch carries a strip depth: it is the one kind whose archive might wrap its
-		// contents. A sourceRef never strips, which is the whole of ADR 0045.
+		// Only a fetch strips; a sourceRef never does (ADR 0045).
 		subpath, strip = f.Subpath, f.StripComponents
 	}
 	content, err = build.FetchDockerfile(ctx, r.httpClient(), contextURL,
@@ -522,56 +445,47 @@ func (r *ImageBuildReconciler) dockerfileBytes(ctx context.Context, obj *ociv1al
 func (r *ImageBuildReconciler) startBuild(ctx context.Context, obj *ociv1alpha1.ImageBuild,
 	inputs build.Inputs, inputHash, contextURL string) error {
 
-	// The FROM check happens here rather than inside the Job, so an unpinned base is refused before
-	// anything executes. For a path that costs one fetch of the context, but only where a build is
-	// about to run anyway -- never on the reconcile that finds an unchanged hash.
+	// Check FROM lines before anything executes.
 	dockerfile, inline, err := r.dockerfileBytes(ctx, obj, contextURL)
 	if err != nil {
 		return err
 	}
-	// Nil is not "skip the guard": it is an image context, which the fetcher checks instead.
 	if dockerfile != nil {
 		if err := build.CheckPinnedBases(bytes.NewReader(dockerfile)); err != nil {
 			if inline {
-				// Terminal only here: the Dockerfile IS this spec, so the fix is an edit, and the
-				// generation change it raises is what wakes the object. A Dockerfile in another
-				// object raises no such event.
+				// Terminal only when inline: only then does the fix raise a generation change.
 				return recon.Terminal("%s", err)
 			}
-			return fmt.Errorf("%w", err)
+			return err
 		}
 	}
 
-	// The credential exists before the pod that mounts it. Both names come from jobName, so there is
-	// one source of truth for what this build is called.
-	pushSecret, err := r.pushSecretFor(ctx, obj, jobName(obj, inputHash))
+	buildName := jobName(obj, inputHash)
+
+	// Credentials must exist before the pod that mounts them.
+	pushSecret, err := r.pushSecretFor(ctx, obj, buildName)
 	if err != nil {
 		return err
 	}
-	// Same lifetime, same owner, same reason: a pod mounts only from its own namespace.
-	caSecret, err := r.registryCASecretFor(ctx, obj, jobName(obj, inputHash))
+	caSecret, err := r.registryCASecretFor(ctx, obj, buildName)
 	if err != nil {
 		return err
 	}
-	// Only when the Dockerfile does not ride inside the context. These are the exact bytes checked
-	// above, which is what stops the pod building something that was never checked.
-	//
-	// Keyed off the same predicate the Job rendering uses, not off `inline`: a ConfigMap Dockerfile
-	// is not inline but is still projected, and keying these two off different conditions is how a
-	// mount and its `--local` stop agreeing.
+	// Projects exactly the bytes checked above. Keyed off projectedDockerfile, the predicate the
+	// Job rendering uses, not off `inline`, so the mount and its --local always agree.
 	var dockerfileSecret string
 	if projectedDockerfile(obj) {
-		dockerfileSecret, err = r.dockerfileSecretFor(ctx, obj, jobName(obj, inputHash), dockerfile)
+		dockerfileSecret, err = r.dockerfileSecretFor(ctx, obj, buildName, dockerfile)
 		if err != nil {
 			return err
 		}
 	}
 
-	// Only a sourceRef context goes through the builder. A `fetch` URL and an `image` reference are
-	// external by nature and the pod fetches them itself, so they need no token -- see ADR 0044.
+	// Only a sourceRef context is proxied and needs a token; fetch and image are pulled directly.
+	// ADR 0044.
 	var contextSecret string
 	if obj.Spec.Context.GetSourceRef() != nil && r.JobConfig.ContextBaseURL != "" {
-		contextSecret, err = r.contextTokenFor(ctx, obj, jobName(obj, inputHash))
+		contextSecret, err = r.contextTokenFor(ctx, obj, buildName)
 		if err != nil {
 			return err
 		}
@@ -591,9 +505,7 @@ func (r *ImageBuildReconciler) startBuild(ctx context.Context, obj *ociv1alpha1.
 		return fmt.Errorf("creating the build job: %w", err)
 	}
 
-	// Now that the Job exists, its Secrets belong to it. They had to be created before it -- an
-	// owner reference needs an owner that exists -- and owned by the ImageBuild they would outlive
-	// every build this object ever runs. ADR 0050.
+	// Hand the Secrets to the Job so they go with it. ADR 0050.
 	r.adoptBuildSecrets(ctx, obj, job)
 
 	obj.Status.BuildRef = &ociv1alpha1.LocalObjectReference{Name: job.Name}
@@ -614,16 +526,13 @@ func (r *ImageBuildReconciler) observeJob(ctx context.Context, obj *ociv1alpha1.
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		// The content is pushed; naming it is this controller's decision, and the only point at
-		// which onConflict can be enforced exactly. ADR 0054.
+		// The Job pushed by digest; tagging here is where onConflict is enforced. ADR 0054.
 		conflict, err := r.applyTags(ctx, obj, digest)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 		if conflict != nil {
-			// onConflict: Keep. The tag was left alone, so this build is not published under it
-			// and there is no artifact to record -- but what was dropped is now a real digest
-			// rather than the empty field ADR 0029 had to accept.
+			// onConflict: Keep left the tag alone, so there is no artifact to record.
 			r.recordKept(obj, conflict)
 			return ctrl.Result{RequeueAfter: recon.Interval(obj.Spec.Interval)}, nil
 		}
@@ -638,18 +547,12 @@ func (r *ImageBuildReconciler) observeJob(ctx context.Context, obj *ociv1alpha1.
 		return ctrl.Result{RequeueAfter: recon.Interval(obj.Spec.Interval)}, nil
 
 	case jobFailed(job):
-		// The failed Job is KEPT until its backoff has elapsed, and deleted only when the next
-		// attempt is actually due. Deleting it as soon as the failure is seen fires this
-		// controller's own Job watch, which reconciles immediately, finds no Job and starts
-		// another — so the RequeueAfter backoff never applies and a failing build retries in a hot
-		// loop. Keeping it also keeps the pod, which is the only place the reason a build failed is
-		// written down; deleting on sight destroys the evidence before anyone can read it.
+		// Keep the failed Job (and its pod's logs) until the backoff has elapsed. Deleting it
+		// immediately fires the Job watch, which starts a new Job at once: a hot loop.
 		msg := storedFailureMessage(obj, job)
 		switch {
 		case obj.Status.BuildRef != nil:
-			// First observation of this failure: count it once, and read the pod while it is still
-			// there. Later passes reuse this rather than listing pods again on every backoff poll,
-			// which would also let the message degrade once the pod is collected.
+			// First observation: count it once and read the pod while it exists.
 			msg = r.jobFailureDetail(ctx, obj, job)
 			obj.Status.BuildRef = nil
 			obj.Status.Failures++
@@ -658,15 +561,13 @@ func (r *ImageBuildReconciler) observeJob(ctx context.Context, obj *ociv1alpha1.
 				obj.Status.LastAttempt.Message = msg
 			}
 		case retryDue(obj):
-			// Already counted, and the wait is over. The delete wakes this controller through the
-			// Job watch, and that reconcile is the one that starts the fresh Job.
+			// The delete wakes the Job watch, whose reconcile starts the fresh Job.
 			if err := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil &&
 				!apierrors.IsNotFound(err) {
 				return ctrl.Result{}, fmt.Errorf("deleting the failed job: %w", err)
 			}
 		}
-		// Returned as an error on every pass, including while waiting: Ready must stay False, and
-		// Reconcile's own backoff already spaces the retries.
+		// An error on every pass keeps Ready False; Reconcile's backoff spaces the retries.
 		return ctrl.Result{}, fmt.Errorf("build failed: %s", msg)
 
 	default:
@@ -680,8 +581,6 @@ type buildMetadata struct {
 }
 
 // readResultDigest recovers the pushed digest from the Job's pod.
-//
-// The digest is the one thing that has to come back out of the build, and it cannot be derived.
 func (r *ImageBuildReconciler) readResultDigest(ctx context.Context, obj *ociv1alpha1.ImageBuild, job *batchv1.Job) (string, error) {
 	pods, err := r.buildPods(ctx, obj, job)
 	if err != nil {
@@ -691,9 +590,8 @@ func (r *ImageBuildReconciler) readResultDigest(ctx context.Context, obj *ociv1a
 		return "", recon.Pending("the build pod for %s has not been observed yet", job.Name)
 	}
 
-	// The metadata file lives in the pod's emptyDir, which the controller cannot read. The build
-	// container copies it to the termination log, which Kubernetes surfaces here — the supported
-	// way to get a small result out of a pod without granting exec.
+	// The build container copies buildctl's metadata file to its termination message, which is
+	// readable without exec.
 	for _, p := range pods.Items {
 		if digest := podBuildDigest(p); digest != "" {
 			if obj.Status.LastAttempt != nil {
@@ -724,15 +622,10 @@ func podBuildDigest(p corev1.Pod) string {
 
 // recordSuccess writes the artifact and rotates history.
 func (r *ImageBuildReconciler) recordSuccess(obj *ociv1alpha1.ImageBuild, inputs build.Inputs, inputHash, digest string) {
-	// The PULL name. status.artifact is the one thing a workload reads, so it is the one thing that
-	// gets the public name; everything that connects goes through repositoryFor, because those run
-	// from inside the cluster where this name may not resolve.
-	//
-	// Retention reads these tags back out of status, so it has to rebuild them against its own
-	// resolved repository rather than dial what it finds here. ADR 0048.
+	// Status gets the public pull name; anything that dials the registry uses repositoryFor
+	// instead. ADR 0048.
 	repo := r.Default.PublicRepository(r.repositoryFor(obj))
-	// Same list the Job was told to push, so status cannot describe a different set of tags than
-	// the build actually wrote.
+	// The same tag list the build was given.
 	effective, err := recon.EffectiveTags(obj.Spec.Push.GetTags(), obj.Spec.Push.GetRef())
 	if err != nil {
 		effective = obj.Spec.Push.Tags
@@ -756,8 +649,6 @@ func (r *ImageBuildReconciler) recordSuccess(obj *ociv1alpha1.ImageBuild, inputs
 		Tags:     tags,
 	}
 	obj.Status.InputHash = inputHash
-	// A build that published is a divergence resolved, so the record must go. Leaving it would make
-	// the field a permanent scar on an object that is now correct.
 	obj.Status.Conflict = nil
 	obj.Status.BuildRef = nil
 	obj.Status.Failures = 0
@@ -770,12 +661,7 @@ func (r *ImageBuildReconciler) recordSuccess(obj *ociv1alpha1.ImageBuild, inputs
 	record := ociv1alpha1.BuildRecord{
 		Digest: digest, Tags: tags, InputHash: inputHash,
 	}
-	// Where the build came from, so an artifact can be traced back to a revision without pulling it
-	// apart. The composer records this per layer; a build has at most one context.
-	//
-	// Omitted rather than recorded empty when there is no context: a build whose Dockerfile is its
-	// whole input has no source to trace to, and an entry with three empty fields would claim
-	// otherwise.
+	// Traceability to a source revision; omitted for builds without a sourceRef context.
 	if ref := obj.Spec.Context.GetSourceRef(); ref != nil {
 		record.Sources = []ociv1alpha1.SourceRecord{{
 			Name:     ref.Name,
@@ -788,10 +674,6 @@ func (r *ImageBuildReconciler) recordSuccess(obj *ociv1alpha1.ImageBuild, inputs
 }
 
 // historyLimit is the object's own retention if it sets one, else the operator's, else the default.
-//
-// Per-object retention matters MORE here than on a composition: a composition can rebuild any
-// artifact from its spec, so retention is a convenience. A build cannot (ADR 0025), so this is how
-// much of the only copy is kept.
 func (r *ImageBuildReconciler) historyLimit(obj *ociv1alpha1.ImageBuild) int {
 	return obj.Spec.Push.HistoryLimit(r.HistoryLimit)
 }
@@ -830,8 +712,7 @@ func (r *ImageBuildReconciler) applyOutcome(obj *ociv1alpha1.ImageBuild, err err
 }
 
 func readyMessage(obj *ociv1alpha1.ImageBuild) string {
-	// A kept tag comes first: it is the case where the object is Ready and yet did NOT do what its
-	// spec asks for, so an operator reading one line has to see it here rather than go looking.
+	// A kept tag first: Ready, yet the spec was not carried out.
 	if c := obj.Status.Conflict; c != nil {
 		return fmt.Sprintf("kept %s at %s; no build was run (onConflict: Keep)", c.Tag, c.Existing)
 	}
@@ -873,8 +754,7 @@ func storedFailureMessage(obj *ociv1alpha1.ImageBuild, job *batchv1.Job) string 
 	return jobFailureMessage(job)
 }
 
-// retryDue reports whether enough time has passed since the last failure to try again. It mirrors
-// the interval Reconcile requeues at, so the wait is the backoff rather than a second policy.
+// retryDue reports whether the failure backoff Reconcile requeues with has elapsed.
 func retryDue(obj *ociv1alpha1.ImageBuild) bool {
 	la := obj.Status.LastAttempt
 	if la == nil || la.FinishedAt == nil {
@@ -883,15 +763,12 @@ func retryDue(obj *ociv1alpha1.ImageBuild) bool {
 	return !time.Now().Before(la.FinishedAt.Add(failureBackoff(obj.Status.Failures)))
 }
 
-// maxFailureDetail is BuildAttempt.Message's MaxLength. Exceeding it does not truncate; the API
-// server rejects the status write, so the failure is lost rather than shortened.
+// maxFailureDetail is BuildAttempt.Message's MaxLength. Exceeding it makes the API server reject
+// the whole status write.
 const maxFailureDetail = 4096
 
-// jobFailureDetail explains a failed build as specifically as the cluster allows.
-//
-// The Job's own condition says only "BackoffLimitExceeded", which names the mechanism and not the
-// cause. The cause is the build container's exit code and termination message, so those are read
-// from the pod and appended — otherwise status shows a failure with no way to act on it.
+// jobFailureDetail explains a failed build using the failing container's exit code and
+// termination message; the Job condition alone says only "BackoffLimitExceeded".
 func (r *ImageBuildReconciler) jobFailureDetail(ctx context.Context, obj *ociv1alpha1.ImageBuild, job *batchv1.Job) string {
 	msg := jobFailureMessage(job)
 
@@ -902,17 +779,11 @@ func (r *ImageBuildReconciler) jobFailureDetail(ctx context.Context, obj *ociv1a
 	return failureDetailFor(msg, pods.Items...)
 }
 
-// failureDetailFor turns the pods of a failed Job into the message stored in status.
-//
-// Split from the lookup so it can be tested without a client: what it produces has to fit
-// BuildAttempt.Message exactly, and that is not something to discover in a cluster.
+// failureDetailFor turns the pods of a failed Job into the message stored in status, within
+// maxFailureDetail.
 func failureDetailFor(msg string, pods ...corev1.Pod) string {
 	for _, p := range pods {
-		// Init containers FIRST, and including them at all is the fix. This iterated only
-		// ContainerStatuses, which does not contain them, so a context that failed to fetch
-		// reported "BackoffLimitExceeded" and nothing else -- the mechanism, with the cause
-		// discarded. First because an init container failing means the build container never ran,
-		// so its status carries nothing worth preferring.
+		// Init containers first: if one failed (e.g. the context fetch), the build never ran.
 		statuses := append(append([]corev1.ContainerStatus{}, p.Status.InitContainerStatuses...),
 			p.Status.ContainerStatuses...)
 		for _, cs := range statuses {
@@ -924,8 +795,7 @@ func failureDetailFor(msg string, pods ...corev1.Pod) string {
 			if t.Reason != "" {
 				where += " (" + t.Reason + ")"
 			}
-			// The pod is named for the FULL log, but it is not the record: the next retry deletes
-			// the Job and takes it with it, which is why the cause has to be in the message.
+			// The pod goes with the Job on the next retry, so the cause itself must be in the message.
 			hint := fmt.Sprintf("; see `kubectl -n %s logs %s -c %s` while the pod lasts",
 				p.Namespace, p.Name, cs.Name)
 
@@ -933,8 +803,7 @@ func failureDetailFor(msg string, pods ...corev1.Pod) string {
 			if cause == "" {
 				return recon.Truncate(msg+": "+where+hint, maxFailureDetail)
 			}
-			// CAUSE FIRST, and only the cause is trimmed: it used to come last, so every
-			// truncation ate the one part worth reading. ADR 0046.
+			// Cause first, and only the cause's head is trimmed. ADR 0046.
 			suffix := " [" + where + "]" + hint
 			budget := max(maxFailureDetail-len(suffix), 0)
 			return recon.TruncateTail(cause, budget) + suffix
@@ -960,28 +829,17 @@ func (r *ImageBuildReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&ociv1alpha1.ImageBuild{}).
 		Owns(&batchv1.Job{}).
-		// Without this a ConfigMap holding a Dockerfile would only be noticed at the next interval,
-		// an hour by default. Editing the recipe and watching nothing happen reads as the controller
-		// being broken. Same reasoning, and near enough the same code, as the composer's watch on
-		// configMap layers.
+		// So an edited Dockerfile ConfigMap rebuilds now, not at the next interval.
 		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.buildsForConfigMap)).
 		Complete(r)
 }
 
-// recordKept notes a build that was not run because onConflict: Keep left an existing tag alone.
+// recordKept notes a build that was not published because onConflict: Keep left an existing tag
+// alone.
 //
-// Conditions are deliberately NOT set here. applyOutcome owns every condition on this kind, and
-// readyMessage renders this case; setting them in both places would make the message depend on call
-// order, which is how the Ready condition ends up disagreeing with itself.
-//
-// The outcome is Ready, not Stalled. With a spec-hash tag an existing tag means these inputs have
-// already been built and published, so nothing is wrong -- and stalling would need a generation
-// change to recover from, which changing the upstream Dockerfile does not produce.
-//
-// status.artifact is deliberately NOT synthesised from what the tag holds. On this kind the digest
-// alone does not say which inputs produced it, so claiming it as this object's artifact would
-// assert something unverifiable. status.conflict says exactly what is known: the tag exists, and
-// this is what it points at.
+// Conditions are left to applyOutcome and readyMessage. The outcome is Ready, not Stalled: an
+// upstream change cannot raise the generation change Stalled needs. status.artifact is not
+// synthesised from the tag, since nothing proves which inputs produced it.
 func (r *ImageBuildReconciler) recordKept(obj *ociv1alpha1.ImageBuild, c *ociv1alpha1.TagConflictStatus) {
 	obj.Status.Conflict = c
 	obj.Status.Failures = 0
@@ -989,9 +847,7 @@ func (r *ImageBuildReconciler) recordKept(obj *ociv1alpha1.ImageBuild, c *ociv1a
 		fmt.Sprintf("Kept %s at %s; no build was run (onConflict: Keep)", c.Tag, c.Existing))
 }
 
-// attestationMode summarises the BuildKit attestation options for the input hash. A string rather
-// than two booleans so that adding a third option later cannot silently collide with an existing
-// combination.
+// attestationMode summarises the BuildKit attestation options for the input hash.
 func attestationMode(cfg JobConfig) string {
 	switch {
 	case cfg.SBOM && cfg.Provenance:
@@ -1005,21 +861,11 @@ func attestationMode(cfg JobConfig) string {
 	}
 }
 
-// maxDockerfileFromConfigMap bounds one key.
-//
-// The same bound build.FetchDockerfile applies to a Dockerfile pulled out of a context tarball, for
-// the same reason: a Dockerfile is kilobytes, and reading more than that into a controller shared by
-// every namespace is a way to make that controller someone else's problem. A whole ConfigMap is
-// capped near 1 MiB by etcd, so this is close to that ceiling rather than far below it -- the point
-// is a legible error rather than a surprising one.
+// maxDockerfileFromConfigMap bounds one key, like build.FetchDockerfile's bound on a context.
 const maxDockerfileFromConfigMap = 1 << 20
 
-// dockerfileFromConfigMap reads the Dockerfile out of one ConfigMap key.
-//
-// Every failure here is Pending rather than Terminal, because every fix is in the OTHER object:
-// create the ConfigMap, add the key, shrink it. Terminal would wedge this object while the thing it
-// needs sits there waiting to be fixed, and ConfigMaps are watched, so the wait is usually over the
-// moment one appears.
+// dockerfileFromConfigMap reads the Dockerfile out of one ConfigMap key. Every failure is Pending,
+// not Terminal: the fix is in the ConfigMap, which is watched.
 func (r *ImageBuildReconciler) dockerfileFromConfigMap(
 	ctx context.Context, obj *ociv1alpha1.ImageBuild,
 ) ([]byte, error) {
@@ -1029,8 +875,7 @@ func (r *ImageBuildReconciler) dockerfileFromConfigMap(
 		key = "Dockerfile"
 	}
 
-	// obj.Namespace, never a namespace from the spec. The reference carries none, and that is the
-	// whole of the boundary (threat-model I4).
+	// Always obj.Namespace: the reference carries none (threat-model I4).
 	var cm corev1.ConfigMap
 	if err := r.Get(ctx, types.NamespacedName{Namespace: obj.Namespace, Name: ref.Name}, &cm); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -1057,14 +902,8 @@ func boundedDockerfile(content []byte, name, key string) ([]byte, error) {
 	return content, nil
 }
 
-// buildsForConfigMap maps a changed ConfigMap to the builds that read a Dockerfile from it.
-//
-// Namespace-scoped: a configMapRef resolves in the object's own namespace, so a same-named ConfigMap
-// elsewhere is unrelated and must not trigger a rebuild. Contrast the composer's source mapping,
-// which lists cluster-wide because a sourceRef carries a namespace field.
-//
-// A linear scan rather than a field index, matching the composer: the list is namespace-scoped and
-// the comparison is one string, so an index would be machinery for a loop that is already small.
+// buildsForConfigMap maps a changed ConfigMap to the builds in its namespace that read a
+// Dockerfile from it.
 func (r *ImageBuildReconciler) buildsForConfigMap(ctx context.Context, obj client.Object) []reconcile.Request {
 	var list ociv1alpha1.ImageBuildList
 	if err := r.List(ctx, &list, client.InNamespace(obj.GetNamespace())); err != nil {
@@ -1088,15 +927,8 @@ func (r *ImageBuildReconciler) buildsForConfigMap(ctx context.Context, obj clien
 	return out
 }
 
-// refreshNow renews the lease on what was just published, without waiting for the next cycle.
-//
-// Until this runs the artifact has NO lease. A registry that expires on pull recency holds no
-// record that anything was pushed, and zot can carry an OLD timestamp onto a new tag when the
-// digest is one it has seen before -- so a collection pass in the gap reclaims content that is
-// minutes old. The scheduled cycle closes that gap only after a full interval.
-//
-// Never fatal. The push succeeded; a failed opportunistic refresh leaves exactly the situation
-// that existed before this call, and the next cycle tries again.
+// refreshNow renews the lease on what was just published, which otherwise has none until the next
+// cycle (zot may even carry an old timestamp onto a new tag). Best effort; never fatal.
 func (r *ImageBuildReconciler) refreshNow(ctx context.Context, obj *ociv1alpha1.ImageBuild) {
 	if r.Refresher == nil {
 		return
@@ -1107,11 +939,8 @@ func (r *ImageBuildReconciler) refreshNow(ctx context.Context, obj *ociv1alpha1.
 	})
 }
 
-// exportRef publishes the reference into the ConfigMap a consumer substitutes from.
-//
-// After recordSuccess, so what is exported is exactly what status reports, and only on a confirmed
-// publish -- a consumer substitutes whatever it finds, and a missing key substitutes the empty
-// string with no complaint from anything.
+// exportRef publishes status.artifact into the push.writeRefTo ConfigMap. No-op until there is an
+// artifact.
 func (r *ImageBuildReconciler) exportRef(ctx context.Context, obj *ociv1alpha1.ImageBuild) error {
 	if obj.Spec.Push.GetWriteRefTo() == nil || obj.Status.Artifact == nil {
 		return nil
@@ -1124,31 +953,22 @@ func (r *ImageBuildReconciler) exportRef(ctx context.Context, obj *ociv1alpha1.I
 	return r.recordExport(ctx, obj, written)
 }
 
-// recordExport remembers the ConfigMap that was written, and removes the previous one when the
-// spec has moved it to another namespace.
-//
-// status is the only record of where it went: the name is derivable from the object, the namespace
-// is not. Without it, moving writeRefTo.namespace strands a ConfigMap a consumer may still be
-// substituting from (ADR 0056).
+// recordExport records where the ConfigMap was written (status is the only record of its
+// namespace) and removes the previous one if it moved. ADR 0056.
 func (r *ImageBuildReconciler) recordExport(
 	ctx context.Context, obj *ociv1alpha1.ImageBuild, written *ociv1alpha1.RefExportStatus,
 ) error {
 	if _, err := recon.RecordExport(ctx, r.Client, obj, obj.Status.RefExport, written); err != nil {
 		return err
 	}
-	// Mutate, do NOT patch. Reconcile takes one status patch at the end, and a second one here
-	// destroys the first: controller-runtime writes the server's response back into the object, so
-	// an intermediate patch replaces the in-memory status with whatever the server held -- which
-	// at that moment is the status from BEFORE this reconcile. recordSuccess has already set
-	// Artifact and InputHash in memory and they had not been persisted yet, so they were silently
-	// dropped and the object never converged: it rebuilt every pass, produced a new digest every
-	// time, and rewrote this very ConfigMap, rolling whatever consumed it.
+	// Mutate, do not patch: an intermediate status patch overwrites the in-memory status with the
+	// server's, discarding unpersisted fields such as Artifact and InputHash, so the object never
+	// converges.
 	obj.Status.RefExport = written
 	return nil
 }
 
-// pollInterval is how often a running Job is re-observed, defaulted here rather than at
-// construction so a zero value in a test means "the normal one".
+// pollInterval is how often a running Job is re-observed.
 func (r *ImageBuildReconciler) pollInterval() time.Duration {
 	if r.BuildPollInterval > 0 {
 		return r.BuildPollInterval
@@ -1157,12 +977,8 @@ func (r *ImageBuildReconciler) pollInterval() time.Duration {
 }
 
 // reconcileExportLifecycle keeps the finalizer in step with whether there is anything to clean up.
-//
-// The finalizer is added only for an export into ANOTHER namespace, where a cross-namespace owner
-// reference is invalid and nothing else would reclaim the ConfigMap. An own-namespace export is
-// owned by this object and goes with it, so most objects that use the feature -- and every object
-// that does not -- keep a deletion that does not depend on this controller running.
-// done is true when the object is going away and this reconcile should stop.
+// Only an export into another namespace needs one: an own-namespace export is garbage-collected
+// through its owner reference. done is true when this reconcile should stop.
 func (r *ImageBuildReconciler) reconcileExportLifecycle(
 	ctx context.Context, obj *ociv1alpha1.ImageBuild, exp *ociv1alpha1.RefExport,
 ) (ctrl.Result, bool, error) {
@@ -1172,8 +988,7 @@ func (r *ImageBuildReconciler) reconcileExportLifecycle(
 		if !has {
 			return ctrl.Result{}, true, nil
 		}
-		// The export is the one thing a build leaves behind: its Secrets belong to its Job and the
-		// Job belongs to this object, so those go on their own.
+		// Only the export needs explicit cleanup; Secrets and Jobs are owner-collected.
 		if err := recon.DeleteExportedRef(ctx, r.Client, obj, obj.Status.RefExport); err != nil {
 			return ctrl.Result{}, true, err
 		}
@@ -1182,9 +997,7 @@ func (r *ImageBuildReconciler) reconcileExportLifecycle(
 		return ctrl.Result{}, true, client.IgnoreNotFound(r.Patch(ctx, obj, patch))
 	}
 
-	// An export that is no longer asked for is removed now rather than at deletion: a consumer
-	// goes on substituting from whatever it finds, so a ConfigMap nobody maintains is worse than
-	// no ConfigMap at all.
+	// Remove an export no longer asked for now: a stale ConfigMap is worse than none.
 	if exp == nil && obj.Status.RefExport != nil {
 		if err := r.recordExport(ctx, obj, nil); err != nil {
 			return ctrl.Result{}, true, err

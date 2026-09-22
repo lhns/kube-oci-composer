@@ -21,14 +21,8 @@ import (
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 )
 
-// The refresh is the whole retention guarantee (ADR 0031), and it fails UNSAFE: if it silently stops
-// doing its job, nothing breaks until the registry's window elapses and live images are deleted.
-// There is no reconcile that goes red, no object that stalls, no pull that fails — until one day
-// every pull fails at once.
-//
-// That is why these tests assert on the REQUESTS the refresher makes rather than on its return
-// value. A refresher that returns a healthy-looking Result while touching nothing is precisely the
-// failure this has to catch, and it would satisfy any assertion made against its own report.
+// The refresh fails UNSAFE (ADR 0031), so these tests assert on the REQUESTS the refresher makes,
+// not only on its Result: a refresher that reports success while touching nothing must still fail.
 
 // recordingRegistry answers manifest requests and remembers every path asked for.
 type recordingRegistry struct {
@@ -64,9 +58,7 @@ func newRegistry(t *testing.T, missing ...string) *recordingRegistry {
 		broken := reg.broken[ref]
 		reg.mu.Unlock()
 
-		// A 500 and a 404 are DIFFERENT alarms (ADR 0049), so the stub has to be able to produce
-		// both. It could only 404, which is why a test about recovery from a transient failure was
-		// written using a permanently deleted manifest.
+		// A 500 and a 404 are different alarms (ADR 0049); the stub produces both.
 		if broken {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
@@ -76,10 +68,7 @@ func newRegistry(t *testing.T, missing ...string) *recordingRegistry {
 			return
 		}
 
-		// The body a digest reference resolves to must actually hash to that digest, because
-		// go-containerregistry verifies it -- as any correct client does. A stub returning a fixed
-		// body for every digest is not a registry, it is a way to make the code under test look
-		// broken.
+		// A digest reference must resolve to a body that hashes to it; the client verifies it.
 		body := manifestFor(ref)
 		w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
 		w.Header().Set("Docker-Content-Digest", digestOf(body))
@@ -152,13 +141,9 @@ func scheme(t *testing.T) *runtime.Scheme {
 	return s
 }
 
-// publicHost is what a workload is told to pull from, and it resolves NOWHERE -- no test server
-// listens on it and it is not in InsecureRegistries.
-//
-// Every fixture below stores its tags through it, because that is what both controllers write into
-// status.artifact.tags and status.history[].tags. Using the reachable host in both places is what
-// let the refresher trust a stored tag for a whole release: the two could not disagree, so the bug
-// had nowhere to show. ADR 0048.
+// publicHost is what a workload is told to pull from, and it resolves NOWHERE. Fixtures store their
+// tags through it, as both controllers do in status, so a refresher that trusts a stored tag's host
+// fails here (ADR 0048).
 const publicHost = "oci-composer.internal:30500"
 
 // publicTag writes a tag the way status carries it: qualified with the public host.
@@ -177,11 +162,8 @@ func buildWith(reg *recordingRegistry, name string, history []ociv1alpha1.BuildR
 	return obj
 }
 
-// Every retained record must be refreshed under BOTH its digest and its tags.
-//
-// Measured against a real registry (test/e2e/retention_test.go): pulling only the digest keeps the
-// CONTENT alive and lets the TAG be collected, because a registry can govern tagged and untagged
-// manifests by different rules. A refresh keeps alive exactly what it asks for.
+// Every retained record must be refreshed under BOTH its digest and its tags: pulling only the
+// digest lets the tag be collected (measured in test/e2e/retention_test.go).
 func TestEveryRetainedReferenceIsRefreshed(t *testing.T) {
 	reg := newRegistry(t)
 
@@ -190,14 +172,7 @@ func TestEveryRetainedReferenceIsRefreshed(t *testing.T) {
 		{Digest: digestB, Tags: []string{publicTag("v0")}},
 	}, nil)
 
-	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithObjects(obj).Build()
-	r := &Refresher{
-		Client:             c,
-		Source:             sourceFor(obj, c),
-		Pending:            allReconciled{},
-		Recorder:           record.NewFakeRecorder(50),
-		InsecureRegistries: []string{reg.host()},
-	}
+	r, _ := refresherFor(t, reg.host(), obj)
 
 	res, err := r.RefreshOnce(context.Background())
 	if err != nil {
@@ -216,12 +191,8 @@ func TestEveryRetainedReferenceIsRefreshed(t *testing.T) {
 	}
 }
 
-// CONDITION 2 of ADR 0031, named there as the most likely implementation mistake.
-//
-// An object Stalled on a spec error must keep refreshing what it already published. Those images may
-// be running right now, and stalling is precisely when nobody is watching the object. A refresh
-// gated on a successful reconcile would delete the images of every object with a broken spec, one
-// retention window after it broke.
+// Condition 2 of ADR 0031: an object Stalled on a spec error must keep refreshing what it already
+// published, since those images may be running.
 func TestAStalledObjectStillRefreshes(t *testing.T) {
 	reg := newRegistry(t)
 
@@ -237,14 +208,7 @@ func TestAStalledObjectStillRefreshes(t *testing.T) {
 			LastTransitionTime: metav1.Now()},
 	}
 
-	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithObjects(obj).Build()
-	r := &Refresher{
-		Client:             c,
-		Source:             sourceFor(obj, c),
-		Pending:            allReconciled{},
-		Recorder:           record.NewFakeRecorder(50),
-		InsecureRegistries: []string{reg.host()},
-	}
+	r, _ := refresherFor(t, reg.host(), obj)
 
 	if _, err := r.RefreshOnce(context.Background()); err != nil {
 		t.Fatalf("refreshing: %v", err)
@@ -257,12 +221,8 @@ func TestAStalledObjectStillRefreshes(t *testing.T) {
 	}
 }
 
-// A partial view must refresh NOTHING rather than most things.
-//
-// The collector's version of this rail protects against sweeping something live. This one protects
-// against the opposite and quieter failure: an object missing from the view is an object whose
-// images stop being kept alive, with the symptom arriving a window later and nothing connecting it
-// back to the cause.
+// A partial view must refresh NOTHING rather than most things, since an object missing from the view
+// would silently stop being kept alive.
 func TestAPartialViewRefreshesNothing(t *testing.T) {
 	reg := newRegistry(t)
 
@@ -270,14 +230,8 @@ func TestAPartialViewRefreshesNothing(t *testing.T) {
 		{Digest: digestA, Tags: []string{publicTag("v1")}},
 	}, nil)
 
-	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithObjects(obj).Build()
-	r := &Refresher{
-		Client:             c,
-		Source:             sourceFor(obj, c),
-		Pending:            allReconciled{pending: []string{"team-a/not-seen-yet"}},
-		Recorder:           record.NewFakeRecorder(50),
-		InsecureRegistries: []string{reg.host()},
-	}
+	r, _ := refresherFor(t, reg.host(), obj)
+	r.Pending = allReconciled{pending: []string{"team-a/not-seen-yet"}}
 
 	res, err := r.RefreshOnce(context.Background())
 	if err != nil {
@@ -291,9 +245,8 @@ func TestAPartialViewRefreshesNothing(t *testing.T) {
 	}
 }
 
-// A reference the registry no longer has means the guarantee has ALREADY been broken by something
-// else. Counted apart from an unreachable registry, because they are different alarms: one says the
-// protection failed, the other says it might.
+// A reference the registry no longer has is counted apart from an unreachable registry: one says the
+// protection already failed, the other that it might.
 func TestAMissingReferenceIsReportedSeparately(t *testing.T) {
 	reg := newRegistry(t, digestB)
 
@@ -302,14 +255,7 @@ func TestAMissingReferenceIsReportedSeparately(t *testing.T) {
 		{Digest: digestB},
 	}, nil)
 
-	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithObjects(obj).Build()
-	r := &Refresher{
-		Client:             c,
-		Source:             sourceFor(obj, c),
-		Pending:            allReconciled{},
-		Recorder:           record.NewFakeRecorder(50),
-		InsecureRegistries: []string{reg.host()},
-	}
+	r, _ := refresherFor(t, reg.host(), obj)
 
 	res, err := r.RefreshOnce(context.Background())
 	if err != nil {
@@ -321,27 +267,16 @@ func TestAMissingReferenceIsReportedSeparately(t *testing.T) {
 	}
 }
 
-// CONDITION 4 of ADR 0031. A design that fails unsafe needs monitoring in a way that a fail-safe one
-// does not: sustained failure has to be loud well before the window elapses, because the alternative
-// to noticing is deletion.
+// Condition 4 of ADR 0031: sustained failure must be loud well before the window elapses.
 func TestSustainedFailureRaisesAnEvent(t *testing.T) {
-	// A registry that is there and unwell, not a manifest that is gone: Degraded is the alarm for
-	// something that MIGHT still be failing, and only a transient error can sustain it (ADR 0049).
+	// A transient 500, not a 404: only a transient error sustains Degraded (ADR 0049).
 	reg := newRegistry(t)
 	reg.setBroken(digestA)
 	obj := buildWith(reg, "app", []ociv1alpha1.BuildRecord{{Digest: digestA}}, nil)
 
-	events := record.NewFakeRecorder(50)
-	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithObjects(obj).Build()
-	r := &Refresher{
-		Client:             c,
-		Source:             sourceFor(obj, c),
-		Pending:            allReconciled{},
-		Recorder:           events,
-		InsecureRegistries: []string{reg.host()},
-	}
+	r, events := refresherFor(t, reg.host(), obj)
 
-	// One failure is a rolling restart, not a problem worth waking anyone for.
+	// One failure is not worth an event.
 	if _, err := r.RefreshOnce(context.Background()); err != nil {
 		t.Fatalf("refreshing: %v", err)
 	}
@@ -372,15 +307,7 @@ func TestRecoveryClearsTheFailureCount(t *testing.T) {
 	reg.setBroken(digestA)
 	obj := buildWith(reg, "app", []ociv1alpha1.BuildRecord{{Digest: digestA}}, nil)
 
-	events := record.NewFakeRecorder(50)
-	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithObjects(obj).Build()
-	r := &Refresher{
-		Client:             c,
-		Source:             sourceFor(obj, c),
-		Pending:            allReconciled{},
-		Recorder:           events,
-		InsecureRegistries: []string{reg.host()},
-	}
+	r, events := refresherFor(t, reg.host(), obj)
 
 	for i := 0; i < DegradedAfter-1; i++ {
 		if _, err := r.RefreshOnce(context.Background()); err != nil {
@@ -406,13 +333,8 @@ func TestRecoveryClearsTheFailureCount(t *testing.T) {
 	}
 }
 
-// An object with no repository AND no default registry configured has nothing to refresh, and must
-// not be counted as a failure.
-//
-// This used to be the serving case -- an object served from the embedded endpoint had no external
-// registry to convince of anything. That endpoint is gone (ADR 0035), so the only way to reach this
-// state now is an operator who has configured no default registry, where the object is Pending and
-// has never published anything.
+// An object with no repository AND no default registry has nowhere it could have published, so it
+// has nothing to refresh and is not a failure.
 func TestAnObjectWithNowhereToPublishIsNotAFailure(t *testing.T) {
 	reg := newRegistry(t)
 
@@ -427,7 +349,7 @@ func TestAnObjectWithNowhereToPublishIsNotAFailure(t *testing.T) {
 		Source:   sourceFor(obj, c),
 		Pending:  allReconciled{},
 		Recorder: record.NewFakeRecorder(50),
-		// No Default: nothing is configured, so there is nowhere for this object to publish.
+		// No Default.
 	}
 
 	res, err := r.RefreshOnce(context.Background())
@@ -458,14 +380,7 @@ func TestCredentialsComeFromTheObjectsSecret(t *testing.T) {
 		},
 	}
 
-	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithObjects(obj, secret).Build()
-	r := &Refresher{
-		Client:             c,
-		Source:             sourceFor(obj, c),
-		Pending:            allReconciled{},
-		Recorder:           record.NewFakeRecorder(50),
-		InsecureRegistries: []string{reg.host()},
-	}
+	r, _ := refresherFor(t, reg.host(), obj, secret)
 
 	res, err := r.RefreshOnce(context.Background())
 	if err != nil {
@@ -476,21 +391,13 @@ func TestCredentialsComeFromTheObjectsSecret(t *testing.T) {
 	}
 }
 
-// A missing Secret is a failure to refresh, not a silent skip. Skipping would mean the object's
-// images quietly stop being protected while nothing anywhere says so.
+// A missing Secret is a failure to refresh, not a silent skip.
 func TestAnUnusableSecretIsAFailureNotASkip(t *testing.T) {
 	reg := newRegistry(t)
 	obj := buildWith(reg, "app", []ociv1alpha1.BuildRecord{{Digest: digestA}}, nil)
 	obj.Spec.Push.SecretRef = &ociv1alpha1.LocalObjectReference{Name: "absent"}
 
-	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithObjects(obj).Build()
-	r := &Refresher{
-		Client:             c,
-		Source:             sourceFor(obj, c),
-		Pending:            allReconciled{},
-		Recorder:           record.NewFakeRecorder(50),
-		InsecureRegistries: []string{reg.host()},
-	}
+	r, _ := refresherFor(t, reg.host(), obj)
 
 	res, err := r.RefreshOnce(context.Background())
 	if err != nil {
@@ -510,6 +417,43 @@ func TestNoPendingGateRefusesToRun(t *testing.T) {
 	}
 }
 
+// refresherFor builds a Refresher over objs[0], with every obj in the fake client.
+func refresherFor(t *testing.T, host string, objs ...client.Object) (*Refresher, *record.FakeRecorder) {
+	t.Helper()
+	events := record.NewFakeRecorder(200)
+	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithObjects(objs...).Build()
+	return &Refresher{
+		Client:             c,
+		Source:             sourceFor(objs[0], c),
+		Pending:            allReconciled{},
+		Recorder:           events,
+		InsecureRegistries: []string{host},
+	}, events
+}
+
+// drainEvents returns every event recorded so far.
+func drainEvents(events *record.FakeRecorder) []string {
+	var out []string
+	for {
+		select {
+		case ev := <-events.Events:
+			out = append(out, ev)
+		default:
+			return out
+		}
+	}
+}
+
+func countReason(events []string, reason string) int {
+	n := 0
+	for _, ev := range events {
+		if strings.Contains(ev, reason) {
+			n++
+		}
+	}
+	return n
+}
+
 func containsRef(requests []string, want string) bool {
 	for _, r := range requests {
 		if strings.Contains(r, want) {
@@ -519,8 +463,7 @@ func containsRef(requests []string, want string) bool {
 	return false
 }
 
-// sourceFor picks the source for whichever kind the test built, so each test stays about retention
-// rather than about which component owns which list.
+// sourceFor picks the source for whichever kind the test built.
 func sourceFor(obj client.Object, c client.Client) Source {
 	if _, ok := obj.(*ociv1alpha1.ImageBuild); ok {
 		return BuildSource{Client: c}
@@ -528,11 +471,8 @@ func sourceFor(obj client.Object, c client.Client) Source {
 	return CompositionSource{Client: c}
 }
 
-// TestEveryReferenceIsBuiltFromTheResolvedRepository is the invariant, asserted directly.
-//
-// Retention runs in-cluster. If a reference it dials came from anywhere but the repository it
-// resolved, it is addressing a host it may not be able to reach -- which is the whole of ADR 0048.
-// One assertion, and the class of bug cannot come back.
+// TestEveryReferenceIsBuiltFromTheResolvedRepository pins ADR 0048 directly: every reference
+// retention dials is built from the repository it resolved, never from a stored host.
 func TestEveryReferenceIsBuiltFromTheResolvedRepository(t *testing.T) {
 	const repo = "registry.svc.cluster.local:5000/team-a/app"
 
@@ -571,8 +511,8 @@ func TestEveryReferenceIsBuiltFromTheResolvedRepository(t *testing.T) {
 	}
 }
 
-// TestABareTagIsRecoveredFromWhateverStatusHolds pins the parse, because the rule is not obvious:
-// a host carries a colon of its own and only the LAST one, after the last slash, introduces a tag.
+// TestABareTagIsRecoveredFromWhateverStatusHolds pins the parse: a host may carry a colon of its own,
+// and only the last one after the last slash introduces a tag.
 func TestABareTagIsRecoveredFromWhateverStatusHolds(t *testing.T) {
 	for _, tc := range []struct{ name, in, want string }{
 		{"already bare", "v1", "v1"},
@@ -580,8 +520,7 @@ func TestABareTagIsRecoveredFromWhateverStatusHolds(t *testing.T) {
 		{"in-cluster host with a port", "registry.svc:5000/team-a/app:sb6b025064f7ba9bc", "sb6b025064f7ba9bc"},
 		{"no port", "ghcr.io/example/app:v1", "v1"},
 		{"empty", "", ""},
-		// A repository and no tag names nothing that was ever published, so it contributes
-		// nothing rather than being appended to repo as if it were a tag.
+		// A repository with no tag names nothing that was published.
 		{"repository with no tag", "oci-composer.internal:30500/team-a/app", ""},
 		{"host and port only", "registry.svc:5000/app", ""},
 		{"a digest is not a tag", "ghcr.io/example/app@" + digestA, ""},
@@ -594,14 +533,8 @@ func TestABareTagIsRecoveredFromWhateverStatusHolds(t *testing.T) {
 	}
 }
 
-// TestTagsStoredWithAnUnresolvableHostStillRefresh is the reported bug, end to end.
-//
-// A live 0.5.0 cluster reported "5 of 9 references" failing every hour for three days, with
-// "lookup oci-composer.internal: no such host". Digests refreshed and tags did not, because the
-// stored tag carried the public host and the refresher used it verbatim. One repository lost every
-// tag it had; the manifest survived only as an untagged blob, which is what deleteUntagged reclaims.
-//
-// The public host here resolves nowhere, exactly as it does not resolve from a pod.
+// TestTagsStoredWithAnUnresolvableHostStillRefresh is ADR 0048 end to end: tags stored under a
+// public host that a pod cannot resolve must still be refreshed through the resolved repository.
 func TestTagsStoredWithAnUnresolvableHostStillRefresh(t *testing.T) {
 	reg := newRegistry(t)
 
@@ -613,15 +546,7 @@ func TestTagsStoredWithAnUnresolvableHostStillRefresh(t *testing.T) {
 		Tags:   []string{publicTag("v1")},
 	})
 
-	rec := record.NewFakeRecorder(50)
-	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithObjects(obj).Build()
-	r := &Refresher{
-		Client:             c,
-		Source:             sourceFor(obj, c),
-		Pending:            allReconciled{},
-		Recorder:           rec,
-		InsecureRegistries: []string{reg.host()},
-	}
+	r, rec := refresherFor(t, reg.host(), obj)
 
 	res, err := r.RefreshOnce(context.Background())
 	if err != nil {
@@ -635,7 +560,6 @@ func TestTagsStoredWithAnUnresolvableHostStillRefresh(t *testing.T) {
 	if res.Refreshed != res.References {
 		t.Errorf("refreshed %d of %d references", res.Refreshed, res.References)
 	}
-	// The tags specifically, since those are the ones that were being lost.
 	for _, want := range []string{"v1", "v0"} {
 		if !containsRef(reg.requests(), want) {
 			t.Errorf("tag %q was never refreshed, so the registry would collect it\nrequests: %v",
@@ -649,8 +573,8 @@ func TestTagsStoredWithAnUnresolvableHostStillRefresh(t *testing.T) {
 	}
 }
 
-// setBroken makes the named references answer 500 -- a registry that is there and unwell, which is
-// a different thing from a manifest that is gone. Replaces the whole set, so no arguments clears it.
+// setBroken makes the named references answer 500 (a transient failure, not a missing manifest).
+// It replaces the whole set; no arguments clears it.
 func (reg *recordingRegistry) setBroken(refs ...string) {
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
@@ -660,13 +584,9 @@ func (reg *recordingRegistry) setBroken(refs ...string) {
 	}
 }
 
-// TestAGoneReferenceDoesNotHoldTheObjectDegradedForever is the bug ADR 0049 is about.
-//
-// A deleted manifest cannot come back on its own, so counting it as a failure re-armed the
-// escalation every cycle and clearFailure was never reached: consecutiveFailures reached 72 on the
-// cluster that reported it, and the object was permanently Degraded over history that had expired.
-// The cost is not the counter, it is that a genuine outage then arrives looking like three days of
-// existing noise.
+// TestAGoneReferenceDoesNotHoldTheObjectDegradedForever pins ADR 0049: a deleted history manifest
+// cannot come back, so it must not keep the failure escalation armed, or a real outage would be
+// indistinguishable from old noise.
 func TestAGoneReferenceDoesNotHoldTheObjectDegradedForever(t *testing.T) {
 	reg := newRegistry(t, digestA)
 	obj := buildWith(reg, "app", []ociv1alpha1.BuildRecord{
@@ -674,15 +594,7 @@ func TestAGoneReferenceDoesNotHoldTheObjectDegradedForever(t *testing.T) {
 		{Digest: digestB}, // still there
 	}, nil)
 
-	events := record.NewFakeRecorder(200)
-	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithObjects(obj).Build()
-	r := &Refresher{
-		Client:             c,
-		Source:             sourceFor(obj, c),
-		Pending:            allReconciled{},
-		Recorder:           events,
-		InsecureRegistries: []string{reg.host()},
-	}
+	r, events := refresherFor(t, reg.host(), obj)
 
 	// Well past the point at which a failure would have escalated.
 	for i := 0; i < DegradedAfter+3; i++ {
@@ -698,36 +610,21 @@ func TestAGoneReferenceDoesNotHoldTheObjectDegradedForever(t *testing.T) {
 		}
 	}
 
-	// The failure count never rose, so a real outage starting now would still be distinguishable.
 	if n := r.failures["team-a/app"]; n != 0 {
 		t.Errorf("consecutiveFailures = %d after %d cycles; a permanent loss must not hold the "+
 			"escalation open", n, DegradedAfter+3)
 	}
 
-	var degraded, lost int
-	for {
-		select {
-		case ev := <-events.Events:
-			switch {
-			case strings.Contains(ev, ociv1alpha1.ReasonRetentionDegraded):
-				degraded++
-			case strings.Contains(ev, ociv1alpha1.ReasonRetentionLost):
-				lost++
-			}
-			continue
-		default:
-		}
-		break
-	}
+	evs := drainEvents(events)
+	degraded := countReason(evs, ociv1alpha1.ReasonRetentionDegraded)
+	lost := countReason(evs, ociv1alpha1.ReasonRetentionLost)
 	if degraded != 0 {
 		t.Errorf("raised %d Degraded events; a manifest that is gone is not a refresh that is "+
 			"failing", degraded)
 	}
-	// Reported every cycle, deliberately: a loss that is still true an hour later is still true.
 	if lost == 0 {
 		t.Error("a reference was lost and nothing said so")
 	}
-	// And the surviving reference is still being refreshed, which is the point of not bailing out.
 	if !containsRef(reg.requests(), digestB) {
 		t.Error("the reference that still exists stopped being refreshed")
 	}
@@ -742,13 +639,8 @@ type recordingLogger struct {
 func (l *recordingLogger) Info(msg string, _ ...any)           { l.infos = append(l.infos, msg) }
 func (l *recordingLogger) Error(_ error, msg string, _ ...any) { l.errors = append(l.errors, msg) }
 
-// TestASkippedCycleGetsLoud — a cycle that declines to run protects exactly as much as one that
-// fails: nothing.
-//
-// The gate itself is right, and stays: a partial view would under-refresh silently, which is worse.
-// What was wrong is that declining was reported at Info while failing was escalated, though the
-// consequence is identical and a skip does not resolve on its own -- one object stuck with
-// observedGeneration behind its generation stops the refresh for EVERY object in the cluster.
+// TestASkippedCycleGetsLoud: a skipped cycle protects as little as a failed one, and one stuck
+// object skips every cycle, so persistent skips must escalate like failures.
 func TestASkippedCycleGetsLoud(t *testing.T) {
 	r := &Refresher{
 		Source:   staticSource{},
@@ -786,13 +678,8 @@ type staticSource struct{}
 
 func (staticSource) Targets(context.Context) ([]Target, error) { return nil, nil }
 
-// The current artifact going missing is NOT expired history, and must not be as quiet as it.
-//
-// ADR 0049 made a gone reference silent so history aging out could not hold an object Degraded
-// forever. It drew no line between that and the artifact in status -- what every workload
-// referencing the object pulls -- and a rolling tag moving deleted exactly that under a Ready object
-// (zot#4444), with nothing but a RetentionLost in the event stream to say so. ADR 0060 amends it:
-// history stays quiet, the current artifact is a failure, and one that persists escalates.
+// A missing current artifact is not expired history: it raises ArtifactLost and escalates to
+// Degraded if it persists (ADR 0060, amending ADR 0049; see zot#4444).
 func TestALostCurrentArtifactIsLoudAndEscalates(t *testing.T) {
 	reg := newRegistry(t, digestA)
 	obj := buildWith(reg, "app", []ociv1alpha1.BuildRecord{
@@ -800,15 +687,7 @@ func TestALostCurrentArtifactIsLoudAndEscalates(t *testing.T) {
 		{Digest: digestB},
 	}, &ociv1alpha1.ArtifactStatus{Digest: digestA})
 
-	events := record.NewFakeRecorder(200)
-	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithObjects(obj).Build()
-	r := &Refresher{
-		Client:             c,
-		Source:             sourceFor(obj, c),
-		Pending:            allReconciled{},
-		Recorder:           events,
-		InsecureRegistries: []string{reg.host()},
-	}
+	r, events := refresherFor(t, reg.host(), obj)
 
 	for i := 0; i < DegradedAfter; i++ {
 		if _, err := r.RefreshOnce(context.Background()); err != nil {
@@ -816,21 +695,9 @@ func TestALostCurrentArtifactIsLoudAndEscalates(t *testing.T) {
 		}
 	}
 
-	var degraded, artifactLost int
-	for {
-		select {
-		case ev := <-events.Events:
-			switch {
-			case strings.Contains(ev, ociv1alpha1.ReasonRetentionDegraded):
-				degraded++
-			case strings.Contains(ev, ociv1alpha1.ReasonArtifactLost):
-				artifactLost++
-			}
-			continue
-		default:
-		}
-		break
-	}
+	evs := drainEvents(events)
+	degraded := countReason(evs, ociv1alpha1.ReasonRetentionDegraded)
+	artifactLost := countReason(evs, ociv1alpha1.ReasonArtifactLost)
 	if artifactLost == 0 {
 		t.Error("the artifact every workload pulls is gone and no ArtifactLost was raised; it read " +
 			"exactly like history expiring")

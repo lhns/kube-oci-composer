@@ -6,17 +6,9 @@ import (
 	"io"
 )
 
-// Tar extraction, and the tar-shaped modes.
-//
-// A tar is the format everything else is normalised into: extractDeb hands its payload here, and
-// buildLayerTarGz writes one. This file is only the READER — translating tar's typeflags into
-// entries. Where an entry is allowed to land belongs to the collector in extract.go.
-
-// extractTar reads an archive and rebases its entries under target.
-//
-// When subpath is set, only entries beneath it are taken, and the prefix is stripped so the
-// selected directory's contents land at target rather than the directory itself. Everything about
-// WHERE an entry lands is the collector's; this function only translates tar's typeflags.
+// extractTar reads an archive and rebases its entries under target, taking only entries beneath
+// subpath when set. It only translates tar's typeflags; where an entry lands is the collector's
+// (extract.go).
 func extractTar(tr *tar.Reader, target, subpath string, strip int) ([]tarEntry, error) {
 	c := newCollector(target, subpath, strip)
 
@@ -29,8 +21,7 @@ func extractTar(tr *tar.Reader, target, subpath string, strip int) ([]tarEntry, 
 			return nil, fmt.Errorf("reading tar: %w", err)
 		}
 
-		// Names are passed through unchanged: a backslash in a tar entry is part of the filename,
-		// not a separator, so the normalisation the zip path applies would corrupt it here.
+		// Names are passed through unchanged: in a tar, a backslash is part of the filename.
 		name, ok, err := c.rebase(hdr.Name)
 		if err != nil {
 			return nil, err

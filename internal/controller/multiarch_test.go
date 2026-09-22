@@ -16,9 +16,8 @@ import (
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 )
 
-// platformIndex builds a real multi-architecture index: children whose descriptors AND configs
-// declare the given platforms. random.Index leaves descriptors empty, which is fine for asserting
-// the refusal but useless for selecting a child.
+// platformIndex builds an index whose children's descriptors AND configs declare the given
+// platforms. random.Index leaves descriptors empty, so a child could not be selected from it.
 func platformIndex(t *testing.T, platforms ...v1.Platform) v1.ImageIndex {
 	t.Helper()
 	idx := mutate.IndexMediaType(empty.Index, "application/vnd.oci.image.index.v1+json")
@@ -58,11 +57,9 @@ func publishIndex(t *testing.T, host, repo string, idx v1.ImageIndex) string {
 	return d.String()
 }
 
-// TestIndexBaseIsAcceptedWithPlatforms is the other half of TestMultiArchIndexIsRejected.
-//
-// ADR 0015 refuses an index base because resolving one would mean the CONTROLLER choosing a
-// platform. With spec.platforms set the choice comes from the spec, so the refusal does not apply.
-// The two tests together are what make that refusal conditional rather than absolute.
+// TestIndexBaseIsAcceptedWithPlatforms is the other half of TestMultiArchIndexIsRejected: ADR 0015
+// refuses an index base only because the controller would have to pick a platform, and with
+// spec.platforms set the spec picks it.
 func TestIndexBaseIsAcceptedWithPlatforms(t *testing.T) {
 	obj := composition("indexbase")
 	r, host := registryReconciler(t, obj)
@@ -89,9 +86,8 @@ func TestIndexBaseIsAcceptedWithPlatforms(t *testing.T) {
 	}
 }
 
-// TestMultiPlatformPublishesAnIndex checks what a consumer sees, and — more importantly — that the
-// children are recorded. An index whose children are unrecorded still resolves and still passes a
-// HEAD; it fails at pull time, after garbage collection has swept them.
+// TestMultiPlatformPublishesAnIndex pins that an index's children are recorded. Unrecorded children
+// still pass a HEAD but fail at pull time, once garbage collection has swept them.
 func TestMultiPlatformPublishesAnIndex(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("multiout", urlLayer("core", url, digest, "/core"))
@@ -115,18 +111,16 @@ func TestMultiPlatformPublishesAnIndex(t *testing.T) {
 		}
 	}
 
-	// Two children over ONE shared layer: two distinct configs plus one layer. Fewer than three
-	// blobs would mean a child's config went unrecorded, and GC would reclaim it under a live
-	// index.
+	// Two children over ONE shared layer: two configs plus one layer. Fewer means a child's config
+	// went unrecorded and GC would reclaim it under a live index.
 	if len(res.Record.Blobs) != 3 {
 		t.Fatalf("want 2 configs + 1 shared layer recorded, got %d: %v",
 			len(res.Record.Blobs), res.Record.Blobs)
 	}
 }
 
-// TestSinglePlatformStaysAnImage — naming exactly one platform must NOT wrap the result in an
-// index. One platform is one image; wrapping would change the digest of every artifact that later
-// adopts an explicit platform, for no gain.
+// TestSinglePlatformStaysAnImage — one platform must NOT be wrapped in an index, or adopting an
+// explicit platform would change every artifact's digest for no gain.
 func TestSinglePlatformStaysAnImage(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("singleplat", urlLayer("core", url, digest, "/core"))
@@ -146,9 +140,8 @@ func TestSinglePlatformStaysAnImage(t *testing.T) {
 	}
 }
 
-// TestExplicitAmd64MatchesTheDefault — on an amd64 controller, naming linux/amd64 explicitly must
-// produce the same artifact as leaving platforms unset. If it did not, adopting the field would
-// silently republish every artifact.
+// TestExplicitAmd64MatchesTheDefault — naming the host platform explicitly must produce the same
+// artifact as leaving platforms unset, or adopting the field would republish every artifact.
 func TestExplicitAmd64MatchesTheDefault(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 
@@ -173,9 +166,8 @@ func TestExplicitAmd64MatchesTheDefault(t *testing.T) {
 	}
 }
 
-// TestUnknownPlatformIsTerminal — a platform the base index does not offer needs a spec change, so
-// retrying hourly would repeat the same failure. Substituting a near match is how an amd64 binary
-// ends up on an arm node.
+// TestUnknownPlatformIsTerminal — a platform the base index lacks needs a spec change, so it is
+// terminal. Substituting a near match is how an amd64 binary ends up on an arm node.
 func TestUnknownPlatformIsTerminal(t *testing.T) {
 	obj := composition("badplat")
 	r, host := registryReconciler(t, obj)
@@ -194,14 +186,12 @@ func TestUnknownPlatformIsTerminal(t *testing.T) {
 	if !strings.Contains(err.Error(), "s390x") {
 		t.Fatalf("the error does not name the missing platform: %v", err)
 	}
-	var te *recon.TerminalError
-	if !asTerminalErr(err, &te) {
+	if !recon.IsTerminal(err) {
 		t.Fatalf("a missing platform needs a spec change, so it must be terminal: %v", err)
 	}
 }
 
-// TestDuplicatePlatformIsTerminal — two identical children make the index ambiguous, and a puller
-// choosing between them decides which of two identical things it meant.
+// TestDuplicatePlatformIsTerminal — two children for one platform make the index ambiguous.
 func TestDuplicatePlatformIsTerminal(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("dupplat", urlLayer("core", url, digest, "/core"))
@@ -212,15 +202,13 @@ func TestDuplicatePlatformIsTerminal(t *testing.T) {
 	if err == nil {
 		t.Fatal("a duplicated platform was accepted")
 	}
-	var te *recon.TerminalError
-	if !asTerminalErr(err, &te) {
+	if !recon.IsTerminal(err) {
 		t.Fatalf("a duplicated platform needs a spec change, so it must be terminal: %v", err)
 	}
 }
 
-// TestBaseDigestChangeRebuilds covers the bug this work fixed: the base reached the output but not
-// the input hash, so repointing spec.base.digest short-circuited as "unchanged" and the new base
-// was never built.
+// TestBaseDigestChangeRebuilds pins that the base is part of the input hash, so repointing
+// spec.base.digest rebuilds rather than short-circuiting as "unchanged".
 func TestBaseDigestChangeRebuilds(t *testing.T) {
 	obj := composition("baseswap")
 	r, host := registryReconciler(t, obj)
@@ -264,6 +252,5 @@ func TestBaseDigestChangeRebuilds(t *testing.T) {
 	}
 }
 
-// hostArch is the architecture the test process runs on, which is also what an unset platform
-// list resolves to.
+// hostArch is what an unset platform list resolves to.
 func hostArch() string { return runtime.GOARCH }

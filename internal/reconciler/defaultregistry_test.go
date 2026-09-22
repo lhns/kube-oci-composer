@@ -2,17 +2,9 @@ package reconciler
 
 import "testing"
 
-// The operator's registry credential is installed by the chart and lives in the CONTROLLER's
-// namespace. Every object in the cluster is reconciled by that controller, so the rule deciding when
-// that credential is used is a security boundary, not a convenience.
-//
-// The failure it prevents: a tenant who can create an ImageComposition sets
-//
-//	push: {repository: attacker.example/x}
-//
-// and the controller authenticates to attacker.example with the operator's registry password. The
-// tenant chooses the host; the operator supplies the credential. That is exfiltration wearing the
-// shape of a feature, and nothing about it looks wrong in a log.
+// The operator's credential must reach the operator's registry and nothing else. Otherwise a tenant
+// setting `push: {repository: attacker.example/x}` gets the controller to authenticate there with
+// the operator's password: exfiltration that looks like a feature.
 func TestTheOperatorCredentialNeverReachesATenantChosenRegistry(t *testing.T) {
 	d := DefaultRegistry{
 		Host:       "registry.internal:5000",
@@ -45,9 +37,8 @@ func TestTheOperatorCredentialNeverReachesATenantChosenRegistry(t *testing.T) {
 			wantName: "operator-push", wantNS: "oci-composer",
 		},
 		{
-			// The ordinary case the first version of this rule got WRONG. Naming a path inside the
-			// operator's own registry is not choosing a different registry, and denying the
-			// credential here forces the operator to hand their password to every tenant.
+			// A path inside the operator's registry is not a different registry. Denying the
+			// credential here would force the operator to hand their password to every tenant.
 			name:     "the operator's registry, path chosen by the object",
 			target:   "registry.internal:5000/somewhere/else",
 			wantName: "operator-push", wantNS: "oci-composer",
@@ -74,10 +65,8 @@ func TestTheOperatorCredentialNeverReachesATenantChosenRegistry(t *testing.T) {
 	}
 }
 
-// The credential is read from the controller's namespace, never the object's. Reading it from the
-// object's namespace would mean a tenant could create a Secret of that name and have the controller
-// push with it -- and, worse, that the operator's own credential would be invisible to the cluster
-// admin who installed it.
+// The credential is read from the controller's namespace, never the object's; otherwise a tenant
+// could create a Secret of that name and have the controller push with it.
 func TestTheDefaultCredentialComesFromTheControllersNamespace(t *testing.T) {
 	d := DefaultRegistry{Host: "r:5000", SecretName: "operator-push", Namespace: "oci-composer"}
 
@@ -88,10 +77,8 @@ func TestTheDefaultCredentialComesFromTheControllersNamespace(t *testing.T) {
 	}
 }
 
-// Namespace-qualified, because one registry is now shared by the whole cluster. Two namespaces both
-// containing an "app" would otherwise publish to the same repository, and the collision would be
-// resolved by whichever reconciled last -- under a tag policy that would read it as a legitimate
-// conflict rather than as two unrelated objects colliding.
+// Namespace-qualified, because one registry is shared by the whole cluster: two namespaces each
+// with an "app" must not publish to the same repository.
 func TestTheDefaultRepositoryIsNamespaceQualified(t *testing.T) {
 	d := DefaultRegistry{Host: "registry.internal:5000"}
 
@@ -112,8 +99,7 @@ func TestTheDefaultRepositoryIsNamespaceQualified(t *testing.T) {
 	}
 }
 
-// Unconfigured means unconfigured: nothing should half-work by producing a repository with an empty
-// host, which would publish to a path that reads as a Docker Hub reference.
+// An unconfigured default must not half-work: an empty host would read as a Docker Hub reference.
 func TestAnUnconfiguredDefaultIsNotUsable(t *testing.T) {
 	var d DefaultRegistry
 	if d.Configured() {

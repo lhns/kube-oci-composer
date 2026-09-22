@@ -2,13 +2,8 @@ package reconciler
 
 import "testing"
 
-// TestThePublicHostRewritesOnlyTheOperatorsOwnRegistry is the boundary this split has to hold.
-//
-// PublicHost says "this is the name a workload should use for MY registry". It says nothing about
-// anyone else's. An object that named its own repository somewhere else must be reported back
-// exactly as written — rewriting its host would put an address in status that names a registry the
-// operator runs and the object never published to, which is a lie in the one field a workload
-// reads.
+// PublicHost renames the operator's registry only. A repository elsewhere must be reported as
+// written; rewriting it would put an address in status the object never published to.
 func TestThePublicHostRewritesOnlyTheOperatorsOwnRegistry(t *testing.T) {
 	d := DefaultRegistry{
 		Host:       "kube-oci-composer-registry.oci.svc.cluster.local:5000",
@@ -37,8 +32,6 @@ func TestThePublicHostRewritesOnlyTheOperatorsOwnRegistry(t *testing.T) {
 			want: "ghcr.io/example/app",
 		},
 		{
-			// The case that matters most: a host chosen by a tenant must never be reported as the
-			// operator's public name.
 			name: "a host a tenant chose is left alone",
 			repo: "attacker.example/x",
 			want: "attacker.example/x",
@@ -59,9 +52,7 @@ func TestThePublicHostRewritesOnlyTheOperatorsOwnRegistry(t *testing.T) {
 	}
 }
 
-// TestAnUnsetPublicHostChangesNothing keeps the split invisible to everyone who does not need it —
-// an external registry, or an ingress whose name resolves everywhere, is one name and must stay
-// one name.
+// TestAnUnsetPublicHostChangesNothing: with no public host, internal and public names are the same.
 func TestAnUnsetPublicHostChangesNothing(t *testing.T) {
 	d := DefaultRegistry{Host: "ghcr.io/example"}
 
@@ -74,12 +65,8 @@ func TestAnUnsetPublicHostChangesNothing(t *testing.T) {
 	}
 }
 
-// TestThePublicNameIsNamespaceQualifiedToo — the public name keeps the path the internal one has,
-// so a bare object name cannot collide across namespaces in one and not the other.
-//
-// Against PublicRepository, which is what the controllers call. PublicRepositoryFor said the same
-// thing for nobody: it had no caller outside this file, while carrying the most confident statement
-// of an invariant the retention refresh was busy violating. ADR 0048.
+// TestThePublicNameIsNamespaceQualifiedToo — the public name keeps the internal one's path, so
+// object names cannot collide across namespaces in one and not the other. ADR 0048.
 func TestThePublicNameIsNamespaceQualifiedToo(t *testing.T) {
 	d := DefaultRegistry{
 		Host:       "registry.svc:5000",
@@ -96,12 +83,8 @@ func TestThePublicNameIsNamespaceQualifiedToo(t *testing.T) {
 	}
 }
 
-// TestTheCredentialRuleIgnoresThePublicHost is the security check on this change.
-//
-// CredentialFor compares against Host, the address the controller actually connects to. Comparing
-// against PublicHost instead — or as well — would mean a tenant who named the operator's PUBLIC
-// name in their own spec could be handed the operator's credential for a connection the operator
-// never verified. The public name is documentation, not authority.
+// TestTheCredentialRuleIgnoresThePublicHost: CredentialFor matches Host, the address actually
+// dialled. Matching PublicHost would hand the operator's credential to a tenant who named it.
 func TestTheCredentialRuleIgnoresThePublicHost(t *testing.T) {
 	d := DefaultRegistry{
 		Host:       "registry.svc:5000",
@@ -115,7 +98,6 @@ func TestTheCredentialRuleIgnoresThePublicHost(t *testing.T) {
 		t.Fatalf("the operator's own registry must get the credential; got %q/%q", ns, name)
 	}
 
-	// The public name is a different host as far as this rule is concerned, and that is deliberate.
 	if name, _ := d.CredentialFor("team-a", "", "oci-composer.internal:30500/team-a/app"); name != "" {
 		t.Fatalf("the public host must not authorise the operator's credential; got %q", name)
 	}

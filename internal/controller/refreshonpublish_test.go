@@ -21,11 +21,8 @@ import (
 	"github.com/lhns/kube-oci-composer/internal/retention"
 )
 
-// countingRegistry records every manifest GET, which is what registers a lease.
-//
-// A HEAD deliberately does not count: the refresher uses remote.Image rather than remote.Head
-// because a registry is not obliged to treat an existence check as a pull, and the whole guarantee
-// rests on it doing so.
+// countingRegistry records every manifest GET, which is what registers a lease. A HEAD does not
+// count: a registry need not treat an existence check as a pull.
 type countingRegistry struct {
 	*httptest.Server
 	mu   sync.Mutex
@@ -54,13 +51,9 @@ func newCountingRegistry(t *testing.T) *countingRegistry {
 	return c
 }
 
-// TestAPublishIsProtectedImmediately covers the window a live cluster lost artifacts in.
-//
-// The refresher runs on a ticker, so until it next fires a freshly published artifact has NO
-// lease: a registry expiring on pull recency holds no record that anything was pushed, and zot
-// carries an OLD push timestamp onto a new tag when the digest is one it has seen before. A
-// collection pass in that gap reclaims content that is minutes old, and the gap is a full
-// interval -- an hour by default.
+// TestAPublishIsProtectedImmediately — a publish must pull its artifact at once rather than wait
+// for the refresher's next tick (up to an hour). Until then it has no lease: a pull-recency
+// registry has no record of the push, and zot reuses an OLD push timestamp for a known digest.
 func TestAPublishIsProtectedImmediately(t *testing.T) {
 	reg := newCountingRegistry(t)
 	host := strings.TrimPrefix(reg.URL, "http://")
@@ -112,8 +105,7 @@ func TestAPublishIsProtectedImmediately(t *testing.T) {
 	}
 }
 
-// everythingReconciled stands in for the readiness gate: this test has one object and has just
-// reconciled it.
+// everythingReconciled is a readiness gate that reports nothing pending.
 type everythingReconciled struct{}
 
 func (everythingReconciled) Pending(context.Context) ([]string, error) { return nil, nil }

@@ -10,26 +10,19 @@ import (
 
 // DigestTag is the tag naming a manifest after its own digest: "digest-<hex>".
 //
-// Both kinds apply it to everything they publish, beside whatever the spec asks for. ADR 0060. It
-// exists for two behaviours of the bundled registry, zot:
+// Both kinds apply it to everything they publish, beside the spec's tags (ADR 0060), because of two
+// behaviours of the bundled registry, zot:
 //
-//   - Moving a manifest's LAST tag drops the manifest from the repository index, so a rolling tag
-//     deleted the previous build under anything still pinned to it (zot#4444). A second name keeps it.
-//   - A manifest that loses its last tag loses its retention statistics with it, and is then never
-//     reclaimed. Content that always carries a tag while it is live is what lets the chart stop
-//     configuring keepUntagged, which is what pins such manifests.
+//   - Moving a manifest's LAST tag drops it from the repository index, deleting the previous build
+//     under anything pinned to it (zot#4444). A second name keeps it.
+//   - A manifest that loses its last tag loses its retention statistics and is never reclaimed;
+//     always carrying a tag is what lets the chart drop keepUntagged.
 //
-// Derived from the content, so it can never be remeaned and can never conflict.
+// Derived from the content, so it can never be remeaned or conflict.
 //
-// NOT "sha256-<hex>", which was the first choice and made every artifact immortal. That is the OCI
-// referrers tag schema -- where a client without the Referrers API keeps the referrers index FOR
-// subject sha256:<hex> -- and zot treats any tag matching `sha256\-[A-Za-z0-9]*$` (unanchored at the
-// start) as one: it never records it in its metadata, so retention never evaluates it and keeps it
-// forever. It would also have collided with that schema on any other registry: a referrers
-// fallback would read our manifest as an index, or overwrite the tag. So the name contains no
-// "sha256-" anywhere.
-//
-// Only the hex: every digest here is sha256, and the tag has 128 characters to fit in.
+// The name must never contain "sha256-": that is the OCI referrers tag schema, which zot matches
+// unanchored and then never evaluates for retention (keeping the artifact forever), and which a
+// referrers fallback on other registries would misread. Only the hex: every digest here is sha256.
 func DigestTag(digest string) string {
 	_, hex, found := strings.Cut(digest, ":")
 	if !found {
@@ -53,12 +46,9 @@ func PublishTags(tags []string, digest string) []string {
 	return append(out, own)
 }
 
-// HasDigestTag reports whether a list of tags from status includes the digest's own tag. Qualified
-// ("host/repo:tag") or bare, since status.artifact stores the one and a composition's history the
-// other.
-//
-// Status is the record of what was applied: an object published before the tag existed does not
-// claim it, and that is how the backfill finds it.
+// HasDigestTag reports whether a list of tags from status includes the digest's own tag, qualified
+// ("host/repo:tag", as in status.artifact) or bare (as in a composition's history). An object
+// published before the tag existed does not claim it, which is how the backfill finds it.
 func HasDigestTag(tags []string, digest string) bool {
 	own := DigestTag(digest)
 	for _, t := range tags {

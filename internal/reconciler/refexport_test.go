@@ -20,8 +20,7 @@ func exportScheme(t *testing.T) *runtime.Scheme {
 	if err := corev1.AddToScheme(s); err != nil {
 		t.Fatal(err)
 	}
-	// The exported name carries the object's KIND, which comes from the scheme -- a typed read
-	// clears TypeMeta, so the object itself cannot be asked.
+	// The exported name carries the kind, which comes from the scheme: typed reads clear TypeMeta.
 	if err := ociv1alpha1.AddToScheme(s); err != nil {
 		t.Fatal(err)
 	}
@@ -68,10 +67,8 @@ const (
 	testRef    = "registry.example/team-a/app@" + testDigest
 )
 
-// TestAnExportIsRefusedOutsideTheAllowList is the privilege boundary.
-//
-// The useful target is the consumer's namespace -- flux-system, which parameterises everything --
-// so this is a real escalation and the default has to be that nothing is permitted.
+// TestAnExportIsRefusedOutsideTheAllowList: writing into flux-system parameterises everything, so
+// the default must be that no foreign namespace is permitted.
 func TestAnExportIsRefusedOutsideTheAllowList(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(exportScheme(t)).Build()
 
@@ -87,12 +84,9 @@ func TestAnExportIsRefusedOutsideTheAllowList(t *testing.T) {
 	}
 }
 
-// TestAnExportWritesBothFormsAndTheWatchLabel.
-//
-// The full ref as well as the digest, because a consumer substituting a bare digest produces a
-// trailing "@" on an empty string if the key is ever absent. And the watch annotation, because
-// without it a new digest is picked up only at the consumer's next interval and its absence is
-// invisible.
+// TestAnExportWritesBothFormsAndTheWatchLabel: the full ref as well as the digest (a consumer
+// composing "repo@${DIGEST}" breaks silently on an absent key), and the watch label, without which
+// a new digest waits for the consumer's next interval.
 func TestAnExportWritesBothFormsAndTheWatchLabel(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(exportScheme(t)).Build()
 
@@ -112,9 +106,7 @@ func TestAnExportWritesBothFormsAndTheWatchLabel(t *testing.T) {
 	if cm.Data["APP_DIGEST"] != testDigest {
 		t.Errorf("digest = %q, want %q", cm.Data["APP_DIGEST"], testDigest)
 	}
-	// A LABEL. kustomize-controller selects these with --watch-configs-label-selector, and a
-	// label selector cannot match an annotation -- as an annotation this is inert, and inert in
-	// the way the feature is most dangerous: the ConfigMap looks right and nothing rolls out.
+	// A label, not an annotation: kustomize-controller selects with --watch-configs-label-selector.
 	if cm.Labels["reconcile.fluxcd.io/watch"] != "Enabled" {
 		t.Errorf("watch marker is not a label (labels=%v annotations=%v); a label selector cannot "+
 			"match an annotation, so nothing would ever notice this change",
@@ -125,10 +117,8 @@ func TestAnExportWritesBothFormsAndTheWatchLabel(t *testing.T) {
 	}
 }
 
-// TestAnIncompleteReferenceIsNeverWritten.
-//
-// A missing key substitutes the EMPTY STRING and Flux says nothing about it, so a half-written
-// export is worse than none: the consumer deploys an image reference that is silently wrong.
+// TestAnIncompleteReferenceIsNeverWritten: Flux silently substitutes an empty string for a missing
+// key, so a half-written export is worse than none.
 func TestAnIncompleteReferenceIsNeverWritten(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(exportScheme(t)).Build()
 
@@ -147,8 +137,7 @@ func TestAnIncompleteReferenceIsNeverWritten(t *testing.T) {
 // TestAnExportReplacesRatherThanMerges — a consumer must never see one key updated and another
 // stale, which is what patching key by key would allow.
 func TestAnExportReplacesRatherThanMerges(t *testing.T) {
-	// Ours, from a previous export -- a foreign one is refused instead, which
-	// TestAForeignConfigMapIsNeverAdopted covers.
+	// Ours, from a previous export (a foreign one is refused: TestAForeignConfigMapIsNeverAdopted).
 	existing := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: exportedName, Namespace: "flux-system",
@@ -176,10 +165,8 @@ func TestAnExportReplacesRatherThanMerges(t *testing.T) {
 	}
 }
 
-// TestAForeignConfigMapIsNeverAdopted.
-//
-// A substitution source is exactly the kind of object a human writes by hand, and this replaces
-// Data wholesale -- so adopting one silently destroys whatever else was in it.
+// TestAForeignConfigMapIsNeverAdopted: an export replaces Data wholesale, so adopting a
+// hand-written ConfigMap would destroy its contents.
 func TestAForeignConfigMapIsNeverAdopted(t *testing.T) {
 	theirs := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: exportedName, Namespace: "flux-system"},
@@ -206,12 +193,8 @@ func TestAForeignConfigMapIsNeverAdopted(t *testing.T) {
 	}
 }
 
-// TestExtraMetadataIsAddedButCannotDisableTheFeature.
-//
-// The passthrough is for a consumer's own conventions. It must not be able to remove the watch
-// marker or the ownership label: losing the first silently stops anything noticing a new digest,
-// and losing the second makes this indistinguishable from a hand-written ConfigMap -- which is
-// what the adoption refusal above keys on.
+// TestExtraMetadataIsAddedButCannotDisableTheFeature: spec labels must not override the watch
+// marker (nothing would notice a new digest) or the ownership label (the adoption check keys on it).
 func TestExtraMetadataIsAddedButCannotDisableTheFeature(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(exportScheme(t)).Build()
 
@@ -223,8 +206,7 @@ func TestExtraMetadataIsAddedButCannotDisableTheFeature(t *testing.T) {
 	}
 	spec.Annotations = map[string]string{"note": "generated"}
 
-	// Every key permitted, so what this test proves is the ORDERING and not the gate: even a key
-	// an operator deliberately allowed cannot turn the feature off.
+	// Every key permitted, so this tests the ordering, not the allow-list gate.
 	opts := allowingFlux()
 	opts.AllowedLabels = []string{"team", "reconcile.fluxcd.io/watch", ManagedByLabel}
 	opts.AllowedAnnotations = []string{"note"}
@@ -253,11 +235,8 @@ func TestExtraMetadataIsAddedButCannotDisableTheFeature(t *testing.T) {
 	}
 }
 
-// TestDeletingTheObjectRemovesItsExport.
-//
-// Everything else a build creates is reclaimed on its own: the Secrets belong to its Job and the
-// Job belongs to the object (ADR 0050). The export cannot be, because a cross-namespace owner
-// reference is invalid -- so it is the one thing that needs deleting deliberately.
+// TestDeletingTheObjectRemovesItsExport: a cross-namespace owner reference is invalid, so unlike
+// everything else a build creates (ADR 0050) the export must be deleted explicitly.
 func TestDeletingTheObjectRemovesItsExport(t *testing.T) {
 	mine := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -310,10 +289,7 @@ func TestDeletionLeavesSomebodyElsesExportAlone(t *testing.T) {
 }
 
 // TestTheWatchMarkerIsConfigurable — ADR 0009 borrows Flux's conventions without depending on
-// them, so the default is Flux's marker and an operator running something else can say so.
-//
-// Written onto an object in somebody ELSE's namespace, which is why this one is settable where
-// reconcile.fluxcd.io/requestedAt, which is only ever read, is not.
+// them, so an operator running something else can choose the marker, or none.
 func TestTheWatchMarkerIsConfigurable(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -358,8 +334,7 @@ func TestTheWatchMarkerIsConfigurable(t *testing.T) {
 	}
 }
 
-// TestParseLabelsDropsWhatItCannotRead — an unparseable entry must not stop the controller
-// starting over a cosmetic setting.
+// TestParseLabelsDropsWhatItCannotRead — an unparseable entry must not stop the controller starting.
 func TestParseLabelsDropsWhatItCannotRead(t *testing.T) {
 	got := ParseLabels("a=1, b=2 ,,garbage,=3,c=")
 	want := map[string]string{"a": "1", "b": "2", "c": ""}
@@ -373,6 +348,5 @@ func TestParseLabelsDropsWhatItCannotRead(t *testing.T) {
 	}
 }
 
-// fluxWatch is what an operator sets for Flux. Not a default: the controller adds no label unless
-// told to.
+// fluxWatch is what an operator sets for Flux; the controller adds no watch label by default.
 var fluxWatch = map[string]string{"reconcile.fluxcd.io/watch": "Enabled"}

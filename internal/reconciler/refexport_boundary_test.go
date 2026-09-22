@@ -14,18 +14,11 @@ import (
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 )
 
-// What an allow-listed namespace does NOT permit.
-//
-// The allow-list says which namespace may be written to and nothing about who may write what
-// inside it. These are the boundaries that hold there instead -- and since ADR 0056 put the
-// ClusterRole's ConfigMap verbs on every namespace, several of them have nothing behind them.
+// What an allow-listed namespace does NOT permit. The allow-list says where, not who may write
+// what; since ADR 0056 grants ConfigMap verbs cluster-wide, these checks are the only boundary.
 
-// TestOneObjectCannotTakeOverAnothersExport.
-//
-// Before the name was derived, a second object could name the same ConfigMap and, because the
-// managed-by label matched, simply update it -- repointing a consuming Kustomization at its own
-// image. The derived name makes that unaskable; this asserts it, on content rather than on an
-// error, because the failure that matters is the first object's value changing.
+// TestOneObjectCannotTakeOverAnothersExport: the derived name keeps a second object from
+// repointing another's export. Asserted on content, since that is the failure that matters.
 func TestOneObjectCannotTakeOverAnothersExport(t *testing.T) {
 	theirs := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -43,7 +36,6 @@ func TestOneObjectCannotTakeOverAnothersExport(t *testing.T) {
 		t.Fatalf("exporting: %v", err)
 	}
 
-	// It landed under its own name, so it could not have collided at all.
 	var mine corev1.ConfigMap
 	if err := c.Get(context.Background(),
 		types.NamespacedName{Namespace: "flux-system", Name: "imagebuild-team-a-intruder"},
@@ -61,10 +53,8 @@ func TestOneObjectCannotTakeOverAnothersExport(t *testing.T) {
 	}
 }
 
-// TestTheOwnerCheckRefusesEvenAManagedConfigMap tests the predicate directly.
-//
-// The derived name is what normally prevents this, so without a test aimed at the guard itself it
-// could rot unnoticed -- which is how it came to be applied on delete but not on write.
+// TestTheOwnerCheckRefusesEvenAManagedConfigMap targets the owner guard on write directly, since
+// the derived name would otherwise mask its absence.
 func TestTheOwnerCheckRefusesEvenAManagedConfigMap(t *testing.T) {
 	someoneElses := ourLabels()
 	someoneElses[ownerNameLabel] = "a-different-build"
@@ -95,11 +85,8 @@ func TestTheOwnerCheckRefusesEvenAManagedConfigMap(t *testing.T) {
 	}
 }
 
-// TestWhichNamespacesAreWritable is the boundary the API server no longer holds.
-//
-// The ClusterRole carries ConfigMap write on every namespace, because RBAC is granted before an
-// object exists (ADR 0056). This is what stops it reaching one nobody permitted, so the third row
-// has nothing behind it.
+// TestWhichNamespacesAreWritable: RBAC grants ConfigMap write everywhere (ADR 0056), so this check
+// is all that stops a write into a namespace nobody permitted.
 func TestWhichNamespacesAreWritable(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -147,11 +134,9 @@ func TestWhichNamespacesAreWritable(t *testing.T) {
 	}
 }
 
-// TestAnOwnNamespaceExportIsOwnedRatherThanFinalized.
-//
-// A cross-namespace owner reference is invalid, which is the only reason the finalizer exists. An
-// export into the object's own namespace is reclaimed by Kubernetes instead, so that object's
-// deletion stops depending on this controller running at all.
+// TestAnOwnNamespaceExportIsOwnedRatherThanFinalized: a same-namespace export gets an owner
+// reference, so its deletion does not depend on the controller; only cross-namespace needs the
+// finalizer.
 func TestAnOwnNamespaceExportIsOwnedRatherThanFinalized(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -184,11 +169,8 @@ func TestAnOwnNamespaceExportIsOwnedRatherThanFinalized(t *testing.T) {
 	}
 }
 
-// TestMetadataKeysAreRefusedRatherThanDropped.
-//
-// These land on an object in a namespace this object may not otherwise touch. Refused rather than
-// dropped, because a dropped key leaves a ConfigMap that looks exactly right while whatever was
-// meant to select on it never does -- the same failure the watch label has.
+// TestMetadataKeysAreRefusedRatherThanDropped: a silently dropped key leaves a ConfigMap that looks
+// right while whatever selects on it never matches.
 func TestMetadataKeysAreRefusedRatherThanDropped(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -261,10 +243,8 @@ func TestTheExportedNameCarriesTheKind(t *testing.T) {
 	}
 }
 
-// TestAnUnnameableExportIsRefusedWithTheNameItBuilt.
-//
-// An object name may be 253 characters on its own, so the derived one can exceed the limit.
-// Reporting the composed name matters: "too long" about a name nobody wrote is not actionable.
+// TestAnUnnameableExportIsRefusedWithTheNameItBuilt: the derived name can exceed the limit, and the
+// error must show that composed name, not the object's.
 func TestAnUnnameableExportIsRefusedWithTheNameItBuilt(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(exportScheme(t)).Build()
 	long := &ociv1alpha1.ImageBuild{
@@ -284,11 +264,8 @@ func TestAnUnnameableExportIsRefusedWithTheNameItBuilt(t *testing.T) {
 	}
 }
 
-// TestAnExportDeletedByHandComesBack.
-//
-// The ConfigMap is not the record -- status is. Somebody removing it by hand, or a namespace being
-// recreated, must not leave the object believing an export exists that does not, because the next
-// publish is the only thing that would notice.
+// TestAnExportDeletedByHandComesBack: status is not proof the ConfigMap exists; a re-export must
+// recreate it rather than trust the record.
 func TestAnExportDeletedByHandComesBack(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(exportScheme(t)).Build()
 
@@ -318,13 +295,8 @@ func TestAnExportDeletedByHandComesBack(t *testing.T) {
 	}
 }
 
-// TestRevokingANamespaceLeavesWhatWasAlreadyWritten.
-//
-// An operator removing a namespace from the allow-list stops NEW exports. It must not also make the
-// controller tear down what a consumer is already substituting from: that would turn a
-// configuration change into an outage, at a moment when nobody is looking at this object.
-//
-// The refusal is terminal, so it says so on the object rather than failing quietly.
+// TestRevokingANamespaceLeavesWhatWasAlreadyWritten: revoking stops new exports (terminally) but
+// must not tear down what a consumer already substitutes from, which would be an outage.
 func TestRevokingANamespaceLeavesWhatWasAlreadyWritten(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(exportScheme(t)).Build()
 
@@ -333,7 +305,7 @@ func TestRevokingANamespaceLeavesWhatWasAlreadyWritten(t *testing.T) {
 		t.Fatalf("exporting: %v", err)
 	}
 
-	// The operator revokes it.
+	// Revoked: no allowed namespaces.
 	_, err := ExportRef(context.Background(), c, owner(), exportSpec(),
 		ExportOptions{WatchLabels: fluxWatch}, testDigest, testRef)
 	if err == nil {

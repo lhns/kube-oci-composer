@@ -13,20 +13,12 @@ import (
 )
 
 // An unpack mode is spelled out in four hand-maintained places: the kubebuilder enum marker, the
-// API's Unpack constants, the internal UnpackMode constants that mirror them, and the switch in
-// collectEntries. Nothing made them agree, and each way of disagreeing fails differently:
-//
-//   - a mode in the code but not the enum is unusable, and the only symptom is a rejection at
-//     apply time that every unit test passes straight through
-//   - a mode in the enum but not the switch is admitted and then fails during the build
-//
-// This is the guard that makes adding the next format safe. It reads the generated CRD from disk on
-// purpose: the marker is the thing that can be forgotten, and asserting against the Go constants
-// alone would prove nothing about what a cluster will accept.
+// API's Unpack constants, the internal UnpackMode mirror, and the switch in collectEntries. These
+// tests keep them in agreement, reading the generated CRD from disk because the marker is what a
+// cluster actually enforces.
 
-// allUnpackModes is the list under test, and adding a mode to the API means adding it here. That is
-// deliberately manual — Go has no way to enumerate a string type's constants, and a test that
-// derived the list from the same place as the code under test would agree with itself for free.
+// allUnpackModes must list every API unpack mode. Deliberately manual: Go cannot enumerate a
+// string type's constants, and a derived list would agree with the code for free.
 var allUnpackModes = []ociv1alpha1.Unpack{
 	ociv1alpha1.UnpackNone,
 	ociv1alpha1.UnpackTar,
@@ -48,9 +40,7 @@ func crdUnpackEnum(t *testing.T) []string {
 		t.Fatalf("reading the generated CRD: %v", err)
 	}
 
-	// Walked untyped rather than through a struct: the typed route needs either a 25-level nested
-	// anonymous struct to reach one leaf, or apiextensions-apiserver, which is only an indirect
-	// dependency today. dig keeps the path readable as the path it is.
+	// Walked untyped: the typed route needs apiextensions-apiserver, only an indirect dependency.
 	var doc map[string]any
 	if err := yaml.Unmarshal(raw, &doc); err != nil {
 		t.Fatalf("parsing the generated CRD: %v", err)
@@ -90,9 +80,8 @@ func dig(t *testing.T, node any, path ...string) any {
 	return node
 }
 
-// TestUnpackModesAreInTheCRDEnum — a mode the CRD does not list cannot be used at all, however
-// complete its implementation is. Catches a forgotten kubebuilder marker, or a marker edited
-// without running the generators.
+// TestUnpackModesAreInTheCRDEnum — a mode missing from the CRD is unusable. Catches a forgotten
+// marker, or one edited without regenerating.
 func TestUnpackModesAreInTheCRDEnum(t *testing.T) {
 	enum := crdUnpackEnum(t)
 	listed := make(map[string]bool, len(enum))
@@ -108,9 +97,8 @@ func TestUnpackModesAreInTheCRDEnum(t *testing.T) {
 	}
 }
 
-// TestCRDEnumModesAreImplemented — the other direction. A mode the CRD admits but the code does not
-// implement is accepted by the API server and then fails during the build, which is a far worse
-// failure than a rejection because it only shows up once someone depends on it.
+// TestCRDEnumModesAreImplemented — the other direction: a mode the CRD admits but the code lacks
+// is accepted and then fails during the build.
 func TestCRDEnumModesAreImplemented(t *testing.T) {
 	known := make(map[string]bool, len(allUnpackModes))
 	for _, mode := range allUnpackModes {
@@ -125,9 +113,8 @@ func TestCRDEnumModesAreImplemented(t *testing.T) {
 	}
 }
 
-// TestUnpackModesMirrorTheInternalConstants — internal/oci keeps its own copy of the enum, so that
-// the assembly package does not import the API types. A copy that drifts sends an unrecognised
-// string into collectEntries' switch and lands on its default arm.
+// TestUnpackModesMirrorTheInternalConstants — internal/oci keeps its own copy of the enum (so it
+// need not import the API types); resolve.go converts by cast, so the strings must match.
 func TestUnpackModesMirrorTheInternalConstants(t *testing.T) {
 	mirrors := map[ociv1alpha1.Unpack]oci.UnpackMode{
 		ociv1alpha1.UnpackNone:    oci.UnpackNone,

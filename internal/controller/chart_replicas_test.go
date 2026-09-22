@@ -32,17 +32,8 @@ func withoutReplicaArg(t *testing.T, key string) []string {
 	return out
 }
 
-// docs parses a helm render into one map per document.
-//
-// A parse failure fails the test rather than skipping the document, which is what it did before.
-// Every assertion here reads "the document with property X also has Y", so an unparseable document
-// vanishes from the search and the test passes having examined nothing.
-//
-// Narrow in practice -- helm rejects a syntax error before this sees it -- but "found nothing,
-// therefore fine" is the failure mode worth removing.
-//
-// A chunk that parses to nothing (comments, trailing whitespace) is still skipped: that is absence
-// of content, not failure to read it.
+// docs parses a helm render into one map per document. A parse failure fails the test, so an
+// unparseable document cannot silently drop out of a search; empty chunks are skipped.
 func docs(t *testing.T, out string) []map[string]any {
 	t.Helper()
 	var all []map[string]any
@@ -59,12 +50,9 @@ func docs(t *testing.T, out string) []map[string]any {
 	return all
 }
 
-// TestOnlyOneRegistryPodEverWrites is the invariant the whole design rests on.
-//
-// zot serialises repository writes with an in-process mutex, so two instances writing one repository
-// lose tags that returned 201 — measured at 2–4% in test/spike. The chart's job is to make a second
-// writer unreachable: the writer StatefulSet is pinned to one replica, and the Service the
-// controllers push to selects it alone and never a read replica.
+// TestOnlyOneRegistryPodEverWrites: zot serialises writes with an in-process mutex, so two writers
+// lose acknowledged tags (2-4% in test/spike). The writer is one replica, and the push Service
+// selects it alone.
 func TestOnlyOneRegistryPodEverWrites(t *testing.T) {
 	out := render(t, replicaArgs[2:]...)
 
@@ -113,9 +101,8 @@ func TestOnlyOneRegistryPodEverWrites(t *testing.T) {
 	}
 }
 
-// TestReadReplicasNeverCollect — garbage collection rewrites index.json, so a replica that collects
-// is a second writer wearing a different name. The refresh probe in test/spike lost content to
-// exactly this, while it was being actively pulled.
+// TestReadReplicasNeverCollect: garbage collection rewrites index.json, so a collecting replica is
+// a second writer.
 func TestReadReplicasNeverCollect(t *testing.T) {
 	var writer, reader map[string]any
 	for name, cfg := range registryConfigs(t, replicaArgs[2:]...) {
@@ -147,15 +134,14 @@ func TestReadReplicasNeverCollect(t *testing.T) {
 	if _, ok := reader["retention"]; ok {
 		t.Error("a read replica must carry no retention policy")
 	}
-	// Both must reach the same metadata database, or a pull recorded by one does not protect
-	// content from the other's collector.
+	// A shared metadata database, or pulls recorded by one pod do not protect content from the
+	// writer's collector.
 	if reader["remoteCache"] != true || writer["remoteCache"] != true {
 		t.Error("both roles must use the shared metadata database, or pulls do not count across pods")
 	}
 }
 
-// TestPullsFanOutAndPushesDoNot — the read Service is what a workload, an Ingress or a NodePort
-// reaches, and it must include every pod serving the API.
+// TestPullsFanOutAndPushesDoNot: the read Service must include every pod serving the API.
 func TestPullsFanOutAndPushesDoNot(t *testing.T) {
 	out := render(t, replicaArgs[2:]...)
 
@@ -180,8 +166,7 @@ func TestPullsFanOutAndPushesDoNot(t *testing.T) {
 		t.Errorf("the read Service selects %v; it must select every pod serving the API", readSvc.Spec.Selector)
 	}
 
-	// Both the writer's pod template and the reader's must carry the serve label, or the Service
-	// silently covers only one of them.
+	// Both pod templates must carry the serve label.
 	var writerServes, readerServes bool
 	for _, d := range docs(t, out) {
 		kind, _ := d["kind"].(string)
@@ -212,11 +197,8 @@ func TestPullsFanOutAndPushesDoNot(t *testing.T) {
 	}
 }
 
-// TestTheWriterSelectorIsNeverTouched.
-//
-// A StatefulSet's spec.selector is immutable. Adding the serve label there instead of only to the
-// pod template would make every existing install fail its upgrade with an API error naming a field
-// rather than a problem.
+// TestTheWriterSelectorIsNeverTouched: a StatefulSet's spec.selector is immutable, so changing it
+// fails every existing install's upgrade.
 func TestTheWriterSelectorIsNeverTouched(t *testing.T) {
 	for _, args := range [][]string{{}, replicaArgs[2:]} {
 		out := render(t, args...)
@@ -237,8 +219,7 @@ func TestTheWriterSelectorIsNeverTouched(t *testing.T) {
 	}
 }
 
-// TestNothingReplicatedRendersByDefault — the default is one pod, and a chart that quietly started
-// running three would be changing the storage requirements of every existing install.
+// TestNothingReplicatedRendersByDefault: the default is one pod with a ReadWriteOnce claim.
 func TestNothingReplicatedRendersByDefault(t *testing.T) {
 	out := render(t)
 	for _, d := range docs(t, out) {
@@ -303,8 +284,7 @@ func TestReplicationRefusesWhatItCannotDo(t *testing.T) {
 	}
 }
 
-// TestAValidReplicatedSetRenders is the control. Without it, a guard that fired unconditionally
-// would pass every case above while making the feature unusable.
+// TestAValidReplicatedSetRenders is the control for the guards above.
 func TestAValidReplicatedSetRenders(t *testing.T) {
 	out := renderRaw(t, replicaArgs...)
 	for _, want := range []string{"-registry-reader", "-registry-read", "kind: PodDisruptionBudget"} {
@@ -314,14 +294,8 @@ func TestAValidReplicatedSetRenders(t *testing.T) {
 	}
 }
 
-// TestACredentialedCacheURLNeverLandsInAConfigMap.
-//
-// zot's redis driver takes credentials only inside the URL, so `redis://user:pass@host` puts a
-// password wherever the config is rendered. A ConfigMap is readable in every `kubectl describe`.
-//
-// This is a regression test for a claim that was false: the threat model asserted the config became
-// a Secret when clustering was on, while the template rendered a ConfigMap unconditionally. Nothing
-// checked it, so nothing caught it — and read replicas made redis mandatory rather than exotic.
+// TestACredentialedCacheURLNeverLandsInAConfigMap: zot's redis driver takes credentials only in
+// the URL, so the config must render as a Secret, not a ConfigMap.
 func TestACredentialedCacheURLNeverLandsInAConfigMap(t *testing.T) {
 	const password = "hunter2"
 	out := render(t,
@@ -349,7 +323,7 @@ func TestACredentialedCacheURLNeverLandsInAConfigMap(t *testing.T) {
 		t.Error("the config did not render as a Secret, so the credentialed URL went somewhere unchecked")
 	}
 
-	// And the pod must actually mount it, or the registry starts with no configuration at all.
+	// And the pod must mount it.
 	if !strings.Contains(out, "secretName: test-release-kube-oci-composer-registry\n") {
 		t.Error("the registry does not mount the config Secret it was given")
 	}
@@ -364,9 +338,8 @@ func toJSON(t *testing.T, v any) string {
 	return string(b)
 }
 
-// TestAnOrdinaryInstallKeepsAnInspectableConfig — the Secret path is conditional on there being
-// something to hide. Hiding zot's configuration unconditionally would cost every operator the
-// ability to read it for no benefit.
+// TestAnOrdinaryInstallKeepsAnInspectableConfig: the config is a Secret only when there is
+// something to hide.
 func TestAnOrdinaryInstallKeepsAnInspectableConfig(t *testing.T) {
 	out := render(t)
 	for _, d := range docs(t, out) {

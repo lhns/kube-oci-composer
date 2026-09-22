@@ -11,8 +11,7 @@ import (
 	"testing"
 )
 
-// contextServer serves a gzipped tar of the given entries, the way source-controller publishes an
-// artifact.
+// contextServer serves a gzipped tar of the given entries.
 func contextServer(t *testing.T, files map[string]string) *httptest.Server {
 	t.Helper()
 	var buf bytes.Buffer
@@ -43,9 +42,8 @@ func contextServer(t *testing.T, files map[string]string) *httptest.Server {
 	return srv
 }
 
-// TestFetchDockerfileStripsTheWrapperDirectory — source-controller wraps an artifact in one
-// top-level directory whose name is a revision nobody can predict, so a match on the whole path
-// would never fire.
+// TestFetchDockerfileStripsTheWrapperDirectory: with a strip depth of 1, a release tarball's
+// unpredictable top-level directory is removed before matching.
 func TestFetchDockerfileStripsTheWrapperDirectory(t *testing.T) {
 	srv := contextServer(t, map[string]string{
 		"app-4f2b1c9/Dockerfile": "FROM scratch\n",
@@ -61,8 +59,7 @@ func TestFetchDockerfileStripsTheWrapperDirectory(t *testing.T) {
 	}
 }
 
-// TestFetchDockerfileHonoursSubpathAndName — a monorepo puts its Dockerfile somewhere, and the two
-// fields that say where must compose.
+// TestFetchDockerfileHonoursSubpathAndName: subpath and file name compose.
 func TestFetchDockerfileHonoursSubpathAndName(t *testing.T) {
 	srv := contextServer(t, map[string]string{
 		"repo-abc/Dockerfile":                "FROM wrong\n",
@@ -78,8 +75,7 @@ func TestFetchDockerfileHonoursSubpathAndName(t *testing.T) {
 	}
 }
 
-// TestFetchDockerfileMissing — a typo in spec.dockerfile must say so, rather than silently letting
-// the FROM check pass over a file that was never read.
+// TestFetchDockerfileMissing: a typo in spec.dockerfile is an error, not a skipped FROM check.
 func TestFetchDockerfileMissing(t *testing.T) {
 	srv := contextServer(t, map[string]string{"repo/Dockerfile": "FROM scratch\n"})
 
@@ -92,8 +88,7 @@ func TestFetchDockerfileMissing(t *testing.T) {
 	}
 }
 
-// TestFetchDockerfileRejectsBadStatus — a source-controller artifact that has been garbage
-// collected returns 404, and that must not read as an empty Dockerfile.
+// TestFetchDockerfileRejectsBadStatus: a collected artifact's 404 is not an empty Dockerfile.
 func TestFetchDockerfileRejectsBadStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -105,34 +100,28 @@ func TestFetchDockerfileRejectsBadStatus(t *testing.T) {
 	}
 }
 
-// TestMatchesContextPath — the path rule, directly, at both depths.
-//
-// It used to try the exact match FIRST and only then skip a leading component, so it found a
-// Dockerfile whatever the archive's shape. That tolerance looked helpful and was not: it kept
-// finding the file while the extractor next to it emptied the context around it, which is why the
-// bug in ADR 0045 presented as a BuildKit error rather than a fetch failure. One rule now, the
-// same one the extractor uses.
+// TestMatchesContextPath pins the one path rule shared with the extractor, at both depths (ADR
+// 0045).
 func TestMatchesContextPath(t *testing.T) {
 	cases := []struct {
 		entry, want string
 		strip       int
 		match       bool
 	}{
-		// Nothing stripped: the archive's paths are the paths. This is a Flux artifact.
+		// Nothing stripped, as for a Flux artifact.
 		{"Dockerfile", "Dockerfile", 0, true},
 		{"./Dockerfile", "Dockerfile", 0, true},
 		{"services/api/Dockerfile", "services/api/Dockerfile", 0, true},
 		{"app-abc/Dockerfile", "Dockerfile", 0, false},
 
-		// One component removed: a release tarball, with stripComponents: 1.
+		// stripComponents: 1, as for a release tarball.
 		{"app-abc/Dockerfile", "Dockerfile", 1, true},
 		{"./app-abc/Dockerfile", "Dockerfile", 1, true},
 		{"app-abc/services/api/Dockerfile", "services/api/Dockerfile", 1, true},
 		{"app-abc/nested/Dockerfile", "Dockerfile", 1, false},
 		{"app-abc/Dockerfile.dev", "Dockerfile", 1, false},
 
-		// Shallower than the strip depth: nothing of it remains, so it matches nothing. The old
-		// rule returned true here, and that is precisely the tolerance being removed.
+		// Shallower than the strip depth: nothing of it remains.
 		{"Dockerfile", "Dockerfile", 1, false},
 		{"other", "Dockerfile", 1, false},
 	}
@@ -144,8 +133,8 @@ func TestMatchesContextPath(t *testing.T) {
 	}
 }
 
-// TestFetchDockerfileFeedsTheFromCheck — the two halves of the guarantee together: the file is read
-// out of a real artifact, and an unpinned FROM in it is refused.
+// TestFetchDockerfileFeedsTheFromCheck: a file read out of a real artifact is refused for an
+// unpinned FROM.
 func TestFetchDockerfileFeedsTheFromCheck(t *testing.T) {
 	srv := contextServer(t, map[string]string{
 		"app-abc/Dockerfile": "FROM golang:1.26\nRUN go build\n",

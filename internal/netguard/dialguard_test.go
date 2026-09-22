@@ -8,11 +8,8 @@ import (
 	"testing"
 )
 
-// TestTheMetadataEndpointIsAlwaysRefused is the point of the whole file.
-//
-// 169.254.169.254 is the cloud metadata endpoint on AWS, GCP, Azure and Hetzner, and it hands
-// credentials to anything that asks. `fetch.url` comes from a spec, so without this a tenant
-// chooses that address and the controller makes the request from its own network position.
+// TestTheMetadataEndpointIsAlwaysRefused: link-local (the cloud metadata endpoint, which hands out
+// credentials) is refused even with DenyPrivate off.
 func TestTheMetadataEndpointIsAlwaysRefused(t *testing.T) {
 	for _, addr := range []string{
 		"169.254.169.254:80",
@@ -56,8 +53,7 @@ func TestTheGuardClassifiesAddressesCorrectly(t *testing.T) {
 		{"127.0.0.1", true, true},
 		{"fd00::1", true, true},
 
-		// 100.64.0.0/10 -- CGNAT, where several managed providers put node networks. net has no
-		// IsPrivate for it, which is exactly why it is worth a case.
+		// 100.64.0.0/10 (CGNAT), which net.IP.IsPrivate does not cover.
 		{"100.64.0.1", true, true},
 		{"100.127.255.254", true, true},
 		// 100.128.0.0 is outside the /10 and is ordinary public space.

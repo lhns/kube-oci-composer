@@ -12,12 +12,9 @@ import (
 
 // LoadKeyFromCluster reads the cosign key pair from a Secret and returns a ready signer.
 //
-// Uses a direct client rather than a manager's cache because it runs before the manager starts: a
-// key that cannot be read or cannot sign should fail the process at boot, not the first artifact.
-//
-// The namespace is always the CONTROLLER's own, never an object's — the operator signs, and a
-// tenant does not choose which key their artifact is signed with. Same rule as the push credential
-// (see DefaultRegistry.CredentialFor in internal/reconciler).
+// It uses a direct client because it runs before the manager starts, so a bad key fails the
+// process at boot. The namespace is always the controller's own: tenants do not choose the signing
+// key (same rule as DefaultRegistry.CredentialFor in internal/reconciler).
 func LoadKeyFromCluster(ctx context.Context, namespace, name string) (*Key, error) {
 	cfg, err := ctrl.GetConfig()
 	if err != nil {

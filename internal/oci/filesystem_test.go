@@ -7,8 +7,7 @@ import (
 	"testing"
 )
 
-// entriesOf reads back every header from a single-layer image, so tests can assert on what
-// actually landed in the tar rather than on the digest alone.
+// entriesOf reads back every header from a single-layer image.
 func entriesOf(t *testing.T, inputs []LayerInput, cfg Config) []*tar.Header {
 	t.Helper()
 	img, err := Assemble(nil, inputs, cfg, t.TempDir())
@@ -43,8 +42,7 @@ func entriesOf(t *testing.T, inputs []LayerInput, cfg Config) []*tar.Header {
 	return out
 }
 
-// assembleDigest is entriesOf's sibling for the tests that care about the digest rather than the
-// contents — determinism assertions, mostly, where the whole point is that two inputs agree.
+// assembleDigest returns the digest of a single-layer assembly.
 func assembleDigest(t *testing.T, inputs []LayerInput, cfg Config) string {
 	t.Helper()
 	img, err := Assemble(nil, inputs, cfg, t.TempDir())
@@ -58,8 +56,7 @@ func assembleDigest(t *testing.T, inputs []LayerInput, cfg Config) string {
 	return d.String()
 }
 
-// TestRemoveEmitsWhiteouts — OCI expresses deletion as a ".wh." sibling. Getting the name or the
-// directory wrong produces a layer that silently deletes nothing.
+// TestRemoveEmitsWhiteouts: a wrong ".wh." name or directory silently deletes nothing.
 func TestRemoveEmitsWhiteouts(t *testing.T) {
 	entries := entriesOf(t, []LayerInput{{
 		Name:   "prune",
@@ -86,8 +83,7 @@ func TestRemoveEmitsWhiteouts(t *testing.T) {
 	}
 }
 
-// TestRemoveRefusesTheRoot — a whiteout of "/" would hide the entire base, which is never what
-// anyone meant to write.
+// TestRemoveRefusesTheRoot: a whiteout of "/" would hide the entire base.
 func TestRemoveRefusesTheRoot(t *testing.T) {
 	for _, p := range []string{"/", "", "/."} {
 		if _, err := Assemble(nil, []LayerInput{{Name: "bad", Remove: []string{p}}},
@@ -97,8 +93,7 @@ func TestRemoveRefusesTheRoot(t *testing.T) {
 	}
 }
 
-// TestRemoveIsDeterministic — the same removals must produce the same layer, or the short-circuit
-// would rebuild forever.
+// TestRemoveIsDeterministic: the same removals produce the same layer.
 func TestRemoveIsDeterministic(t *testing.T) {
 	mk := func() string {
 		img, err := Assemble(nil, []LayerInput{{
@@ -118,8 +113,7 @@ func TestRemoveIsDeterministic(t *testing.T) {
 	}
 }
 
-// TestOwnershipIsApplied — content is normally read rather than written, so root-owned is the
-// default; this is for the case where a process must own what it reads.
+// TestOwnershipIsApplied: for a process that must own what it reads.
 func TestOwnershipIsApplied(t *testing.T) {
 	src := writeTarGz(t, map[string]string{"lib/a.jar": "aaa"})
 
@@ -140,7 +134,7 @@ func TestOwnershipIsApplied(t *testing.T) {
 	}
 }
 
-// TestOwnershipDefaultsToRoot — the common case, and the one the digest was pinned against.
+// TestOwnershipDefaultsToRoot: the common case.
 func TestOwnershipDefaultsToRoot(t *testing.T) {
 	src := writeTarGz(t, map[string]string{"lib/a.jar": "aaa"})
 	for _, e := range entriesOf(t, []LayerInput{{
@@ -152,8 +146,7 @@ func TestOwnershipDefaultsToRoot(t *testing.T) {
 	}
 }
 
-// TestModeOverrideIsApplied — and applies to files and directories separately, since a directory
-// needs the execute bit to be traversable and a file usually should not have it.
+// TestModeOverrideIsApplied: separately to files and directories, which need the execute bit.
 func TestModeOverrideIsApplied(t *testing.T) {
 	src := writeTarGz(t, map[string]string{"lib/a.jar": "aaa"})
 
@@ -182,8 +175,7 @@ func TestModeOverrideIsApplied(t *testing.T) {
 	}
 }
 
-// TestModeDefaultsToNormalised — without an override, permissions are normalised so that whoever
-// packed the upstream archive cannot vary the output digest through bits nobody looks at.
+// TestModeDefaultsToNormalised: without an override, upstream permissions cannot vary the digest.
 func TestModeDefaultsToNormalised(t *testing.T) {
 	src := writeTarGz(t, map[string]string{"lib/a.jar": "aaa"})
 	for _, e := range entriesOf(t, []LayerInput{{
@@ -202,8 +194,7 @@ func TestModeDefaultsToNormalised(t *testing.T) {
 	}
 }
 
-// TestSubpathStripsThePrefix — a release tarball usually wraps everything in a version-named
-// directory. Selecting it must place its CONTENTS at the target, not the directory itself.
+// TestSubpathStripsThePrefix: selecting a directory places its CONTENTS at the target.
 func TestSubpathStripsThePrefix(t *testing.T) {
 	src := writeTarGz(t, map[string]string{
 		"core-1.1.1/lib/a.jar": "aaa",
@@ -232,8 +223,7 @@ func TestSubpathStripsThePrefix(t *testing.T) {
 	}
 }
 
-// TestSubpathMatchingNothingIsAnError — a typo would otherwise produce an empty layer, and the
-// workload would start with files missing for no visible reason.
+// TestSubpathMatchingNothingIsAnError: a typo must not produce an empty layer.
 func TestSubpathMatchingNothingIsAnError(t *testing.T) {
 	src := writeTarGz(t, map[string]string{"core-1.1.1/lib/a.jar": "aaa"})
 
@@ -283,8 +273,7 @@ func TestConfigSurfaceIsStamped(t *testing.T) {
 	}
 }
 
-// TestInheritWithoutABaseIsAnError — nothing to inherit from, and an empty config would leave a
-// non-runnable image with no explanation.
+// TestInheritWithoutABaseIsAnError: there is nothing to inherit from.
 func TestInheritWithoutABaseIsAnError(t *testing.T) {
 	src := writeTarGz(t, map[string]string{"a": "1"})
 

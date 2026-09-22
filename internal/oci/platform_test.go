@@ -21,19 +21,10 @@ func testInputs(t *testing.T) ([]LayerInput, string) {
 	}}, t.TempDir()
 }
 
-// TestUnsetPlatformMatchesTheOldHardcodedDefault is the regression guard for the rollout.
-//
-// Before multi-architecture output, a base-less artifact was stamped linux/amd64 unconditionally.
-// It is now stamped with the CONTROLLER's platform. Those must agree on amd64, or upgrading the
-// controller republishes different content under spec-hash tags that have not changed — which
-// `immutable: true` turns into a failed build for every artifact in every cluster at once.
-//
-// Skipped off amd64 rather than deleted: the property being asserted is specifically "the new
-// default equals the old constant on the architecture everything was built on".
-//
-// GOOS is deliberately NOT part of the condition. The OS is always linux — see RuntimePlatform,
-// which does not use runtime.GOOS precisely so that building the controller on Windows or macOS
-// cannot stamp an artifact nothing will run. This test therefore holds on any amd64 host.
+// TestUnsetPlatformMatchesTheOldHardcodedDefault: base-less artifacts were once always
+// linux/amd64 and now take the controller's platform; on amd64 the two must agree, or an upgrade
+// would republish different content under unchanged spec-hash tags. Only amd64 is checked; the OS
+// is always linux (see RuntimePlatform).
 func TestUnsetPlatformMatchesTheOldHardcodedDefault(t *testing.T) {
 	if runtime.GOARCH != "amd64" {
 		t.Skipf("the old default was linux/amd64; this host is %s", runtime.GOARCH)
@@ -57,8 +48,8 @@ func TestUnsetPlatformMatchesTheOldHardcodedDefault(t *testing.T) {
 	}
 }
 
-// TestPlatformComesFromTheBase keeps ADR 0015's rule: claiming amd64 over an arm64 base produces
-// an image the kubelet refuses to run, and the error points at the workload rather than here.
+// TestPlatformComesFromTheBase: claiming amd64 over an arm64 base yields an unrunnable image
+// (ADR 0015).
 func TestPlatformComesFromTheBase(t *testing.T) {
 	base, err := random.Image(64, 1)
 	if err != nil {
@@ -90,9 +81,7 @@ func TestPlatformComesFromTheBase(t *testing.T) {
 	}
 }
 
-// TestAssembleIndexIsDeterministic is the load-bearing test of the project, applied to the index
-// path: two assemblies of identical inputs must produce the same index digest, or nothing above it
-// — skipping rebuilds, comparing digests, immutable tags — holds.
+// TestAssembleIndexIsDeterministic: identical inputs produce the same index digest.
 func TestAssembleIndexIsDeterministic(t *testing.T) {
 	platforms := []Platform{{OS: "linux", Architecture: "amd64"}, {OS: "linux", Architecture: "arm64"}}
 
@@ -114,8 +103,7 @@ func TestAssembleIndexIsDeterministic(t *testing.T) {
 	}
 }
 
-// TestAssembleIndexStampsEachPlatform checks the descriptors a kubelet actually reads. Getting
-// these wrong produces "no matching manifest for linux/arm64", which points at the workload.
+// TestAssembleIndexStampsEachPlatform checks the descriptors a kubelet reads to pick a child.
 func TestAssembleIndexStampsEachPlatform(t *testing.T) {
 	platforms := []Platform{
 		{OS: "linux", Architecture: "amd64"},
@@ -144,8 +132,7 @@ func TestAssembleIndexStampsEachPlatform(t *testing.T) {
 		if got != want {
 			t.Fatalf("child %d descriptor is %s, want %s", i, got, want)
 		}
-		// And the child's own config must agree with the descriptor. A descriptor that lies is
-		// worse than no index: the puller selects on it and then runs the wrong binary.
+		// The child's own config must agree with its descriptor.
 		child, err := idx.Image(desc.Digest)
 		if err != nil {
 			t.Fatalf("child %d: %v", i, err)
@@ -161,10 +148,7 @@ func TestAssembleIndexStampsEachPlatform(t *testing.T) {
 	}
 }
 
-// TestAssembleIndexSharesLayers asserts that composed content is byte-identical across platforms.
-// The layers are the same files by construction; if they ever stopped being shared, an index would
-// silently double its storage and the children would disagree about content they represent
-// equally.
+// TestAssembleIndexSharesLayers: composed content is byte-identical across platforms.
 func TestAssembleIndexSharesLayers(t *testing.T) {
 	platforms := []Platform{{OS: "linux", Architecture: "amd64"}, {OS: "linux", Architecture: "arm64"}}
 	inputs, dir := testInputs(t)
@@ -210,9 +194,8 @@ func TestAssembleIndexSharesLayers(t *testing.T) {
 	}
 }
 
-// TestParsePlatform covers the spec's two accepted shapes and rejects the rest. The CRD pattern
-// enforces this too; this is the belt to that braces, since a spec that somehow passed validation
-// still must not produce a half-parsed platform.
+// TestParsePlatform covers the spec's two accepted shapes and rejects the rest, independently of
+// the CRD pattern.
 func TestParsePlatform(t *testing.T) {
 	ok := map[string]Platform{
 		"linux/amd64":  {OS: "linux", Architecture: "amd64"},
@@ -237,9 +220,8 @@ func TestParsePlatform(t *testing.T) {
 	}
 }
 
-// TestPlatformsAreInTheInputHash: a build for a different platform set produces different output,
-// so it must produce a different hash. Otherwise the second build is skipped as "unchanged" and
-// the wrong artifact is served indefinitely.
+// TestPlatformsAreInTheInputHash: a different platform set is different output, so a different
+// hash.
 func TestPlatformsAreInTheInputHash(t *testing.T) {
 	layers := []LayerInput{{Digest: "sha256:1111", Unpack: UnpackNone, Target: "/x"}}
 
@@ -256,8 +238,7 @@ func TestPlatformsAreInTheInputHash(t *testing.T) {
 		t.Fatal("a two-platform index shares an input hash with a single-platform image")
 	}
 
-	// Order is part of the identity: it decides the order of the children in the index, and so
-	// the index digest.
+	// Order decides the order of the index's children, and so its digest.
 	rev := InputHash(layers, Config{}, "", []Platform{
 		{OS: "linux", Architecture: "arm64"}, {OS: "linux", Architecture: "amd64"},
 	})
@@ -266,9 +247,8 @@ func TestPlatformsAreInTheInputHash(t *testing.T) {
 	}
 }
 
-// TestBaseDigestIsInTheInputHash covers a bug this change fixed: the base reached the output but
-// not the hash, so repointing spec.base.digest left the hash unchanged, the cheap path
-// short-circuited, and the new base was silently never built.
+// TestBaseDigestIsInTheInputHash: repointing spec.base.digest must change the hash, or the new base
+// is never built.
 func TestBaseDigestIsInTheInputHash(t *testing.T) {
 	layers := []LayerInput{{Digest: "sha256:1111", Unpack: UnpackNone, Target: "/x"}}
 	a := InputHash(layers, Config{}, "sha256:aaaa", nil)

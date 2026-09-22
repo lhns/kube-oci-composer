@@ -13,9 +13,7 @@ func TestTagFromRef(t *testing.T) {
 	}{
 		{name: "empty", ref: "", want: ""},
 
-		// The reason this is hand-parsed. An untemplated placeholder must contribute NOTHING;
-		// name.ParseReference would turn it into index.docker.io/library/x:latest and we would
-		// publish a moving tag nobody asked for.
+		// Why this is hand-parsed: name.ParseReference would default a placeholder to :latest.
 		{name: "bare placeholder has no tag", ref: "plugin-bundle", want: ""},
 		{name: "repo path but no tag", ref: "oci-composer.internal/plugin-bundle", want: ""},
 
@@ -78,6 +76,3 @@ func TestEffectiveTags(t *testing.T) {
 		})
 	}
 }
-
-// TestPublishRefDrivesTheTag is the point of the field: a reference rewritten by something like
-// kustomize's images transformer publishes under that tag, without publish.tags being touched.

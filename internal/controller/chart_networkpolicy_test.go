@@ -8,15 +8,23 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// registryNetworkPolicy returns the policy in front of the REGISTRY.
-//
-// Selected by name, not by being the first NetworkPolicy in the render. The chart ships a second
-// one for the builder's context endpoint, and "the first one" silently became that instead --
-// these tests failed pointing at a policy they were never about.
+// registryNetworkPolicy returns the policy in front of the registry, or nil.
 func registryNetworkPolicy(t *testing.T, args ...string) *networkingv1.NetworkPolicy {
 	t.Helper()
-	out := render(t, args...)
-	for _, doc := range splitDocs(out) {
+	return networkPolicyNamed(t, "-registry", args...)
+}
+
+// builderContextPolicy returns the policy in front of the builder's context endpoint, or nil.
+func builderContextPolicy(t *testing.T, args ...string) *networkingv1.NetworkPolicy {
+	t.Helper()
+	return networkPolicyNamed(t, "-builder-context", args...)
+}
+
+// networkPolicyNamed returns the rendered NetworkPolicy whose name ends in suffix, or nil. Selected
+// by name because the chart renders more than one.
+func networkPolicyNamed(t *testing.T, suffix string, args ...string) *networkingv1.NetworkPolicy {
+	t.Helper()
+	for _, doc := range splitDocs(render(t, args...)) {
 		var probe struct {
 			Kind     string `json:"kind"`
 			Metadata struct {
@@ -26,7 +34,7 @@ func registryNetworkPolicy(t *testing.T, args ...string) *networkingv1.NetworkPo
 		if err := yaml.Unmarshal([]byte(doc), &probe); err != nil || probe.Kind != "NetworkPolicy" {
 			continue
 		}
-		if !strings.HasSuffix(probe.Metadata.Name, "-registry") {
+		if !strings.HasSuffix(probe.Metadata.Name, suffix) {
 			continue
 		}
 		var np networkingv1.NetworkPolicy
@@ -38,23 +46,17 @@ func registryNetworkPolicy(t *testing.T, args ...string) *networkingv1.NetworkPo
 	return nil
 }
 
-// TestTheRegistryPolicyAdmitsEveryNamespaceByDefault is the property the policy exists for.
-//
-// A build Job runs in its OBJECT's namespace, not the release's, so every build crosses a namespace
-// boundary to push. In a default-deny cluster nothing lets it through, and the build fails in a way
-// that looks like a registry fault. Defaulting to every namespace is deliberate: this is a
-// connectivity guarantee, and reads are anonymous by design while writes need the password, so a
-// namespace boundary in front of that adds no authority to either rule.
+// TestTheRegistryPolicyAdmitsEveryNamespaceByDefault: build Jobs run in their object's namespace,
+// so every push crosses a namespace boundary. The policy is a connectivity guarantee for
+// default-deny clusters; authority comes from the registry's own auth, not the namespace.
 func TestTheRegistryPolicyAdmitsEveryNamespaceByDefault(t *testing.T) {
 	np := registryNetworkPolicy(t, "--set", "registry.publish.mode=internalOnly")
 	if np == nil {
 		t.Fatal("no NetworkPolicy rendered; builds in other namespaces would be blocked in a default-deny cluster")
 	}
 
-	// It must select every pod serving the registry API -- the writer and any read replica -- and
-	// nothing else. Selecting only the writer would leave replicas with no policy at all, which in
-	// a default-deny cluster means the read Service blackholes a share of every pull; selecting
-	// more than that would silently restrict the controllers too.
+	// Every pod serving the registry API (writer and read replicas) and nothing else: missing a
+	// replica blackholes a share of pulls in a default-deny cluster.
 	if got := np.Spec.PodSelector.MatchLabels["oci-composer.lhns.de/registry-role"]; got != "serve" {
 		t.Fatalf("the policy selects registry-role %q; it must cover every pod serving the API", got)
 	}
@@ -70,8 +72,7 @@ func TestTheRegistryPolicyAdmitsEveryNamespaceByDefault(t *testing.T) {
 
 	var open bool
 	for _, peer := range rule.From {
-		// An empty namespaceSelector matches every namespace. A nil one does not — it would mean
-		// "this namespace only", which is exactly the bug this test exists to catch.
+		// An empty namespaceSelector matches every namespace; a nil one means "this namespace only".
 		if peer.NamespaceSelector != nil &&
 			len(peer.NamespaceSelector.MatchLabels) == 0 &&
 			len(peer.NamespaceSelector.MatchExpressions) == 0 {
@@ -87,11 +88,8 @@ func TestTheRegistryPolicyAdmitsEveryNamespaceByDefault(t *testing.T) {
 	}
 }
 
-// TestNarrowingThePolicyAlwaysKeepsTheReleaseNamespace.
-//
-// Both controllers live in the release namespace and talk to the registry constantly. Narrowing the
-// list and forgetting it would stop publishing — and, worse, stop the retention refresh, whose
-// silence is not an outage but a deletion one window later (ADR 0031).
+// TestNarrowingThePolicyAlwaysKeepsTheReleaseNamespace: the controllers live there; losing access
+// stops publishing and the retention refresh, which means deletions one window later (ADR 0031).
 func TestNarrowingThePolicyAlwaysKeepsTheReleaseNamespace(t *testing.T) {
 	np := registryNetworkPolicy(t,
 		"--set", "registry.publish.mode=internalOnly",
@@ -119,9 +117,8 @@ func TestNarrowingThePolicyAlwaysKeepsTheReleaseNamespace(t *testing.T) {
 	}
 }
 
-// TestNodeCIDRsBecomeAnIpBlock — kubelet image pulls arrive from the NODE's network namespace and
-// no podSelector can ever match them. If node traffic is not otherwise permitted, this is the only
-// way to admit it, and the symptom of getting it wrong is a pull that hangs.
+// TestNodeCIDRsBecomeAnIpBlock: kubelet pulls come from the node's network, which no podSelector
+// matches; an ipBlock is the only way to admit them.
 func TestNodeCIDRsBecomeAnIpBlock(t *testing.T) {
 	np := registryNetworkPolicy(t,
 		"--set", "registry.publish.mode=internalOnly",
@@ -141,8 +138,8 @@ func TestNodeCIDRsBecomeAnIpBlock(t *testing.T) {
 	}
 }
 
-// TestThePolicyCanBeTurnedOffEntirely. Anyone whose CNI ignores NetworkPolicy, or who manages
-// policy centrally, should be able to render nothing rather than a resource that misleads.
+// TestThePolicyCanBeTurnedOffEntirely: for CNIs that ignore NetworkPolicy or central policy
+// management.
 func TestThePolicyCanBeTurnedOffEntirely(t *testing.T) {
 	np := registryNetworkPolicy(t,
 		"--set", "registry.publish.mode=internalOnly",
@@ -153,38 +150,8 @@ func TestThePolicyCanBeTurnedOffEntirely(t *testing.T) {
 	}
 }
 
-// builderContextPolicy returns the policy in front of the builder's context endpoint.
-func builderContextPolicy(t *testing.T, args ...string) *networkingv1.NetworkPolicy {
-	t.Helper()
-	for _, doc := range splitDocs(render(t, args...)) {
-		var probe struct {
-			Kind     string `json:"kind"`
-			Metadata struct {
-				Name string `json:"name"`
-			} `json:"metadata"`
-		}
-		if err := yaml.Unmarshal([]byte(doc), &probe); err != nil || probe.Kind != "NetworkPolicy" {
-			continue
-		}
-		if !strings.HasSuffix(probe.Metadata.Name, "-builder-context") {
-			continue
-		}
-		var np networkingv1.NetworkPolicy
-		if err := yaml.Unmarshal([]byte(doc), &np); err != nil {
-			t.Fatalf("parsing NetworkPolicy: %v", err)
-		}
-		return &np
-	}
-	return nil
-}
-
-// TestTheContextPolicyAdmitsEveryNamespaceByDefault is the fetch leg's counterpart to the
-// registry's policy, and the gap this closes.
-//
-// A build Job runs in its OBJECT's namespace, so it crosses a namespace boundary to fetch its
-// source exactly as it does to push. Before the builder served contexts, that crossing went to
-// flux-system -- a namespace this chart does not own and so could not write a policy for, which is
-// why users hand-wrote one per namespace.
+// TestTheContextPolicyAdmitsEveryNamespaceByDefault is the fetch-side counterpart of the registry
+// policy: build Jobs cross a namespace boundary to fetch their source from the builder.
 func TestTheContextPolicyAdmitsEveryNamespaceByDefault(t *testing.T) {
 	np := builderContextPolicy(t, "--set", "registry.publish.mode=internalOnly")
 	if np == nil {
@@ -202,8 +169,8 @@ func TestTheContextPolicyAdmitsEveryNamespaceByDefault(t *testing.T) {
 	}
 }
 
-// TestNarrowingTheContextPolicyKeepsTheReleaseNamespace — an ImageBuild in the release namespace
-// builds there, and omitting it would break exactly the install that never left one namespace.
+// TestNarrowingTheContextPolicyKeepsTheReleaseNamespace: ImageBuilds in the release namespace build
+// there too.
 func TestNarrowingTheContextPolicyKeepsTheReleaseNamespace(t *testing.T) {
 	np := builderContextPolicy(t,
 		"--set", "registry.publish.mode=internalOnly",
@@ -229,8 +196,8 @@ func TestNarrowingTheContextPolicyKeepsTheReleaseNamespace(t *testing.T) {
 	}
 }
 
-// TestBuildPodsAreToldTheServiceAddress — the URL is used by pods in other namespaces, so a
-// loopback or localhost address would render, lint and then fail every build.
+// TestBuildPodsAreToldTheServiceAddress: build pods in other namespaces use the URL, so it must not
+// be loopback.
 func TestBuildPodsAreToldTheServiceAddress(t *testing.T) {
 	out := render(t, "--set", "registry.publish.mode=internalOnly")
 	if !strings.Contains(out, "--context-base-url=http://test-release-kube-oci-composer-builder-context.oci-composer.svc.") {

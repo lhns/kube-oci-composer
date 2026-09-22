@@ -8,11 +8,11 @@ import (
 	"testing"
 )
 
-// pinnedBase is the same image test/e2e/manifests/dockerfile uses, so a build here pulls something
-// the cluster has already seen. Pinned because the controller refuses a floating FROM.
-const pinnedBase = "busybox:1.37@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0"
+// Dockerfiles that do not live in the build context.
 
-// A Dockerfile that does not live in the build context, against a real cluster.
+// pinnedBase is the base manifests/dockerfile uses, so it is already on the nodes. Pinned because
+// the controller refuses a floating FROM.
+const pinnedBase = "busybox:1.37@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0"
 
 // TestAnInlineDockerfileBuilds — the motivating case: an upstream project that ships no Dockerfile,
 // built without forking it to add one.
@@ -49,14 +49,9 @@ spec:
 		return nil
 	})
 
-	// This build has a sourceRef context, so it also proves the fetch went through the BUILDER
-	// rather than source-controller (ADR 0044). Asserted here rather than in a build of its own:
-	// every extra ImageBuild is another repository, and zot walks repositories on a rotation, so
-	// the retention suite's negative control gets slower with each one. A separate build for this
-	// pushed it past its deadline and turned main red.
-	//
-	// The flux-system check covers EVERY Job in the namespace, not just this one, so a single
-	// build fetching directly fails it.
+	// This build has a sourceRef context, so it also checks the fetch went through the BUILDER, not
+	// source-controller (ADR 0044) -- here rather than in its own build, because each extra
+	// repository slows the retention controls. It inspects EVERY Job in the namespace.
 	args := mustKubectl(t, "-n", buildNamespace, "get", "jobs",
 		"-o", `jsonpath={.items[*].spec.template.spec.initContainers[*].args}`)
 	if strings.Contains(args, "flux-system") {
@@ -70,8 +65,7 @@ spec:
 	}
 }
 
-// TestAContextlessInlineBuildNeedsNoSource — a build that reads no files used to need a Flux
-// source pointed at an empty directory, purely to satisfy a required field.
+// TestAContextlessInlineBuildNeedsNoSource -- a build that reads no files needs no Flux source.
 func TestAContextlessInlineBuildNeedsNoSource(t *testing.T) {
 	name := "e2e-nocontext"
 	applyStdin(t, fmt.Sprintf(`
@@ -102,8 +96,8 @@ spec:
 	})
 }
 
-// TestADockerfileFromAConfigMapBuildsAndRebuildsOnEdit — two claims: the content is hashed, so an
-// edit rebuilds, and the ConfigMap is watched, so it happens before the next interval an hour on.
+// TestADockerfileFromAConfigMapBuildsAndRebuildsOnEdit -- the content is hashed, so an edit
+// rebuilds, and the ConfigMap is watched, so it happens well before the 1h interval.
 func TestADockerfileFromAConfigMapBuildsAndRebuildsOnEdit(t *testing.T) {
 	name := "e2e-configmap"
 	apply := func(marker string) {
@@ -161,11 +155,8 @@ spec:
 	})
 }
 
-// TestTheFromGuardRunsWhateverTheDockerfileCameFrom is the most important test in this file: a
-// source that skips the only content guard this controller has is a security regression.
-//
-// The guard runs in the controller for a path, an inline or a ConfigMap, and in the build pod's
-// fetcher for an image context. A table, so a fourth source with no case here is visibly missing.
+// TestTheFromGuardRunsWhateverTheDockerfileCameFrom -- a Dockerfile source that skipped the only
+// content guard would be a security regression. A table, so a new source without a case stands out.
 func TestTheFromGuardRunsWhateverTheDockerfileCameFrom(t *testing.T) {
 	unpinned := "FROM golang:1.26\n"
 
@@ -247,15 +238,9 @@ spec:
 	}
 }
 
-// TestAFailedBuildSaysWhyInStatus — the diagnostics fix, against a real cluster.
-//
-// The cause has to be IN status, not behind `kubectl logs <pod>`: the next retry deletes the Job
-// and takes the pod with it, so the pointer outlives neither. Asserting on the message rather than
-// on Ready=False is the whole point; the old behaviour was already Ready=False with the reason
-// unavailable.
-//
-// A failing build pushes nothing, so this adds no repository to zot's GC rotation -- unlike the
-// build that starved the retention control in #51.
+// TestAFailedBuildSaysWhyInStatus -- the build's own error output must be IN status (ADR 0046): the
+// next retry deletes the pod, so `kubectl logs` is no record. Asserts the message, not merely
+// Ready=False. Pushes nothing, so adds no repository to zot's GC rotation.
 func TestAFailedBuildSaysWhyInStatus(t *testing.T) {
 	name := "e2e-failing-build"
 	applyStdin(t, fmt.Sprintf(`

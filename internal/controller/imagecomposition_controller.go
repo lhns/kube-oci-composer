@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -36,54 +35,37 @@ import (
 	"github.com/lhns/kube-oci-composer/internal/retention"
 )
 
-// pendingRetryInterval is how often a composition waiting on a dependency re-checks. Short
-// enough that a same-commit apply converges without anyone noticing; long enough that a
-// genuinely missing reference costs a couple of cheap GETs a minute rather than a hot loop.
-const pendingRetryInterval = 30 * time.Second
-
 // ImageCompositionReconciler assembles and publishes OCI artifacts.
 type ImageCompositionReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
 
-	// Refresher renews the lease on an artifact the moment it is published, rather than
-	// leaving it unprotected until the next scheduled cycle. Optional: nil disables it, which
-	// is what --retention-refresh-interval=0 means.
+	// Refresher renews the lease on an artifact the moment it is published. Nil disables it
+	// (--retention-refresh-interval=0).
 	Refresher *retention.Refresher
 
-	// Default is where objects publish when they name no repository of their own. Configured once
-	// by the operator; see recon.DefaultRegistry for why its credential is namespaced to the
-	// controller rather than to the object.
+	// Default is where objects publish when they name no repository of their own.
 	Default recon.DefaultRegistry
 
 	// Attestor attaches the SBOM, provenance and signature, when any of them is enabled. Nil or
 	// disabled changes nothing about the reconcile.
 	Attestor *attest.Attestor
 
-	// Export is what the operator, rather than an object, decides about push.writeRefTo: which
-	// foreign namespaces are permitted, and which metadata keys an object may set. Both empty by
-	// default -- the controller is the boundary here, not RBAC (ADR 0056).
+	// Export is what the operator decides about push.writeRefTo. The controller, not RBAC, is the
+	// boundary here (ADR 0056).
 	Export recon.ExportOptions
 
-	// Transport, when set, trusts an additional CA on top of the system roots. Applies to EVERY
-	// registry this controller talks to, not only the operator's own -- see recon.Transport for
-	// why scoping it per host would break base-image pulls from the bundled registry, which is the
-	// flagship flow.
+	// Transport, when set, trusts an additional CA on top of the system roots, for EVERY registry
+	// this controller talks to (base images may come from the bundled registry too).
 	Transport http.RoundTripper
 
-	// InsecureRegistries are hosts this controller may push to over plain HTTP, matched on host
-	// exactly as the builder and the retention refresher match it (recon.InsecureHost).
-	//
-	// It exists on this controller at all because the loopback serving endpoint is gone (ADR 0035):
-	// pushes used to be either loopback -- always plaintext -- or to a real registry over HTTPS,
-	// so there was no third case. Now the DEFAULT case is a bundled registry reached over a
-	// NodePort or a Service, and neither has a certificate.
+	// InsecureRegistries are hosts this controller may push to over plain HTTP (recon.InsecureHost).
+	// The default bundled registry has no certificate (ADR 0035).
 	InsecureRegistries []string
 
 	// RequirePinnedSources refuses any sourceRef that names no revision (threat T1). Off by
-	// default: pinning is deliberately optional per ADR 0026, and this is how an operator opts a
-	// whole cluster out of that.
+	// default, since pinning is optional per ADR 0026.
 	RequirePinnedSources bool
 
 	// Fetcher retrieves layer content from its origin.
@@ -102,28 +84,23 @@ type ImageCompositionReconciler struct {
 	HistoryLimit int
 }
 
-// The controller never creates or deletes ImageCompositions — it only observes them and patches
-// their finalizers and status. The verbs below say exactly that, so the role cannot quietly
-// grant more than the code uses.
+// The controller only observes ImageCompositions and patches their finalizers and status; the
+// verbs grant no more than that.
 //
 // +kubebuilder:rbac:groups=oci.lhns.de,resources=imagecompositions,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=oci.lhns.de,resources=imagecompositions/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=oci.lhns.de,resources=imagecompositions/finalizers,verbs=update
-// Secrets are read by name and deliberately NOT cached (see cmd/oci-composer), so this needs
-// `get` alone. Caching them would require list and watch on every Secret in the cluster —
-// an enormous blast radius for a controller that reads one referenced push credential.
+// Secrets are read by name and NOT cached (see cmd/oci-composer), so `get` alone suffices;
+// caching would need list/watch on every Secret in the cluster.
 //
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 //
-// ConfigMaps ARE cached, unlike Secrets, because configMapRef layers are watched — a ConfigMap
-// edit must rebuild promptly rather than at the next interval, which could be an hour away.
-// That costs an informer over all ConfigMaps; the alternative is a controller that appears not
-// to notice edits.
+// ConfigMaps ARE cached and watched, so a configMapRef edit rebuilds promptly; create, update and
+// delete are for push.writeRefTo exports.
 //
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;delete
 //
-// Flux sources are read for their status.artifact only. Read-only, and only the source kinds a
-// layer can reference.
+// Flux sources are read-only, for their status.artifact.
 //
 // +kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=gitrepositories;ocirepositories;buckets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
@@ -142,8 +119,7 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Recorded on the way out of every branch, so readiness reflects "this object has been
-	// through a reconcile" rather than "this object is healthy". See Readiness.Observe.
+	// On every branch: readiness means "reconciled", not "healthy". See Readiness.Observe.
 	if r.Readiness != nil {
 		defer r.Readiness.Observe(req.NamespacedName)
 	}
@@ -160,8 +136,7 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	}
 
-	// Suspend halts work without touching what is already published — the object simply stops
-	// being reconciled, and says so.
+	// Suspend halts work without touching what is already published.
 	if obj.Spec.Suspend {
 		return ctrl.Result{}, r.patchStatus(ctx, &obj, func(o *ociv1alpha1.ImageComposition) {
 			recon.SetCondition(o, ociv1alpha1.ReadyCondition, metav1.ConditionFalse,
@@ -171,21 +146,16 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		})
 	}
 
-	// The CRD defaults this, so it is normally set. The fallback covers an object created before
-	// the default existed, and a deliberate zero.
 	interval := recon.Interval(obj.Spec.Interval)
 
 	result, err := r.reconcileArtifact(ctx, &obj)
 	if err != nil {
-		// Checked before terminal: a dependency that is not there yet is a normal step in
-		// converging a commit, so it gets a quiet fixed-interval retry rather than a Warning
-		// event, an error log and exponential backoff. Crucially it never sets Stalled — the
-		// object that would fix it is a different one, and changing it raises no event here.
-		var pe *recon.PendingError
-		if errors.As(err, &pe) {
+		// A missing dependency is a normal step in converging: a quiet fixed-interval retry, and
+		// never Stalled, since the object that fixes it raises no event here.
+		if recon.IsPending(err) {
 			logger.Info("waiting on a dependency; will retry", "reason", err.Error(),
-				"retryIn", pendingRetryInterval)
-			return ctrl.Result{RequeueAfter: pendingRetryInterval},
+				"retryIn", recon.PendingRetryInterval)
+			return ctrl.Result{RequeueAfter: recon.PendingRetryInterval},
 				r.patchStatus(ctx, &obj, func(o *ociv1alpha1.ImageComposition) {
 					recon.SetCondition(o, ociv1alpha1.ReconcilingCondition, metav1.ConditionTrue,
 						ociv1alpha1.ReasonDependencyNotReady, err.Error())
@@ -195,12 +165,10 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				})
 		}
 
-		var te *recon.TerminalError
-		if errors.As(err, &te) {
+		if recon.IsTerminal(err) {
 			logger.Error(err, "terminal error; not retrying until the spec changes")
 			recon.Event(r.Recorder, &obj, corev1.EventTypeWarning, reasonFor(err), err.Error())
-			// No requeue: Stalled means a human must act. The generation change that fixes it
-			// wakes the controller anyway.
+			// No requeue: the generation change that fixes it wakes the controller.
 			return ctrl.Result{}, r.patchStatus(ctx, &obj, func(o *ociv1alpha1.ImageComposition) {
 				recon.SetCondition(o, ociv1alpha1.StalledCondition, metav1.ConditionTrue, reasonFor(err), err.Error())
 				recon.SetCondition(o, ociv1alpha1.ReadyCondition, metav1.ConditionFalse, reasonFor(err), err.Error())
@@ -219,8 +187,7 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}); perr != nil {
 			return ctrl.Result{}, perr
 		}
-		// Returning the error lets controller-runtime apply exponential backoff.
-		return ctrl.Result{}, err
+		return ctrl.Result{}, err // exponential backoff
 	}
 
 	if err := r.patchStatus(ctx, &obj, func(o *ociv1alpha1.ImageComposition) {
@@ -229,13 +196,11 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		o.Status.InputHash = result.InputHash
 		markDigestTagged(o.Status.History, result.DigestTagged)
 		o.Status.History = recon.RecordHistory(o.Status.History, result.Record, r.historyLimit(o))
-		// Assigned unconditionally, including to nil: a divergence that has been resolved must stop
-		// being reported, or the field becomes a permanent scar on an object that is now correct.
+		// Assigned even when nil, so a resolved divergence stops being reported.
 		o.Status.Conflict = result.Conflict
 		msg := fmt.Sprintf("Published %s", result.Artifact.Ref)
 		if c := result.Conflict; c != nil {
-			// Ready, but the message says what was kept and what was dropped. A conflict an
-			// operator has to go looking for is one they will not find.
+			// Ready, but the message says what was kept and what was dropped.
 			msg = fmt.Sprintf("Kept %s at %s; dropped %s (onConflict: Keep)",
 				c.Tag, c.Existing, c.Dropped)
 		}
@@ -247,8 +212,7 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, err
 	}
 
-	// A nil Record means the reconcile converged without publishing, so there is nothing newly
-	// unprotected.
+	// A nil Record means nothing was published, so nothing is newly unprotected.
 	if result.Record != nil {
 		r.refreshNow(ctx, &obj, result.Artifact)
 	}
@@ -282,9 +246,8 @@ type buildResult struct {
 	// Conflict is set when onConflict: Keep left an existing tag in place and dropped what this
 	// reconcile produced. Copied into status so the divergence is visible rather than inferred.
 	Conflict *ociv1alpha1.TagConflictStatus
-	// Record describes a NEW build, and is nil when the reconcile converged without publishing.
-	// Garbage collection reads status.history, so appending on a no-op would grow the retention
-	// list with duplicates and evict genuinely distinct builds.
+	// Record describes a NEW build, and is nil when the reconcile converged without publishing,
+	// so history is not padded with duplicates.
 	Record *ociv1alpha1.BuildRecord
 	// DigestTagged are history digests given their own tag on this pass (ADR 0060's backfill).
 	// Reported rather than written, because status is patched against a fresh read.
@@ -292,12 +255,8 @@ type buildResult struct {
 }
 
 // buildRecord captures the blobs a build is composed of, so garbage collection can tell what is
-// still live without inferring it from what happens to be in storage.
-//
-// For a multi-platform build it walks every child: Blobs is the union of their configs and layers,
-// and Manifests names the children themselves. Both matter to GC — the layers are shared between
-// children and so appear once, while the configs differ per platform and would otherwise be
-// reclaimed under a live index.
+// still live. For an index, Blobs is the union of every child's config and layers, and Manifests
+// names the children, so per-platform configs are not reclaimed under a live index.
 func buildRecord(art builtArtifact, tags []string, digest v1.Hash, inputs []oci.LayerInput) (*ociv1alpha1.BuildRecord, error) {
 	children, err := art.children()
 	if err != nil {
@@ -349,9 +308,8 @@ func buildRecord(art builtArtifact, tags []string, digest v1.Hash, inputs []oci.
 	}, nil
 }
 
-// sourceRecords is where each layer's content came from, so an artifact can be traced back to a
-// revision without pulling it apart. Layers that carry no revision still record their digest: for a
-// fetch that IS the identity, and an empty revision is honest about there being none.
+// sourceRecords is where each layer's content came from. Layers without a revision still record
+// their digest, which for a fetch is the identity.
 func sourceRecords(inputs []oci.LayerInput) []ociv1alpha1.SourceRecord {
 	if len(inputs) == 0 {
 		return nil
@@ -377,15 +335,11 @@ func tagSuffix(tags []string) string {
 
 // reconcileArtifact does the work and returns what is published.
 //
-// The ordering is the important part, and it is ordered by cost. The input hash is computed from
-// the spec alone, so the cheapest possible check — one HEAD, no network transfer — comes first
-// and covers the overwhelmingly common case of nothing having changed. Only past that point does
-// anything get fetched, and only past the digest comparison does anything get written.
+// Ordered by cost: the input hash comes from the spec alone, so the common "nothing changed" case
+// costs a few HEADs. Only past that is anything fetched, and only past the digest comparison is
+// anything written.
 func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj *ociv1alpha1.ImageComposition) (buildResult, error) {
-	// Built from the spec only; Path is filled in later, after we know a build is actually
-	// needed. InputHash deliberately ignores Path for exactly this reason.
-	// The work directory holds both the assembled layer tarballs and anything synthesised while
-	// resolving a source, so it is created before resolution rather than after.
+	// Created before resolution: it also holds content synthesised while resolving (ConfigMaps).
 	workDir, err := os.MkdirTemp("", "oci-composer-work-*")
 	if err != nil {
 		return buildResult{}, fmt.Errorf("creating work dir: %w", err)
@@ -399,10 +353,8 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 
 	cfg := configFrom(obj.Spec.Config)
 
-	// Platforms that can be known WITHOUT fetching anything. A declared list is known; an unset
-	// one is the base's platform, which the base digest already pins, or — with no base — the
-	// controller's own. Fetching the base here to learn its platform would defeat the point of a
-	// hash that exists to avoid fetching.
+	// Platforms knowable WITHOUT fetching: the declared list, else the base's (pinned by the base
+	// digest), else, with no base, the controller's own.
 	declared, err := declaredPlatforms(obj)
 	if err != nil {
 		return buildResult{}, err
@@ -410,10 +362,7 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	hashPlatforms := declared
 	var baseDigest string
 	if obj.Spec.Base != nil {
-		// From the accessor, not the field: `ref` and `image`+`digest` name the same base, so they
-		// must hash the same. Reading .Digest directly would make a base spelled as a ref hash as
-		// empty, and rewriting a spec from one spelling to the other would rebuild and republish
-		// every artifact for no change in content.
+		// From the accessor, not the field, so `ref` and `image`+`digest` spellings hash the same.
 		_, baseDigest = obj.Spec.Base.Repository()
 	} else if len(hashPlatforms) == 0 {
 		hashPlatforms = []oci.Platform{oci.RuntimePlatform()}
@@ -425,19 +374,16 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 		return buildResult{}, err
 	}
 
-	opts, err := r.remoteOptions(ctx, obj)
+	opts, err := r.remoteOptions(ctx, obj, tgt.writeRepo)
 	if err != nil {
 		return buildResult{}, err
 	}
 
 	refOpts := r.refOptions(tgt.writeRepo)
 
-	// What each tag currently resolves to, plus whether the previously recorded digest is still
-	// present at all. A HEAD failure is not an error: the ordinary cause is that the reference
-	// does not exist yet, or that the serving store was emptied by a restart.
-	// The digest's own tag is checked with the rest only once status claims it. An object published
-	// before it existed would otherwise fail the cheap path below and be reassembled from every
-	// layer just to add a name; backfillDigestTags adds it for the price of one request.
+	// The digest's own tag is checked only once status claims it; otherwise an object published
+	// before ADR 0060 would miss the cheap path and be reassembled just to add a name, which
+	// backfillDigestTags does for one request.
 	resolve := tgt.tags
 	if prev := obj.Status.Artifact; prev != nil && recon.HasDigestTag(prev.Tags, prev.Digest) {
 		resolve = recon.PublishTags(tgt.tags, prev.Digest)
@@ -447,17 +393,12 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 		return buildResult{}, err
 	}
 
-	// The cheap path. Same inputs, and everything those inputs produced last time is still
-	// published under every name it should be, so there is nothing to do. This is what makes
-	// reconciling on an interval nearly free: without it, the output digest could only be
-	// learned by downloading every layer and assembling them, every hour, forever.
+	// The cheap path: same inputs, and everything they produced is still published under every
+	// name, so there is nothing to do. This is what makes interval reconciles nearly free.
 	if prev := obj.Status.Artifact; prev != nil &&
 		obj.Status.InputHash == inputHash &&
 		published.Matches(prev.Digest) &&
-		// The third conjunct, added last so an object with attestations disabled evaluates exactly
-		// the expression it evaluated before. Complete() reads only status, so a converged
-		// reconcile still costs zero extra registry requests -- which is the whole point of
-		// recording what was attached rather than asking every hour.
+		// Reads only status, so a converged reconcile costs no extra registry requests.
 		r.Attestor.Complete(attestRecord(obj.Status.Attestations), prev.Digest) {
 		art := prev.DeepCopy()
 		tagged := r.backfillDigestTags(ctx, obj, tgt, art, refOpts, opts)
@@ -466,21 +407,12 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	}
 
 	for i := range inputs {
-		// Content synthesised during resolution (a ConfigMap) is already on disk; only remote
-		// sources need fetching.
-		if inputs[i].Path != "" {
+		// Already on disk (a ConfigMap), or a remove entry with nothing to fetch.
+		if inputs[i].Path != "" || len(inputs[i].Remove) > 0 {
 			continue
 		}
 
-		// A remove entry has no content to fetch; it produces whiteouts from the spec alone.
-		if len(inputs[i].Remove) > 0 {
-			continue
-		}
-
-		// An image layer resolves to a manifest rather than a file. Pulled HERE rather than during
-		// resolution, so that the short-circuit above can decide there is nothing to do without
-		// touching a registry. It deliberately skips the layer cache, which is keyed by digest for
-		// single blobs where an image is a manifest plus its layers — the registry is the cache.
+		// An image layer is a manifest, not a blob, so it skips the layer cache.
 		if src, ok := imagePulls[i]; ok {
 			img, err := r.pullImageLayer(ctx, obj, inputs[i], src)
 			if err != nil {
@@ -494,9 +426,7 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 		if err != nil {
 			var dm *oci.ErrDigestMismatch
 			if errors.As(err, &dm) {
-				// Terminal on purpose: the declared digest and the served bytes disagree, and
-				// no amount of retrying reconciles that. Retrying would also mean repeatedly
-				// pulling content we have already decided not to trust.
+				// Terminal: the declared digest and the served bytes disagree.
 				return buildResult{}, recon.Terminal("layer %q: %s", inputs[i].Name, dm.Error())
 			}
 			return buildResult{}, fmt.Errorf("layer %q: %w", inputs[i].Name, err)
@@ -508,8 +438,7 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	if err != nil {
 		var unsupported *oci.ErrUnsupportedUnpack
 		if errors.As(err, &unsupported) {
-			// Terminal on purpose: retrying cannot add a code path to this binary. See
-			// oci.ErrUnsupportedUnpack for how a spec gets past the CRD's enum in the first place.
+			// Terminal: retrying cannot add a code path to this binary.
 			return buildResult{}, recon.Terminal("%s", unsupported.Error())
 		}
 		return buildResult{}, err
@@ -520,22 +449,15 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 		return buildResult{}, fmt.Errorf("computing digest: %w", err)
 	}
 
-	// Second convergence check, now against the real output digest. The input hash can differ
-	// while the output does not — a cosmetic spec change, or a controller that lost its recorded
-	// hash — and there is no reason to republish identical bytes.
-	//
-	// This runs BEFORE the immutability guard, and the order is load-bearing: republishing the
-	// same content under the same tag has to stay a no-op, or a steady reconcile loop would fail
-	// every time round with immutable tags.
+	// Second convergence check, against the real output digest, for a changed input hash with
+	// unchanged output. It must run BEFORE the conflict guard, or republishing identical content
+	// under an immutable tag would fail.
 	if published.Matches(digest.String()) {
-		// Nothing to republish, but the digest's own tag may not be there: resolve checked it only
-		// if status already claimed it. Idempotent, so applying it again costs one request.
+		// The digest's own tag may be missing (it was only checked if status claimed it).
 		if err := recon.ApplyDigestTag(tgt.writeRepo, digest.String(), refOpts, opts); err != nil {
 			return buildResult{}, err
 		}
-		// Attested here too, and this is the path that matters when the feature is newly enabled:
-		// the bytes are unchanged and nothing needs republishing, but there is no attestation yet.
-		// Without this, turning signing on would do nothing until something else changed.
+		// Attested here too, so newly enabling attestation takes effect without a content change.
 		return buildResult{
 			Artifact:     artifactStatus(tgt, digest, true),
 			InputHash:    inputHash,
@@ -547,21 +469,14 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 	if tag, cur := published.Conflicts(tgt.tags, digest.String()); tag != "" {
 		switch tgt.onConflict {
 		case ociv1alpha1.ConflictFail:
-			// Refuse to change what a tag means. Terminal, because that is the failure mode which
-			// leaves nodes running different bytes under one name, and no amount of retrying fixes
-			// it.
+			// Refuse to change what a tag means.
 			return buildResult{}, recon.Terminal(
 				"tag %s already resolves to %s but this spec produces %s; change the tag, or set "+
 					"onConflict: Overwrite if it is meant to move", tag, cur, digest)
 		case ociv1alpha1.ConflictKeep:
-			// Leave the tag alone and publish nothing. Ready, because with a spec-hash tag an
-			// existing tag means the content is already published and correct.
-			//
-			// status.artifact reports the EXISTING digest, not the one just produced: it must
-			// describe what a consumer actually pulls, and under Keep that is the content that was
-			// already there. The digest this spec produced is recorded separately, because
-			// otherwise the object would read healthy while nothing said the two had diverged --
-			// precisely the shape of the incident behind ADR 0026.
+			// Publish nothing. status.artifact reports the EXISTING digest, since that is what a
+			// consumer pulls; the dropped digest is recorded in the conflict so the divergence is
+			// visible (ADR 0026).
 			existing, err := v1.NewHash(cur)
 			if err != nil {
 				return buildResult{}, recon.Terminal(
@@ -569,8 +484,7 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 			}
 			now := metav1.Now()
 			return buildResult{
-				// Without the digest's own tag: nothing was written, and the existing content is
-				// not this pass's to name. Once the object converges on it, the backfill does.
+				// Without the digest's own tag: nothing was written. The backfill adds it later.
 				Artifact:  artifactStatus(tgt, existing, false),
 				InputHash: inputHash,
 				Conflict: &ociv1alpha1.TagConflictStatus{
@@ -583,9 +497,7 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 		}
 	}
 
-	// The digest reference first. It is the one thing that is always correct, it is what image
-	// automation pins, and writing it before any tag means a failure part-way through leaves the
-	// content addressable rather than a tag pointing at nothing.
+	// The digest reference first, so a failure part-way leaves the content addressable.
 	digestRef, err := name.ParseReference(fmt.Sprintf("%s@%s", tgt.writeRepo, digest), refOpts...)
 	if err != nil {
 		return buildResult{}, recon.Terminal("invalid reference %s@%s: %v", tgt.writeRepo, digest, err)
@@ -606,8 +518,7 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 		}
 	}
 
-	// Supply-chain material AFTER the artifact is addressable, so a failure here cannot leave a
-	// signature describing something that was never published.
+	// After publishing, so a signature never describes something unpublished.
 	attestations := r.attestPublished(ctx, obj, tgt, digest, inputs, baseDigest, refOpts, opts)
 
 	recon.Event(r.Recorder, obj, corev1.EventTypeNormal, ociv1alpha1.ReasonSucceeded,
@@ -615,9 +526,7 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 
 	record, err := buildRecord(art, recon.PublishTags(tgt.tags, digest.String()), digest, inputs)
 	if err != nil {
-		// The artifact is published and usable; only the retention record is missing. Failing
-		// here would leave storage holding blobs that nothing records as live, which is worse
-		// than reporting the build and logging the gap.
+		// The artifact is published; only its retention record could not be built.
 		return buildResult{}, fmt.Errorf("recording build %s: %w", digest, err)
 	}
 
@@ -636,9 +545,7 @@ func (r *ImageCompositionReconciler) historyLimit(obj *ociv1alpha1.ImageComposit
 
 // resolveLayer returns a local path holding the layer's content.
 //
-// With a cache configured this is usually a hit and costs nothing; the fetch is the fallback.
-// Note that the returned path is owned by the cache and must NOT be removed by the caller —
-// deleting it would evict the entry that was just populated and guarantee a miss next time.
+// With a cache, the returned path is owned by the cache and must NOT be removed by the caller.
 func (r *ImageCompositionReconciler) resolveLayer(ctx context.Context, in oci.LayerInput) (string, error) {
 	fetch := func(ctx context.Context, digest string) (string, error) {
 		return r.Fetcher.FetchURL(ctx, in.URL, digest)
@@ -651,10 +558,8 @@ func (r *ImageCompositionReconciler) resolveLayer(ctx context.Context, in oci.La
 
 // target is where an artifact is written and how it should be referenced.
 //
-// The two differ because one string cannot satisfy two resolvers: the controller reaches the
-// registry through cluster DNS, and a kubelet reaches it with the node's resolver. They are equal
-// whenever one name genuinely works from both places, which is every external registry and any
-// ingress with real DNS.
+// writeRepo and pullRepo differ when the controller (cluster DNS) and the kubelet (node resolver)
+// need different names for one registry; see recon.DefaultRegistry.PublicHost.
 type target struct {
 	// writeRepo is what the controller pushes to, checks tags against, and refreshes. Everything
 	// that opens a connection uses this one.
@@ -666,33 +571,24 @@ type target struct {
 	tags []string
 	// onConflict decides what happens to a tag that already means something else.
 	onConflict ociv1alpha1.TagConflictPolicy
-	// usesDefault marks a target the OBJECT did not choose, which is the only case where the
-	// operator's own credential may be used. See recon.DefaultRegistry.CredentialFor.
-	usesDefault bool
 }
 
-// target is where this object publishes.
-//
-// One shape now: the controller uploads to a registry, either one the object named or the
-// operator's default (ADR 0035). There is no second surface to choose between, which is why this
-// stopped being a branch.
+// target is where this object publishes: the repository it named, or the operator's default,
+// under the object's own name (ADR 0035).
 func (r *ImageCompositionReconciler) target(obj *ociv1alpha1.ImageComposition) (target, error) {
 	p := obj.Spec.Push
 	repo := ""
-	usesDefault := false
 	if p != nil {
 		repo = p.Repository
 	}
 	if repo == "" {
 		if !r.Default.Configured() {
-			// Operator-level misconfiguration, not a spec error. Configuring a registry means
-			// restarting the controller with different flags -- which changes nothing about this
-			// object, so stalling would leave every composition wedged after the fix. It waits.
+			// Pending, not Stalled: the fix is restarting the controller with a registry, which
+			// bumps no generation here.
 			return target{}, recon.Pending(
 				"this object names no repository, and no default registry is configured")
 		}
-		repo = r.Default.RepositoryFor(obj.Namespace, publishName(obj))
-		usesDefault = true
+		repo = r.Default.RepositoryFor(obj.Namespace, obj.Name)
 	}
 
 	tags, err := recon.EffectiveTags(p.GetTags(), p.GetRef())
@@ -700,25 +596,17 @@ func (r *ImageCompositionReconciler) target(obj *ociv1alpha1.ImageComposition) (
 		return target{}, err
 	}
 	return target{
-		writeRepo:   repo,
-		pullRepo:    r.Default.PublicRepository(repo),
-		tags:        tags,
-		onConflict:  p.ResolveConflictPolicy(),
-		usesDefault: usesDefault,
+		writeRepo:  repo,
+		pullRepo:   r.Default.PublicRepository(repo),
+		tags:       tags,
+		onConflict: p.ResolveConflictPolicy(),
 	}, nil
 }
 
 // refOptions decides whether this repository may be reached over plain HTTP.
 //
-// A method rather than three lines inline, because it is the only part of the push path that a
-// unit test can actually check. go-containerregistry treats localhost and 127.0.0.1 as insecure on
-// its own, so a test against an httptest registry succeeds whether or not this controller ever
-// consults --insecure-registry -- which is exactly how the controller shipped with no plain-HTTP
-// push path at all and a green suite. That was found in a cluster, by the e2e, one round after the
-// serving endpoint was removed.
-//
-// Matched on HOST, never on prefix: naming one internal registry must not downgrade requests to a
-// lookalike name that merely starts the same way.
+// A method so unit tests can check it directly: go-containerregistry treats localhost as insecure
+// on its own, so a push test against httptest passes whether or not this is consulted.
 func (r *ImageCompositionReconciler) refOptions(repository string) []name.Option {
 	if recon.InsecureHost(repository, r.InsecureRegistries) {
 		return []name.Option{name.Insecure}
@@ -726,12 +614,8 @@ func (r *ImageCompositionReconciler) refOptions(repository string) []name.Option
 	return nil
 }
 
-// artifactStatus reports the PULL reference, never the loopback one the controller wrote to.
-// Getting that backwards would put an address into status that only the controller can reach.
-//
-// The digest is the value that is always present and always correct, so it anchors every field
-// here; tags decorate it. A build with no tags reports a digest-only reference rather than
-// something with an empty tag in it.
+// artifactStatus reports the PULL reference, never the one the controller wrote to. Every field is
+// anchored on the digest; a build with no tags reports a digest-only reference.
 //
 // own adds the digest's own tag to Tags, for content this pass actually named. It never moves
 // Revision or Ref, which are built from the spec's first tag.
@@ -759,13 +643,11 @@ func artifactStatus(t target, digest v1.Hash, own bool) *ociv1alpha1.ArtifactSta
 
 // backfillDigestTags gives content published before ADR 0060 its digest's own tag.
 //
-// Driven by status, so a converged object costs nothing here once every record claims the tag. art
-// (the artifact about to be reported) is updated in place; the history digests that were tagged are
-// returned for the status patch to mark. History as well as the artifact, because history is what a
-// rollback pulls and what a rolling tag used to delete.
+// Driven by status, so it costs nothing once every record claims the tag. art is updated in place;
+// the tagged history digests are returned for the status patch to mark. History too, because that
+// is what a rollback pulls.
 //
-// Best effort. A failure is logged and retried next pass; it must not make a Ready object unready,
-// and a record whose content has already expired simply stays unclaimed.
+// Best effort: a failure is logged and retried next pass, and expired content stays unclaimed.
 func (r *ImageCompositionReconciler) backfillDigestTags(
 	ctx context.Context, obj *ociv1alpha1.ImageComposition, tgt target,
 	art *ociv1alpha1.ArtifactStatus, refOpts []name.Option, opts []remote.Option,
@@ -808,31 +690,16 @@ func markDigestTagged(history []ociv1alpha1.BuildRecord, digests []string) {
 	}
 }
 
-// publishName is the repository path an object gets inside the default registry.
-//
-// The object's own name. spec.publish.name used to let a composition choose a different one; with
-// publish gone, an object wanting a specific path names the whole repository in spec.push instead,
-// which is one fewer way to express the same thing.
-func publishName(obj *ociv1alpha1.ImageComposition) string {
-	return obj.Name
-}
-
-// remoteOptions builds registry auth. Credentials are always read from a referenced Secret,
-// never taken from the spec.
+// remoteOptions builds registry auth for writeRepo, the repository actually pushed to, so the
+// credential is matched against the right host. Credentials come from a Secret, never the spec.
 func (r *ImageCompositionReconciler) remoteOptions(
-	ctx context.Context, obj *ociv1alpha1.ImageComposition,
+	ctx context.Context, obj *ociv1alpha1.ImageComposition, writeRepo string,
 ) ([]remote.Option, error) {
-	// Resolved through target() so the host the credential is matched against is the one actually
-	// pushed to.
-	tgt, err := r.target(obj)
-	if err != nil {
-		return nil, err
-	}
 	return recon.RemoteAuth{
 		Reader:    r.Client,
 		Transport: r.Transport,
 		Default:   r.Default,
-	}.Options(ctx, obj.Namespace, tgt.writeRepo, obj.Spec.Push)
+	}.Options(ctx, obj.Namespace, writeRepo, obj.Spec.Push)
 }
 
 func configFrom(c *ociv1alpha1.ImageConfig) oci.Config {
@@ -874,8 +741,7 @@ func reasonFor(err error) string {
 // exportRef publishes the reference into the ConfigMap a consumer substitutes from, and records
 // where it went.
 //
-// A composition's reference is computable from its spec hash (ADR 0017), but only by reproducing
-// that hash on the consuming side, which is not trivial -- so this kind exports too (ADR 0056).
+// ADR 0056.
 func (r *ImageCompositionReconciler) exportRef(
 	ctx context.Context, obj *ociv1alpha1.ImageComposition, art *ociv1alpha1.ArtifactStatus,
 ) error {
@@ -905,12 +771,9 @@ func (r *ImageCompositionReconciler) exportRef(
 	})
 }
 
-// finalize removes the finalizer. Published artifacts are deliberately left in place: they are
-// content-addressed and may still be referenced by a running workload, so deleting the object
-// that described them is not a reason to break pods that are using them.
-//
-// The export is the exception, and only when it went into ANOTHER namespace: one written into this
-// object's own is owned by it and goes on its own.
+// finalize removes the finalizer. Published artifacts are left in place, since running workloads
+// may still use them. A ref export in ANOTHER namespace is deleted here; one in this namespace is
+// owned by the object and garbage-collected.
 func (r *ImageCompositionReconciler) finalize(ctx context.Context, obj *ociv1alpha1.ImageComposition) (ctrl.Result, error) {
 	if err := recon.DeleteExportedRef(ctx, r.Client, obj, obj.Status.RefExport); err != nil {
 		return ctrl.Result{}, err
@@ -928,11 +791,8 @@ func (r *ImageCompositionReconciler) patchStatus(ctx context.Context, obj *ociv1
 	}
 	patch := client.MergeFrom(latest.DeepCopy())
 	mutate(&latest)
-	// Set on EVERY status write, not just the successful one, because both describe the pass rather
-	// than its outcome — which is how Flux writes them. Echoing only on success makes `flux
-	// reconcile` wait for a token that never arrives and report a timeout instead of the failure the
-	// object is already describing; and a stale observedGeneration reads to kstatus as "still
-	// working" rather than "failed".
+	// Set on EVERY status write, as Flux does: both describe the pass, not its outcome. Echoing only
+	// on success makes `flux reconcile` time out on a failure, and kstatus read it as in progress.
 	latest.Status.ObservedGeneration = latest.Generation
 	latest.Status.LastHandledReconcileAt = latest.Annotations[ociv1alpha1.ReconcileRequestAnnotation]
 	return r.Status().Patch(ctx, &latest, patch)
@@ -965,14 +825,11 @@ func (r *ImageCompositionReconciler) compositionsForConfigMap(ctx context.Contex
 
 // compositionsForSource maps a changed Flux source of one kind to the compositions referencing it.
 //
-// Cluster-wide, unlike the ConfigMap mapping: sourceRef carries an explicit namespace and is
-// routinely pointed at a shared source in flux-system, so listing only the source's own namespace
-// would miss exactly the arrangement most clusters use. The namespace comparison below is what
-// keeps a same-named source elsewhere from triggering unrelated rebuilds.
+// Lists cluster-wide because sourceRef carries its own namespace; the namespace comparison keeps
+// same-named sources elsewhere from matching.
 //
-// The kind is captured rather than read off the incoming object, because an unstructured object
-// arriving from a cache has no guarantee of carrying its GVK, and silently matching every kind
-// would make a Bucket edit rebuild a GitRepository-backed composition.
+// The kind is captured rather than read off the object, because an unstructured object from a
+// cache may not carry its GVK.
 func (r *ImageCompositionReconciler) compositionsForSource(kind string) handler.MapFunc {
 	return func(ctx context.Context, obj client.Object) []reconcile.Request {
 		var list ociv1alpha1.ImageCompositionList
@@ -1010,19 +867,15 @@ func (r *ImageCompositionReconciler) compositionsForSource(kind string) handler.
 // RBAC above grants read access to.
 var fluxSourceKinds = []string{"GitRepository", "OCIRepository", "Bucket"}
 
-// fluxSourceGVK is the group the source kinds live in.
+// fluxSourceGroup is the group the source kinds live in.
 const fluxSourceGroup = "source.toolkit.fluxcd.io"
 
 // watchableSourceKinds returns the source kinds this cluster actually serves, paired with the
 // version the API server prefers for each.
 //
-// Flux is NOT a dependency (ADR 0009) and a cluster without it must work unchanged, so a kind the
-// RESTMapper cannot resolve is skipped rather than treated as a startup failure. The cost of that
-// is stated plainly: the mapper is consulted once, at startup, so installing Flux into a running
-// cluster leaves this controller without source watches until it is restarted. It still reconciles
-// those compositions on spec.interval, which is the pre-existing behaviour, so the failure mode is
-// slowness rather than incorrectness — and correctness is now the resolver's job (ADR 0026), not
-// the watch's.
+// Flux is NOT a dependency (ADR 0009), so a kind the RESTMapper cannot resolve is skipped. The
+// mapper is consulted once, at startup: installing Flux later leaves no source watches until a
+// restart, which only slows convergence to spec.interval (correctness is the resolver's, ADR 0026).
 func watchableSourceKinds(mapper meta.RESTMapper) []schema.GroupVersionKind {
 	var out []schema.GroupVersionKind
 	for _, kind := range fluxSourceKinds {
@@ -1042,16 +895,11 @@ func (r *ImageCompositionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	b := ctrl.NewControllerManagedBy(mgr).
 		For(&ociv1alpha1.ImageComposition{}).
-		// Without this a ConfigMap edit would only be noticed at the next interval, which
-		// defaults to an hour. Users reasonably expect editing the source of a layer to rebuild
-		// it, and a silent hour of staleness reads as the controller being broken.
+		// So a ConfigMap edit rebuilds now rather than at the next interval.
 		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.compositionsForConfigMap))
 
-	// And the same argument for Flux sources, with an extra edge. A generator that bumps a
-	// GitRepository's ref.tag and the composition's publish tag in ONE apply reconciles this object
-	// immediately and the source not at all — so without a watch, the window during which the
-	// composition is waiting for its source to catch up lasted until the next interval. The
-	// resolver refuses to build in that window; this is what ends it in seconds.
+	// Likewise for Flux sources: when a source and a composition change in one apply, the
+	// composition waits (Pending) for the source to catch up, and this watch ends that wait.
 	logger := mgr.GetLogger().WithName("imagecomposition")
 	for _, gvk := range watchableSourceKinds(mgr.GetRESTMapper()) {
 		src := &unstructured.Unstructured{}
@@ -1065,22 +913,18 @@ func (r *ImageCompositionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 // refreshNow renews the lease on what was just published, without waiting for the next cycle.
 //
-// Until this runs the artifact has NO lease. A registry that expires on pull recency holds no
-// record that anything was pushed, and zot can carry an OLD timestamp onto a new tag when the
-// digest is one it has seen before -- so a collection pass in the gap reclaims content that is
-// minutes old. The scheduled cycle closes that gap only after a full interval.
+// Until this runs the artifact has NO lease: zot can carry an OLD timestamp onto a new tag for a
+// digest it has seen before, so a collection pass in the gap could reclaim minutes-old content.
 //
-// Never fatal. The push succeeded; a failed opportunistic refresh leaves exactly the situation
-// that existed before this call, and the next cycle tries again.
+// Never fatal: the next scheduled cycle tries again.
 func (r *ImageCompositionReconciler) refreshNow(
 	ctx context.Context, obj *ociv1alpha1.ImageComposition, artifact *ociv1alpha1.ArtifactStatus,
 ) {
 	if r.Refresher == nil || artifact == nil {
 		return
 	}
-	// The artifact is passed rather than read from obj.Status: patchStatus writes to a freshly
-	// fetched copy, so the object this function is handed still describes the previous pass.
-	// History is left out on purpose -- what is newly unprotected is this publish.
+	// artifact is passed because obj.Status still describes the previous pass (patchStatus writes
+	// to a fresh copy). History is left out: only this publish is newly unprotected.
 	r.Refresher.RefreshNow(ctx, retention.Target{
 		Object: obj, Push: obj.Spec.Push, Artifact: artifact,
 	})

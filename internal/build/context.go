@@ -13,26 +13,15 @@ import (
 	"github.com/lhns/kube-oci-composer/internal/archive"
 )
 
-// Reading one file out of a build context.
-//
-// The context is a source-controller artifact: a gzipped tar at a digest-addressed URL. The build
-// itself never passes through this process — an init container fetches the same URL into the build
-// pod — but the FROM check has to happen BEFORE a Job exists, which means the controller needs the
-// Dockerfile and only the Dockerfile.
-//
-// So this streams the tarball and stops at the entry it wants. It never writes to disk (the
-// controller's root filesystem is read-only by design) and it bounds what it will read, because the
-// URL is trusted to be digest-addressed but not to be small.
+// Reading one file out of a build context. The FROM check runs before a Job exists, so the
+// controller streams the context tarball until it finds the Dockerfile: never to disk (read-only
+// root filesystem), and bounded, since the URL is digest-addressed but not necessarily small.
 
 const (
-	// maxDockerfileBytes bounds one entry. A Dockerfile is kilobytes; anything approaching this is
-	// not one, and reading it into a controller shared by every namespace would be a way to make
-	// that controller someone else's problem.
+	// maxDockerfileBytes bounds one entry; a Dockerfile is kilobytes.
 	maxDockerfileBytes = 1 << 20
 
-	// maxContextScan bounds how much of the tarball is walked looking for the entry. A context can
-	// legitimately be hundreds of megabytes, and the Dockerfile is usually near the front, but
-	// "usually" is not a bound.
+	// maxContextScan bounds how much of the tarball is walked looking for the entry.
 	maxContextScan = 64 << 20
 
 	fetchTimeout = 2 * time.Minute
@@ -64,8 +53,7 @@ func FetchDockerfile(ctx context.Context, client *http.Client, url, subpath, doc
 	}
 	defer zr.Close()
 
-	// source-controller wraps everything in one top-level directory whose name is not predictable,
-	// so the match is on the path's tail rather than the whole thing.
+	// Matched through the extractor's own path mapping; see matchesContextPath.
 	want := path.Join(subpath, dockerfile)
 
 	tr := tar.NewReader(zr)
@@ -92,12 +80,8 @@ func FetchDockerfile(ctx context.Context, client *http.Client, url, subpath, doc
 	}
 }
 
-// matchesContextPath reports whether an archive entry is the file being looked for.
-//
-// The SAME mapping the extractor uses, so the file this finds is the file the build gets. It used
-// to be a second, more forgiving rule -- exact match first, then skip a leading component -- which
-// is how the Dockerfile kept being found while the context around it was emptied, and why that bug
-// surfaced as a BuildKit error rather than a fetch failure. ADR 0045.
+// matchesContextPath reports whether an archive entry is the file being looked for, using the same
+// mapping as the extractor so the file checked is the file built. ADR 0045.
 func matchesContextPath(entry, want string, strip int) bool {
 	place := archive.NewMapping(strip, "").Map(entry)
 	return place.Selected && place.Dest == want

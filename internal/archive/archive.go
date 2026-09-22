@@ -1,12 +1,7 @@
-// Package archive materialises a downloaded archive as a directory tree.
+// Package archive materialises a downloaded archive as a directory tree, for BuildKit's --local.
 //
-// Separate from internal/oci, which unpacks archives into in-memory []tarEntry for a layer tarball;
-// a build context has to be real files for BuildKit's `--local` to read. Same input, different
-// sink. Keeping it neutral also keeps ADR 0025 true -- internal/oci contributes nothing to a
-// build -- where an import from the build path into internal/oci would falsify it.
-//
-// Different sinks, ONE path rule: Mapping decides where an entry lands and internal/oci calls it
-// too. Two copies of that rule is what ADR 0023 forbade and what ADR 0045 was written about.
+// Separate from internal/oci, which unpacks into memory for a layer tarball, so the build path
+// does not import internal/oci (ADR 0025). Both share ONE path rule, Mapping (ADR 0023, ADR 0045).
 package archive
 
 import (
@@ -22,9 +17,8 @@ import (
 
 // Mode is how a fetched blob becomes a directory tree.
 //
-// A smaller set than the API's Unpack: a build context is a tree, so the single-file modes cannot
-// describe one, and the rest are not implemented yet rather than refused on principle. Anything
-// unknown fails loudly here rather than producing an empty context.
+// A subset of the API's Unpack: single-file modes cannot describe a tree, and the rest are not yet
+// implemented. Anything else fails loudly rather than producing an empty context.
 type Mode string
 
 const (
@@ -32,19 +26,15 @@ const (
 	ModeTarGz Mode = "tar.gz"
 )
 
-// maxEntries bounds how many files an archive may contain. Not a size bound -- the emptyDir has
-// its own -- but a bound on what that does not catch: millions of empty files cost inodes, not
-// bytes.
+// maxEntries bounds how many files an archive may contain: the emptyDir bounds bytes, but millions
+// of empty files cost inodes.
 const maxEntries = 500_000
 
 // Extract writes the archive in r into dest.
 //
-// subpath, when set, selects one directory out of the archive and strips its prefix, so dest ends
-// up holding that directory's contents rather than the directory itself.
-//
-// strip removes that many leading path components from every entry, before subpath is considered.
-// Zero leaves the archive's own paths alone, which is what a Flux artifact wants: its entries are
-// already at the root. See Mapping, which both this and the composer's assembler share.
+// strip removes that many leading path components from every entry (zero suits a Flux artifact,
+// whose entries are at the root). subpath, when set, then selects one directory and places its
+// contents at dest. See Mapping.
 func Extract(r io.Reader, mode Mode, dest, subpath string, strip int) error {
 	tr, closeFn, err := reader(r, mode)
 	if err != nil {
@@ -72,9 +62,7 @@ func Extract(r io.Reader, mode Mode, dest, subpath string, strip int) error {
 			return fmt.Errorf("archive has more than %d entries", maxEntries)
 		}
 
-		// Refused rather than relativised or skipped. filepath.Join folds "/etc/passwd" back under
-		// the destination, so it does not escape -- but it lands somewhere the archive did not say,
-		// quietly. Same refuse-rather-than-sanitise rule as the ConfigMap source's key check.
+		// Refused rather than relativised: filepath.Join would quietly fold it under dest.
 		if strings.HasPrefix(path.Clean(hdr.Name), "/") {
 			return fmt.Errorf("archive entry %q is an absolute path, which escapes the layout the "+
 				"archive describes", hdr.Name)
@@ -109,8 +97,7 @@ func reader(r io.Reader, mode Mode) (*tar.Reader, func(), error) {
 
 // writeEntry places one archive entry, refusing anything that would land outside dest.
 //
-// The traversal check is on the resolved path rather than the name, so `..` segments, absolute
-// paths and escaping symlinks are caught by one rule.
+// The traversal check is on the resolved path rather than the name, so any `..` form is caught.
 func writeEntry(tr *tar.Reader, hdr *tar.Header, dest, name string) error {
 	full := filepath.Join(dest, filepath.FromSlash(name))
 	if !strings.HasPrefix(full, filepath.Clean(dest)+string(os.PathSeparator)) {
@@ -129,8 +116,7 @@ func writeEntry(tr *tar.Reader, hdr *tar.Header, dest, name string) error {
 		if err != nil {
 			return fmt.Errorf("creating %s: %w", name, err)
 		}
-		// Bounded by the header's own size: copying to exhaustion would let one entry fill the
-		// volume.
+		// Bounded by the header's size, so one entry cannot fill the volume.
 		if _, err := io.CopyN(f, tr, hdr.Size); err != nil && err != io.EOF {
 			_ = f.Close()
 			return fmt.Errorf("writing %s: %w", name, err)
@@ -141,8 +127,7 @@ func writeEntry(tr *tar.Reader, hdr *tar.Header, dest, name string) error {
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 			return err
 		}
-		// Refused rather than followed: a build context has no legitimate need for a symlink that
-		// leaves the tree. Relative links inside it are kept.
+		// A link leaving the tree is refused; relative links inside it are kept.
 		if resolved := path.Join(path.Dir(name), hdr.Linkname); path.IsAbs(hdr.Linkname) ||
 			strings.HasPrefix(resolved, "../") || resolved == ".." {
 			return fmt.Errorf("archive entry %q is a symlink to %q, which leaves the context",
@@ -151,8 +136,7 @@ func writeEntry(tr *tar.Reader, hdr *tar.Header, dest, name string) error {
 		return os.Symlink(hdr.Linkname, full)
 
 	default:
-		// Devices, fifos, sockets and hard links: no use in a build context, and each is a way to
-		// surprise whatever reads the tree.
+		// Devices, fifos, sockets and hard links are skipped: no use in a build context.
 		return nil
 	}
 }

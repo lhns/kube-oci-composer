@@ -37,12 +37,8 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: |-
-          ImageBuild builds an OCI image from a Dockerfile and a content-addressed context.
-
-          The keep annotation is emitted into the CRD itself so the chart can install it verbatim.
-          Deleting a CRD deletes every object of that kind, and Helm removing one on an uninstall or a
-          toggle flip is not a risk worth taking for a resource that costs nothing when unused.
+        description: ImageBuild builds an OCI image from a Dockerfile and a content-addressed
+          context.
         properties:
           apiVersion:
             description: |-
@@ -65,14 +61,12 @@ spec:
             description: |-
               ImageBuildSpec builds an OCI image by executing a Dockerfile.
 
-              This kind executes arbitrary code, so its output digest is NOT a function of its spec — it is an
-              observation, recorded in status after the fact. What the API can offer is that the INPUTS are
-              content-addressed, so an unchanged input hash skips the build. Two clusters applying the same
-              commit can still produce two different images.
+              This kind executes arbitrary code, so its output digest is NOT a function of its spec; it is
+              recorded in status after the fact. The INPUTS are content-addressed, so an unchanged input hash
+              skips the build, but two clusters applying the same commit can produce different images.
 
-              If what you need is "take a released artifact and put it in an image", use ImageComposition — it
-              is a strictly stronger tool, and since ADR 0024 it can take files out of an image your CI already
-              built. See ADR 0025 for what this kind costs.
+              To put released artifacts into an image, use ImageComposition, a strictly stronger tool. See
+              ADR 0025.
             properties:
               args:
                 description: |-
@@ -104,8 +98,8 @@ spec:
                   mode:
                     default: Auto
                     description: |-
-                      Mode selects whether a cache is used at all. "Disabled" is how you demonstrate that a
-                      rebuild reproduces the previous digest; it is not how you should run day to day.
+                      Mode selects whether a cache is used at all. "Disabled" is for checking that a rebuild
+                      reproduces the previous digest, not for daily use.
                     enum:
                     - Auto
                     - Disabled
@@ -115,8 +109,7 @@ spec:
                       Ref is where the cache is exported to and imported from. Defaults to a per-object ref
                       derived from push.repository.
 
-                      A cache shared between objects is a channel between whoever can write their Dockerfiles, so
-                      this is never defaulted to anything shared.
+                      Never defaulted to anything shared: a shared cache is a channel between Dockerfile authors.
                     maxLength: 512
                     type: string
                 type: object
@@ -131,15 +124,12 @@ spec:
                     description: |-
                       Fetch retrieves the context as an archive over HTTP(S), at a declared digest.
 
-                      For a release tarball rather than a checkout. The digest is declared, not resolved: a
-                      mismatch means the URL served something other than what this spec names, and is refused.
-
-                      Only the archive unpack modes apply, since a context is a tree.
+                      For a release tarball rather than a checkout. A digest mismatch is refused. Only the archive
+                      unpack modes apply, since a context is a tree.
                     properties:
                       digest:
-                        description: |-
-                          Digest of the fetched bytes. Declared here rather than resolved, because an arbitrary URL
-                          is not content-addressed by anything else. A mismatch is terminal. See ADR 0002.
+                        description: Digest of the fetched bytes. A mismatch is terminal.
+                          See ADR 0002.
                         pattern: ^sha256:[a-f0-9]{64}$
                         type: string
                       stripComponents:
@@ -147,27 +137,17 @@ spec:
                           StripComponents removes this many leading path components from every entry, before Subpath
                           is applied.
 
-                          For an archive that wraps everything in one directory -- a release tarball is
-                          "app-1.2.3/Dockerfile" -- `stripComponents: 1` drops that level. The alternative is
-                          `subpath: app-1.2.3`, which carries the version and so has to be edited on every release.
-
-                          Path components, not a tar flag: it behaves the same for every archive format.
-
-                          Zero, the default, leaves the archive's own paths alone. Nothing infers this from the source
-                          kind -- doing so is what broke every sourceRef context, since a Flux artifact has no wrapping
-                          directory to remove (ADR 0045). A value that would remove every entry is an error rather than
-                          a silently empty layer.
+                          For "app-1.2.3/Dockerfile", `stripComponents: 1` drops the versioned directory, unlike
+                          `subpath: app-1.2.3`, which must be edited every release. Same for every archive format.
+                          Zero, the default, leaves paths alone. Removing every entry is an error.
                         maximum: 16
                         minimum: 0
                         type: integer
                       subpath:
                         description: |-
-                          Subpath selects one directory from inside the archive and strips the prefix. Useful when a
-                          release tarball wraps everything in a version-named directory you do not want in the image.
-                          A subpath matching nothing is an error rather than a silently empty layer.
-
-                          Applies to the archive unpack modes only. It is invalid with "gz", which unpacks a single
-                          file, and ignored with "none".
+                          Subpath selects one directory from inside the archive and places its contents at the target.
+                          A subpath matching nothing is an error. Archive unpack modes only: invalid with "gz",
+                          ignored with "none".
                         maxLength: 4096
                         type: string
                       unpack:
@@ -204,20 +184,15 @@ spec:
                     description: |-
                       Image takes the flattened filesystem of a digest-pinned image as the context.
 
-                      For building on what CI already published. Costs a pull and a flatten in the build pod on
-                      every cache miss, so prefer sourceRef where it would do.
-
-                      `FROM <image>@sha256:… AS ctx` plus `COPY --from=ctx` does much the same with no context at
-                      all. Reach for this when the image IS the tree the build reads -- notably an
-                      ImageComposition's output, which is how "compose the workdir, then build it" is spelled.
+                      For building on what CI already published, notably an ImageComposition's output ("compose
+                      the workdir, then build it"). Costs a pull and a flatten per cache miss, so prefer sourceRef
+                      where it would do; `FROM <image>@sha256:… AS ctx` plus `COPY --from=ctx` is an alternative.
                     properties:
                       ref:
                         description: |-
                           Ref is the image to read, pinned by digest: "repo:tag@sha256:…" or "repo@sha256:…".
 
-                          The tag is decorative — it is recorded for humans and ignored when pulling, exactly as it
-                          is for spec.base.ref. What is pulled is the digest, which is what ADR 0002 requires of
-                          every input.
+                          The tag is for humans and ignored when pulling, as for spec.base.ref (ADR 0002).
                         maxLength: 1024
                         pattern: ^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*(:[a-zA-Z0-9._-]+)?@sha256:[a-f0-9]{64}$
                         type: string
@@ -243,10 +218,8 @@ spec:
                     type: object
                   sourceRef:
                     description: |-
-                      SourceRef takes the context from a Flux source's artifact.
-
-                      The one to reach for when the content moves: source-controller tracks the revision. ADR 0042
-                      says which sources are delegated to it and why.
+                      SourceRef takes the context from a Flux source's artifact. The one to reach for when the
+                      content moves: source-controller tracks the revision.
                     properties:
                       kind:
                         description: Kind of the referenced source.
@@ -261,29 +234,20 @@ spec:
                       namespace:
                         description: |-
                           Namespace of the referenced source. Must be the consuming object's own namespace, which is
-                          also the default — the field remains only so an explicit value is not a schema error.
-
-                          A source elsewhere is REFUSED. Both controllers read Flux sources cluster-wide, so honouring
-                          another namespace would let anyone who can create one of these objects pull that namespace's
-                          content into an image they control and can read.
+                          also the default; any other namespace is REFUSED, since it would expose that namespace's
+                          content to anyone who can create this object.
                         type: string
                       revision:
                         description: "Revision the artifact is expected to be at.
                           Optional; unset consumes whatever the source\ncurrently
                           publishes.\n\nThis is the only way to make a sourceRef layer
-                          a pure function of the spec. Without it the\nsource can
-                          move under a fixed spec — a branch or a semver range does
-                          so with no edit to\nanything, so nothing observes it. It
-                          is also independent of the source controller's own\nbookkeeping:
-                          the staleness check compares generation against observedGeneration,
-                          which is the\nsource reporting on itself, whereas this is
-                          an assertion from the consuming side.\n\nMatched against
-                          Flux's \"<ref>@<algo>:<hash>\" by whichever half you give:\n\n\trevision:
-                          v0.6.8                  matches v0.6.8@sha1:<anything>\n\trevision:
-                          v0.6.8@sha1:b739efb5    matches only that commit\n\nThe
-                          short form exists because a generator usually knows the
-                          tag it asked for and not the\ncommit it resolved to, and
-                          the useful check should not require the half it cannot supply."
+                          a pure function of the spec: without it, a\nbranch or semver
+                          range can move the source under an unchanged spec.\n\nMatched
+                          against Flux's \"<ref>@<algo>:<hash>\" by whichever half
+                          you give:\n\n\trevision: v0.6.8                  matches
+                          v0.6.8@sha1:<anything>\n\trevision: v0.6.8@sha1:b739efb5
+                          \   matches only that commit\n\nThe short form suits a generator
+                          that knows the tag it asked for but not the commit."
                         maxLength: 256
                         type: string
                       subpath:
@@ -306,28 +270,20 @@ spec:
                   rule: '!has(self.fetch) || self.fetch.unpack == ''tar'' || self.fetch.unpack
                     == ''tar.gz'''
               dockerfile:
-                description: |-
-                  Dockerfile says where the recipe comes from. Omitted, it is "Dockerfile" at the context root
-                  — see EffectiveDockerfile, and see DockerfileSource for why that default is not in the schema.
+                description: Dockerfile says where the recipe comes from. Omitted,
+                  it is "Dockerfile" at the context root.
                 properties:
                   configMapRef:
                     description: |-
                       ConfigMapRef reads the Dockerfile from one key of a ConfigMap in this object's namespace.
 
-                      The content is hashed, not the resourceVersion, so an edit rebuilds and a no-op write does
-                      not. The ConfigMap is watched, so that happens promptly rather than at the next interval.
-
-                      No `optional`, unlike a composition's configMap layer: a missing Dockerfile cannot produce an
-                      empty build, only an object that can never become Ready.
+                      The content is hashed, so an edit rebuilds promptly and a no-op write does not. The
+                      ConfigMap must exist.
                     properties:
                       key:
                         default: Dockerfile
-                        description: |-
-                          Key within it. Data is read first and BinaryData second.
-
-                          This default IS in the schema, unlike the ones on DockerfileSource, and the difference is the
-                          point: no CEL rule tests has(self.key), so materialising it costs nothing and buys a value
-                          visible in `kubectl get -o yaml`.
+                        description: Key within it. Data is read first and BinaryData
+                          second.
                         maxLength: 253
                         type: string
                       name:
@@ -341,12 +297,8 @@ spec:
                     description: |-
                       Inline is the Dockerfile itself, verbatim. Plaintext in etcd and in `kubectl get -o yaml`.
 
-                      An unpinned FROM here is terminal rather than retried: the fix is an edit to this field, and
-                      the generation change it raises is what wakes the object. A `path` Dockerfile gets no such
-                      event, so the same check is not terminal there.
-
-                      Capped well below what etcd would take: every watcher of every ImageBuild pays for the size
-                      on every update.
+                      An unpinned FROM here is terminal (Stalled) rather than retried, since the fix is an edit to
+                      this field.
                     maxLength: 65536
                     minLength: 1
                     type: string
@@ -366,19 +318,16 @@ spec:
                 default: 1h
                 description: |-
                   Interval at which to reconcile. Nearly free when nothing has changed: the controller
-                  compares a hash of the resolved inputs rather than building.
-
-                  It never rebuilds on a timer: a new digest under an unchanged spec is what immutable tags
-                  refuse. To pick up upstream fixes, change an input — repin FROM, or move the context.
+                  compares a hash of the resolved inputs rather than building. It never rebuilds on a timer;
+                  to pick up upstream fixes, change an input (repin FROM, or move the context).
                 type: string
               network:
                 default: Sandbox
                 description: |-
                   Network controls whether RUN can reach the network.
 
-                  "None" is the only mode in which this kind approaches ImageComposition's guarantee, and it is
-                  unusable for any Dockerfile that installs packages — which is most of them. "Sandbox" is the
-                  default precisely because of that, and it is where reproducibility is lost.
+                  "None" comes closest to reproducible, but breaks any Dockerfile that installs packages, hence
+                  the "Sandbox" default.
                 enum:
                 - Sandbox
                 - None
@@ -387,11 +336,9 @@ spec:
                 description: |-
                   Platforms the image is built for, as "linux/amd64".
 
-                  Required, unlike ImageComposition's — there is no base in the spec to default from.
-
-                  More than one entry produces an image index and needs a builder that can emulate or a
-                  multi-node builder. A platform the builder cannot produce fails the build rather than being
-                  silently dropped.
+                  Required: there is no base to default from. More than one entry produces an image index and
+                  needs a builder that can emulate or a multi-node builder. A platform the builder cannot
+                  produce fails the build.
                 items:
                   maxLength: 64
                   pattern: ^[a-z0-9]+/[a-z0-9]+(/[a-z0-9]+)?$
@@ -401,33 +348,22 @@ spec:
                 type: array
               push:
                 description: |-
-                  Push publishes the built image to an external registry.
-
-                  Optional. A build always publishes to a registry -- the Job runs in another pod and cannot
-                  reach the controller's loopback-only serving endpoint (ADR 0025) -- but WHICH registry can
-                  come from the operator's default rather than from here. Omit it entirely and the build
-                  publishes to <default registry>/<namespace>/<name>.
+                  Push is where the built image is published. Optional: omitted, the build publishes to
+                  <default registry>/<namespace>/<name>.
                 properties:
                   history:
                     description: |-
-                      History is how many past builds to retain, overriding the controller's default. Identical
-                      to Publish's.
+                      History is how many past builds to retain, overriding the controller's default.
 
-                      It matters MORE here than there, not less: a composition can rebuild any artifact from its
-                      spec, so retention is a convenience. A build cannot (ADR 0025), so retention is how much of
-                      the only copy is kept. That this knob existed only on the kind where it matters least was an
-                      oversight rather than a decision.
+                      A composition can rebuild any artifact from its spec; an ImageBuild cannot (ADR 0025), so
+                      there this is how much of the only copy is kept.
                     format: int32
                     minimum: 1
                     type: integer
                   immutable:
                     description: |-
-                      Immutable is DEPRECATED on this side too; use OnConflict. Identical to Publish's in every
-                      respect, so the field cannot mean different things depending on where it sits.
-
-                      It was also INERT here until the release that added OnConflict: nothing in the build
-                      controller read it, and BuildKit pushed over whatever the tag held. The CRD advertised a
-                      guarantee that did not exist.
+                      Immutable is DEPRECATED; use OnConflict. true means onConflict: Fail, false means
+                      onConflict: Overwrite.
                     type: boolean
                   onConflict:
                     description: |-
@@ -435,18 +371,11 @@ spec:
                       (refuse and stall), Overwrite (move the tag), or Keep (leave it, drop this build, stay
                       Ready). Defaults to Fail.
 
-                      Republishing IDENTICAL content is a no-op regardless of this field, so a steady reconcile
-                      loop never reaches it -- only a real change of meaning does.
+                      Republishing IDENTICAL content is never a conflict. The check is against the digest actually
+                      produced, on both kinds (ADR 0054), so a tag meant to MOVE needs Overwrite.
 
-                      Evaluated against the digest actually produced, on both kinds: the build uploads by digest
-                      and this controller applies the names afterwards (ADR 0054). A tag meant to MOVE therefore
-                      conflicts under Fail -- that is what Fail asks for -- and wants Overwrite instead.
-
-                      Deliberately carries NO schema default, unlike the `immutable` field it replaces. Structural
-                      defaults are applied when an object is read back from storage, so defaulting this would
-                      rewrite every existing `immutable: false` object into a refusing one the moment the CRD was
-                      upgraded -- a silent reversal of a setting its author chose on purpose. The effective default
-                      lives in ResolveConflictPolicy instead, where it can consult `immutable` first.
+                      No schema default: it would be applied to stored objects on read and silently turn every
+                      `immutable: false` object into a refusing one. The effective default consults `immutable`.
                     enum:
                     - Fail
                     - Overwrite
@@ -454,12 +383,8 @@ spec:
                     type: string
                   ref:
                     description: |-
-                      Ref behaves exactly as on Publish: a reference whose TAG is appended to Tags, so a
-                      kustomize images transformer or a Helm value can retag without editing this list.
-
-                      Absent until now, which meant the spec-hash tag pattern documented for ImageComposition
-                      could not be used from ImageBuild at all — the one place a generator most wants it, since a
-                      build's tag is the only thing identifying which inputs produced it.
+                      Ref is a reference whose TAG is appended to Tags, so a kustomize images transformer or a
+                      Helm value can retag without editing this list.
                     maxLength: 512
                     type: string
                   repository:
@@ -467,13 +392,10 @@ spec:
                       Repository is the fully qualified target, e.g. "ghcr.io/example/artifact".
 
                       Optional. Omitted, the object publishes to the operator's default registry under
-                      <namespace>/<name> -- which is what a default chart install configures, so nothing here has
-                      to name a host at all.
+                      <namespace>/<name>, which a default chart install configures.
 
-                      Naming one has a second effect worth knowing: the operator's own registry credential is used
-                      ONLY for the default target. An object that chooses its own repository authenticates with its
-                      own secretRef, or not at all. Otherwise anyone able to create one of these objects could
-                      point it at a host they control and have the controller hand over the operator's password.
+                      The operator's registry credential is used ONLY for the default target. An object that names
+                      its own repository authenticates with its own secretRef, or not at all.
                     type: string
                   secretRef:
                     description: SecretRef names a docker-registry Secret holding
@@ -517,9 +439,7 @@ spec:
                             description: |-
                               Ref receives the full pullable reference, registry/repository@sha256:...
 
-                              Prefer this over Digest alone: a consumer substituting a bare digest into an image field
-                              produces a trailing "@" on an empty string if the key is ever missing, which fails later and
-                              less legibly than a missing image would.
+                              Prefer this over Digest alone: a substituted bare digest fails less legibly if missing.
                             type: string
                         type: object
                         x-kubernetes-validations:
@@ -531,12 +451,9 @@ spec:
                         description: |-
                           Labels are added to the generated ConfigMap.
 
-                          Each key must be permitted by --ref-export-allowed-labels, which is empty by default: these
-                          land on an object in a namespace this object may not otherwise touch. An unpermitted key is
-                          refused rather than dropped, because a dropped one leaves a ConfigMap that looks right.
-
-                          The controller's own watch labels and its managed-by and owner labels are written last, so
-                          nothing set here can turn them off.
+                          Each key must be permitted by --ref-export-allowed-labels, which is empty by default; an
+                          unpermitted key is refused rather than dropped. The controller's own labels are written last
+                          and cannot be overridden.
                         type: object
                       namespace:
                         description: |-
@@ -545,9 +462,7 @@ spec:
                           Must be the object's OWN namespace, or one the operator allow-listed with
                           --ref-export-namespaces (ADR 0056). Anything else is refused.
 
-                          No default, deliberately: a substitution source is read from the CONSUMING Kustomization's
-                          namespace, so defaulting this to the object's own would often produce a ConfigMap nothing
-                          reads, silently.
+                          No default: a substitution source is read from the CONSUMING Kustomization's namespace.
                         minLength: 1
                         type: string
                     required:
@@ -563,9 +478,8 @@ spec:
                     && self.onConflict == ''Fail'') || (!self.immutable && self.onConflict
                     == ''Overwrite'')'
               resources:
-                description: |-
-                  Resources for the build pod. The namespace's ResourceQuota and LimitRange apply on top,
-                  which is deliberate: a build is a workload, and the cluster already knows how to govern one.
+                description: Resources for the build pod. The namespace's ResourceQuota
+                  and LimitRange apply on top.
                 properties:
                   claims:
                     description: |-
@@ -642,11 +556,8 @@ spec:
                       maxLength: 253
                       type: string
                     secretRef:
-                      description: |-
-                        SecretRef names a Secret in this object's namespace.
-
-                        Cross-namespace is not offered: it would let anyone who can create an ImageBuild read any
-                        Secret in the cluster.
+                      description: SecretRef names a Secret in this object's namespace.
+                        Other namespaces are not allowed.
                       properties:
                         name:
                           description: Name of the referent.
@@ -665,9 +576,8 @@ spec:
                   ServiceAccountName the build pod runs as. Empty uses the namespace's default account with
                   NO API token mounted, which is what a pod running code from a git repository should have.
 
-                  Set this only when a build genuinely needs an identity — pulling from a registry that
-                  authenticates by workload identity, say. Naming an account mounts its token, so whatever it
-                  can do, a Dockerfile in the referenced repository can do.
+                  Set this only when a build needs an identity: naming an account mounts its token, so the
+                  Dockerfile can do whatever that account can.
                 maxLength: 253
                 type: string
               suspend:
@@ -698,8 +608,7 @@ spec:
             description: ImageBuildStatus is the observed state.
             properties:
               artifact:
-                description: Artifact is what was produced. Deliberately the same
-                  shape every kind in this group uses.
+                description: Artifact is what was produced.
                 properties:
                   digest:
                     description: Digest of the published manifest, e.g. "sha256:...".
@@ -711,8 +620,8 @@ spec:
                     type: string
                   ref:
                     description: |-
-                      Ref is the complete pullable reference, including the serving host in serving mode.
-                      Surfaced as a printer column so `kubectl get` shows the exact string to use.
+                      Ref is the complete pullable reference, as a workload should pull it. Shown by
+                      `kubectl get`.
                     type: string
                   revision:
                     description: |-
@@ -839,26 +748,20 @@ spec:
                     type: string
                 type: object
               failures:
-                description: |-
-                  Failures counts consecutive failed attempts, so backoff can be capped and the object can stop
-                  hammering without being Stalled — the fix for a failing RUN lives in another object.
+                description: Failures counts consecutive failed attempts, for capped
+                  backoff without Stalling.
                 format: int32
                 type: integer
               history:
                 description: History is the retained builds, newest first.
                 items:
                   description: |-
-                    BuildRecord is one past build, retained so garbage collection knows what is still live.
-
-                    Kept in status rather than inferred from what is in storage. Inference would mean deciding an
-                    object is garbage because nothing appears to point at it, which is exactly the reasoning that
-                    deletes live data when the controller's view is incomplete. An explicit record also makes
-                    retention visible in `kubectl get -o yaml`.
+                    BuildRecord is one past build, retained in status so what must stay alive is an explicit record
+                    rather than inferred from storage (ADR 0031).
                   properties:
                     blobs:
                       description: |-
-                        Blobs are the config and layer digests this build is composed of. These are the objects
-                        garbage collection must not reclaim while this build is retained. For a multi-platform
+                        Blobs are the config and layer digests this build is composed of. For a multi-platform
                         build it is the union across every child.
                       items:
                         type: string
@@ -876,22 +779,13 @@ spec:
                       description: |-
                         Manifests are the CHILD manifest digests when this build is a multi-platform index. Empty
                         for a single-platform build, where Digest is the manifest itself.
-
-                        Garbage collection reads this, and must: without it the index is retained while its children
-                        are swept, leaving a manifest that resolves to nothing. That is indistinguishable from
-                        having deleted the artifact, except that it fails at pull time rather than at collection
-                        time, long after the change that caused it.
                       items:
                         type: string
                       type: array
                     sources:
                       description: |-
                         Sources records what each layer was resolved FROM, so an artifact can be traced back to the
-                        revision that produced it.
-
-                        Without this the only way to answer "which revision is in this image?" is to pull the
-                        manifest, fetch the layer and read its contents — which is how the incident behind ADR 0026
-                        had to be diagnosed, and why a wrong artifact sat unnoticed until a tag conflict surfaced it.
+                        revision that produced it (ADR 0026).
                       items:
                         description: SourceRecord is where one layer's content came
                           from.
@@ -928,8 +822,7 @@ spec:
                 description: |-
                   InputHash summarises everything that determines the build.
 
-                  Unlike ImageComposition's field of the same name, this hash is the IDENTITY rather than a
-                  short-circuit: there is nothing to check it against until a build has run. See ADR 0025.
+                  Unlike ImageComposition's, this hash is the build's IDENTITY (ADR 0025).
                 type: string
               lastAttempt:
                 description: LastAttempt records the most recent execution.
@@ -946,10 +839,8 @@ spec:
                     type: string
                   podName:
                     description: |-
-                      PodName of the build pod, for the FULL log.
-
-                      Not the record of why a build failed -- Message is, since ADR 0046. This pod is deleted when
-                      the next retry falls due, so a pointer to it outlives neither the pod nor the failure.
+                      PodName of the build pod, for the full log while it exists. Message records why a build
+                      failed (ADR 0046).
                     type: string
                   startedAt:
                     description: StartedAt and FinishedAt bound the attempt.

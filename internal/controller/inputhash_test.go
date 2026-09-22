@@ -1,11 +1,6 @@
 package controller
 
 import (
-	"archive/tar"
-	"bytes"
-	"compress/gzip"
-	"crypto/sha256"
-	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -14,8 +9,7 @@ import (
 	"github.com/lhns/kube-oci-composer/internal/oci"
 )
 
-// countingOrigin serves the payload and counts requests, so a test can assert on how many times
-// the controller actually reached out over the network rather than inferring it from timing.
+// countingOrigin serves a tar.gz and counts requests; fail makes it return 503.
 type countingOrigin struct {
 	url, digest string
 	requests    *atomic.Int64
@@ -25,27 +19,7 @@ type countingOrigin struct {
 func newCountingOrigin(t *testing.T, files map[string]string) *countingOrigin {
 	t.Helper()
 
-	var buf bytes.Buffer
-	zw := gzip.NewWriter(&buf)
-	tw := tar.NewWriter(zw)
-	for name, body := range files {
-		if err := tw.WriteHeader(&tar.Header{
-			Name: name, Mode: 0o644, Size: int64(len(body)), Typeflag: tar.TypeReg,
-		}); err != nil {
-			t.Fatalf("tar header: %v", err)
-		}
-		if _, err := tw.Write([]byte(body)); err != nil {
-			t.Fatalf("tar body: %v", err)
-		}
-	}
-	if err := tw.Close(); err != nil {
-		t.Fatalf("closing tar: %v", err)
-	}
-	if err := zw.Close(); err != nil {
-		t.Fatalf("closing gzip: %v", err)
-	}
-	payload := buf.Bytes()
-
+	payload := tarGz(t, files)
 	o := &countingOrigin{requests: &atomic.Int64{}, fail: &atomic.Bool{}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		o.requests.Add(1)
@@ -57,18 +31,13 @@ func newCountingOrigin(t *testing.T, files map[string]string) *countingOrigin {
 	}))
 	t.Cleanup(srv.Close)
 
-	sum := sha256.Sum256(payload)
 	o.url = srv.URL + "/content.tar.gz"
-	o.digest = "sha256:" + hex.EncodeToString(sum[:])
+	o.digest = sha256Digest(payload)
 	return o
 }
 
-// TestSteadyStateReconcileDoesNotFetch is the test this change exists for.
-//
-// Before the inputHash short-circuit, the output digest could only be learned by downloading
-// every layer and assembling them — so an hourly interval meant re-pulling tens of megabytes
-// from upstream, forever, to discover that nothing had changed. Taking the origin away after the
-// first build is the only honest way to prove the second reconcile does not touch it.
+// TestSteadyStateReconcileDoesNotFetch pins the inputHash short-circuit: an unchanged spec must
+// converge without downloading any layer. The origin is taken away to prove it is not touched.
 func TestSteadyStateReconcileDoesNotFetch(t *testing.T) {
 	origin := newCountingOrigin(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("steady", urlLayer("core", origin.url, origin.digest, "/core"))
@@ -79,7 +48,6 @@ func TestSteadyStateReconcileDoesNotFetch(t *testing.T) {
 		t.Fatalf("first build made %d origin requests, want 1", got)
 	}
 
-	// The origin is now gone. A reconcile that still needs it will fail loudly.
 	origin.fail.Store(true)
 
 	second := build(t, r, obj, "steady-state reconcile")
@@ -113,8 +81,6 @@ func TestChangedSpecStillRebuilds(t *testing.T) {
 }
 
 // TestTargetChangeAloneRebuilds — the same bytes at a different path are a different artifact.
-// Hashing only the layer digests would miss this, and the workload would silently keep the old
-// layout.
 func TestTargetChangeAloneRebuilds(t *testing.T) {
 	origin := newCountingOrigin(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("retarget", urlLayer("core", origin.url, origin.digest, "/core"))
@@ -153,9 +119,8 @@ func TestMissingPublishedArtifactForcesRebuild(t *testing.T) {
 	}
 }
 
-// TestInputHashIgnoresIncidentalFields — name and URL must not affect the hash. Switching to a
-// mirror or renaming an entry would otherwise force a pointless rebuild of byte-identical
-// content, which is the exact cost this whole mechanism exists to avoid.
+// TestInputHashIgnoresIncidentalFields — name, URL and temp path must not affect the hash, or a
+// mirror switch or rename would rebuild byte-identical content.
 func TestInputHashIgnoresIncidentalFields(t *testing.T) {
 	base := []oci.LayerInput{{
 		Name: "core", URL: "https://a.example/x.tgz", Path: "/tmp/one",
@@ -171,9 +136,8 @@ func TestInputHashIgnoresIncidentalFields(t *testing.T) {
 	}
 }
 
-// TestInputHashIsUnambiguous — fields are length-prefixed so no rearrangement across a field
-// boundary can collide. Plain concatenation would make these two byte streams identical, and a
-// real spec change would then be silently skipped.
+// TestInputHashIsUnambiguous — fields are length-prefixed; plain concatenation would make these
+// two inputs collide and a real change be skipped.
 func TestInputHashIsUnambiguous(t *testing.T) {
 	a := oci.InputHash([]oci.LayerInput{
 		{Digest: "sha256:11", Unpack: oci.UnpackNone, Target: "/ab"},
@@ -218,30 +182,12 @@ func TestInputHashCoversConfig(t *testing.T) {
 	}
 }
 
-// TestInputHashIsPinned guards the hash against accidental change.
-//
-// The input hash decides whether a build is skipped, so changing how it is computed — or bumping
-// oci.AssemblyVersion — invalidates every recorded hash in every cluster and rebuilds everything
-// on the next reconcile. That is sometimes exactly right, and it must never happen by accident.
-// If this test fails, the change was either deliberate (update the constant below) or a bug.
+// TestInputHashIsPinned guards the hash against accidental change: changing its computation or
+// bumping oci.AssemblyVersion rebuilds every artifact in every cluster. If this fails, either the
+// change was deliberate (update the constant) or it is a bug.
 func TestInputHashIsPinned(t *testing.T) {
-	// Changed twice, both times because something that genuinely affects the output was missing.
-	//
-	// 1. The schema v2 redesign, which added ownership, modes, removals and the full config
-	//    surface. Pre-deployment, so the one-time rebuild cost nothing.
-	// 2. Multi-architecture output, which added the base digest and the platform list. The base
-	//    digest was a real bug: it reached the output but not the hash, so repointing
-	//    spec.base.digest left the hash unchanged, the cheap path short-circuited, and the new
-	//    base was never built.
-	//
-	// (2) rebuilds every artifact once. That is safe here and was checked before merging: the
-	// resolved platform for an unset list on an amd64 controller is linux/amd64, which is exactly
-	// what was previously hardcoded, so the rebuild produces the SAME digest and republishing it
-	// under an unchanged immutable tag is a no-op. On a non-amd64 controller it would not be —
-	// see TestUnsetPlatformMatchesTheOldHardcodedDefault.
-	// Re-recorded for AssemblyVersion 3 (Go 1.27 changed compress/flate's output, ADR 0057). This
-	// constant moving IS the migration: it is what makes every cluster rebuild, deliberately,
-	// rather than serve old bytes under an unchanged hash.
+	// Last re-recorded for AssemblyVersion 3 (ADR 0057). See also
+	// TestUnsetPlatformMatchesTheOldHardcodedDefault.
 	const want = "sha256:f0faf228562e7c0c249bb4d987ee06877d98cf1944ef1b95027e9a8ee387510c"
 
 	got := oci.InputHash([]oci.LayerInput{
