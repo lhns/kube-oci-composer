@@ -53,11 +53,8 @@ lint: ## Run golangci-lint if available.
 
 .PHONY: controller-gen
 controller-gen: ## Install controller-gen if missing OR at the wrong version.
-# The version check is the point. `command -v` alone only asks whether SOME controller-gen exists,
-# so a bump to CONTROLLER_GEN_VERSION (Renovate opens those) never reaches a machine that already
-# has an older one. Generated output then keeps being produced by the old binary locally while CI
-# installs the pinned one and fails `verify` on the difference — which is exactly what happened
-# between v0.16.5 and v0.19.0, red on every push until someone regenerated.
+# Checks the version, not just presence: otherwise a CONTROLLER_GEN_VERSION bump never reaches a
+# machine with an older binary, and CI's `verify` fails on the difference.
 	@[ "$$($(CONTROLLER_GEN) --version 2>/dev/null | awk '{print $$2}')" = "$(CONTROLLER_GEN_VERSION)" ] || \
 		go install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION)
 
@@ -72,8 +69,7 @@ manifests: controller-gen ## Regenerate CRDs, RBAC and deepcopy functions.
 
 .PHONY: chart-crds
 chart-crds: manifests ## Copy generated CRDs into the chart.
-# Into files/crds/, which templates/crds.yaml emits verbatim -- NOT into crds/, which Helm installs
-# once and then never upgrades. One chart now, so both kinds land in the same place (ADR F).
+# Into files/crds/, emitted verbatim by templates/crds.yaml -- not crds/, which Helm never upgrades.
 	cp config/crd/bases/oci.lhns.de_imagecompositions.yaml charts/kube-oci-composer/files/crds/
 	cp config/crd/bases/oci.lhns.de_imagebuilds.yaml charts/kube-oci-composer/files/crds/
 
@@ -101,9 +97,8 @@ DEFAULT_REGISTRY ?= localhost:5000
 
 .PHONY: run
 run: manifests ## Run the controller against the current kubecontext.
-	# DEFAULT_REGISTRY is where objects that name no repository publish. Point it at a registry you
-	# can actually reach from here -- `docker run -p 5000:5000 ghcr.io/project-zot/zot-linux-amd64`
-	# is enough -- because with no default and no push.repository, objects stay Pending.
+	# DEFAULT_REGISTRY must be reachable from here (e.g. `docker run -p 5000:5000
+	# ghcr.io/project-zot/zot-linux-amd64`); without one, objects naming no repository stay Pending.
 	go run ./cmd/oci-composer --default-registry=$(DEFAULT_REGISTRY)
 
 .PHONY: docker-build
@@ -122,9 +117,7 @@ docker-push: ## Push the container image.
 
 ##@ Deploy
 
-# One CRD per target, for the reason chart-crds gives: installing the composer must not imply the
-# builder's API exists (ADR 0004). `make uninstall` applying the whole directory would also delete
-# every ImageBuild in a cluster where the builder was installed from its own chart.
+# One CRD per target (ADR 0004): uninstalling one kind's CRD must not delete the other kind's objects.
 .PHONY: install
 install: manifests ## Install the composer's CRD into the current cluster.
 	kubectl apply -f config/crd/bases/oci.lhns.de_imagecompositions.yaml
@@ -143,9 +136,7 @@ uninstall-builder: ## Remove the builder's CRD from the current cluster.
 
 .PHONY: chart-lint
 chart-lint: ## Lint and render the chart.
-# registry.publish.mode has no default -- the chart refuses to install until an operator says how
-# workloads reach the registry (ADR 0037). Lint has to answer it like anyone else; the answer here
-# is the one that asserts nothing about the cluster.
+# registry.publish.mode has no default (ADR 0037); internalOnly assumes nothing about the cluster.
 	helm lint charts/kube-oci-composer --set registry.publish.mode=internalOnly
 	helm template kube-oci-composer charts/kube-oci-composer --set registry.publish.mode=internalOnly >/dev/null
 
@@ -162,18 +153,9 @@ e2e-up: ## Create the kind cluster used by the e2e tests.
 
 .PHONY: e2e-test
 e2e-test: ## Run the e2e tests against the current cluster. RUN=<regex> limits which.
-# The retention tests WAIT -- for a registry to collect something, and then for it not to collect
-# something else -- and those waits cannot be shortened without shrinking the margin that makes the
-# assertion mean anything.
-#
-# What CAN be shortened is how long the registry takes to get round to collecting at all: zot holds
-# each repository's task back by a random delay of up to gcMaxSchedulerDelay, 30s by default, so a
-# pass costs roughly (repositories x delay / 2). up.sh sets it to 1s. See
-# E2E_GC_MAX_SCHEDULER_DELAY there and collectionDeadline in test/e2e/retention_test.go.
-#
-# 30m, against a suite that should now run in a third of that. A cap far above the expected runtime
-# turns a hang into a half-hour hang, and a go-test timeout produces no useful output at all --
-# strictly worse than the assertion failure it would mask.
+# The retention tests wait on the registry's collector; up.sh shortens zot's per-repository
+# scheduling delay (E2E_GC_MAX_SCHEDULER_DELAY) to keep those waits short. The 30m cap is about 3x
+# the expected runtime: a go test timeout yields no useful output, so it should not fire first.
 	go test ./test/e2e/... -tags=e2e -timeout 30m -count=1 -v $(if $(RUN),-run '$(RUN)')
 
 .PHONY: e2e-down

@@ -1,23 +1,7 @@
 {{- /*
-registry.publish.mode has no default, and the chart refuses to install without it.
-
-That is a deliberate cost, so here is the argument for paying it.
-
-status.artifact.ref is a single string that TWO resolvers have to understand. The controllers reach
-the registry through cluster DNS to push and refresh; the kubelet reaches it with the NODE's
-resolver to pull, and the node's resolver has never heard of anything.svc.cluster.local. Before the
-internal/public split there was no value that worked: leave the host unset and every pull failed
-with ErrImagePull, set it to a node-resolvable name and every publish failed with "no such host".
-
-The split fixed the mechanism. It cannot fix the fact that SOMEBODY has to say how nodes reach the
-registry, because that depends on a cluster this chart cannot see -- whether there is an ingress
-controller, whether there is DNS for it, whether the operator is willing to put a file on every
-node. There is no answer that works everywhere, so guessing produces the failure this file exists
-to prevent: an install that reports success and produces images nothing can pull, discovered days
-later by someone who did not install it.
-
-So the chart asks. The failure moves from a silent runtime one to a message at install time naming
-the four choices, which is the whole trade.
+registry.publish.mode has no default: how kubelets reach the registry depends on the cluster
+(ingress, node DNS, containerd drop-ins), and a wrong guess installs cleanly and then fails every
+pull with ErrImagePull. So the chart refuses to install and names the four choices.
 */}}
 
 {{- define "kube-oci-composer.checkPublishMode" -}}
@@ -44,10 +28,7 @@ cannot see cluster DNS, so without this the chart would publish images no Pod co
 {{- fail (printf "registry.publish.mode is %q, which is not one of: %s" $mode (join ", " $valid)) -}}
 {{- end -}}
 
-{{- /*
-Each mode asserts the values that make it true. A mode that renders without them is a mode that
-lied -- the operator answered the question and still got images nothing can pull.
-*/}}
+{{- /* Each mode requires the values that make it work. */}}
 {{- if and (eq $mode "ingress") (not .Values.registry.host) -}}
 {{- fail "registry.publish.mode=ingress needs registry.host set to the hostname the Ingress serves; it is what workloads will pull from." -}}
 {{- end -}}

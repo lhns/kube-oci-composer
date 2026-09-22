@@ -1,14 +1,11 @@
 //go:build e2e
 
-// Package e2e runs against a real cluster.
+// Package e2e runs against a real cluster (see up.sh).
 //
-// This is the only test that proves the point of the project: compose an artifact, mount it as an
-// image volume, and confirm the files land where the spec said. Everything else verifies that the
-// controller does what it intends; this verifies that what it intends is useful.
-//
-// It also doubles as the check that the kubelet honours image volumes at all. The API accepting
-// spec.volumes[].image does not prove the feature is enabled, and if it is not, the entire
-// approach is moot — so that failure must be loud rather than skipped.
+// The image-volume test is the one that proves the project useful: compose an artifact, mount it as
+// an image volume, and confirm the files land where the spec said. It also checks that the kubelet
+// honours image volumes at all -- the API accepting spec.volumes[].image does not prove it -- so that
+// failure is loud rather than skipped.
 package e2e
 
 import (
@@ -22,9 +19,8 @@ import (
 
 const (
 	namespace = "oci-composer-e2e"
-	// The PUBLIC registry name: what a kubelet resolves, via the containerd drop-in on each node,
-	// and what status.artifact.ref reports. The controllers never use it -- they talk to the
-	// registry's in-cluster Service -- which is why this suite needs no CoreDNS entry for it.
+	// The PUBLIC registry name: what a kubelet resolves (via the containerd drop-in) and what
+	// status.artifact.ref reports. The controllers never use it.
 	registryHost = "oci-composer.e2e:5000"
 	timeout      = 5 * time.Minute
 	interval     = 5 * time.Second
@@ -48,15 +44,13 @@ func mustKubectl(t *testing.T, args ...string) string {
 
 func applyStdin(t *testing.T, manifest string) {
 	t.Helper()
-	cmd := exec.Command("kubectl", "apply", "-f", "-")
-	cmd.Stdin = strings.NewReader(manifest)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := applyStdinAllowingFailure(t, manifest); err != nil {
 		t.Fatalf("apply failed: %v\n%s\n%s", err, out, manifest)
 	}
 }
 
-// applyStdinAllowingFailure is applyStdin for the cases where a REJECTION is the result, not an
-// error -- probing whether the cluster supports a field at all.
+// applyStdinAllowingFailure returns a rejection instead of failing, for probing whether the cluster
+// supports a field at all.
 func applyStdinAllowingFailure(t *testing.T, manifest string) (string, error) {
 	t.Helper()
 	cmd := exec.Command("kubectl", "apply", "-f", "-")
@@ -65,8 +59,8 @@ func applyStdinAllowingFailure(t *testing.T, manifest string) (string, error) {
 	return string(out), err
 }
 
-// eventually polls until fn succeeds. On timeout it reports the last error AND dumps the
-// controller's logs, because "timed out waiting for Ready" on its own tells you nothing.
+// eventually polls until fn succeeds. On timeout it reports the last error and the controller's
+// logs.
 func eventually(t *testing.T, what string, fn func() error) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -95,14 +89,14 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// TestComposedArtifactMountsAsAnImageVolume is the whole point.
+// TestComposedArtifactMountsAsAnImageVolume is the whole point: a composed artifact, pulled by the
+// reference status reports, mounts with each layer's files under its `to:` path.
 func TestComposedArtifactMountsAsAnImageVolume(t *testing.T) {
 	mustKubectl(t, "create", "namespace", namespace, "--dry-run=client", "-o", "yaml")
 	_, _ = kubectl(t, "create", "namespace", namespace)
 	t.Cleanup(func() { _, _ = kubectl(t, "delete", "namespace", namespace, "--wait=false") })
 
-	// A ConfigMap source, so the test needs no network access to an external artifact. The
-	// digest is resolved by the controller from the content.
+	// A ConfigMap source, so no external artifact is needed.
 	applyStdin(t, `
 apiVersion: v1
 kind: ConfigMap
@@ -122,13 +116,8 @@ metadata:
   namespace: `+namespace+`
 spec:
   interval: 1m
-  # TAGGED, and that is load-bearing rather than decorative: an untagged manifest is unreferenced
-  # as far as a registry is concerned, and zot -- configured here with a compressed GC for the
-  # retention tests -- reclaims it within seconds. The publish then succeeds and the pull that
-  # follows reports "not found", which reads as the composer having published nothing.
-  #
-  # A workload should still reference the DIGEST (ADR 0010). The tag exists to keep the manifest
-  # reachable, not to be pulled.
+  # Tagged so the manifest stays reachable under the suite's compressed GC; the pod below still
+  # references the DIGEST (ADR 0010).
   push:
     tags: [main]
   layers:
@@ -152,15 +141,14 @@ spec:
 		return nil
 	})
 
-	// status.artifact.ref, not a reference reassembled from the digest. It is what the controller
-	// says a consumer should pull, so using it means the test fails if that answer is wrong --
-	// which is the whole contract an image volume depends on.
+	// status.artifact.ref as published, not a reference rebuilt from the digest: it is the
+	// controller's answer to "what should a consumer pull", and this test checks that answer.
 	ref := strings.TrimSpace(mustKubectl(t, "-n", namespace, "get", "imagecomposition",
 		"e2e-artifact", "-o", "jsonpath={.status.artifact.ref}"))
 	if ref == "" {
 		t.Fatal("status.artifact.ref is empty; nothing can pull this")
 	}
-	// A tag alone would let a stale image satisfy this test. ADR 0010: pull the digest.
+	// A tag alone would let a stale image satisfy this test (ADR 0010).
 	if !strings.Contains(ref, "@sha256:") {
 		t.Fatalf("status.artifact.ref is not digest-pinned: %q", ref)
 	}
@@ -169,7 +157,6 @@ spec:
 	}
 	t.Logf("published %s", ref)
 
-	// Reference the DIGEST, exactly as a workload should. See ADR 0010.
 	applyStdin(t, `
 apiVersion: v1
 kind: Pod
@@ -185,8 +172,7 @@ spec:
         - sh
         - -c
         - |
-          # Listed BEFORE asserting: a failing 'test -f' prints nothing, so without this a
-          # failure arrives as an empty log saying only that the pod exited non-zero.
+          # Listed first: a failing 'test -f' prints nothing.
           echo "--- what actually mounted ---"
           ls -laR /mnt || true
           echo "-----------------------------"
@@ -198,14 +184,8 @@ spec:
           echo IMAGE_VOLUME_OK
       volumeMounts:
         - name: plugins
-          # The image ROOT is mounted here, so the assertions above are against
-          # /mnt + the layer's own 'to: /plugins' -- which is precisely what this test exists to
-          # pin down: that 'to:' places content at that path INSIDE the artifact.
-          #
-          # Deliberately not subPath. subPath would let the test assert /plugins directly, but it
-          # is a kubelet feature whose behaviour on image volumes is not uniform across versions
-          # (it works on 1.36; on kind's 1.33 here the mount simply did not appear), and this test
-          # is about the composer's output, not about subPath.
+          # The image ROOT, so the assertions check that 'to: /plugins' placed content at that path
+          # inside the artifact. Not subPath: its behaviour on image volumes varies by version.
           mountPath: /mnt
           readOnly: true
   volumes:
@@ -231,9 +211,7 @@ spec:
 			t.Fatalf("consumer pod failed:\nstate: %s\nlogs:\n%s", strings.TrimSpace(state), logs)
 			return nil
 		default:
-			// Surface the pull error rather than just the phase: if image volumes are not
-			// supported, this is where it says so, and that is the single most useful line in
-			// the whole run.
+			// The pod's events carry the pull error, e.g. when image volumes are unsupported.
 			events, _ := kubectl(t, "-n", namespace, "get", "events",
 				"--field-selector", "involvedObject.name=consumer",
 				"-o", "jsonpath={range .items[*]}{.reason}: {.message}{\"\\n\"}{end}")
@@ -247,8 +225,8 @@ spec:
 	}
 }
 
-// TestChangingTheSourceRebuilds — editing the ConfigMap must produce a new digest, because the
-// controller resolves the digest from its content rather than from a declared one.
+// TestChangingTheSourceRebuilds -- editing the ConfigMap must produce a new digest, because the
+// controller resolves the digest from content, and the previous build must stay in history.
 func TestChangingTheSourceRebuilds(t *testing.T) {
 	ns := namespace + "-rebuild"
 	_, _ = kubectl(t, "create", "namespace", ns)

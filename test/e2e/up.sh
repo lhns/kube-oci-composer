@@ -1,70 +1,40 @@
 #!/usr/bin/env bash
-# Creates the kind cluster the e2e tests run against, and loads the controller image into it.
+# Creates the kind cluster the e2e tests run against, loads the images and installs the chart.
 set -euo pipefail
 
 CLUSTER="${CLUSTER:-kube-oci-composer-e2e}"
-# Image volumes need BOTH a kubelet that supports them and a runtime that implements the CRI side.
-# The kubelet half is beta from 1.33; the runtime half landed in containerd 2.1, and the 1.33 node
-# image ships 2.0.x. On that combination the pod is admitted and RUNS with nothing mounted, which
-# reads as the composer having produced the wrong layout. 1.36 matches the cluster this operator
-# is deployed to (containerd 2.3.x).
+# Image volumes need kubelet support AND containerd >= 2.1; on older runtimes the pod runs with
+# nothing mounted. 1.36 matches production (containerd 2.3.x).
 NODE_IMAGE="${NODE_IMAGE:-kindest/node:v1.36.1}"
 IMG="${IMG:-ghcr.io/lhns/kube-oci-composer:e2e}"
-# The namespace the ImageBuild fixtures live in. Builds run in their object's namespace, so this
-# is also where the build Jobs appear.
+# Namespace of the ImageBuild fixtures, and so of the build Jobs.
 BUILD_NS="${BUILD_NS:-oci-builder-e2e}"
 
-# The registry host baked into every published reference, and the NodePort the node actually reaches
-# it on.
-#
-# This is the PUBLIC name only -- what a kubelet resolves, and what status.artifact.ref reports.
-# The controllers never see it; they use the registry's in-cluster Service.
-#
-# Deliberately not a generic "oci.e2e": a cluster may well run other registries, and a name this
-# specific cannot be mistaken for the only one.
+# The PUBLIC registry name (what a kubelet resolves and status.artifact.ref reports) and the
+# NodePort behind it. The controllers never use it; they use the in-cluster Service.
 REGISTRY_HOST="${REGISTRY_HOST:-oci-composer.e2e:5000}"
 NODE_PORT="${NODE_PORT:-30500}"
 
-# The retention clock, compressed from one base the way a deployment derives it.
-#
-# Only the window and the build poll are choices. Everything else the chart derives, and the tests
-# read back what was actually deployed -- so changing a number here cannot leave a test asserting
-# something that is no longer true, which is how a retention test came to pass while measuring
-# nothing.
+# The retention clock, compressed. Only the window, the refresh and the build poll are chosen; the
+# chart derives the rest and the tests read back what was deployed.
 E2E_WINDOW="${E2E_WINDOW:-30s}"
 
-# The refresh interval is set EXPLICITLY rather than derived, and that is the one exception here.
-# The chart refuses to DERIVE an interval under 30s -- 720 is a sensible factor against 30 days and
-# a ridiculous one against 30 seconds -- and offers the explicit value as the escape hatch for
-# someone who means it. This is that someone. The 24x margin check still applies, so this cannot
-# drift into the misconfiguration the check exists to catch.
+# Set explicitly: the chart refuses to DERIVE an interval under 30s, and the explicit value is the
+# escape hatch. The 24x margin check still applies.
 E2E_REFRESH="${E2E_REFRESH:-1s}"
 E2E_REFRESH_FACTOR="${E2E_REFRESH_FACTOR:-30}"
 
-# gcInterval = window / this. 6 gives a five-second sweep.
-#
-# A one-second sweep was tried, on the theory that a repository is reached every
-# (repositories x gcInterval). Two negative controls failed on that run -- but control latency is
-# bimodal here with a spread of several minutes, so one run is not evidence of causation and that
-# reading has been withdrawn. What IS established is that gcInterval was never the term that
-# mattered: see E2E_GC_MAX_SCHEDULER_DELAY below. Five seconds is the value this suite passes on.
+# gcInterval = window / this: a five-second sweep. gcInterval is not what bounds collection
+# latency; see E2E_GC_MAX_SCHEDULER_DELAY.
 E2E_GC_FACTOR="${E2E_GC_FACTOR:-6}"
 
-# What the retention tests were actually waiting for.
-#
-# zot holds each repository's collection task back by a fresh random delay of up to this, so a full
-# pass takes roughly (repositories x delay / 2). At zot's 30s default, against the ~33 repositories
-# this suite accumulates, that is ~500s before anything expired is collected -- which is where the
-# five-minute waits in the retention tests came from, not from the 30s window.
-#
-# One second here takes a pass to ~20s. Nothing is checked less strictly: the content still has to
-# expire on its own terms first, and the negative controls still have to watch it happen.
+# zot delays each repository's collection task by a random amount up to this, so a pass takes
+# roughly repositories x delay / 2: ~500s at the 30s default over this suite's ~33 repositories,
+# ~20s at 1s. Content still has to expire first, so no assertion is weakened.
 E2E_GC_MAX_SCHEDULER_DELAY="${E2E_GC_MAX_SCHEDULER_DELAY:-1s}"
 
-# What lets everything else be small. A build's image is untagged from the push until the controller
-# names it (ADR 0054), so the chart never derives gcDelay below three times this -- 45s at the
-# shipped 15s, which a 30s window cannot accommodate. Shortening the poll shortens that floor, and
-# the retention tests then derive short watch windows that still mean something.
+# gcDelay is never derived below 3x this (a build is untagged until named, ADR 0054); at the
+# default 15s that is 45s, more than the 30s window allows.
 E2E_BUILD_POLL="${E2E_BUILD_POLL:-3s}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -73,18 +43,13 @@ if ! kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
   kind create cluster --name "$CLUSTER" --image "$NODE_IMAGE" --config "$HERE/kind-config.yaml"
 fi
 
-# Tell containerd where the registry is. Image volumes are pulled by the KUBELET using the NODE's
-# resolver, so the .svc.cluster.local host in every reference resolves to nothing; this drop-in
-# supplies the endpoint directly and containerd never looks the name up. Without it the pull fails
-# with ErrImagePull even though the Service is perfectly healthy.
-#
-# Written after the node exists rather than baked in: certs.d is read per-pull, so no containerd
-# restart is needed. Only `config_path` (in kind-config.yaml) has to be set at startup.
+# Point containerd at the registry's NodePort for the public name: the kubelet pulls with the NODE's
+# resolver, which does not know it. certs.d is read per pull, so no restart is needed; only
+# `config_path` (kind-config.yaml) must be set at startup.
 for node in $(kind get nodes --name "$CLUSTER"); do
   docker exec "$node" mkdir -p "/etc/containerd/certs.d/${REGISTRY_HOST}"
   docker exec -i "$node" tee "/etc/containerd/certs.d/${REGISTRY_HOST}/hosts.toml" >/dev/null <<EOF
-# Plain HTTP: this is a NodePort on the node itself, and containerd defaults to HTTPS for any
-# host:port, so without the scheme here the pull dies in the TLS handshake.
+# Plain HTTP: containerd assumes HTTPS for any host:port.
 [host."http://localhost:${NODE_PORT}"]
   capabilities = ["pull", "resolve"]
 EOF
@@ -92,19 +57,11 @@ done
 
 BUILDER_IMG="${BUILDER_IMG:-ghcr.io/lhns/kube-oci-builder:e2e}"
 
-# Everything publishes here now: compositions and builds alike (ADR 0035). The drop-in above points
-# this name at the registry's NodePort, so a Pod can actually pull what gets published -- which is
-# what the image-volume tests exercise.
+# Everything publishes here (ADR 0035); the drop-in above makes it pullable by pods.
 E2E_REGISTRY="$REGISTRY_HOST"
 
-# BOTH images, before the single install that references them. imagePullPolicy is Never in the e2e,
-# so an image that is not loaded is ErrImageNeverPull rather than a pull attempt.
-#
-# CI builds both ONCE, with a layer cache, and hands over an archive (e2e.yaml's images job). Run
-# directly, nothing is set and they are built here as before.
-#
-# Set-but-missing is an ERROR, not a fallback: quietly building instead would hide a broken
-# artifact step and hand back exactly the time the archive exists to save.
+# Load both images before the install (pullPolicy is Never). CI passes a prebuilt archive; run
+# directly, the images are built here. A set-but-missing archive is an error, not a fallback.
 E2E_IMAGE_ARCHIVE="${E2E_IMAGE_ARCHIVE:-}"
 if [ -n "$E2E_IMAGE_ARCHIVE" ]; then
   if [ ! -f "$E2E_IMAGE_ARCHIVE" ]; then
@@ -119,8 +76,7 @@ else
   kind load docker-image "$BUILDER_IMG" --name "$CLUSTER"
 fi
 
-# Checked now rather than discovered later: with pullPolicy=Never an image the node lacks is
-# ErrImageNeverPull, which arrives as a helm --wait timeout five minutes from here.
+# Fail now rather than as a helm --wait timeout (ErrImageNeverPull) five minutes later.
 for node in $(kind get nodes --name "$CLUSTER"); do
   have="$(docker exec "$node" crictl images -o json)"
   for want in "$IMG" "$BUILDER_IMG"; do
@@ -131,41 +87,19 @@ for node in $(kind get nodes --name "$CLUSTER"); do
   done
 done
 
-# CRDs are NOT applied here any more: the chart installs them from templates/ (ADR 0033), and Helm
-# refuses to adopt a CRD it did not create. Letting the chart do it also means the e2e exercises
-# that path rather than working around it.
-
-# ONE chart, all three components (ADR 0033). The registry it installs is the one everything
-# publishes to -- no hand-rolled fixture registry any more, so the e2e exercises the deployment an
-# operator actually gets.
+# One chart, all components, CRDs included (ADR 0033), so the e2e runs what an operator installs.
 #
-# The retention policy is compressed to a 30s window against a 1s refresh -- a margin of 30, where a
-# deployment runs 30 days against 1h for 720. PROPORTIONATE, not merely small: the chart refuses to
-# render a margin below 24 (threat D7), and it is right to, because the margin is the guarantee.
-# Compressing the window without compressing the interval with it would be exactly the misconfigured
-# state that check exists to catch, so the e2e must not be the first thing to work around it.
+# Retention: a 30s window against a 1s refresh keeps the margin (30) above the chart's floor of 24
+# (threat D7) instead of working around it.
 #
-# SCOPED to keepalive-* repositories so the retention tests get to watch something expire without a
-# 30s window reaching every other test's images.
+# Scoped to keepalive-* so the short window only touches the retention tests' images. Scoping does
+# NOT protect other repositories' untagged manifests -- zot collects those by default -- so gcDelay
+# must clear the naming gap (ADR 0054). deleteUntagged stays true, or the digest-only retention test
+# would prove nothing. keepUntagged stays off, the default (ADR 0060); requireKeepUntaggedOff
+# refuses to run that test otherwise.
 #
-# That scoping is NOT what protects the others, though it was written believing it was. zot collects
-# untagged manifests in a repository matching no policy BY DEFAULT, so an unmatched repository is
-# less protected, not more -- and a build's manifest is untagged for the moment between being pushed
-# and being named (ADR 0054). With gcDelay=1s the collector won that race, deleted the manifest,
-# then deleted the now-empty repository, and the read-back failed NAME_UNKNOWN. Intermittently,
-# because zot walks repositories on a rotation.
-#
-# gcDelay is what makes this safe, and why it is never 1s: nothing younger than gcDelay is ever
-# collected, so the delay has to clear the naming gap. deleteUntagged stays TRUE -- turning it off
-# would switch off reclaiming altogether, and the digest-only retention test would pass while
-# proving nothing.
-#
-# keepUntagged is OFF, which is the chart's default (ADR 0060).
-# The controllers name everything they publish after its own digest, so nothing live is untagged,
-# and with keepUntagged configured zot keeps every manifest whose last tag expired, forever: the
-# digest-only test's control could never be reclaimed. requireKeepUntaggedOff refuses to run it then.
-# No defaultRegistry.insecure: the controllers never connect to the public name, and the in-cluster
-# Service they DO connect to is marked insecure by the chart automatically.
+# No defaultRegistry.insecure: the controllers only use the in-cluster Service, which the chart
+# marks insecure itself.
 helm upgrade --install kube-oci-composer charts/kube-oci-composer \
   --namespace oci-composer --create-namespace \
   --set image.repository="${IMG%:*}" \
@@ -188,43 +122,30 @@ helm upgrade --install kube-oci-composer charts/kube-oci-composer \
   --set registry.logLevel=debug \
   --wait --timeout 5m
 
-# NO CoreDNS entry, and its absence is the assertion.
-#
-# An earlier version taught cluster DNS about the public name, because the controllers were pointed
-# at it and could not resolve it. They are not any more: --default-registry is the registry's own
-# Service and --public-registry-host carries the node-resolvable name into status.artifact.ref and
-# nowhere else. If this suite passes without the twenty lines that used to be here, the split is
-# right; that is what this deletion tests.
+# Deliberately NO CoreDNS entry for the public name: the controllers must not need it, and this
+# suite passing without one is what shows it.
 
 kubectl -n oci-composer rollout status deploy/kube-oci-composer --timeout=5m
 kubectl -n oci-composer rollout status deploy/kube-oci-composer-builder --timeout=5m
 
 # --- ImageBuild fixtures ----------------------------------------------------------------------
 #
-# The controller is already installed above -- one chart, all components (ADR 0033). What is left is
-# what a build NEEDS: a build context from a Flux source, which this cluster does not run. A minimal
-# GitRepository CRD stands in and the harness publishes status.artifact itself, pointing at a tarball
-# served from a ConfigMap, so this tests the controller's reading of the contract rather than testing
-# Flux.
+# Flux is not installed. A minimal GitRepository CRD stands in, and its status.artifact points at a
+# tarball served from a ConfigMap, so the controller's reading of the contract is what is tested.
 
 kubectl apply -f "$HERE/../crds/gitrepository.yaml"
 
 kubectl create namespace "$BUILD_NS" --dry-run=client -o yaml | kubectl apply -f -
 
-# The context tarball, built here so the Dockerfile lives in the repository as a readable file
-# rather than as a base64 blob in a manifest. The wrapper directory mimics what source-controller
-# produces, which both FetchDockerfile and the build pod fetcher have to strip -- one rule, named by
-# both, after the two copies of it once disagreed.
+# The context tarball, built from the readable Dockerfiles in manifests/.
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/src-e2e"
 cp "$HERE/manifests/dockerfile" "$WORK/src-e2e/Dockerfile"
 cp "$HERE/manifests/dockerfile.unpinned" "$WORK/src-e2e/Dockerfile.unpinned"
 cp "$HERE/manifests/dockerfile.other" "$WORK/src-e2e/Dockerfile.other"
-# Archived from INSIDE src-e2e, so entries land at the root -- "./", "Dockerfile" -- which is the
-# shape source-controller actually publishes. Archiving the directory itself wrapped everything in
-# "src-e2e/", and that fixture agreed with a wrong assumption in the fetcher: the suite passed while
-# every real sourceRef build was dropping its root-level files. See ADR 0045.
+# Archived from INSIDE src-e2e, so entries sit at the root ("./", "Dockerfile") as in a real
+# source-controller artifact. A wrapper directory here once hid a fetcher bug (ADR 0045).
 tar -czf "$WORK/context.tar.gz" -C "$WORK/src-e2e" .
 
 kubectl -n "$BUILD_NS" create configmap e2e-context \
@@ -232,15 +153,11 @@ kubectl -n "$BUILD_NS" create configmap e2e-context \
   --dry-run=client -o yaml | kubectl apply -f -
 
 kubectl -n "$BUILD_NS" apply -f "$HERE/manifests/context-server.yaml"
-# The registry is part of the release now, so `helm --wait` above already waited for it.
-# statefulset, not deploy: the registry became one so that clustering could never be a kind switch
-# under a running install (ADR 0039).
 kubectl -n oci-composer rollout status statefulset/kube-oci-composer-registry --timeout=3m
 kubectl -n "$BUILD_NS" rollout status deploy/e2e-context --timeout=3m
 
-# The source's published artifact. Nothing verifies this digest -- a real source-controller is what
-# would have computed it -- but it must be STABLE, since the input hash is built from it and a
-# changing value would rebuild on every reconcile.
+# The source's artifact. Nothing verifies the digest, but it must be STABLE: it feeds the input
+# hash, and a changing value would rebuild on every reconcile.
 CONTEXT_URL="http://e2e-context.${BUILD_NS}.svc.cluster.local:8080/context.tar.gz"
 CONTEXT_DIGEST="sha256:$(sha256sum "$WORK/context.tar.gz" | cut -d' ' -f1)"
 
@@ -256,5 +173,3 @@ status:
     digest: ${CONTEXT_DIGEST}
     revision: main@sha1:e2e
 EOF
-
-

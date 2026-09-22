@@ -2,14 +2,9 @@
 
 // ImageBuild against a real cluster.
 //
-// This is the first thing that runs the builder end to end, and it exists because two pieces of it
-// could not be verified any other way. The digest comes back out of the build through the pod's
-// termination message, which needs a real kubelet to populate; and the FROM check reads a real
-// context over HTTP. Both were previously only unit-tested against fakes.
-//
-// It also answers ADR 0025's second spike question — whether rootless BuildKit runs on the target
-// nodes at all. If it does not, that is a real answer and the ADR lists it as grounds to abandon,
-// so the failure must be loud rather than skipped.
+// Covers what only a cluster can: rootless BuildKit running on the nodes (ADR 0025's second spike
+// question; a failure is an answer, so it is loud), the digest returned through the pod's
+// termination message, and the FROM check reading a real context over HTTP.
 package e2e
 
 import (
@@ -20,60 +15,40 @@ import (
 	"time"
 )
 
-// buildNamespace must match up.sh's BUILD_NS, which defaults to the same value. The registry host
-// is derived from it rather than written out twice, so overriding one cannot leave the other
-// pointing somewhere the fixtures are not.
 const (
+	// Must match up.sh's BUILD_NS.
 	buildNamespace = "oci-builder-e2e"
-	// The INTERNAL name, and the contrast with registryHost is the point.
-	//
-	// These fixtures set spec.push.repository explicitly, because the retention tests need to
-	// name specific repositories. An explicit repository is used VERBATIM -- the operator's
-	// public name is only substituted for objects that named none (ADR 0037), and rewriting a
-	// host a tenant chose would be a lie in the one field a workload reads.
-	//
-	// So an explicit repository has to be a name whoever pushes can resolve, and the push happens
-	// from a Job inside the cluster. Naming the public host here produced exactly the failure the
-	// split exists to prevent, from the other side: `lookup oci-composer.e2e: no such host`, from
-	// BuildKit, in a namespace with no drop-in and no reason to have one.
+	// The INTERNAL registry name. These fixtures set spec.push.repository explicitly, which is used
+	// verbatim (ADR 0037), and the push comes from a Job inside the cluster -- so it must be a name
+	// cluster DNS resolves, unlike registryHost.
 	buildRegistry = "kube-oci-composer-registry.oci-composer.svc.cluster.local:5000"
-	// Where the chart puts everything now: one release, one namespace (ADR 0033).
+	// One release, one namespace (ADR 0033).
 	operatorNamespace = "oci-composer"
 )
 
-// buildTimeout is longer than the composer's `timeout` because a cold build pulls a base image and
-// pushes a result. It must stay well under `go test -timeout` (see the Makefile) or the binary
-// panics first and the dump below never runs.
+// buildTimeout covers a cold build (base pull plus push). It must stay well under `go test
+// -timeout` (Makefile), or the binary panics before the diagnostics below are printed.
 const buildTimeout = 5 * time.Minute
 
-// refusalTimeout is for an outcome that runs NO Job: a conflict refused by the pre-flight, or a
-// Keep that declines to build at all.
-//
-// Those paths are API reads plus one registry round trip -- resolveInputs uses only the API server
-// -- so they settle in seconds. Giving them the build budget means a genuine stall is
-// indistinguishable from a slow build for five minutes, which is how a stuck reconcile came to
-// read as "the suite is just slow".
+// refusalTimeout is for outcomes that run NO Job (a conflict refused by pre-flight, a Keep). They
+// settle in seconds; the build budget would make a stall look like a slow build.
 const refusalTimeout = 90 * time.Second
 
-// buildEventually polls like eventually(), but dumps the BUILDER's logs and the build pod's on
-// timeout, since a failure is usually inside the build rather than in the controller.
+// buildEventually polls like eventually(), but on timeout dumps the builder's logs, the Jobs and
+// the build pods, since a failure is usually inside the build.
 func buildEventually(t *testing.T, what string, fn func() error) {
 	t.Helper()
 	buildEventuallyWithin(t, buildTimeout, what, fn)
 }
 
-// buildEventuallyWithin is buildEventually with the budget stated by the caller, because how long
-// an outcome may legitimately take depends on whether it builds anything.
+// buildEventuallyWithin is buildEventually with a caller-chosen budget.
 func buildEventuallyWithin(t *testing.T, timeout time.Duration, what string, fn func() error) {
 	t.Helper()
 	buildEventuallyPolling(t, timeout, interval, what, fn)
 }
 
-// buildEventuallyPolling is buildEventuallyWithin with the poll rate stated too.
-//
-// The rate is normally irrelevant -- a build takes minutes and five seconds of slack costs nothing
-// -- but one caller measures the gap between a push and a question about the registry, and there
-// the poll interval IS the measurement's resolution. See awaitPublishedDigest.
+// buildEventuallyPolling also takes the poll rate, for the one caller whose measurement resolution
+// is the poll interval (awaitPublishedDigest).
 func buildEventuallyPolling(t *testing.T, timeout, poll time.Duration, what string, fn func() error) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -93,8 +68,8 @@ func buildEventuallyPolling(t *testing.T, timeout, poll time.Duration, what stri
 		what, last, ctrl, jobs, pods, obj)
 }
 
-// dockerBuildStatus is the part of status this test reads.
-type dockerBuildStatus struct {
+// imageBuildStatus is the part of an ImageBuild's status these tests read.
+type imageBuildStatus struct {
 	InputHash              string `json:"inputHash"`
 	LastHandledReconcileAt string `json:"lastHandledReconcileAt"`
 	Artifact               *struct {
@@ -106,16 +81,14 @@ type dockerBuildStatus struct {
 		Existing string `json:"existing"`
 		Dropped  string `json:"dropped"`
 	} `json:"conflict"`
-	// LastAttempt carries WHY a build failed, which since ADR 0046 is the durable record -- the
-	// pod named in it is deleted by the next retry.
+	// Why the last build failed; the durable record, since its pod is deleted by the retry
+	// (ADR 0046).
 	LastAttempt *struct {
 		PodName string `json:"podName"`
 		Message string `json:"message"`
 	} `json:"lastAttempt"`
-	// History is the retained record of past builds, newest first. ADR 0031's guarantee is stated
-	// over exactly this list -- an image named by a live object's retained history is never
-	// deleted -- so a test asking whether that guarantee holds has to read it rather than infer it
-	// from status.artifact, which only ever names the LATEST build.
+	// Past builds, newest first. ADR 0031's guarantee is stated over this list; status.artifact
+	// names only the latest build.
 	History    []buildRecord     `json:"history"`
 	Conditions []statusCondition `json:"conditions"`
 }
@@ -133,11 +106,11 @@ type statusCondition struct {
 	Message string `json:"message"`
 }
 
-func buildStatus(t *testing.T, name string) dockerBuildStatus {
+func buildStatus(t *testing.T, name string) imageBuildStatus {
 	t.Helper()
 	out := mustKubectl(t, "-n", buildNamespace, "get", "imagebuild", name,
 		"-o", "jsonpath={.status}")
-	var st dockerBuildStatus
+	var st imageBuildStatus
 	if strings.TrimSpace(out) == "" {
 		return st
 	}
@@ -147,10 +120,9 @@ func buildStatus(t *testing.T, name string) dockerBuildStatus {
 	return st
 }
 
-// readyCondition returns the Ready condition, or nil. It returns the condition rather than a bool
-// because every caller wants the reason and message when it is not what they expected — which is
-// why a bool-returning version kept being bypassed.
-func readyCondition(st dockerBuildStatus) *statusCondition {
+// readyCondition returns the Ready condition, or nil. A condition rather than a bool, because
+// callers report its reason and message.
+func readyCondition(st imageBuildStatus) *statusCondition {
 	for i := range st.Conditions {
 		if st.Conditions[i].Type == "Ready" {
 			return &st.Conditions[i]
@@ -159,57 +131,28 @@ func readyCondition(st dockerBuildStatus) *statusCondition {
 	return nil
 }
 
-// applyBuild creates an ImageBuild. extraSpec is appended verbatim under spec, already indented
-// two spaces, for the fields only one test needs.
+// applyBuild creates an ImageBuild pushing <buildRegistry>/e2e/<name>:v1. extraSpec is appended
+// verbatim under spec, already indented.
 func applyBuild(t *testing.T, name, dockerfile string, extraSpec ...string) {
 	t.Helper()
-	applyStdin(t, fmt.Sprintf(`
-apiVersion: oci.lhns.de/v1alpha1
-kind: ImageBuild
-metadata:
-  name: %s
-  namespace: %s
-spec:
-  interval: 1h
-  context:
-    sourceRef:
-      kind: GitRepository
-      name: e2e-src
-  dockerfile: {path: %s}
-  platforms: [linux/amd64]
-  timeout: 10m
-  push:
-    repository: %s/e2e/%s
-    tags: [v1]
-%s
-`, name, buildNamespace, dockerfile, buildRegistry, name, strings.Join(extraSpec, "\n")))
-	t.Cleanup(func() {
-		_, _ = kubectl(t, "-n", buildNamespace, "delete", "imagebuild", name, "--ignore-not-found")
-	})
+	applyBuildToTagged(t, name, dockerfile, buildRegistry+"/e2e/"+name, "[v1]", extraSpec...)
 }
 
-// applyBuildTo is applyBuild with the push target chosen, so two objects can be pointed at one
-// repository -- which is the only way to produce a real tag conflict.
+// applyBuildTo is applyBuild with the repository chosen, so two objects can share one -- the only
+// way to produce a real tag conflict.
 func applyBuildTo(t *testing.T, name, dockerfile, repository string, extraSpec ...string) {
 	t.Helper()
 	applyBuildToTagged(t, name, dockerfile, repository, "[v1]", extraSpec...)
 }
 
-// applyBuildToUntagged publishes BY DIGEST ONLY: push.tags is empty, so nothing ever names the
-// manifest.
-//
-// That is a supported publishing mode (Push.Tags: "Empty pushes by digest only") and it is what
-// ADR 0010 tells users to consume, but for the retention tests it is more than a convenience: it
-// is the only way to obtain an untagged manifest a registry will still reason about. See the note
-// in retention_test.go on why a manifest that was untagged by DELETING its tag is not the same
-// thing.
+// applyBuildToUntagged publishes BY DIGEST ONLY (push.tags: []), the mode ADR 0010 tells users to
+// consume. The controller still names it after its own digest (ADR 0060).
 func applyBuildToUntagged(t *testing.T, name, dockerfile, repository string, extraSpec ...string) {
 	t.Helper()
 	applyBuildToTagged(t, name, dockerfile, repository, "[]", extraSpec...)
 }
 
-// applyBuildToTagged is the shared body: tags is a YAML list literal, so a caller can ask for no
-// tags at all.
+// applyBuildToTagged is the shared body; tags is a YAML list literal.
 func applyBuildToTagged(t *testing.T, name, dockerfile, repository, tags string, extraSpec ...string) {
 	t.Helper()
 	applyStdin(t, fmt.Sprintf(`
@@ -237,10 +180,8 @@ spec:
 	})
 }
 
-// TestImageBuildProducesAnImage is the whole point of the kind.
-//
-// It proves the three things only a cluster can: rootless BuildKit runs, the built digest makes it
-// back through the pod's termination message, and the image is actually in the registry afterwards.
+// TestImageBuildProducesAnImage -- rootless BuildKit runs, the digest comes back through the
+// termination message, and the registry really serves a manifest at that digest.
 func TestImageBuildProducesAnImage(t *testing.T) {
 	applyBuild(t, "e2e-build", "Dockerfile")
 
@@ -266,93 +207,19 @@ func TestImageBuildProducesAnImage(t *testing.T) {
 		t.Error("no input hash recorded, so the short-circuit has nothing to compare")
 	}
 
-	// The digest must name something the registry actually has. This is what proves the push
-	// happened rather than the controller merely believing it did.
-	manifest := curlInCluster(t, "verify-digest",
+	// Proves the push happened, not merely that the controller believes it did.
+	manifest := fetchInCluster(t, "verify-digest",
 		fmt.Sprintf("http://%s/v2/e2e/e2e-build/manifests/%s", buildRegistry, st.Artifact.Digest))
 	if !strings.Contains(manifest, "layers") {
-		tags := curlInCluster(t, "verify-tags",
+		tags := fetchInCluster(t, "verify-tags",
 			fmt.Sprintf("http://%s/v2/e2e/e2e-build/tags/list", buildRegistry))
 		t.Fatalf("the registry does not serve a manifest at the recorded digest %s\n"+
 			"response:\n%s\ntags the registry does have:\n%s", st.Artifact.Digest, manifest, tags)
 	}
 }
 
-// curlInCluster fetches a URL from inside the cluster and returns the body.
-//
-// Deliberately not `kubectl run --rm -i`, which attaches AFTER creating the pod: a container that
-// makes one request and exits finishes before the attach lands, so kubectl returns success with no
-// output and the assertion reads it as an empty response. Creating the pod, waiting for it to
-// finish and then reading its log has no such race.
-//
-// The request asks for every media type containerd would. Builds now push OCI types explicitly
-// (see buildctlArgs), but a registry may still hold Docker-typed manifests pushed by anything else,
-// and narrowing the Accept header would fail on a manifest that is perfectly correct.
-func curlInCluster(t *testing.T, name, url string) string {
-	t.Helper()
-
-	const accept = "application/vnd.oci.image.manifest.v1+json," +
-		"application/vnd.oci.image.index.v1+json," +
-		"application/vnd.docker.distribution.manifest.v2+json," +
-		"application/vnd.docker.distribution.manifest.list.v2+json,*/*"
-
-	_, _ = kubectl(t, "-n", buildNamespace, "delete", "pod", name, "--ignore-not-found")
-	mustKubectl(t, "-n", buildNamespace, "run", name,
-		"--restart=Never", "--image=busybox:1.37", "--command", "--",
-		"wget", "-qO-", "--header", "Accept: "+accept, url)
-	t.Cleanup(func() {
-		_, _ = kubectl(t, "-n", buildNamespace, "delete", "pod", name, "--ignore-not-found")
-	})
-
-	// Succeeded or Failed: a non-200 leaves wget's exit code behind and an empty log, and the
-	// caller's assertion reports that better than a timeout here would.
-	for _, cond := range []string{"Succeeded", "Failed"} {
-		if _, err := kubectl(t, "-n", buildNamespace, "wait", "--for=jsonpath={.status.phase}="+cond,
-			"pod/"+name, "--timeout=90s"); err == nil {
-			break
-		}
-	}
-	out, _ := kubectl(t, "-n", buildNamespace, "logs", name)
-	return out
-}
-
-// curlHeaders fetches only the response headers from inside the cluster.
-//
-// Same create/wait/logs shape as curlInCluster, and for the same reason: `kubectl run --rm -i`
-// attaches after the pod is created, so a container that makes one request and exits finishes
-// before the attach lands and the output is lost.
-//
-// `wget -S --spider` sends a HEAD and prints the headers on stderr, which is where the digest a
-// registry reports for a tag lives.
-func curlHeaders(t *testing.T, name, url string) string {
-	t.Helper()
-
-	const accept = "application/vnd.oci.image.manifest.v1+json," +
-		"application/vnd.oci.image.index.v1+json," +
-		"application/vnd.docker.distribution.manifest.v2+json," +
-		"application/vnd.docker.distribution.manifest.list.v2+json,*/*"
-
-	_, _ = kubectl(t, "-n", buildNamespace, "delete", "pod", name, "--ignore-not-found")
-	mustKubectl(t, "-n", buildNamespace, "run", name,
-		"--restart=Never", "--image=busybox:1.37", "--command", "--",
-		"wget", "-S", "--spider", "--header", "Accept: "+accept, url)
-	t.Cleanup(func() {
-		_, _ = kubectl(t, "-n", buildNamespace, "delete", "pod", name, "--ignore-not-found")
-	})
-
-	for _, cond := range []string{"Succeeded", "Failed"} {
-		if _, err := kubectl(t, "-n", buildNamespace, "wait", "--for=jsonpath={.status.phase}="+cond,
-			"pod/"+name, "--timeout=90s"); err == nil {
-			break
-		}
-	}
-	out, _ := kubectl(t, "-n", buildNamespace, "logs", name)
-	return out
-}
-
-// TestImageBuildIsIdempotent — the input hash is the whole cost model. A second reconcile of an
-// unchanged object must not build again, which is visible as the digest and hash both holding still
-// while no new Job appears.
+// TestImageBuildIsIdempotent -- the input hash is the cost model: reconciling an unchanged object
+// must not build again (same hash, same digest, no new Job).
 func TestImageBuildIsIdempotent(t *testing.T) {
 	applyBuild(t, "e2e-idempotent", "Dockerfile")
 
@@ -366,9 +233,8 @@ func TestImageBuildIsIdempotent(t *testing.T) {
 	first := buildStatus(t, "e2e-idempotent")
 	jobsBefore := jobsFor(t, "e2e-idempotent")
 
-	// Force a reconcile without changing an input, then wait for the controller to say it handled
-	// THAT request rather than sleeping and hoping. A fixed sleep would pass even if the
-	// short-circuit had regressed and a rebuild simply had not started yet.
+	// Wait for the controller to acknowledge THIS reconcile request rather than sleeping: a sleep
+	// would pass while a regressed rebuild simply had not started yet.
 	requested := fmt.Sprintf("%d", time.Now().Unix())
 	mustKubectl(t, "-n", buildNamespace, "annotate", "imagebuild", "e2e-idempotent",
 		"reconcile.fluxcd.io/requestedAt="+requested, "--overwrite")
@@ -394,8 +260,7 @@ func TestImageBuildIsIdempotent(t *testing.T) {
 	}
 }
 
-// jobsFor returns the Jobs belonging to one build. Scoped by name because the Job name is derived
-// from the object's, so a namespace-wide count would be coupled to what neighbouring tests leave.
+// jobsFor returns one build's Jobs (named after the object), so neighbouring tests do not count.
 func jobsFor(t *testing.T, name string) []string {
 	t.Helper()
 	all := mustKubectl(t, "-n", buildNamespace, "get", "jobs", "-o", "jsonpath={.items[*].metadata.name}")
@@ -408,9 +273,8 @@ func jobsFor(t *testing.T, name string) []string {
 	return mine
 }
 
-// TestImageBuildRefusesAnUnpinnedFrom — the one rule the controller enforces on a Dockerfile's
-// CONTENT, and the reason it is enforced before a Job exists: an unpinned base means an unchanged
-// spec can silently build on something else.
+// TestImageBuildRefusesAnUnpinnedFrom -- an unpinned base lets an unchanged spec build on something
+// else, so it is refused before any Job exists.
 func TestImageBuildRefusesAnUnpinnedFrom(t *testing.T) {
 	applyBuild(t, "e2e-unpinned", "Dockerfile.unpinned")
 
@@ -426,7 +290,6 @@ func TestImageBuildRefusesAnUnpinnedFrom(t *testing.T) {
 		return fmt.Errorf("not refused yet: %+v", st.Conditions)
 	})
 
-	// And no Job may exist for it — the check has to happen before anything executes.
 	jobs := mustKubectl(t, "-n", buildNamespace, "get", "jobs",
 		"-o", "jsonpath={.items[*].metadata.name}")
 	if strings.Contains(jobs, "e2e-unpinned") {
@@ -434,14 +297,12 @@ func TestImageBuildRefusesAnUnpinnedFrom(t *testing.T) {
 	}
 }
 
-// TestRebuildingTheSameContextReproducesTheDigest answers ADR 0025's first spike question: does
-// SOURCE_DATE_EPOCH=0 plus rewrite-timestamp=true give byte-identical output across two runs of the
-// same context? See 0025 and 0027 for what each answer costs.
+// TestRebuildingTheSameContextReproducesTheDigest answers ADR 0025's first spike question: do
+// SOURCE_DATE_EPOCH=0 and rewrite-timestamp=true give byte-identical output (see also ADR 0027)?
 //
-// Two things keep it from passing vacuously. Two objects rather than one deleted and recreated,
-// because the Job name is derived from the inputs and a recreated object would ADOPT the first
-// build's finished Job and read its digest back without building. And the cache disabled on both,
-// or the second digest would match by reuse rather than by reproducibility.
+// Two objects rather than one recreated, because a recreated object would adopt the first build's
+// finished Job (its name derives from the inputs); and the cache is disabled, or the digests would
+// match by reuse rather than reproducibility.
 func TestRebuildingTheSameContextReproducesTheDigest(t *testing.T) {
 	const noCache = "  cache:\n    mode: Disabled"
 
@@ -464,8 +325,7 @@ func TestRebuildingTheSameContextReproducesTheDigest(t *testing.T) {
 		t.Fatalf("a build produced no digest: %q and %q", a, b)
 	}
 	if a != b {
-		// Not a flake to retry. This is 0025's concession reproducing, and the ADR asks that it be
-		// recorded rather than smoothed over: an unchanged spec can produce two different images.
+		// Not a flake: ADR 0025 asks that this be recorded rather than smoothed over.
 		t.Fatalf("two builds of an identical context produced different digests:\n  %s\n  %s\n"+
 			"status.inputHash therefore identifies the inputs and not the output, so a rebuild "+
 			"after losing status or the store can permanently conflict with an already-published "+
@@ -473,16 +333,12 @@ func TestRebuildingTheSameContextReproducesTheDigest(t *testing.T) {
 	}
 }
 
-// The tag-conflict policy, end to end and against a real registry.
-//
-// This is the assertion that could not have existed before ADR 0029: `push.immutable` was in this
-// kind's CRD from the day it shipped and nothing read it, so BuildKit overwrote whatever the tag
-// held. Two objects are pointed at one repository, which is the only way to produce a genuine
-// conflict, and each policy is then checked against what the registry actually serves.
+// TestImageBuildTagConflictPolicy checks each onConflict policy (ADR 0029) against what the
+// registry actually serves, with two objects pointed at one repository and tag.
 func TestImageBuildTagConflictPolicy(t *testing.T) {
 	repo := fmt.Sprintf("%s/e2e/e2e-conflict", buildRegistry)
 
-	// The incumbent. Its digest is what every assertion below compares against.
+	// The incumbent; every assertion compares against its digest.
 	applyBuildTo(t, "e2e-conflict-first", "Dockerfile", repo)
 	buildEventually(t, "the first build to publish", func() error {
 		st := buildStatus(t, "e2e-conflict-first")
@@ -493,8 +349,7 @@ func TestImageBuildTagConflictPolicy(t *testing.T) {
 	})
 	original := buildStatus(t, "e2e-conflict-first").Artifact.Digest
 
-	// A second object, different content, same tag. Under the default it must refuse -- and it must
-	// refuse without ever creating a Job, because a push from inside one cannot be undone.
+	// Different content, same tag, default policy: refused, without a Job (a push cannot be undone).
 	applyBuildTo(t, "e2e-conflict-fail", "Dockerfile.other", repo)
 	buildEventuallyWithin(t, refusalTimeout, "the conflicting build to be refused", func() error {
 		st := buildStatus(t, "e2e-conflict-fail")
@@ -513,8 +368,7 @@ func TestImageBuildTagConflictPolicy(t *testing.T) {
 			got, original)
 	}
 
-	// Keep leaves the tag alone, runs no build, reports Ready -- and records the divergence, which
-	// is the only thing separating this from a silent one.
+	// Keep: tag untouched, no build, Ready -- and the divergence recorded in status.
 	applyBuildTo(t, "e2e-conflict-keep", "Dockerfile.other", repo, "    onConflict: Keep")
 	buildEventuallyWithin(t, refusalTimeout, "the kept build to report Ready", func() error {
 		st := buildStatus(t, "e2e-conflict-keep")
@@ -536,7 +390,7 @@ func TestImageBuildTagConflictPolicy(t *testing.T) {
 		t.Errorf("Keep moved the tag to %s; it must be left at %s", got, original)
 	}
 
-	// And Overwrite really does move it, or the whole enum would be one behaviour with three names.
+	// Overwrite really moves it.
 	applyBuildTo(t, "e2e-conflict-overwrite", "Dockerfile.other", repo, "    onConflict: Overwrite")
 	buildEventually(t, "the overwriting build to publish", func() error {
 		st := buildStatus(t, "e2e-conflict-overwrite")
@@ -555,14 +409,11 @@ func TestImageBuildTagConflictPolicy(t *testing.T) {
 	}
 }
 
-// tagDigest asks the registry what a tag resolves to, from inside the cluster.
-//
-// Reads the Docker-Content-Digest header rather than hashing the body, because the body a registry
-// returns depends on the media types requested and hashing the wrong representation would compare
-// two different digests of the same image.
+// tagDigest asks the registry what a tag resolves to. It reads Docker-Content-Digest rather than
+// hashing the body, whose representation depends on the Accept header.
 func tagDigest(t *testing.T, repository, tag string) string {
 	t.Helper()
-	out := curlHeaders(t, "tag-digest",
+	out := headersInCluster(t, "tag-digest",
 		fmt.Sprintf("http://%s/v2/%s/manifests/%s", buildRegistry, repository, tag))
 	for _, line := range strings.Split(out, "\n") {
 		k, v, ok := strings.Cut(line, ":")

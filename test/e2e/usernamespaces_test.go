@@ -8,33 +8,18 @@ import (
 	"time"
 )
 
-// TestUserNamespacesOnThisCluster measures threat-model gap E1 rather than arguing about it.
+// TestUserNamespacesOnThisCluster measures threat-model gap E1: whether `hostUsers: false` works
+// here, which would remove the privilege escalation rootless BuildKit needs (ADR 0027).
 //
-// Build pods run rootless BuildKit with allowPrivilegeEscalation, SETUID/SETGID and seccomp
-// unconfined -- all four measured as necessary (ADR 0027), and all four widening the kernel surface
-// reachable from code that came out of a git repository. `hostUsers: false` would remove the need
-// for the escalation entirely by mapping the container's root to an unprivileged host uid.
-//
-// ADR 0027 recorded it as the destination and reported it not running on the cluster of the day.
-// That measurement is now old: user namespaces went beta in 1.30 and this suite runs on 1.36. So
-// this re-measures instead of citing.
-//
-// It does NOT fail when the feature is unavailable. A test that fails on an upstream capability
-// this project cannot provide would be turned off, and the answer -- either way -- is what the
-// threat model needs. It fails only when the probe itself is wrong, which has already happened
-// twice: see the comments below, both of which are there because the probe reported something it
-// had not measured.
+// It SKIPs when the feature is unavailable -- the answer either way is the measurement -- and fails
+// only when the probe itself is broken or the setting is silently ignored.
 func TestUserNamespacesOnThisCluster(t *testing.T) {
-	// Parallel: it SKIPs on most clusters after ~90s of probing, sequentially, while the
-	// parallel group waits on it. Nothing here shares state.
+	// Parallel: it can spend ~90s probing, and shares no state.
 	t.Parallel()
 
 	const pod = "userns-probe"
 
-	// Its OWN namespace. The first version borrowed the image-volume test's, which by then had
-	// been deleted -- so the probe reported "the cluster refused hostUsers: false" when what the
-	// cluster had actually said was "no such namespace". A probe that can report the wrong answer
-	// is worse than no probe.
+	// Its OWN namespace, so a missing namespace cannot masquerade as a refused hostUsers.
 	ns := namespace + "-userns"
 	_, _ = kubectl(t, "create", "namespace", ns)
 	t.Cleanup(func() { _, _ = kubectl(t, "delete", "namespace", ns, "--wait=false") })
@@ -61,8 +46,7 @@ spec:
           echo USERNS_PROBE_DONE
 `)
 	if err != nil {
-		// Only a rejection that MENTIONS the field is evidence about the field. Anything else is
-		// the probe being broken, and must fail rather than quietly become a measurement.
+		// Only a rejection mentioning the field is evidence about it; anything else is a broken probe.
 		if !strings.Contains(strings.ToLower(out), "hostuser") {
 			t.Fatalf("the probe could not be applied, and not because of hostUsers: %s", strings.TrimSpace(out))
 		}
@@ -70,9 +54,7 @@ spec:
 		t.Skip("user namespaces unavailable on this cluster; E1 stands as recorded in ADR 0027")
 	}
 
-	// A short deadline on purpose. If the node cannot run this pod it sits Pending indefinitely,
-	// and that IS the measurement -- spending the suite's full five-minute timeout to learn it
-	// would add five minutes to every run for an answer available in one.
+	// Short on purpose: a node that cannot run this pod leaves it Pending, and that IS the answer.
 	const settle = 90 * time.Second
 	var phase string
 	deadline := time.Now().Add(settle)
@@ -87,9 +69,6 @@ spec:
 		time.Sleep(interval)
 	}
 
-	// Plain -o wide rather than a jsonpath range. The jsonpath this started with was copied from
-	// another file and mangled in transit, and an unterminated-quote error from kubectl replaced
-	// the diagnostic it was supposed to produce.
 	events, _ := kubectl(t, "-n", ns, "get", "events", "--field-selector", "involvedObject.name="+pod)
 
 	if phase != "Succeeded" && phase != "Failed" {
@@ -106,8 +85,7 @@ spec:
 		t.Skip("the probe did not complete; E1 stands as recorded in ADR 0027")
 	}
 
-	// It ran. Now check it actually got a namespace rather than the identity map, because a
-	// silently-ignored hostUsers would be the worst outcome: it reads as mitigated and is not.
+	// It ran: the identity map would mean hostUsers was silently ignored -- mitigated on paper only.
 	if strings.Contains(uidMap, "0          0 4294967295") || strings.Contains(uidMap, "0 0 4294967295") {
 		t.Fatalf("hostUsers: false was accepted and IGNORED -- uid_map is the identity map:\n%s", uidMap)
 	}

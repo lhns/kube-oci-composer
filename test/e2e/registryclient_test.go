@@ -2,16 +2,12 @@
 
 // Talking to the in-cluster registry from a test.
 //
-// One long-lived pod with curl in it, driven by `kubectl exec`, rather than a pod per request. The
-// retention tests poll for over a minute, so a pod per request would mean dozens of pod creations
-// and image pulls — minutes of wall clock spent on scheduling rather than on what is being measured.
-//
-// It also sidesteps the attach race that curlInCluster documents: there is nothing to attach to,
-// because the pod is already running and exec returns the command's own output.
+// registryRequest drives one long-lived curl pod with `kubectl exec`: the retention tests poll for
+// minutes, and a pod per request would spend that time scheduling. wgetInCluster runs a pod per
+// request for the few one-off checks.
 package e2e
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 )
@@ -22,10 +18,15 @@ const curlImage = "curlimages/curl:8.19.0@sha256:" +
 
 const curlPod = "e2e-curl"
 
-// ensureCurlPod starts the helper pod once per suite run and leaves it up.
-//
-// Deliberately NOT cleaned up between tests: the whole point is that it outlives them. up.sh's
-// namespace goes with the cluster, which is what removes it.
+// manifestAccept lists every manifest type containerd asks for, so a correct manifest of any of
+// them is served.
+const manifestAccept = "application/vnd.oci.image.manifest.v1+json," +
+	"application/vnd.oci.image.index.v1+json," +
+	"application/vnd.docker.distribution.manifest.v2+json," +
+	"application/vnd.docker.distribution.manifest.list.v2+json,*/*"
+
+// ensureCurlPod starts the helper pod once per suite run. It is deliberately left running between
+// tests; the cluster's teardown removes it.
 func ensureCurlPod(t *testing.T) {
 	t.Helper()
 
@@ -42,25 +43,16 @@ func ensureCurlPod(t *testing.T) {
 }
 
 // registryRequest performs one HTTP request against the in-cluster registry and returns the
-// response headers followed by the body.
+// response headers (for the status line and Docker-Content-Digest) followed by the body.
 //
-// Headers are included (`curl -i`) because the assertions need both the status line and
-// Docker-Content-Digest, and a registry reports a manifest's identity in a header rather than in
-// what it sends back.
-//
-// A non-2xx is NOT an error here. "Does this manifest still exist?" is a question whose answer is
-// often 404, and turning that into a test failure would make the negative controls impossible to
-// write.
-func registryRequest(t *testing.T, _, method, path, body, contentType string) string {
+// A non-2xx is NOT an error: "does this still exist?" is often answered 404, and the negative
+// controls depend on asking it.
+func registryRequest(t *testing.T, method, path, body, contentType string) string {
 	t.Helper()
 	ensureCurlPod(t)
 
-	// HEAD goes through curl's own --head, NOT `-X HEAD`.
-	//
-	// `-X HEAD` sends the right method and then waits for a body that a HEAD response never has:
-	// zot sets Content-Length to the manifest's length on HEAD, so curl blocks until it gives up,
-	// and the exec hangs for its whole timeout. `-I` tells curl the response is headers-only. It
-	// also implies -i, so the status line is still in the output the callers match on.
+	// HEAD uses curl's --head (-I), NOT `-X HEAD`: with -X curl waits for the body that zot's
+	// Content-Length announces and never sends, and the exec hangs. -I implies -i.
 	method = strings.ToUpper(method)
 	verb := []string{"-i", "-X", method}
 	if method == "HEAD" {
@@ -69,11 +61,7 @@ func registryRequest(t *testing.T, _, method, path, body, contentType string) st
 
 	args := []string{"-n", buildNamespace, "exec", curlPod, "--", "curl", "-s"}
 	args = append(args, verb...)
-	args = append(args,
-		"-H", "Accept: application/vnd.oci.image.manifest.v1+json,"+
-			"application/vnd.oci.image.index.v1+json,"+
-			"application/vnd.docker.distribution.manifest.v2+json,"+
-			"application/vnd.docker.distribution.manifest.list.v2+json,*/*")
+	args = append(args, "-H", "Accept: "+manifestAccept)
 	if contentType != "" {
 		args = append(args, "-H", contentType)
 	}
@@ -86,12 +74,43 @@ func registryRequest(t *testing.T, _, method, path, body, contentType string) st
 	return out
 }
 
-// shortName builds a readable label for a request. Kept because callers pass one and it makes a
-// failing exec traceable to the call that made it.
-func shortName(repository, tag string) string {
-	repo := repository
-	if i := strings.LastIndex(repo, "/"); i >= 0 {
-		repo = repo[i+1:]
+// wgetInCluster runs `wget <flags> <url>` once in a fresh busybox pod and returns its log.
+//
+// Not `kubectl run --rm -i`, which attaches after the pod starts: a one-request container can exit
+// first and the output is lost. Create, wait, then read the log instead. A failed request is
+// returned like any other; the caller's assertion reports it better than a timeout would.
+func wgetInCluster(t *testing.T, name, url string, flags ...string) string {
+	t.Helper()
+
+	args := []string{"-n", buildNamespace, "run", name,
+		"--restart=Never", "--image=busybox:1.37", "--command", "--", "wget"}
+	args = append(args, flags...)
+	args = append(args, "--header", "Accept: "+manifestAccept, url)
+
+	_, _ = kubectl(t, "-n", buildNamespace, "delete", "pod", name, "--ignore-not-found")
+	mustKubectl(t, args...)
+	t.Cleanup(func() {
+		_, _ = kubectl(t, "-n", buildNamespace, "delete", "pod", name, "--ignore-not-found")
+	})
+
+	for _, cond := range []string{"Succeeded", "Failed"} {
+		if _, err := kubectl(t, "-n", buildNamespace, "wait", "--for=jsonpath={.status.phase}="+cond,
+			"pod/"+name, "--timeout=90s"); err == nil {
+			break
+		}
 	}
-	return fmt.Sprintf("%s-%s", repo, tag)
+	out, _ := kubectl(t, "-n", buildNamespace, "logs", name)
+	return out
+}
+
+// fetchInCluster returns the body at url, fetched from inside the cluster.
+func fetchInCluster(t *testing.T, name, url string) string {
+	t.Helper()
+	return wgetInCluster(t, name, url, "-qO-")
+}
+
+// headersInCluster returns only the response headers (a HEAD via `wget -S --spider`).
+func headersInCluster(t *testing.T, name, url string) string {
+	t.Helper()
+	return wgetInCluster(t, name, url, "-S", "--spider")
 }

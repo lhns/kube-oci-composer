@@ -1,7 +1,7 @@
 {{- if .Values.imageBuild.enabled }}
 {{/*
-Kept deliberately readable. This role is the difference between this component and the composer,
-whose role can create only the ConfigMap push.writeRefTo exports — so it is worth being able to read in one screen.
+Kept readable on one screen: this role (it can create Jobs) is what separates the builder from the
+composer.
 */}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -13,46 +13,31 @@ rules:
   - apiGroups: [oci.lhns.de]
     resources: [imagebuilds]
     verbs: [get, list, watch]
-  # Finalizer, so an ImageBuild exporting a reference into ANOTHER namespace can delete the
-  # ConfigMap on its way out. Nothing else it creates needs this -- its Secrets belong to its Job
-  # and the Job belongs to the object, and an export into the object's own namespace is likewise
-  # owner-referenced. Only a cross-namespace one cannot be. ADR 0056.
+  # Finalizer, only for deleting a ConfigMap exported into ANOTHER namespace, which cannot be
+  # owner-referenced. ADR 0056.
   - apiGroups: [oci.lhns.de]
     resources: [imagebuilds/finalizers]
     verbs: [update]
   - apiGroups: [oci.lhns.de]
     resources: [imagebuilds/status]
     verbs: [get, update, patch]
-  # Creating Jobs is the ability to run arbitrary containers. This is the permission that makes
-  # this a separate component rather than a flag on the composer.
+  # Creating Jobs is running arbitrary containers: the reason this is a separate component.
   - apiGroups: [batch]
     resources: [jobs]
     verbs: [get, list, watch, create, delete]
   - apiGroups: [""]
     resources: [pods]
     verbs: [get, list, watch]
-  # get, create and update -- but NOT list or watch, which is the part that matters. This controller
-  # can only touch Secrets whose names it already knows; it cannot enumerate a namespace's.
-  #
-  # create and update exist for one thing: a short-lived copy of the operator's registry credential
-  # in the namespace a build runs in. A pod can only mount Secrets from its own namespace, and the
-  # build must run in the object's -- it mounts that namespace's build secrets and runs its code.
-  # The copy is owned by the ImageBuild and goes with it.
+  # No list or watch: only Secrets whose names it already knows. create/update are for a copy of
+  # the operator's registry credential in the build's namespace (a pod mounts Secrets only from its
+  # own); the copy is owned by the ImageBuild.
   - apiGroups: [""]
     resources: [secrets]
     verbs: [get, create, update]
-  # ConfigMaps ARE cached and watched, unlike Secrets, because a Dockerfile can live in one
-  # (spec.dockerfile.configMapRef) and an edit has to rebuild promptly rather than at the next
-  # interval -- an hour by default, which reads as the controller being broken. That costs an
-  # informer over every ConfigMap in the cluster; the composer already pays it for configMap layers.
-  #
-  # The write verbs are push.writeRefTo's, and they are cluster-wide because RBAC is granted before
-  # an object exists: permitting an export into whatever namespace its object lives in means
-  # permitting it everywhere. So THE CONTROLLER is the boundary, not this rule -- it writes only to
-  # the object's own namespace or one named in --ref-export-namespaces, and deletes only a
-  # ConfigMap carrying its own managed-by and owner labels. ADR 0056 says what that costs.
-  #
-  # No deletecollection, ever: nothing here removes ConfigMaps in bulk.
+  # Watched, so an edit to a spec.dockerfile.configMapRef rebuilds promptly. The write verbs are
+  # push.writeRefTo's and cluster-wide because RBAC precedes the object; the controller is the
+  # boundary (own namespace or --ref-export-namespaces, deletes only its own labelled ConfigMaps).
+  # ADR 0056. No deletecollection.
   - apiGroups: [""]
     resources: [configmaps]
     verbs: [get, list, watch, create, update, delete]
