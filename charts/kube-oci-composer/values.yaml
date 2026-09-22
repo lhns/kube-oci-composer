@@ -383,9 +383,9 @@ registry:
     # references. So with this on, every retired image stays on disk. Off, it is reclaimed gcDelay
     # after its last tag expires.
     #
-    # Off by default since the release after the digest tag arrived, which is what gave every object
-    # a release to reconcile and be backfilled first. Upgrading straight past that release skips
-    # the backfill: set this true for one upgrade, let every object reconcile, then drop it.
+    # Off by default. Upgrading from 0.5.x or earlier, set this true for the upgrade, wait until every
+    # object has reconciled (status.artifact.tags then includes a digest- tag), and remove it: content
+    # published before the digest tag existed is untagged until then, and off would collect it by age.
     #
     # Content attached by hand (cosign attest, oras attach) is untagged and is reclaimed by age with
     # this off. Setting it true protects that again, at the cost above.
