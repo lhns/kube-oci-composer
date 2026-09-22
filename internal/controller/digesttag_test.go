@@ -13,12 +13,8 @@ import (
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 )
 
-// A composition published before ADR 0060 must gain its digest's own tag on the cheap path --
-// without being reassembled to get it.
-//
-// Reassembly is the cost being avoided: it downloads every layer. The cheap path only checks the
-// digest's own tag once status claims it, so an object that predates the tag converges on its
-// spec's tags as before, and the tag is applied to what is already there.
+// A composition published before ADR 0060 must gain its digest's own tag without being reassembled
+// (which downloads every layer): the tag is applied to what is already published.
 func TestAConvergedCompositionGainsItsDigestsOwnTagWithoutRepublishing(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("backfill", urlLayer("core", url, digest, "/core"))
@@ -27,14 +23,13 @@ func TestAConvergedCompositionGainsItsDigestsOwnTagWithoutRepublishing(t *testin
 
 	art := build(t, r, obj, "first")
 
-	// Turn it into what an object published before the tag existed looks like: no digest tag in
-	// the registry, and none claimed in status.
+	// Simulate a pre-ADR-0060 object: no digest tag in the registry or in status.
 	own := recon.DigestTag(art.Digest)
 	deleteTag(t, repo, own)
 	obj.Status.Artifact.Tags = []string{repo + ":main"}
 	obj.Status.History[0].Tags = []string{"main"}
 
-	// And an older retained build, published before it too.
+	// Plus an older retained build, also untagged.
 	older := pushUntagged(t, repo)
 	obj.Status.History = append(obj.Status.History, ociv1alpha1.BuildRecord{Digest: older})
 
@@ -58,7 +53,7 @@ func TestAConvergedCompositionGainsItsDigestsOwnTagWithoutRepublishing(t *testin
 		}
 	}
 
-	// What Reconcile does with it, and then the next pass asks nothing further.
+	// Apply what Reconcile would; the next pass must then do nothing.
 	obj.Status.Artifact = res.Artifact
 	markDigestTagged(obj.Status.History, res.DigestTagged)
 	for _, rec := range obj.Status.History {
