@@ -99,7 +99,7 @@ data:
         "gc": true,
         "gcDelay": {{ include "kube-oci-composer.gcDelay" $ | quote }},
         "gcInterval": {{ include "kube-oci-composer.gcInterval" $ | quote }},
-        {{- with $.Values.registry.gcMaxSchedulerDelay }}
+        {{- with $.Values.registry.retention.gcMaxSchedulerDelay }}
         {{- /*
         How long a collection task may be held back before it runs. zot draws a fresh random delay
         up to this for EVERY repository's task, so a full pass over the registry takes roughly

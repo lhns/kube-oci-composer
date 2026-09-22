@@ -127,3 +127,22 @@ func TestTheRenderedConfigCarriesWhatTheE2EAssertsAgainst(t *testing.T) {
 			"governs the repository it is testing")
 	}
 }
+
+// The scheduler delay is set where values.yaml documents it -- registry.retention -- and reaches
+// the registry from there.
+//
+// It did not. The template read registry.gcMaxSchedulerDelay while values.yaml documented
+// registry.retention.gcMaxSchedulerDelay, so an operator setting the documented key got zot's
+// default, silently. The e2e passed only because up.sh set the undocumented one; nothing rendered
+// the documented path until this.
+func TestTheSchedulerDelayIsReadFromWhereItIsDocumented(t *testing.T) {
+	storage, _ := registryConfig(t, "--set", "registry.retention.gcMaxSchedulerDelay=1s")["storage"].(map[string]any)
+	if got, _ := storage["gcMaxSchedulerDelay"].(string); got != "1s" {
+		t.Errorf("registry.retention.gcMaxSchedulerDelay=1s rendered gcMaxSchedulerDelay=%q", got)
+	}
+	// And empty by default: the jitter exists for registries holding thousands of repositories.
+	storage, _ = registryConfig(t)["storage"].(map[string]any)
+	if _, present := storage["gcMaxSchedulerDelay"]; present {
+		t.Error("gcMaxSchedulerDelay is rendered by default; it is a test's setting")
+	}
+}

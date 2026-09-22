@@ -151,7 +151,7 @@ helm upgrade --install kube-oci-composer charts/kube-oci-composer \
   --set "retention.refreshFactor=$E2E_REFRESH_FACTOR" \
   --set "retention.refreshInterval=$E2E_REFRESH" \
   --set "registry.retention.gcFactor=$E2E_GC_FACTOR" \
-  --set "registry.gcMaxSchedulerDelay=$E2E_GC_MAX_SCHEDULER_DELAY" \
+  --set "registry.retention.gcMaxSchedulerDelay=$E2E_GC_MAX_SCHEDULER_DELAY" \
   --set "imageBuild.buildPollInterval=$E2E_BUILD_POLL" \
   --set registry.logLevel=debug \
   --wait --timeout 5m
