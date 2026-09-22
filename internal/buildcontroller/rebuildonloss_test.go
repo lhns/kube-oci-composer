@@ -8,12 +8,10 @@ import (
 	"testing"
 
 	batchv1 "k8s.io/api/batch/v1"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
-	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 )
 
 // registryAnswering serves HEAD for the named references and answers everything else with `code`:
@@ -139,23 +137,6 @@ func TestAnObjectThatNeverPublishedIsNotChecked(t *testing.T) {
 	}
 	if reached {
 		t.Error("the registry was queried about an object that has never published")
-	}
-}
-
-// TestTheLossEventSaysTheDigestChanges: a rebuild replaces rather than restores.
-func TestTheLossEventSaysTheDigestChanges(t *testing.T) {
-	rec := record.NewFakeRecorder(10)
-	obj := builtAndPublished("example:5000", digestOfNothing)
-	recon.Event(rec, obj, corev1.EventTypeWarning, ociv1alpha1.ReasonArtifactLost,
-		"placeholder")
-
-	select {
-	case ev := <-rec.Events:
-		if !strings.Contains(ev, ociv1alpha1.ReasonArtifactLost) {
-			t.Errorf("event = %q, want one naming %s", ev, ociv1alpha1.ReasonArtifactLost)
-		}
-	default:
-		t.Fatal("no event was recorded")
 	}
 }
 

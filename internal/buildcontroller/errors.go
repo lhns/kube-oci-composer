@@ -4,14 +4,11 @@
 package buildcontroller
 
 import (
+	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 	"time"
 )
 
 const (
-	// pendingRetryInterval matches the composer's: quick convergence for a dependency that is
-	// about to appear, without a hot loop.
-	pendingRetryInterval = 30 * time.Second
-
 	// defaultBuildPollInterval is how often a running Job is re-observed (the Job is also
 	// watched). It also bounds how long a pushed but untagged image is exposed to the registry's
 	// collector (ADR 0054); the chart derives gcDelay from it.
@@ -23,7 +20,7 @@ const (
 
 // failureBackoff returns how long to wait after n consecutive failures.
 func failureBackoff(n int32) time.Duration {
-	d := pendingRetryInterval
+	d := recon.PendingRetryInterval
 	for range n {
 		if d >= maxFailureBackoff {
 			break

@@ -63,8 +63,8 @@ func TestMissingSourceRequeuesWithoutStalling(t *testing.T) {
 		t.Fatalf("waiting on a dependency must not be returned to the queue as an error: %v", err)
 	}
 	// A fixed short retry, not exponential backoff, so a one-second race clears in seconds.
-	if res.RequeueAfter != pendingRetryInterval {
-		t.Fatalf("RequeueAfter %v, want %v", res.RequeueAfter, pendingRetryInterval)
+	if res.RequeueAfter != recon.PendingRetryInterval {
+		t.Fatalf("RequeueAfter %v, want %v", res.RequeueAfter, recon.PendingRetryInterval)
 	}
 
 	got := reload(t, r, obj)

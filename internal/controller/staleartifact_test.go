@@ -62,8 +62,8 @@ func TestStaleSourceArtifactIsNeverPublished(t *testing.T) {
 			"that tag can never be corrected", got.Status.Artifact.Ref)
 	}
 	// A short fixed retry, not the spec interval: the source is seconds from catching up.
-	if res.RequeueAfter != pendingRetryInterval {
-		t.Fatalf("RequeueAfter %v, want %v", res.RequeueAfter, pendingRetryInterval)
+	if res.RequeueAfter != recon.PendingRetryInterval {
+		t.Fatalf("RequeueAfter %v, want %v", res.RequeueAfter, recon.PendingRetryInterval)
 	}
 	if len(got.Status.History) != 0 {
 		t.Fatalf("recorded %d builds from a stale source, want none", len(got.Status.History))

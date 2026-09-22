@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -35,10 +34,6 @@ import (
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 	"github.com/lhns/kube-oci-composer/internal/retention"
 )
-
-// pendingRetryInterval is how often a composition waiting on a dependency re-checks: short enough
-// that a same-commit apply converges unnoticed, long enough not to be a hot loop.
-const pendingRetryInterval = 30 * time.Second
 
 // ImageCompositionReconciler assembles and publishes OCI artifacts.
 type ImageCompositionReconciler struct {
@@ -159,8 +154,8 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		// never Stalled, since the object that fixes it raises no event here.
 		if recon.IsPending(err) {
 			logger.Info("waiting on a dependency; will retry", "reason", err.Error(),
-				"retryIn", pendingRetryInterval)
-			return ctrl.Result{RequeueAfter: pendingRetryInterval},
+				"retryIn", recon.PendingRetryInterval)
+			return ctrl.Result{RequeueAfter: recon.PendingRetryInterval},
 				r.patchStatus(ctx, &obj, func(o *ociv1alpha1.ImageComposition) {
 					recon.SetCondition(o, ociv1alpha1.ReconcilingCondition, metav1.ConditionTrue,
 						ociv1alpha1.ReasonDependencyNotReady, err.Error())

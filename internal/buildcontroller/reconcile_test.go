@@ -25,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
+	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 )
 
 // The reconcile loop, against a fake client. CRD schema rules are covered by the envtest suite in
@@ -369,8 +370,8 @@ func TestMissingSourceIsPendingNotStalled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a missing source surfaced as an error: %v", err)
 	}
-	if res.RequeueAfter != pendingRetryInterval {
-		t.Errorf("requeue = %v, want %v", res.RequeueAfter, pendingRetryInterval)
+	if res.RequeueAfter != recon.PendingRetryInterval {
+		t.Errorf("requeue = %v, want %v", res.RequeueAfter, recon.PendingRetryInterval)
 	}
 	got := reload(t, r, obj)
 	if c := conditionOf(got, ociv1alpha1.StalledCondition); c != nil {

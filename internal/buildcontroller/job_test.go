@@ -8,6 +8,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
+	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 )
 
 // testHash stands in for an input hash wherever the value itself does not matter.
@@ -243,8 +244,8 @@ func TestSecretsAreMountedNotInlined(t *testing.T) {
 
 // TestFailureBackoffIsCapped, so a pushed fix is noticed promptly.
 func TestFailureBackoffIsCapped(t *testing.T) {
-	if got := failureBackoff(0); got != pendingRetryInterval {
-		t.Errorf("first retry is %v, want %v", got, pendingRetryInterval)
+	if got := failureBackoff(0); got != recon.PendingRetryInterval {
+		t.Errorf("first retry is %v, want %v", got, recon.PendingRetryInterval)
 	}
 	if failureBackoff(1) <= failureBackoff(0) {
 		t.Error("backoff does not grow")

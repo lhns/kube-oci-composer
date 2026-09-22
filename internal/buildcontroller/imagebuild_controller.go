@@ -138,7 +138,7 @@ func (r *ImageBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		recon.Event(r.Recorder, &obj, corev1.EventTypeWarning, ociv1alpha1.ReasonInvalidSpec, err.Error())
 		return ctrl.Result{}, nil
 	case recon.IsPending(err):
-		return ctrl.Result{RequeueAfter: pendingRetryInterval}, nil
+		return ctrl.Result{RequeueAfter: recon.PendingRetryInterval}, nil
 	default:
 		// Transient, including build failures. Capped backoff: the fix is usually an upstream push
 		// that only a retry will notice.

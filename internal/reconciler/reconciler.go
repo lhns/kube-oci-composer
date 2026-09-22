@@ -62,6 +62,10 @@ func IsPending(err error) bool {
 	return errors.As(err, &p)
 }
 
+// PendingRetryInterval is how often an object waiting on a dependency checks again. Short, because
+// the dependency is usually another object in the same commit, which raises no event here.
+const PendingRetryInterval = 30 * time.Second
+
 // Event records one, if a recorder was wired (nil is normal in tests). The message is truncated
 // because the API server rejects an over-long one outright, losing the event.
 func Event(rec record.EventRecorder, obj runtime.Object, eventType, reason, msg string) {
