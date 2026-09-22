@@ -13,8 +13,7 @@ import (
 	"github.com/ulikunitz/xz"
 )
 
-// tarFile is one entry to place in a fixture tar. Shared with the tar and zip tests, not only the
-// deb ones — a deb's payload is an ordinary tar, which is the whole reason this fixture generalises.
+// tarFile is one entry to place in a fixture tar. Shared with the tar, zip and image tests.
 type tarFile struct {
 	name string // verbatim, so a fixture can carry dpkg's "./" prefix or anything else
 	body string
@@ -52,8 +51,7 @@ func buildTar(t *testing.T, files []tarFile) []byte {
 	return buf.Bytes()
 }
 
-// compressData applies a data.tar suffix. No .bz2: the standard library decodes bzip2 but cannot
-// write it, which is why debDecompress's .bz2 branch has no test.
+// compressData applies a data.tar suffix. No .bz2: the standard library cannot write bzip2.
 func compressData(t *testing.T, raw []byte, suffix string) []byte {
 	t.Helper()
 	if suffix == "" {
@@ -98,8 +96,7 @@ func buildDeb(t *testing.T, suffix string, files []tarFile) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	buf.WriteString(arMagic)
-	// Deliberately odd-sized, so every test exercises the padding byte: get that wrong and every
-	// subsequent member header is off by one.
+	// Deliberately odd-sized, so every test exercises the padding byte.
 	arMember(&buf, "debian-binary", []byte("2.0\n"))
 	arMember(&buf, "control.tar"+suffix, compressData(t, buildTar(t, []tarFile{
 		{name: "./control", body: "Package: fixture\n"},
@@ -117,8 +114,8 @@ func byName(entries []tarEntry) map[string]tarEntry {
 	return out
 }
 
-// TestExtractDebTakesOnlyTheDataMember — control.tar is a tar as well, so reading the wrong
-// member yields a plausible-looking layer full of packaging metadata rather than an error.
+// TestExtractDebTakesOnlyTheDataMember: control.tar is a tar too, so the wrong member would still
+// look plausible.
 func TestExtractDebTakesOnlyTheDataMember(t *testing.T) {
 	deb := buildDeb(t, ".xz", []tarFile{{name: "./usr/bin/tool", body: "payload"}})
 
@@ -137,8 +134,7 @@ func TestExtractDebTakesOnlyTheDataMember(t *testing.T) {
 	}
 }
 
-// TestExtractDebEveryCompression — dpkg picks the compressor, so a caller cannot know which to
-// expect and all of them have to work.
+// TestExtractDebEveryCompression: dpkg picks the compressor, so all of them have to work.
 func TestExtractDebEveryCompression(t *testing.T) {
 	for _, suffix := range []string{"", ".gz", ".xz", ".zst"} {
 		t.Run("data.tar"+suffix, func(t *testing.T) {
@@ -154,9 +150,8 @@ func TestExtractDebEveryCompression(t *testing.T) {
 	}
 }
 
-// TestExtractDebPreservesRelativeSymlinks — the case this feature was added for. Debian ships a
-// native library as a real file plus a symlink under a versioned directory, and the symlink is
-// relative. Flattening it to a copy, or dropping it, breaks the consumer's lookup path.
+// TestExtractDebPreservesRelativeSymlinks: Debian ships native libraries as a file plus a relative
+// symlink, which must survive as a symlink.
 func TestExtractDebPreservesRelativeSymlinks(t *testing.T) {
 	deb := buildDeb(t, ".xz", []tarFile{
 		{name: "./usr/lib/x86_64-linux-gnu/liblua5.4-ldap.so.0.0.0", body: "ELF"},
@@ -176,15 +171,13 @@ func TestExtractDebPreservesRelativeSymlinks(t *testing.T) {
 	if !ok {
 		t.Fatalf("symlink missing, got %v", entries)
 	}
-	// Unchanged means still relative, which is what makes it resolve inside the artifact once
-	// subpath has stripped the shared prefix off both ends.
+	// Still relative, so it resolves inside the artifact after subpath stripping.
 	if e.link != "../../liblua5.4-ldap.so.0.0.0" {
 		t.Errorf("link = %q, want the relative target unchanged", e.link)
 	}
 }
 
-// TestExtractDebRebasesUnderTarget — subpath and target compose the same way they do for tar, so
-// a package's layout does not dictate the layout in the image.
+// TestExtractDebRebasesUnderTarget: subpath and target compose as they do for tar.
 func TestExtractDebRebasesUnderTarget(t *testing.T) {
 	deb := buildDeb(t, ".gz", []tarFile{
 		{name: "./usr/share/doc/fixture/copyright", body: "MIT"},
@@ -206,8 +199,7 @@ func TestExtractDebRebasesUnderTarget(t *testing.T) {
 	}
 }
 
-// TestExtractDebRejectsMalformed — each of these is a case where guessing would produce a
-// plausible-looking but wrong layer, so they must fail rather than degrade.
+// TestExtractDebRejectsMalformed: guessing would produce a plausible but wrong layer.
 func TestExtractDebRejectsMalformed(t *testing.T) {
 	valid := buildDeb(t, ".xz", []tarFile{{name: "./usr/bin/tool", body: "payload"}})
 
@@ -245,9 +237,7 @@ func TestExtractDebRejectsMalformed(t *testing.T) {
 	}
 }
 
-// TestAssembleUnpackDeb wires the mode through the layer path the reconciler actually uses,
-// rather than testing extractDeb alone — collectEntries' switch is where a new mode gets
-// forgotten.
+// TestAssembleUnpackDeb goes through collectEntries, where a new mode gets forgotten.
 func TestAssembleUnpackDeb(t *testing.T) {
 	deb := buildDeb(t, ".xz", []tarFile{{name: "./usr/lib/thing.so", body: "ELF"}})
 	src := writeBytes(t, "input.deb", deb)

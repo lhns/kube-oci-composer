@@ -39,9 +39,8 @@ func writeTarGz(t *testing.T, files map[string]string) string {
 	return p
 }
 
-// TestAssembleIsDeterministic is the load-bearing test of this project. The reconcile loop
-// skips work by comparing a computed digest against what is already published; provenance
-// claims the output is a pure function of the inputs. Both are false if this fails.
+// TestAssembleIsDeterministic is the load-bearing test of this project: skipping work by digest
+// and provenance both rely on the output being a pure function of the inputs.
 func TestAssembleIsDeterministic(t *testing.T) {
 	src := writeTarGz(t, map[string]string{
 		"lib/a.jar": "aaa",
@@ -97,8 +96,7 @@ func TestAssembleDigestChangesWithContent(t *testing.T) {
 	}
 }
 
-// TestAssembleLayerOrderMatters — layers overlay, so order is part of the meaning and must be
-// part of the digest.
+// TestAssembleLayerOrderMatters: layers overlay, so order must be part of the digest.
 func TestAssembleLayerOrderMatters(t *testing.T) {
 	a := writeTarGz(t, map[string]string{"a": "1"})
 	b := writeTarGz(t, map[string]string{"b": "2"})
@@ -162,7 +160,7 @@ func TestAssemblePlacesContentAtTarget(t *testing.T) {
 			}
 			found[hdr.Name] = buf.String()
 		}
-		// Every entry must carry the fixed epoch, or determinism is a lie.
+		// Every entry must carry the fixed epoch.
 		if !hdr.ModTime.Equal(epoch) {
 			t.Fatalf("entry %q has ModTime %v, want %v", hdr.Name, hdr.ModTime, epoch)
 		}
@@ -175,21 +173,10 @@ func TestAssemblePlacesContentAtTarget(t *testing.T) {
 	}
 }
 
-// TestAssembleMatchesItsGoldenDigest is the mechanism behind AssemblyVersion.
-//
-// AssemblyVersion exists so that a controller which assembles differently cannot serve artifacts
-// built by the old algorithm under an unchanged input hash. It is a constant a human must remember
-// to bump, and TestAssembleIsDeterministic cannot help: it runs the algorithm twice in one process,
-// so any change agrees with itself.
-//
-// This pins the actual bytes. Change the tar writer, the gzip level, the config, the ordering, or
-// the toolchain's flate output, and this fails — which is the prompt to decide whether the change
-// is intended and whether AssemblyVersion must move. Updating the constant below is part of making
-// that change, not a nuisance to route around.
-//
-// Fixed to linux/amd64 on purpose: the platform of a base-less artifact is the controller's own
-// architecture (ADR 0002), so leaving it unset would make this assert the host rather than the
-// algorithm.
+// TestAssembleMatchesItsGoldenDigest pins the actual bytes, so any change to the output (tar
+// writer, gzip, config, ordering, the toolchain's flate) fails here and prompts deciding whether
+// AssemblyVersion must move. TestAssembleIsDeterministic cannot catch that: a change agrees with
+// itself. Fixed to linux/amd64 so it asserts the algorithm, not the host (ADR 0002).
 func TestAssembleMatchesItsGoldenDigest(t *testing.T) {
 	const (
 		goldenDigest      = "sha256:2ecb3fd3521d9ac10e3ea9b1d749dcf15d24b76fb0088feaadc158bf931edacb"

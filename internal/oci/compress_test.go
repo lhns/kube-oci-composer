@@ -10,8 +10,7 @@ import (
 	"testing"
 )
 
-// writeBytes puts fixture bytes on disk under a chosen name, since some unpack modes take a path
-// and the extension is occasionally load-bearing for a reader's own sanity checks.
+// writeBytes puts fixture bytes on disk under a chosen name.
 func writeBytes(t *testing.T, name string, body []byte) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), name)
@@ -21,17 +20,8 @@ func writeBytes(t *testing.T, name string, body []byte) string {
 	return p
 }
 
-// TestUnpackTarCompressions — the codecs themselves are shared with the already-shipped deb path,
-// so the risk here is the MAPPING: a mode wired to the wrong codec hands a compressed stream to the
-// tar reader and reports it as a corrupt archive.
-//
-// Asserted two ways at once. The payload must arrive, which catches a mode that decodes to nothing;
-// and every codec must produce the SAME digest, which catches one that decodes to something subtly
-// different and pins that packaging never reaches the output.
-//
-// No tar.bz2 case: the standard library decodes bzip2 but cannot write it, the same reason the deb
-// fixtures skip it. That branch is two lines of stdlib shared with the deb path, and adding a bzip2
-// writer dependency to cover it would cost more than it proves.
+// TestUnpackTarCompressions pins the mode-to-codec MAPPING: the payload must arrive, and every
+// codec must produce the SAME digest. No tar.bz2 case: the stdlib cannot write bzip2.
 func TestUnpackTarCompressions(t *testing.T) {
 	raw := buildTar(t, []tarFile{
 		{name: "usr/bin/tool", body: "payload"},
@@ -85,8 +75,7 @@ func gzipBytes(t *testing.T, body string) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
-	// A real .gz usually records the original filename. Set one deliberately: the layer must take
-	// its name from the spec, so this must NOT show up anywhere in the output.
+	// The layer takes its name from the spec, so this header name must NOT reach the output.
 	zw.Name = "original-name.so"
 	if _, err := zw.Write([]byte(body)); err != nil {
 		t.Fatalf("gzip write: %v", err)
@@ -97,7 +86,7 @@ func gzipBytes(t *testing.T, body string) []byte {
 	return buf.Bytes()
 }
 
-// TestUnpackGzPlacesASingleFile — gz is not an archive; it is `none` with one decompression first.
+// TestUnpackGzPlacesASingleFile: gz is `none` with one decompression first.
 func TestUnpackGzPlacesASingleFile(t *testing.T) {
 	src := writeBytes(t, "lib.so.gz", gzipBytes(t, "ELF payload"))
 
@@ -119,9 +108,7 @@ func TestUnpackGzPlacesASingleFile(t *testing.T) {
 	}
 }
 
-// TestUnpackGzRequiresAFileTarget — the output name comes from the spec and nowhere else, so there
-// has to be one. Deriving it from the URL instead would make the layer depend on a field InputHash
-// deliberately excludes, and two mirrors of identical bytes would then disagree under one hash.
+// TestUnpackGzRequiresAFileTarget: the file name comes only from the spec (see singleFile).
 func TestUnpackGzRequiresAFileTarget(t *testing.T) {
 	src := writeBytes(t, "lib.so.gz", gzipBytes(t, "ELF"))
 
@@ -139,8 +126,7 @@ func TestUnpackGzRequiresAFileTarget(t *testing.T) {
 	}
 }
 
-// TestUnpackGzRejectsSubpath — there is nothing to select from, and ignoring the field silently
-// would leave a spec mistake looking like it worked.
+// TestUnpackGzRejectsSubpath: there is nothing to select from.
 func TestUnpackGzRejectsSubpath(t *testing.T) {
 	src := writeBytes(t, "lib.so.gz", gzipBytes(t, "ELF"))
 
@@ -155,12 +141,8 @@ func TestUnpackGzRejectsSubpath(t *testing.T) {
 	}
 }
 
-// TestUnknownUnpackModeIsTerminal — the CRD's enum normally shields this arm, but it is reachable
-// when the CRD is newer than the controller, which the chart makes easy: CRDs ship under crds/,
-// and Helm installs those without ever upgrading them.
-//
-// It must be a typed error so the reconciler reports Stalled. Untyped, it was retried with backoff
-// forever and no condition ever said why.
+// TestUnknownUnpackModeIsTerminal: reachable when the CRD is newer than the controller, and must
+// be typed so the reconciler reports Stalled instead of retrying forever.
 func TestUnknownUnpackModeIsTerminal(t *testing.T) {
 	src := writeBytes(t, "input.bin", []byte("x"))
 

@@ -8,14 +8,8 @@ import (
 	"github.com/lhns/kube-oci-composer/internal/archive/archivetest"
 )
 
-// TestTheComposerPlacesEntriesLikeTheBuilder is the guard ADR 0023 asked for and did not get.
-//
-// The composer's assembler and the builder's fetcher have different SINKS -- layer entries in
-// memory versus files on a disk -- but they must agree exactly on WHERE an entry lands. A second
-// copy of that rule was written for the builder, the two drifted, and every ImageBuild with a
-// sourceRef context broke while the composer was fine (ADR 0045).
-//
-// Both now run the same table. A case either side gets wrong fails here.
+// TestTheComposerPlacesEntriesLikeTheBuilder: the composer's assembler and the builder's fetcher
+// must agree exactly on where an entry lands (ADR 0023, ADR 0045), so both run the shared table.
 func TestTheComposerPlacesEntriesLikeTheBuilder(t *testing.T) {
 	for _, tc := range archivetest.PathCases() {
 		t.Run(tc.Name, func(t *testing.T) {
@@ -35,9 +29,8 @@ func TestTheComposerPlacesEntriesLikeTheBuilder(t *testing.T) {
 
 			entries, err := extractTar(tar.NewReader(&buf), "", tc.Subpath, tc.Strip)
 
-			// A subpath that selects nothing is refused rather than yielding an empty layer, and a
-			// strip that consumes everything likewise. Both are the correct outcome for a case whose
-			// entry contributes nothing, so the assertion is on the placement, not on success.
+			// A case contributing nothing may be refused (empty selection), so assert on the
+			// placement, not on success.
 			if tc.Dest == "" {
 				if err == nil && len(entries) != 0 {
 					t.Errorf("entry %q should contribute nothing, got %d entries", tc.Entry, len(entries))
@@ -62,9 +55,8 @@ func TestTheComposerPlacesEntriesLikeTheBuilder(t *testing.T) {
 	}
 }
 
-// TestStripComponentsWorksForEveryFormat is the claim that this is a PATH rule rather than a tar
-// flag: it lives in the collector, which every format routes through, so zip and deb get it for
-// free. A per-format implementation is exactly the shape that broke.
+// TestStripComponentsWorksForEveryFormat: stripping is a path rule in the collector, not a
+// per-format feature.
 func TestStripComponentsWorksForEveryFormat(t *testing.T) {
 	t.Run("zip", func(t *testing.T) {
 		f := openZip(t, []zipEntry{
