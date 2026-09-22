@@ -68,3 +68,13 @@ func TestEveryChartGuardIsActuallyReached(t *testing.T) {
 		})
 	}
 }
+
+// registry.retention.window moved to retention.window in 0.6.0. An old values file still setting it
+// must be refused: ignored, a lengthened window silently fell back to the default and content was
+// collected sooner than the operator had asked for.
+func TestTheOldRetentionWindowKeyIsRefused(t *testing.T) {
+	out := renderExpectingFailure(t, "--set", "registry.retention.window=2160h")
+	if !strings.Contains(out, "retention.window") || !strings.Contains(out, "moved") {
+		t.Errorf("the refusal must say where the key went:\n%s", out)
+	}
+}

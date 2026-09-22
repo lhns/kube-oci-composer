@@ -105,11 +105,32 @@ operator.keepBuilds is 0, which will be clamped to 1. Only the newest build stay
 a commit or rescheduling a pod pinned to an older digest will fail.
 {{- end }}
 
-{{- if and .Release.IsUpgrade .Values.registry.enabled (not .Values.registry.retention.keepUntagged) }}
+{{- /*
+Shown on the one upgrade that stops keeping untagged content: the live registry config still has
+keepUntagged, and this render does not. Checked against the cluster rather than on every upgrade, so
+it says something only when it matters. The config is a Secret when it holds credentials.
+*/}}
+{{- $liveRegistryConfig := "" }}
+{{- $registryConfigName := include "kube-oci-composer.registryFullname" . }}
+{{- with (lookup "v1" "ConfigMap" .Release.Namespace $registryConfigName) }}
+{{- $liveRegistryConfig = index (.data | default dict) "config.json" | default "" }}
+{{- end }}
+{{- with (lookup "v1" "Secret" .Release.Namespace $registryConfigName) }}
+{{- $liveRegistryConfig = index (.data | default dict) "config.json" | default "" | b64dec }}
+{{- end }}
+{{- if and .Release.IsUpgrade .Values.registry.enabled (not .Values.registry.retention.keepUntagged) (contains "keepUntagged" $liveRegistryConfig) }}
 
-UPGRADING FROM 0.5.x OR EARLIER? The registry no longer keeps untagged content (ADR 0060). Content
-published before this release is untagged until its object next reconciles, and until then it can
-be collected by age while something pulls it. If this is that upgrade, re-run it with
-registry.retention.keepUntagged=true, wait until every object's status.artifact.tags includes a
-digest- tag (the default interval is 1h), then drop the override.
+WARNING: this upgrade stops the registry keeping untagged content (ADR 0060). Content published
+before it -- digest-only publications and attestations -- carries no tag until its object next
+reconciles, and until then it can be collected. If you have not done so already:
+
+  1. Re-run this upgrade with registry.retention.keepUntagged=true.
+  2. Wait until this lists nothing (both controllers backfill on startup, usually within minutes):
+
+       kubectl get imagecompositions,imagebuilds -A -o json | jq -r '.items[]
+         | select([.status.artifact // empty] + (.status.history // [])
+                  | any(.digest and ((.tags // []) | any(test(":digest-|^digest-")) | not)))
+         | "\(.kind) \(.metadata.namespace)/\(.metadata.name)"'
+
+  3. Upgrade again without the override.
 {{- end }}
