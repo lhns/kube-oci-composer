@@ -26,9 +26,10 @@ import (
 // zotRetention is the part of the registry's config these tests reason about.
 type zotRetention struct {
 	Storage struct {
-		GCDelay    string `json:"gcDelay"`
-		GCInterval string `json:"gcInterval"`
-		Retention  struct {
+		GCDelay             string `json:"gcDelay"`
+		GCInterval          string `json:"gcInterval"`
+		GCMaxSchedulerDelay string `json:"gcMaxSchedulerDelay"`
+		Retention           struct {
 			Policies []struct {
 				Repositories   []string `json:"repositories"`
 				DeleteUntagged *bool    `json:"deleteUntagged"`
@@ -142,5 +143,35 @@ func requireUntaggedCollection(t *testing.T, repository string) {
 					"show that PULLING keeps one alive.", repository)
 			}
 		}
+	}
+}
+
+// The setting that decides how soon anything is actually collected must reach the registry.
+//
+// zot holds each repository's collection task back by a random delay of up to
+// gcMaxSchedulerDelay, so a full pass costs roughly (repositories x delay / 2). At zot's 30s
+// default against this suite's ~33 repositories that is ~500s, which is where the retention tests'
+// multi-minute waits came from -- not from the 30s window.
+//
+// It is asserted here because it is REACHABLE rather than supported: zot's own struct marks the
+// field "not configurable by the end user", and it works only because the config is unmarshalled
+// with viper/mapstructure, which maps by field name and ignores the yaml tag hiding it. If a zot
+// upgrade closes that door the tests get slow again rather than wrong, and this says so directly
+// instead of leaving someone to infer it from a suite that quietly takes half an hour.
+//
+// This proves the value was DELIVERED. That zot honoured it is proved by the collection latency
+// the negative controls measure, which is the only behavioural evidence available.
+func TestTheSchedulerDelayReachesTheRegistry(t *testing.T) {
+	got := deployedRetention(t).Storage.GCMaxSchedulerDelay
+	if got == "" {
+		t.Fatal("the registry was deployed without gcMaxSchedulerDelay, so every collection task " +
+			"waits up to zot's default 30s and a pass over this suite's repositories takes minutes")
+	}
+	d, err := time.ParseDuration(got)
+	if err != nil {
+		t.Fatalf("gcMaxSchedulerDelay %q is not a duration: %v", got, err)
+	}
+	if d > 5*time.Second {
+		t.Errorf("gcMaxSchedulerDelay is %s; every wait in this file scales with it", d)
 	}
 }
