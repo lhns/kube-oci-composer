@@ -263,19 +263,35 @@ func TestPullingByDigestKeepsAnUntaggedImageAlive(t *testing.T) {
 //
 // The digest-side counterpart of eventuallyUntagged: keepUntagged is a separate rule from keepTags,
 // so a control that only watches tags cannot speak for digest-addressed content.
+//
+// HEAD, and that is the whole of this control's correctness -- for the reason eventuallyUntagged
+// states and this function ignored. A GET is a pull: zot's GetManifest handler calls
+// meta.OnGetManifest, which calls MetaDB.UpdateStatsOnDownload(repo, reference) and stamps the
+// digest's lastPullTimestamp. keepUntagged.pulledWithin is the retention window, and this polls
+// every 10s, so every GET renewed the control's recency inside its own window and it could never
+// become a candidate. That is not a hypothesis: the control survived 709s of polling, to the
+// second, on repeated runs, which is a deadline being waited out rather than a collection being
+// missed.
+//
+// zot's CheckManifest handler (HEAD) resolves the manifest through the same getImageManifest and
+// returns the same 200/404 -- and records nothing. So HEAD asks exactly the question this needs,
+// "is it still there", without being the answer's cause. Verified in zot v2.1.21: OnGetManifest is
+// called from GetManifest and from nowhere else.
 func eventuallyGone(t *testing.T, repository, digest string, maxSeconds int) {
 	t.Helper()
 
 	for waited := 0; waited < maxSeconds; waited += 10 {
-		if !manifestExistsByDigest(t, repository, digest) {
+		if !manifestExistsByDigestWithoutPulling(t, repository, digest) {
 			return
 		}
 		sleepInCluster(t, 10)
 	}
 
-	t.Fatalf("%s@%s survived %ds untagged and unpulled, so this suite cannot observe an untagged "+
-		"manifest being collected at all -- which is the only thing that makes the assertion above "+
-		"evidence of anything.%s", repository, digest, maxSeconds, registryLogs(t))
+	t.Fatalf("%s@%s survived %ds untagged and unpulled -- polled with HEAD, so this wait did not "+
+		"renew it -- and so this suite cannot observe an untagged manifest being collected at all, "+
+		"which is the only thing that makes the assertion above evidence of anything. Check "+
+		"deleteUntagged, keepUntagged, and the repository glob against %q.%s",
+		repository, digest, maxSeconds, repository, registryLogs(t))
 }
 
 // refreshBothFor pulls a tag AND a digest every two seconds for the given number of seconds,
@@ -422,15 +438,21 @@ func pushTinyImageFrom(t *testing.T, repository, dockerfile string) string {
 
 // manifestExists fetches a manifest with GET, which is what a real pull is.
 //
-// Whether a HEAD would also renew recency is UNMEASURED and deliberately left that way. An early
-// version of this file used HEAD here, and when the tagged case was collected the obvious reading
-// was that HEAD does not count as a pull. That reading was wrong, and so was the next one; the
-// causes were a retention policy that matched no tags and then a refresh that pulled the digest but
-// not the tag. Both are recorded because they are the kind of plausible, tidy explanation worth
-// being suspicious of.
+// Whether HEAD also renews recency is no longer unmeasured: it does not. zot records a download --
+// MetaDB.UpdateStatsOnDownload, which is what sets the lastPullTimestamp `pulledWithin` reads --
+// only from meta.OnGetManifest, and only GetManifest calls that. CheckManifest, the HEAD handler,
+// resolves the manifest and returns without touching the metadata database (zot v2.1.21).
 //
-// GET stays regardless: it is unambiguously a pull, the difference in cost is a few KB, and the
-// refresh has no reason to economise on the one request the whole guarantee depends on.
+// An early version of this file used HEAD here, and when the tagged case was collected anyway the
+// obvious reading was that HEAD does not count as a pull. That reading happened to be true and was
+// still wrong as an inference: the causes were a retention policy that matched no tags and then a
+// refresh that pulled the digest but not the tag. Recorded because it is the kind of plausible,
+// tidy explanation worth being suspicious of even when it later turns out to hold.
+//
+// GET stays HERE regardless: these callers are asserting that something SURVIVED, so renewing it is
+// harmless, it is unambiguously a pull, and the refresh has no reason to economise on the one
+// request the whole guarantee depends on. A caller waiting for something to DIE must use
+// manifestExistsByDigestWithoutPulling instead.
 func manifestExists(t *testing.T, repository, tag string) bool {
 	t.Helper()
 	return strings.Contains(
@@ -444,6 +466,22 @@ func manifestExistsByDigest(t *testing.T, repository, digest string) bool {
 	// GET rather than HEAD, for the reason manifestExists gives.
 	return strings.Contains(
 		registryRequest(t, "get-"+shortName(repository, "digest"), "GET",
+			fmt.Sprintf("/v2/%s/manifests/%s", repository, digest), "", ""),
+		"200 OK")
+}
+
+// manifestExistsByDigestWithoutPulling answers the same question as manifestExistsByDigest without
+// being a pull, for the negative controls.
+//
+// A control that renews its own subject can never fire, and the renewal is invisible in the result:
+// every poll answers "still there", which is exactly what a broken registry would also answer. The
+// tag-side control avoids this by reading the tags list, which names no manifest; the digest side
+// has no listing to read -- an untagged manifest appears in no API but the one that fetches it --
+// so it asks with HEAD instead, which zot resolves identically and records nothing against.
+func manifestExistsByDigestWithoutPulling(t *testing.T, repository, digest string) bool {
+	t.Helper()
+	return strings.Contains(
+		registryRequest(t, "head-"+shortName(repository, "digest"), "HEAD",
 			fmt.Sprintf("/v2/%s/manifests/%s", repository, digest), "", ""),
 		"200 OK")
 }
