@@ -5,17 +5,17 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"github.com/lhns/kube-oci-composer/internal/netguard"
 	"io"
 	"net/http"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/lhns/kube-oci-composer/internal/netguard"
 )
 
-// ErrDigestMismatch is returned when fetched content does not match the declared digest.
-// It is deliberately a distinct error type: the caller maps it to a TERMINAL condition
-// (Stalled), never a retry, because retrying cannot make wrong bytes right and a silent retry
+// ErrDigestMismatch is returned when fetched content does not match the declared digest. The
+// caller maps it to a TERMINAL condition (Stalled): retrying cannot fix wrong bytes, and a retry
 // loop would hide tampering.
 type ErrDigestMismatch struct {
 	Want string
@@ -27,8 +27,7 @@ func (e *ErrDigestMismatch) Error() string {
 	return fmt.Sprintf("digest mismatch for %s: declared %s, got %s", e.Ref, e.Want, e.Got)
 }
 
-// DefaultFetchTimeout bounds a single fetch. Artifacts here are tens of megabytes; a fetch
-// that has not finished well inside this is stuck rather than slow.
+// DefaultFetchTimeout bounds a single fetch.
 const DefaultFetchTimeout = 10 * time.Minute
 
 // Fetcher retrieves content addressed by digest.
@@ -38,9 +37,7 @@ type Fetcher struct {
 
 // NewFetcher returns a Fetcher with sane timeouts and the SSRF dial guard installed.
 //
-// The guard is in the default constructor rather than an option, because a fetcher built without
-// it is one an attacker-supplied URL can point at a metadata endpoint (I6), and that should not be
-// the thing a caller has to remember.
+// The guard is not optional: without it a spec's URL could reach a metadata endpoint (I6).
 func NewFetcher() *Fetcher {
 	return NewFetcherWithGuard(DialGuard{})
 }
@@ -54,12 +51,8 @@ func NewFetcherWithGuard(g DialGuard) *Fetcher {
 
 // FetchURL downloads url into a temporary file, verifying that its content matches wantDigest.
 //
-// The content is streamed to disk rather than buffered: these artifacts run to tens or hundreds
-// of megabytes and a controller holding several of them in memory at once is a memory limit
-// waiting to be hit.
-//
-// The digest is verified over the bytes as they stream past, so a mismatch is caught without a
-// second pass. The caller owns the returned file and must remove it.
+// The content is streamed to disk and hashed on the way. The caller owns the returned file and
+// must remove it.
 func (f *Fetcher) FetchURL(ctx context.Context, url, wantDigest string) (path string, err error) {
 	if !strings.HasPrefix(wantDigest, "sha256:") {
 		return "", fmt.Errorf("unsupported digest algorithm in %q: only sha256 is supported", wantDigest)
@@ -86,7 +79,7 @@ func (f *Fetcher) FetchURL(ctx context.Context, url, wantDigest string) (path st
 	}
 	defer func() {
 		tmp.Close()
-		// Only leave the file behind on success; a partial download is never useful.
+		// Only leave the file behind on success.
 		if err != nil {
 			os.Remove(tmp.Name())
 		}
@@ -106,12 +99,6 @@ func (f *Fetcher) FetchURL(ctx context.Context, url, wantDigest string) (path st
 	return tmp.Name(), nil
 }
 
-// DialGuard is the SSRF guard, which lives in internal/netguard so the build path can use it too.
-//
-// Aliased rather than moved wholesale because the guard is a property of fetching over HTTP, and
-// both controllers fetch. ADR 0025 keeps internal/oci out of the build path, so a builder that
-// needs the same protection has to reach a neutral package rather than this one.
+// DialGuard is the SSRF guard. It lives in internal/netguard so the build path can use it without
+// importing internal/oci (ADR 0025).
 type DialGuard = netguard.DialGuard
-
-// ErrBlockedAddress is netguard's, re-exported for callers that already match on it here.
-type ErrBlockedAddress = netguard.ErrBlockedAddress

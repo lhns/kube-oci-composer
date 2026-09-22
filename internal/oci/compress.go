@@ -10,16 +10,10 @@ import (
 	"github.com/ulikunitz/xz"
 )
 
-// Stream decompression, shared by every unpack mode that has a compressed payload.
-//
-// This started inside the deb reader, because a .deb's data member can arrive under any of these
-// and dpkg picks which. The same table serves `unpack: tar.gz` and its siblings, so it lives here
-// rather than there — a codec is not a property of the container that happens to need it.
+// Stream decompression, shared by every unpack mode with a compressed payload (and a .deb's data
+// member).
 
-// compression names a stream codec.
-//
-// Values are the suffixes the API's unpack modes already use, so a mode maps onto a codec by
-// inspection rather than through a translation table nobody can check.
+// compression names a stream codec. Values are the suffixes the API's unpack modes use.
 type compression string
 
 const (
@@ -32,13 +26,8 @@ const (
 
 // decompress wraps r in the named codec.
 //
-// The returned cleanup MUST be called: the zstd reader holds goroutines and buffers, and dropping
-// it leaks both. compNone returns r with a no-op cleanup so that every caller can defer
-// unconditionally rather than guarding the call.
-//
-// bz2 has no writer in the standard library and is therefore not covered by a round-trip test — it
-// is accepted because rejecting a valid archive would be worse than accepting an untested path
-// through two lines of stdlib.
+// The returned cleanup MUST be called (the zstd reader holds goroutines); it is never nil, so
+// callers can defer it unconditionally. bz2 has no stdlib writer, so it has no round-trip test.
 func decompress(r io.Reader, c compression) (io.Reader, func(), error) {
 	noop := func() {}
 	switch c {
@@ -69,11 +58,8 @@ func decompress(r io.Reader, c compression) (io.Reader, func(), error) {
 	}
 }
 
-// tarCompressions is the set of unpack modes that are a tar under a codec, and which codec.
-//
-// This is the ONE list of them: collectEntries dispatches by looking a mode up here rather than
-// naming them again in a case label, so adding tar.lz4 is one entry and cannot half-land as a mode
-// the switch accepts and the codec table does not.
+// tarCompressions is the ONE list of unpack modes that are a tar under a codec, and which codec.
+// collectEntries dispatches by lookup here, so the modes and codecs cannot disagree.
 var tarCompressions = map[UnpackMode]compression{
 	UnpackTar:     compNone,
 	UnpackTarGz:   compGzip,

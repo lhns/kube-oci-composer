@@ -11,18 +11,14 @@ import (
 
 // Debian binary package extraction.
 //
-// A .deb is an ar archive of three members in order: debian-binary, control.tar.* and
-// data.tar.*. Only data.tar.* holds the package's files, and it is an ordinary tar, so
-// everything after decompression is extractTar's job. ADR 0022 has the reasoning.
-//
-// ar is parsed here rather than through a dependency: it is a magic string followed by fixed
-// 60-byte headers, which is less code than auditing a library for it would be.
+// A .deb is an ar archive of debian-binary, control.tar.* and data.tar.*. Only data.tar.* holds
+// the package's files, as an ordinary tar (ADR 0022). ar is simple enough to parse here rather than
+// take a dependency.
 
 const (
 	arMagic = "!<arch>\n"
 
-	// Member header layout. The fields this does not read — mtime, uid, gid, mode — sit between
-	// the name and the size and are skipped over.
+	// Member header layout. mtime, uid, gid and mode, between name and size, are not read.
 	arHeaderLen = 60
 	arNameEnd   = 16 // name occupies [0, arNameEnd)
 	arSizeStart = 48
@@ -56,18 +52,16 @@ func openDebData(r io.Reader) (io.Reader, func(), error) {
 			return nil, noop, errors.New("malformed ar header")
 		}
 
-		// Names are space-padded and conventionally end in "/". GNU long names (a "//" string
-		// table plus "/N" references) are refused rather than guessed at: dpkg does not emit
-		// them, and a mis-read member name would produce a silently wrong layer.
+		// Names are space-padded and conventionally end in "/". GNU long names are not
+		// supported (dpkg does not emit them).
 		name := strings.TrimRight(strings.TrimSpace(string(hdr[:arNameEnd])), "/")
 		size, err := strconv.ParseInt(strings.TrimSpace(string(hdr[arSizeStart:arSizeEnd])), 10, 64)
 		if err != nil || size < 0 {
 			return nil, noop, fmt.Errorf("unreadable size for ar member %q", name)
 		}
 
-		// dpkg picks the compressor, so a caller cannot know which to expect. The member name
-		// carries it as a dotted suffix and compression's values are those names without the dot,
-		// so the codec falls out of the name; decompress rejects anything it does not implement.
+		// dpkg picks the compressor; the member name's suffix names the codec, and decompress
+		// rejects any it does not implement.
 		if suffix, ok := strings.CutPrefix(name, "data.tar"); ok {
 			dr, closeFn, err := decompress(io.LimitReader(r, size),
 				compression(strings.TrimPrefix(suffix, ".")))

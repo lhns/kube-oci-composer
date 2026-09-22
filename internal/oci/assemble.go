@@ -21,30 +21,18 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/types"
 )
 
-// epoch is the fixed timestamp stamped on every tar entry and on the image config.
-//
-// Determinism is the property the whole design rests on: the output digest must be a pure
-// function of the spec. Real timestamps would make two assemblies of identical inputs produce
-// different digests, which would break idempotence, make provenance meaningless, and turn every
-// reconcile into a needless push. 1970-01-01 is used rather than "now" for exactly that reason.
+// epoch is the fixed timestamp stamped on every tar entry and on the image config, so the output
+// digest is a pure function of the spec.
 var epoch = time.Unix(0, 0).UTC()
 
 // AssemblyVersion identifies the output format produced by Assemble.
 //
-// It is folded into InputHash, which is what lets the reconciler skip a build whose inputs have
-// not changed. BUMP THIS whenever Assemble's output changes for identical inputs — entry
-// ordering, header normalisation, media types, the config it stamps. Forgetting to means an
-// upgraded controller looks at an artifact built by the old algorithm, sees an unchanged input
-// hash, and keeps serving it forever.
+// It is folded into InputHash. BUMP THIS whenever Assemble's output changes for identical inputs
+// (entry ordering, header normalisation, media types, the config), or an upgraded controller will
+// keep the old artifact under an unchanged input hash.
 //
-// THE TOOLCHAIN COUNTS TOO, which is the part that is easy to miss because it is not in this
-// repository. Go 1.27 changed compress/flate's output: identical diff_id, identical config digest,
-// a compressed layer 202 -> 204 bytes. Every artifact's digest moves under an unchanged spec-hash
-// tag, so every composition wedges on onConflict: Fail at once. A Go minor upgrade is a migration
-// and bumps this. See ADR 0057.
-//
-// v3: that migration, taken. Nothing in this repository changed, which is exactly why this
-// constant has to move by hand.
+// THE TOOLCHAIN COUNTS TOO: a Go upgrade that changes compress/flate's output moves every digest
+// under an unchanged spec-hash tag. v3 is the Go 1.27 migration (ADR 0057).
 const AssemblyVersion = 3
 
 // identity returns what the hash should treat as this entry's content.
@@ -57,25 +45,14 @@ func (in LayerInput) identity() string {
 
 // InputHash returns a stable hash of everything that determines the assembled output.
 //
-// Only the fields that actually affect the result are included: the ordered layer digests, their
-// unpack modes and targets, the config, and AssemblyVersion. LayerInput.Name and .Path are
-// excluded deliberately — the name appears only in error messages, and the path is a temporary
-// location that differs on every reconcile. Including either would defeat the whole point by
-// producing a different hash for identical content.
+// Only fields that affect the result are included. Name, URL and Path are not: two sources of the
+// same digest are interchangeable, and Path differs every reconcile. Fields are length-prefixed so
+// no combination of values can collide with another.
 //
-// Fields are length-prefixed rather than delimiter-joined so that no combination of targets or
-// label values can produce the same byte stream as a different combination.
-// baseDigest and platforms cover everything outside the layers that reaches the output.
-//
-// baseDigest is the spec's base pin, empty for a scratch artifact. It was previously ABSENT from
-// this hash, which meant repointing spec.base.digest left the hash unchanged, the cheap path
-// short-circuited, and the new base was silently never built. It also stands in for the platform
-// when none is declared, since an unset list resolves to the base's platform.
-//
-// platforms are the platforms that could be determined WITHOUT fetching anything: the declared
-// list if the spec has one, or the controller's own when there is no base and nothing declared.
-// It is deliberately empty when the platform comes from the base — baseDigest already pins that,
-// and fetching the base to compute a hash would defeat the purpose of having one.
+// baseDigest is the spec's base pin, empty for a scratch artifact; it also stands in for the
+// platform when none is declared. platforms are those known WITHOUT fetching anything: the
+// declared list, or the controller's own when there is no base. Empty when the platform comes
+// from the base, which baseDigest already pins.
 func InputHash(inputs []LayerInput, cfg Config, baseDigest string, platforms []Platform) string {
 	h := sha256.New()
 	writeField := func(s string) {
@@ -105,15 +82,13 @@ func InputHash(inputs []LayerInput, cfg Config, baseDigest string, platforms []P
 		}
 	}
 
-	// Every config field lands in the image config and therefore in the output digest, so all of
-	// them must move the hash.
+	// Every config field reaches the output digest, so all of them must move the hash.
 	fmt.Fprintf(h, "inherit=%t;", cfg.Inherit)
 	writeField(cfg.User)
 	writeField(cfg.WorkingDir)
 	writeField(cfg.StopSignal)
 
-	// Labels are a map, so they need a stable order. Everything else is already a slice and
-	// carries its own.
+	// Labels are a map, so they need a stable order.
 	keys := make([]string, 0, len(cfg.Labels))
 	for k := range cfg.Labels {
 		keys = append(keys, k)
@@ -167,17 +142,11 @@ func (p Platform) toV1() v1.Platform {
 
 // RuntimePlatform is the platform a base-less artifact is built for when the spec names none.
 //
-// This is the ONE input to the output digest that does not come from the spec. ADR 0002 records
-// why the exception is taken and what it costs: on a single-architecture cluster it is exactly the
-// value that was previously hardcoded, so nothing changes; on a mixed-architecture cluster the same
-// spec can produce different content depending on which node the leader is on, and the answers are
-// to name `platforms` in the spec or to pin the controller to one architecture.
+// This is the ONE input to the output digest that does not come from the spec (ADR 0002): on a
+// mixed-architecture cluster, name `platforms` or pin the controller to one architecture.
 //
-// The OS is linux, NOT runtime.GOOS. GOOS is the platform the controller BINARY was built for,
-// which on a developer machine is windows or darwin — and stamping an artifact os=windows would
-// produce something no kubelet will mount, from a spec that says nothing about Windows. Every
-// artifact this controller produces is a linux container image; only the architecture is genuinely
-// in question, and that is what GOARCH answers.
+// The OS is always linux, NOT runtime.GOOS, which is where the binary happens to run (possibly
+// windows or darwin on a developer machine).
 func RuntimePlatform() Platform {
 	return Platform{OS: "linux", Architecture: runtime.GOARCH}
 }
@@ -205,13 +174,8 @@ func platformFor(base v1.Image) (Platform, error) {
 
 // ErrUnsupportedUnpack is returned for an unpack mode this build does not implement.
 //
-// Typed, like ErrDigestMismatch, so the reconciler can map it to a TERMINAL condition: retrying
-// cannot add a code path to a running binary. Untyped it was an ordinary error, so the object sat
-// Ready=False and requeued with backoff indefinitely without ever saying why.
-//
-// The realistic cause is version skew rather than a typo, since the CRD's enum rejects anything
-// else at admission. The chart ships CRDs under crds/, which Helm installs but never upgrades, so
-// a schema newer than its controller is an ordinary situation.
+// Typed so the reconciler maps it to a TERMINAL condition: retrying cannot add a code path. The
+// CRD enum rejects typos, so the realistic cause is a CRD newer than the controller.
 type ErrUnsupportedUnpack struct {
 	Mode string
 }
@@ -235,14 +199,9 @@ const (
 	UnpackZip     UnpackMode = "zip"
 	UnpackDeb     UnpackMode = "deb"
 
-	// UnpackImage marks a layer whose content is another image's flattened filesystem.
-	//
-	// Not a member of the CRD's unpack enum and never dispatched on: an image layer is recognised
-	// by LayerInput.Image being set, and there is nothing to unpack because nothing was fetched.
-	// It exists so the mode field discriminates image layers inside InputHash. Without it, an
-	// image layer and an `unpack: none` fetch would hash identically whenever their digests
-	// matched — which needs a preimage attack rather than an accident, but costs nothing to rule
-	// out given the field is hashed anyway.
+	// UnpackImage marks a layer whose content is another image's flattened filesystem. Not in the
+	// CRD enum and never dispatched on (LayerInput.Image identifies image layers); it only keeps
+	// image layers and `unpack: none` fetches distinct in InputHash.
 	UnpackImage UnpackMode = "image"
 )
 
@@ -253,12 +212,9 @@ const (
 type LayerInput struct {
 	// Name of the entry, used in error messages and provenance. Not part of the output.
 	Name string
-	// Identity is what names this entry's CONTENT for hashing, when Digest names its transport
-	// instead. A Flux artifact is the case: source-controller re-packs on restart, so the tarball's
-	// digest changes while the revision it describes does not, and hashing the digest rebuilt every
-	// composition for bytes that were identical. Digest is still what the fetch is verified
-	// against; only the hash reads this. Empty means Digest identifies the content, which is true
-	// for everything else.
+	// Identity names this entry's CONTENT for hashing when Digest names only its transport: a Flux
+	// artifact's tarball digest changes when source-controller re-packs, its revision does not.
+	// The fetch is still verified against Digest. Empty means Digest identifies the content.
 	Identity string
 	// URL the content is fetched from. Not part of the output: two URLs serving the same
 	// digest are interchangeable by definition.
@@ -266,20 +222,15 @@ type LayerInput struct {
 	// Path to the fetched content on local disk. Empty until fetched, and always empty for an
 	// image layer, which has no fetched file.
 	Path string
-	// Image is the source image for an image layer, resolved and pulled by the caller. Its
-	// flattened filesystem becomes this entry's content. Nil for every other kind of entry.
-	//
-	// Not part of the output by itself: Digest carries the image's manifest digest, and that is
-	// what reaches InputHash. Holding the v1.Image here is the same arrangement Path uses — the
-	// resolved handle for content the hash already identifies.
+	// Image is the source image for an image layer, resolved and pulled by the caller; its
+	// flattened filesystem becomes this entry's content. Nil otherwise. Like Path, it is a handle
+	// on content that Digest (the manifest digest) already identifies for InputHash.
 	Image v1.Image
 	// Digest of the fetched content, already verified.
 	Digest string
 	// Unpack controls how the bytes become layer content.
 	Unpack UnpackMode
 	// Subpath selects a directory within an unpacked archive. Empty takes the whole archive.
-	// Used by sourceRef layers, where the artifact is a whole repository and usually only one
-	// directory of it belongs in the image.
 	Subpath string
 
 	// StripComponents is how many leading path components to remove from every entry, applied
@@ -324,14 +275,12 @@ type tarEntry struct {
 
 // Assemble builds an image from the given inputs, in order. Later entries overlay earlier ones.
 //
-// The result is byte-for-byte reproducible: entries are sorted, timestamps are fixed, and
-// ownership is normalised. Two calls with the same inputs produce the same digest, which is what
-// lets the reconciler skip work by comparing digests instead of rebuilding.
+// The result is byte-for-byte reproducible: entries are sorted, timestamps fixed and ownership
+// normalised.
 //
-// workDir holds the assembled layer files. They must outlive this call — go-containerregistry
-// reads them lazily when the image is written — so the CALLER owns the directory and must remove
-// it only after the image has been consumed. An empty workDir uses the system temp directory,
-// which leaves the files behind; pass a real directory in any long-running process.
+// workDir holds the assembled layer files, which go-containerregistry reads lazily, so the CALLER
+// must remove it only after the image has been consumed. An empty workDir uses the system temp
+// directory and leaves the files behind.
 func Assemble(base v1.Image, inputs []LayerInput, cfg Config, workDir string) (v1.Image, error) {
 	plat, err := platformFor(base)
 	if err != nil {
@@ -352,18 +301,11 @@ func AssembleAs(base v1.Image, inputs []LayerInput, cfg Config, plat Platform, w
 
 // AssembleIndex builds one image per platform and returns them as an OCI image index.
 //
-// The layer tarballs are built ONCE and shared by every child. That is not just an optimisation:
-// composed content is the same bytes on every platform, so rebuilding it per platform would spend
-// real time producing identical layers, and any non-determinism in that path would show up as
-// children that disagree about content they are supposed to share.
+// The layer tarballs are built ONCE and shared by every child, so the children cannot disagree
+// about content that is the same on every platform.
 //
-// bases maps each platform to the child of the base index selected for it, and is nil for a
-// base-less artifact. A platform with no entry is an error rather than a silent scratch image —
-// see resolveBase, which is where that selection happens.
-//
-// Determinism holds exactly as it does for a single image: the children are assembled from the
-// same layers in the given platform order, so two calls with the same arguments produce the same
-// index digest.
+// bases maps each platform to its base image, and is nil for a base-less artifact. A platform
+// missing from a non-nil map is an error rather than a silent scratch image.
 func AssembleIndex(bases map[Platform]v1.Image, inputs []LayerInput, cfg Config,
 	platforms []Platform, workDir string) (v1.ImageIndex, error) {
 	if len(platforms) == 0 {
@@ -392,9 +334,7 @@ func AssembleIndex(bases map[Platform]v1.Image, inputs []LayerInput, cfg Config,
 		idx = mutate.AppendManifests(idx, mutate.IndexAddendum{
 			Add: img,
 			Descriptor: v1.Descriptor{
-				// The descriptor is what a kubelet reads to pick a child. Getting it wrong
-				// produces a pull that fails with "no matching manifest", pointing at the
-				// workload rather than at the composition that caused it.
+				// What a kubelet reads to pick a child.
 				Platform: &p,
 			},
 		})
@@ -404,8 +344,7 @@ func AssembleIndex(bases map[Platform]v1.Image, inputs []LayerInput, cfg Config,
 
 // buildLayers converts every input into a deterministic layer, once.
 //
-// The layer files must outlive this call: go-containerregistry reads them lazily when the image is
-// written, so the CALLER owns workDir and removes it only after the image has been consumed.
+// The layer files are read lazily; see Assemble on workDir's lifetime.
 func buildLayers(inputs []LayerInput, workDir string) ([]v1.Layer, error) {
 	layers := make([]v1.Layer, 0, len(inputs))
 	for _, in := range inputs {
@@ -424,9 +363,7 @@ func buildLayers(inputs []LayerInput, workDir string) ([]v1.Layer, error) {
 
 // assembleFor stacks the layers on the base and stamps the config for one platform.
 func assembleFor(base v1.Image, layers []v1.Layer, inputs []LayerInput, cfg Config, plat Platform) (v1.Image, error) {
-	// The base's layers come first and are reused verbatim: they are already content-addressed,
-	// so repacking them would change their digests, break sharing with anything else on the same
-	// base, and re-upload content the registry already holds.
+	// The base's layers come first and are reused verbatim, keeping their digests and sharing.
 	img := empty.Image
 	if base != nil {
 		img = base
@@ -448,8 +385,7 @@ func assembleFor(base v1.Image, layers []v1.Layer, inputs []LayerInput, cfg Conf
 	}
 	cf = cf.DeepCopy()
 
-	// Inheritance is opt-in. An artifact that is only ever mounted should have an empty config,
-	// and silently acquiring a base's entrypoint would be surprising. See ADR 0015.
+	// Inheritance is opt-in: silently acquiring a base's entrypoint would be surprising (ADR 0015).
 	if cfg.Inherit {
 		if base == nil {
 			return nil, fmt.Errorf("config.inherit is set but there is no base to inherit from")
@@ -468,10 +404,8 @@ func assembleFor(base v1.Image, layers []v1.Layer, inputs []LayerInput, cfg Conf
 
 	cf.Created = v1.Time{Time: epoch}
 	cf.Author = ""
-	// The platform is decided by the caller, not derived here — for a multi-platform build the
-	// same layers are stamped once per platform, so this function cannot be the one that knows.
-	// Claiming linux/amd64 over an arm64 base produces an image the kubelet refuses to run, for a
-	// reason that points nowhere useful, which is why platformFor exists rather than a default.
+	// The caller decides the platform: a multi-platform build stamps the same layers once per
+	// platform.
 	cf.OS = plat.OS
 	cf.Architecture = plat.Architecture
 	cf.Variant = plat.Variant
@@ -502,8 +436,7 @@ func assembleFor(base v1.Image, layers []v1.Layer, inputs []LayerInput, cfg Conf
 	if len(cfg.Volumes) > 0 {
 		cf.Config.Volumes = toSet(cfg.Volumes)
 	}
-	// History entries carry timestamps; drop them rather than stamp them, so nothing
-	// non-deterministic leaks into the config digest.
+	// History entries carry timestamps; drop them.
 	cf.History = nil
 
 	img, err = mutate.ConfigFile(img, cf)
@@ -511,8 +444,7 @@ func assembleFor(base v1.Image, layers []v1.Layer, inputs []LayerInput, cfg Conf
 		return nil, fmt.Errorf("setting config: %w", err)
 	}
 
-	// Provenance last, so it describes the finished manifest. See provenance.go for why this is
-	// annotations rather than config labels, and why nothing here is time-dependent.
+	// Provenance last, so it describes the finished manifest.
 	return withProvenance(img, base, inputs), nil
 }
 
@@ -533,11 +465,8 @@ func buildLayerTarGz(in LayerInput, workDir string) (string, error) {
 		return "", err
 	}
 
-	// Stable order. Without this the digest would depend on filesystem or archive iteration
-	// order, which is exactly the kind of incidental variation determinism must exclude.
-	//
-	// SliceStable, not Slice: equal names must break ties on archive order, which is a property of
-	// the input, rather than on how the sort happened to partition them. See the dedupe below.
+	// Stable order, so the digest does not depend on iteration order. SliceStable, so equal names
+	// keep archive order for the dedupe below.
 	sort.SliceStable(entries, func(i, j int) bool { return entries[i].name < entries[j].name })
 
 	out, err := os.CreateTemp(workDir, "layer-*.tar.gz")
@@ -546,17 +475,15 @@ func buildLayerTarGz(in LayerInput, workDir string) (string, error) {
 	}
 	defer out.Close()
 
-	// gzip.Writer leaves ModTime zero and OS unknown unless told otherwise, so the compressed
-	// stream is itself deterministic.
+	// gzip.Writer leaves ModTime zero and OS unknown, so the stream is deterministic.
 	zw := gzip.NewWriter(out)
 	tw := tar.NewWriter(zw)
 
 	seen := make(map[string]bool, len(entries))
 	for _, e := range entries {
 		if seen[e.name] {
-			// First occurrence wins, which after the stable sort above means the one the archive
-			// listed first. Overlaying BETWEEN layers is what the ordered layers list is for; two
-			// entries with one name inside a single archive is an ambiguity, not an overlay.
+			// The first occurrence in archive order wins. Overlaying is between layers, not
+			// within one archive.
 			continue
 		}
 		seen[e.name] = true
@@ -612,9 +539,7 @@ func buildLayerTarGz(in LayerInput, workDir string) (string, error) {
 
 // collectEntries turns one input into the set of files it contributes.
 func collectEntries(in LayerInput) ([]tarEntry, error) {
-	// A remove entry produces whiteouts and nothing else. OCI expresses deletion as a ".wh."
-	// sibling, so the bytes remain in the layer below and this hides a path rather than
-	// reclaiming its space.
+	// A remove entry produces only ".wh." whiteouts, which hide a path without reclaiming space.
 	if len(in.Remove) > 0 {
 		var out []tarEntry
 		for _, p := range in.Remove {
@@ -630,24 +555,20 @@ func collectEntries(in LayerInput) ([]tarEntry, error) {
 
 	target := strings.TrimPrefix(path.Clean("/"+in.Target), "/")
 
-	// An image contributes a filesystem rather than a fetched file, so it returns before the open
-	// below — there is no Path to open. Checked here rather than as a switch arm for that reason.
+	// An image layer has no fetched file to open.
 	if in.Image != nil {
 		return extractImage(in.Image, target, in.Subpath, in.StripComponents)
 	}
 
-	// Every mode past this point reads the fetched file, so it is opened once here rather than in
-	// each arm. Every extractor takes it: the content is always streamed to disk before it gets
-	// here, so an *os.File is both the io.Reader the tar and deb readers want and the io.ReaderAt
-	// the zip reader needs.
+	// Every remaining mode reads the fetched file; *os.File serves both io.Reader and the zip
+	// reader's io.ReaderAt.
 	f, err := os.Open(in.Path)
 	if err != nil {
 		return nil, fmt.Errorf("opening content: %w", err)
 	}
 	defer f.Close()
 
-	// A tar under a codec. Looked up rather than listed as case labels, so the set of modes and
-	// their codecs cannot disagree — see tarCompressions.
+	// A tar under a codec; see tarCompressions.
 	if comp, ok := tarCompressions[in.Unpack]; ok {
 		return extractTarball(f, comp, target, in.Subpath, in.StripComponents)
 	}
@@ -666,27 +587,22 @@ func collectEntries(in LayerInput) ([]tarEntry, error) {
 		return extractDeb(f, target, in.Subpath, in.StripComponents)
 
 	default:
-		// Reached when the CRD admits a mode this build does not implement. Typed so the reconciler
-		// reports it as terminal instead of retrying a mode that will never appear.
+		// The CRD admits a mode this build does not implement.
 		return nil, &ErrUnsupportedUnpack{Mode: string(in.Unpack)}
 	}
 }
 
 // singleFile places one file at the target, decompressing it first when comp says to.
 //
-// This is `unpack: none` and `unpack: gz` — they are one procedure differing only by a codec, so a
-// third single-file mode is one more call rather than another copy of this.
-//
-// The name in the image comes from the spec and nowhere else. gzip can record an original filename
-// in its header and the URL usually ends in one, but both are excluded from InputHash, so deriving
-// the name from either would let two mirrors serving identical bytes produce different layers under
-// one input hash — after which the reconciler serves whichever was built first, forever.
+// This is `unpack: none` and `unpack: gz`. The file name comes from the spec only: the gzip header
+// and the URL are not in InputHash, so deriving it from either would let identical bytes produce
+// different layers under one input hash.
 func singleFile(f *os.File, in LayerInput, target string, comp compression) ([]tarEntry, error) {
 	if target == "" || strings.HasSuffix(in.Target, "/") {
 		return nil, fmt.Errorf("target %q must name a file when unpack is %q", in.Target, in.Unpack)
 	}
-	// Refused rather than ignored, because there is no archive to select from and silence would
-	// leave a spec mistake looking like it worked. `none` predates this and still ignores it.
+	// Refused rather than ignored, so a spec mistake does not look like it worked. `none`
+	// predates this and still ignores it.
 	if comp != compNone && in.Subpath != "" {
 		return nil, fmt.Errorf("subpath is not valid with unpack %q: there is no archive to select from", in.Unpack)
 	}
@@ -706,8 +622,8 @@ func singleFile(f *os.File, in LayerInput, target string, comp compression) ([]t
 
 // extractTarball extracts a tar that may be wrapped in a codec.
 //
-// Deferring the codec cleanup here is safe because extractTar materialises every entry before it
-// returns; a change that made it return a lazy reader would have to move this.
+// Deferring the codec cleanup is safe only because extractTar materialises every entry before it
+// returns.
 func extractTarball(f *os.File, comp compression, target, subpath string, strip int) ([]tarEntry, error) {
 	r, closeFn, err := decompress(f, comp)
 	if err != nil {
