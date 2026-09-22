@@ -1,15 +1,12 @@
 # Default values for kube-oci-composer.
 
-# replicaCount is deliberately 1, and raising it does NOT scale throughput.
-#
-# Reconciling runs under leader election, so a second replica is a warm standby that reconciles
-# nothing until it wins the lease. It is no longer a STORAGE question -- the registry holds the
-# images now (ADR 0035) -- so extra replicas are merely idle rather than dangerous.
+# Raising this does NOT add throughput: reconciling runs under leader election, so extra replicas
+# are idle warm standbys.
 replicaCount: 1
 
 image:
   repository: ghcr.io/lhns/kube-oci-composer
-  # Empty means use the chart's appVersion, so an upgrade of the chart moves the image with it.
+  # Empty means the chart's appVersion, so the image moves with chart upgrades.
   tag: ""
   pullPolicy: IfNotPresent
   pullSecrets: []
@@ -25,194 +22,122 @@ serviceAccount:
 operator:
   metricsBindAddress: ":8080"
   healthProbeBindAddress: ":8081"
-  # Leader election. On by default: two controllers reconciling the same object would push and
-  # re-tag concurrently, which the tag-conflict policy would then read as a genuine conflict.
+  # Keep on: two controllers reconciling one object would push and re-tag concurrently, which the
+  # tag-conflict policy reads as a genuine conflict.
   leaderElect: true
 
   storage:
-    # Directory holding fetched layer sources, keyed by digest. Always used, even when S3 is
-    # configured behind it, because assembly reads local files.
+    # Local directory for fetched layer sources, keyed by digest. Always used, even with S3,
+    # because assembly reads local files.
     cacheDir: /var/cache/oci-composer
 
-  # Object storage for the layer cache, and optionally for served blobs.
-  #
-  # Leave endpoint empty to keep everything local to the pod. With it set, a restart or a
-  # reschedule onto another node reuses cached layers instead of re-fetching every one from
-  # upstream — which is the difference between the pod being unready for seconds and for minutes.
+  # Object storage for the layer cache. Empty endpoint keeps everything local to the pod; with it
+  # set, a restart or reschedule reuses cached layers instead of re-fetching all of them.
   s3:
-    # Must include a scheme. A bare host is rejected at startup rather than guessed, because
-    # guessing wrong would ship credentials in plaintext.
+    # Must include a scheme; a bare host is rejected at startup rather than guessed.
     endpoint: ""
     bucket: ""
     prefix: ""
-    # Most self-hosted gateways ignore the region but require a value. Ceph RGW expects "default"
-    # rather than an AWS region name.
+    # Most self-hosted gateways ignore the region but require one; Ceph RGW expects "default".
     region: default
-    # Path-style addressing (host/bucket/key). Required by most self-hosted gateways, whose
-    # certificate does not cover per-bucket subdomains.
+    # Path-style addressing (host/bucket/key), needed by most self-hosted gateways.
     pathStyle: true
-    # Secret holding AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY. Credentials are injected as
-    # environment variables, never as flags — flags appear in ps, in the pod spec, and in every
-    # kubectl describe.
+    # Secret with AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, injected as env (never as flags).
     existingSecret: ""
 
-  # Registry hosts that may be reached over plain HTTP, comma separated. Matched on host, so naming
-  # one internal registry does not downgrade any other request this controller makes.
+  # Registry hosts reachable over plain HTTP, comma separated. Matched on host, so other requests
+  # are not downgraded.
   insecureRegistry: ""
 
-  # Keeping published images from being reclaimed by the registry.
-  #
-  # Applies to objects using spec.push. A registry with an expiry policy will delete anything it has
-  # not seen used recently; this re-pulls every image a live ImageComposition still references, which
-  # is what tells the registry they are still in use. Refreshing only READS -- it needs no write or
-  # delete permission and can destroy nothing. See ADR 0031.
-  # How many past builds stay pullable per ImageComposition, unless the object overrides it via
-  # spec.push.history.
-  #
-  # Retention is the ONLY thing keeping an older digest resolvable: reverting a commit, and a pod
-  # pinned to a previous digest being rescheduled, both depend on it. Layers are shared between
-  # builds, so a generous value costs far less than the count suggests.
+  # How many past builds stay pullable per ImageComposition, unless spec.push.history overrides it.
+  # Retention is the ONLY thing keeping an older digest resolvable (reverts, pods pinned to an old
+  # digest being rescheduled). Builds share layers, so a generous value is cheap. 0 is clamped to 1.
   keepBuilds: 10
 
   # SBOM, provenance and signing. All off by default.
   #
-  # SIGNING IS INERT UNTIL SOMETHING VERIFIES IT. This chart ships no admission policy, so turning
-  # it on changes nothing an attacker experiences until you install Kyverno, policy-controller or
-  # Connaisseur and point it at the public key. Example policies: docs/examples/verify.
+  # SIGNING IS INERT UNTIL SOMETHING VERIFIES IT: this chart ships no admission policy. Install
+  # Kyverno, policy-controller or Connaisseur with the public key; examples in docs/examples/verify.
   #
-  # For an ImageComposition the SBOM is DERIVED from the digest-pinned inputs and is exact rather
-  # than scanned -- it says "core-1.1.1.tgz sha256:... unpacked at /core", not "openssl 3.0.11".
-  # For an ImageBuild it comes from BuildKit and is a scan of the result, because only the build
-  # can see what it installed (ADR 0008).
+  # An ImageComposition's SBOM is derived from its digest-pinned inputs (exact, not scanned); an
+  # ImageBuild's comes from BuildKit and is a scan (ADR 0008).
   supplyChain:
     sbom: false
     provenance: false
     signing:
       enabled: false
       # A Secret in the RELEASE namespace, from `cosign generate-key-pair k8s://<ns>/<name>`.
-      # Never nameable by an object: the operator signs, tenants do not choose the key.
+      # Objects cannot name a key; the operator signs.
       existingSecret: ""
 
-  # Refuse any sourceRef that names no revision (threat T1).
-  #
-  # Pinning is optional by design -- a composition tracking a branch is a legitimate thing to want
-  # (ADR 0026) -- so this is how an operator decides otherwise for a whole cluster. Objects that
-  # omit `revision:` go Stalled with a message saying so.
+  # Refuse any sourceRef without a revision (threat T1). Pinning is optional by design (ADR 0026);
+  # this makes it mandatory cluster-wide. Objects omitting `revision:` go Stalled.
   requirePinnedSources: false
 
-  # Refuse `fetch` URLs resolving to private, loopback or CGNAT addresses (threat I6).
-  #
-  # Cloud metadata endpoints on link-local addresses are refused ALWAYS, whatever this says: they
-  # hand out credentials and no layer source lives there. This covers the rest, and is off by
-  # default because an artifact server on a private address is an ordinary layer source -- refusing
-  # those would make this a guard people turn off. Set it if all your sources are external.
-  # See ADR 0036.
+  # Refuse `fetch` URLs resolving to private, loopback or CGNAT addresses (threat I6, ADR 0036).
+  # Link-local (cloud metadata) is refused ALWAYS. Off by default because an artifact server on a
+  # private address is an ordinary source; set it if all your sources are external.
   fetchDenyPrivate: false
 
   retention:
-    # Empty uses the shared one derived from retention.window. Set it only to make THIS controller
-    # refresh differently from the other.
-    #
-    # Zero disables refreshing entirely. Correct only when the registry has no expiry policy at
-    # all -- and the chart refuses to render it while retention.window is set, because that
-    # combination guarantees the deletion ADR 0031 exists to prevent.
+    # Empty uses the shared interval derived from retention.window; set only to make this
+    # controller differ. 0 disables refreshing, which is correct only when the registry never
+    # expires anything -- the chart refuses it while retention.window is set (ADR 0031).
     refreshInterval: ""
 
-# The bundled registry (zot), ON by default.
-#
-# A registry is now the only way an artifact becomes pullable (ADR 0035), so shipping this enabled
-# is what keeps "helm install and you are done" true. Turn it off if you already run one, point
-# defaultRegistry.host at yours, and give it defaultRegistry.existingPushSecret.
-#
-# Deliberately plain: no HA, no object storage, no TLS termination. If you need any of those, run
-# zot's own chart or Harbor instead of this.
-#
-# What you own once this is on: the volume, and backing it up. For ImageComposition that is a
-# convenience -- artifacts rebuild from their specs. For ImageBuild the registry is a SYSTEM OF
-# RECORD, because a rebuild may not reproduce the digest, so losing this volume loses those images.
-# See docs/registry.md.
-# Custom resource definitions.
-#
-# Installed from templates/ rather than crds/, so `helm upgrade` actually applies CRD changes --
-# Helm installs crds/ once and never touches it again. Both CRDs are annotated
-# helm.sh/resource-policy: keep, so nothing here can delete one: deleting a CRD deletes every object
-# of that kind.
-#
-# Set false when something else owns them (a GitOps CRD sync, or a cluster where CRDs are applied by
-# an administrator).
+# Custom resource definitions, installed from templates/ so `helm upgrade` applies CRD changes.
+# Both are annotated helm.sh/resource-policy: keep, since deleting a CRD deletes every object of
+# its kind. Set false when something else (GitOps, an administrator) owns them.
 crds:
   install: true
 
-# How long images are kept. THE setting to think about; everything else derives from it.
+# How long images are kept. THE setting to think about; the rest derives from it.
 #
-# This describes whoever stores your images. With the bundled registry the chart configures it for
-# you; with your own registry you are DECLARING what that registry already does, because the
-# controllers' refresh cadence has to be derived from something and the chart cannot read your
-# policy. Getting the declaration wrong is not cosmetic: the controllers keep live images alive by
-# re-pulling them, and they need to do that faster than your registry expires them.
+# With the bundled registry the chart configures this. With your own registry you are DECLARING
+# what it already does: the controllers keep live images alive by re-pulling them, and must do so
+# faster than your registry expires them. A wrong declaration can lose images.
 retention:
   # How long content survives with nothing referencing it. Empty means "my registry never expires
-  # anything", which switches off the derivation and the checks rather than guessing.
+  # anything", which turns off the derivation and the checks.
   window: 720h
 
-  # Everything below is DERIVED from the window and needs no attention. Set one only if you have a
-  # reason, and the chart will still refuse combinations that lose images.
+  # Everything below is derived from the window. The chart refuses combinations that lose images.
 
-  # refreshInterval = window / refreshFactor. The default is a margin of 720: refreshing has to
-  # fail continuously for a month before an image a live object references is at risk.
-  #
-  # The RATIO is the guarantee, not either number (ADR 0031), and the chart refuses anything below
-  # 24 -- a day's worth of refreshes. Lower it only if you understand what you are spending.
+  # refreshInterval = window / refreshFactor. At 720, refreshing must fail continuously for a
+  # month before a live image is at risk. The ratio is the guarantee (ADR 0031); below 24 is
+  # refused.
   refreshFactor: 720
 
-  # How often the controllers re-pull what live objects reference. Empty derives it.
-  #
-  # Set explicitly to go below the floor the derivation enforces -- which is how the e2e runs a
-  # one-second refresh against a thirty-second window on purpose.
+  # How often the controllers re-pull what live objects reference. Empty derives it. Set it
+  # explicitly to go below the derived 30s floor (the e2e uses 1s against a 30s window).
   refreshInterval: ""
 
-# push.writeRefTo, which writes a published image reference into a ConfigMap for a consumer -- a
-# Flux Kustomization's postBuild.substituteFrom -- to substitute. Governs both controllers.
+# push.writeRefTo: writing a published image reference into a ConfigMap for a consumer, e.g. a Flux
+# Kustomization's postBuild.substituteFrom. Applies to both controllers.
 #
-# An object may always export into ITS OWN namespace; that needs nothing here. These settings are
-# about writing somewhere else, and about what an object may put on a ConfigMap it does not own.
-#
-# The ConfigMap's name is not chosen by the object. It is <kind>-<namespace>-<object name>, e.g.
-# imagebuild-team-a-app, which is the name a consumer spells in substituteFrom.
+# Exporting into the object's OWN namespace needs nothing here. The ConfigMap is named
+# <kind>-<namespace>-<object name>, e.g. imagebuild-team-a-app.
 refExport:
-  # Namespaces an object may export into BESIDES its own. Empty permits none.
-  #
-  # The useful target is the namespace your Kustomizations substitute from, usually flux-system,
-  # which parameterises everything in the cluster. Naming it here permits EVERY ImageBuild and
-  # ImageComposition in the cluster to create a ConfigMap there -- under a name carrying its own
-  # kind and namespace, so it can neither collide with nor overwrite anything else, but there all
-  # the same.
-  #
-  # This list is enforced by the controller, not by RBAC: see ADR 0056 for why, and ADR 0055 for
-  # what the feature costs -- chiefly that the digest becomes state outside git.
+  # Namespaces an object may export into BESIDES its own. Empty permits none. Typically
+  # flux-system. Listing one lets EVERY ImageBuild and ImageComposition create a ConfigMap there
+  # (under its own non-colliding name). Enforced by the controller, not RBAC (ADR 0056); see
+  # ADR 0055 for the cost -- the digest becomes state outside git.
   namespaces: []
 
-  # Labels added to every generated ConfigMap, so whatever watches substitution sources notices a
-  # new digest. Empty adds none, and the change is then seen only at the consumer's next interval.
-  # Flux wants "reconcile.fluxcd.io/watch=Enabled" -- a label, not an annotation, because
-  # kustomize-controller selects these with --watch-configs-label-selector.
+  # Labels added to every generated ConfigMap so a watcher notices a new digest. Flux wants
+  # "reconcile.fluxcd.io/watch=Enabled" (a label: kustomize-controller selects on it). Empty adds
+  # none, and the change is seen only at the consumer's next interval.
   labels: ""
 
   # Label and annotation keys an object may set on its exported ConfigMap, exact or with a trailing
-  # "*". Empty permits none, and an unpermitted key is refused rather than quietly dropped.
-  #
-  # These land on an object in a namespace the object may not otherwise touch, which is the whole
-  # reason they are not simply allowed.
+  # "*". Empty permits none; an unpermitted key is refused, not dropped.
   allowedLabels: []
   allowedAnnotations: []
 
-# Which components this release runs. All on by default: one install gives a working, entirely
-# local system -- a composer, a builder and a registry for them to publish into.
+# Which components run. All on by default: one install gives a composer, a builder and a registry.
 #
-# imageBuild is the one worth a second thought. Its controller creates Jobs, which is the ability to
-# run arbitrary containers in this namespace; that is why it used to be a separate chart you opted
-# into (ADR 0025). Turning it off here removes its Deployment AND its RBAC, so the capability is
-# genuinely gone rather than merely unused.
+# imageBuild's controller creates Jobs -- it can run arbitrary containers in this namespace
+# (ADR 0025). Disabling it removes its Deployment AND its RBAC.
 imageComposition:
   enabled: true
 
@@ -226,45 +151,31 @@ imageBuild:
     tag: ""
     pullPolicy: IfNotPresent
 
-  # Both images are part of every build's input hash, so a floating tag would let an upgraded
-  # builder change output without changing the hash. The chart refuses to render an unpinned one.
+  # Must be pinned by digest (refused otherwise): both are part of every build's input hash, so a
+  # floating tag could change output without changing the hash.
   buildkitImage: "moby/buildkit:v0.17.2-rootless@sha256:5b45405a38c579692f6fcd47ceef2002fe4fa61bb04ef0c2c644cf74cbbd57b8"
   dockerfileFrontend: "docker/dockerfile:1.12.1@sha256:93bfd3b68c109427185cd78b4779fc82b484b0b7618e36d0f104d4d801e66d25"
 
-  # The image that fetches, VERIFIES and unpacks each build's context, as the Job's init container.
-  #
-  # Empty means this operator's own builder image, which is what you want: the fetcher is a
-  # subcommand of the same binary, so the chart already knows a digest for it. Set it only to pin
-  # the fetcher separately from the controller.
-  #
-  # Its digest is in the build input hash, like the other two. The argument that it need not be is
-  # worth answering: every context is digest-addressed, so a correct fetcher has exactly one possible
-  # output -- true of the DOWNLOAD, false of the UNPACK, where a fixed symlink or wrapper bug changes
-  # the tree under an unchanged digest.
+  # The init-container image that fetches, verifies and unpacks each build's context. Empty (the
+  # usual choice) uses this operator's builder image. Set only to pin it separately; must then be
+  # pinned by digest. Its digest is in the build input hash: unpacking bugs can change the tree
+  # under an unchanged context digest.
   fetcherImage: ""
 
-  # Refuse a spec.context.fetch URL resolving to a private, loopback or CGNAT address.
-  #
-  # Link-local is refused whatever this says -- that is where cloud metadata endpoints serve
-  # credentials. Off by default for the same reason the composer's is: an artifact server on a
-  # private address is an ordinary source, and a guard people switch off is no guard. See ADR 0036.
-  #
-  # This governs the CONTROLLER's read of a Dockerfile out of a fetch context. The fetch inside the
-  # build pod is deliberately unguarded: that pod runs arbitrary code from a Dockerfile and can
-  # already reach whatever the pod network allows.
+  # Refuse a spec.context.fetch URL resolving to a private, loopback or CGNAT address (ADR 0036).
+  # Link-local is always refused. Governs the CONTROLLER's read of a Dockerfile from a fetch
+  # context; the build pod's own fetch is unguarded, as it already runs arbitrary code.
   fetchDenyPrivate: false
 
-  # Its own bind addresses: this is a second pod in the same namespace, not the composer.
+  # This pod's own bind addresses.
   metricsBindAddress: ":8080"
   healthProbeBindAddress: ":8081"
-  # Where build pods fetch their Flux source, so they never reach source-controller. See ADR 0044.
+  # Where build pods fetch their Flux source, so they never reach source-controller (ADR 0044).
   contextBindAddress: ":8090"
 
-  # Lets build pods reach the context endpoint above. A build Job runs in its OBJECT's namespace,
-  # so it crosses a namespace boundary to fetch, and a default-deny cluster blocks it.
-  #
-  # Empty allowedNamespaces means every namespace, which is the default because a build can land
-  # anywhere. Reaching the endpoint is not reading it: every request carries a per-build token.
+  # Lets build pods (which run in their object's namespace) reach the context endpoint in a
+  # default-deny cluster. Empty allowedNamespaces means every namespace; each request still needs
+  # a per-build token.
   networkPolicy:
     enabled: true
     allowedNamespaces: []
@@ -274,13 +185,11 @@ imageBuild:
   leaderElect: true
   serviceAccountName: ""
 
-  # SBOM, provenance and signing for builds. See operator.supplyChain for the caveats -- they all
-  # apply, and the SBOM here is a scan rather than a derivation.
+  # SBOM, provenance and signing for builds; the caveats under operator.supplyChain apply.
   #
-  # Enabling either attestation CHANGES THE PUBLISHED DIGEST: BuildKit attaches attestations as
-  # extra manifests in an index, so a single-platform build's artifact becomes an index. Existing
-  # pins keep resolving; anything that assumed the digest named a manifest now finds an index. It
-  # is in the input hash, so it happens once, visibly, when you turn it on.
+  # Enabling an attestation CHANGES THE PUBLISHED DIGEST: BuildKit wraps the result in an index.
+  # Existing pins keep resolving, but consumers expecting a manifest now get an index. It is in
+  # the input hash, so it happens once, when turned on.
   supplyChain:
     sbom: false
     provenance: false
@@ -288,222 +197,151 @@ imageBuild:
       enabled: false
       existingSecret: ""
 
-  # Refuse an ImageBuild whose spec.context names no revision (threat T1). It matters more here
-  # than on the composer: an unpinned context builds whatever the branch is at now, and a build's
-  # output cannot be reproduced from its spec (ADR 0025).
+  # Refuse an ImageBuild whose spec.context has no revision (threat T1). Matters more than for
+  # the composer: a build's output cannot be reproduced from its spec (ADR 0025).
   requirePinnedSources: false
 
   retention:
-    # Empty uses the shared one derived from retention.window; see operator.retention.
+    # Empty uses the shared interval; see operator.retention.
     refreshInterval: ""
 
-  # How often a running build Job is re-observed.
-  #
-  # Also how long a build's image can sit UNTAGGED: the Job pushes by digest and this controller
-  # applies the names when it next looks (ADR 0054). Untagged is what a registry's collector
-  # reclaims, so the registry's gcDelay is never derived below three times this.
-  #
-  # Lower it to compress that whole chain -- which is what the e2e does, so its retention tests can
-  # use short timings and still mean something.
+  # How often a running build Job is re-observed. Also bounds how long a build's image sits
+  # UNTAGGED before the controller names it (ADR 0054), so registry.retention.gcDelay is never
+  # derived below 3x this. The e2e lowers it to compress retention timings.
   buildPollInterval: 15s
 
   resources:
     requests: {cpu: 100m, memory: 128Mi}
     limits: {memory: 512Mi}
 
-# Where objects publish when they do not name a repository themselves.
+# Where objects publish when they name no repository.
 #
-# Empty and registry.enabled -- the default -- means the bundled registry, addressed by its
-# in-cluster Service DNS. Set `host` to publish into a registry you already run, and pair it with
-# `existingPushSecret`; then set registry.enabled=false and nothing zot-related is installed.
+# Empty with registry.enabled (the default) means the bundled registry via its in-cluster DNS.
+# To use your own registry: set `host` and `existingPushSecret`, and registry.enabled=false.
 #
-# The credential named here is read from the CONTROLLER's namespace, and is used ONLY for objects
-# that did not name their own repository. An object naming its own target uses its own secretRef or
-# nothing -- the operator's credential is never sent to a registry a tenant chose.
+# The credential is read from the CONTROLLER's namespace and used ONLY for objects that named no
+# repository; it is never sent to a registry a tenant chose.
 defaultRegistry:
   host: ""
   existingPushSecret: ""
-  # Extra hosts reachable over plain HTTP, comma separated.
-  #
-  # The bundled registry's in-cluster Service name is added automatically -- it is always plain HTTP.
-  # `registry.host` is NOT, because it may be an ingress terminating TLS and forcing HTTP would break
-  # it. Set this when registry.host is plain HTTP, which a NodePort is:
+  # Extra plain-HTTP hosts, comma separated. The bundled registry's Service name is added
+  # automatically; registry.host is NOT (it may be a TLS ingress). Set this when registry.host is
+  # plain HTTP, as a NodePort is:
   #
   #   defaultRegistry.insecure: oci-composer.internal:5000
   insecure: ""
 
+# The bundled registry (zot), ON by default: a registry is the only way an artifact becomes
+# pullable (ADR 0035). To use your own, set registry.enabled=false plus defaultRegistry.host and
+# defaultRegistry.existingPushSecret. For HA writes, object-storage-only setups or TLS termination
+# beyond what is here, run zot's own chart or Harbor.
+#
+# You own the volume and its backups. ImageComposition artifacts rebuild from specs; ImageBuild
+# output may not reproduce, so the registry is its SYSTEM OF RECORD. See docs/registry.md.
 registry:
   enabled: true
 
-  # How long one HTTP request may take, end to end -- not a stall timeout. It counts time queued
-  # behind zot's registry-wide upload lock, so a short value makes large layers unpushable under
-  # concurrency. Unset, zot applies 60s. Generous on purpose; docs/registry.md, ADR 0047.
+  # Limit for one whole HTTP request, including time queued behind zot's registry-wide upload
+  # lock -- not a stall timeout. Short values make large layers unpushable under concurrency.
+  # Must be set (zot otherwise applies 60s). docs/registry.md, ADR 0047.
   readTimeout: "1h"
 
-  # Pinned by digest, like every other image this project consumes.
-  #
-  # Do not pin an older version. Before v2.1.21, zot deletes layers that published images still
-  # need. The damage is hard to recognise: the tag keeps resolving, and the pull fails partway with
-  # a missing layer, which reads as a broken image rather than a registry that reclaimed too much.
+  # Pinned by digest. Do not use a version before v2.1.21: older zot deletes layers published
+  # images still need, and pulls then fail partway with a missing layer.
   image: ghcr.io/project-zot/zot:v2.1.21@sha256:6b69512c00dceaad05b1144e6079aac6aa7309d7fd200f9947ecb1de09cf48c8
 
-  # The registry's own collection settings. All derived from the top-level retention.window, and
-  # all meaningless when this registry is disabled -- the window itself is not, which is why it
-  # lives up there and these live here.
+  # The registry's collection settings, derived from the top-level retention.window.
   retention:
-    # Which repositories the policy governs. Everything, by default.
-    #
-    # Scoping this protects the repositories outside it ONLY for tagged content -- no expiry window
-    # is applied where no policy matches. Their UNTAGGED manifests are still collected, because
-    # zot's default for a repository it finds no policy for is to delete them. So narrowing this is
-    # an escape hatch for images, not for a build's output between being pushed and being named.
+    # Repositories the policy governs. Narrowing it protects outside repositories only for TAGGED
+    # content: zot still collects untagged manifests where no policy matches, including a build's
+    # output before it is named.
     repositories: ["**"]
 
-    # Whether a manifest with no tag pointing at it is collected.
-    #
-    # Leave it true in production. It is what reclaims a manifest once nothing names it: content
-    # whose object was retired and whose tags expired, and an ImageBuild refused under
-    # onConflict: Fail, whose content is uploaded and then deliberately not named (ADR 0054).
-    #
-    # Setting this false switches off untagged collection entirely -- nothing is ever reclaimed --
-    # which also removes the race gcDelay otherwise guards, so the chart accepts any gcDelay then.
+    # Whether untagged manifests are collected. Leave true in production: it reclaims content no
+    # tag names any more, including builds refused under onConflict: Fail (ADR 0054). false means
+    # nothing untagged is ever reclaimed, and gcDelay is then unconstrained.
     deleteUntagged: true
 
-    # Whether to configure zot's keepUntagged rule, which keeps an untagged manifest while it is
-    # pulled or recently pushed.
+    # Whether to configure zot's keepUntagged rule (keep untagged manifests while pulled or
+    # recently pushed). The controllers publish nothing untagged -- every manifest carries a
+    # digest-<hex> tag (ADR 0060) -- so it is off by default.
     #
-    # It exists to protect content nothing names. The controllers no longer publish any: every
-    # manifest they write -- digest-only publications and attestations included -- is named after
-    # its own digest (digest-<hex>), so it is governed by the tag rule for as long as it is live
-    # (ADR 0060).
+    # Hazard: with it on, zot keeps every manifest that ever lost its last tag, and its layers,
+    # FOREVER (removing the tag deletes the stats it would evaluate). Off, such content goes
+    # gcDelay after its last tag expires.
     #
-    # And configuring it has a cost that is not in zot's documentation. Removing a manifest's last
-    # tag deletes the digest's statistics; with keepUntagged configured, zot then retains a
-    # statistics-less untagged manifest without evaluating it -- forever, along with every layer it
-    # references. So with this on, every retired image stays on disk. Off, it is reclaimed gcDelay
-    # after its last tag expires.
-    #
-    # Off by default. Upgrading from 0.5.x or earlier, set this true for the upgrade, wait until every
-    # object has reconciled (status.artifact.tags then includes a digest- tag), and remove it: content
-    # published before the digest tag existed is untagged until then, and off would collect it by age.
-    #
-    # Content attached by hand (cosign attest, oras attach) is untagged and is reclaimed by age with
-    # this off. Setting it true protects that again, at the cost above.
+    # Upgrading from 0.5.x or earlier: set true for the upgrade, wait until every object's
+    # status.artifact.tags includes a digest- tag, then remove it. Content attached by hand
+    # (cosign attest, oras attach) is untagged and is collected by age while this is off.
     keepUntagged: false
 
-    # How long a collection task may be held back before it runs, at most. Empty leaves zot's
-    # default of 30 seconds.
-    #
-    # Worth knowing even if you never set it: zot draws a fresh random delay up to this for EVERY
-    # repository, so a full pass takes roughly (repositories x this / 2). That, not gcInterval, is
-    # what decides how soon something expired is actually collected.
-    #
-    # Leave it empty in production. The jitter is there so a registry holding thousands of
-    # repositories does not collect them in one burst. A test holding thirty wants the opposite,
-    # and that is the only reason this is exposed -- see the note in templates/registry-config.yaml
-    # about how it is reachable at all.
+    # Upper bound on zot's random per-repository delay before a collection task runs. Empty keeps
+    # zot's 30s. A full pass takes roughly repositories x this / 2, which -- more than gcInterval --
+    # decides how soon expired content goes. Leave empty in production; exposed for tests (see
+    # templates/registry-config.yaml).
     gcMaxSchedulerDelay: ""
 
-    # gcInterval = window / gcFactor. Promptness only: collecting late is safe, collecting early
-    # is not, so this is the one value here with no failure mode worse than "later than you
-    # expected". Refused if it ever exceeds the window, which would make the window describe
-    # nothing.
+    # gcInterval = window / gcFactor. Promptness only: collecting late is safe. Refused if it
+    # exceeds the window.
     gcFactor: 120
     gcInterval: ""
 
-    # How old something must be before collection may take it.
-    #
-    # Derived, but NOT from the window: it guards a wall-clock gap. A build's manifest is untagged
-    # from the moment it is pushed until the controller names it (ADR 0054), and untagged is what
-    # the collector reclaims -- so this never derives below three times imageBuild.buildPollInterval,
-    # however short the window gets. That floor is what lets a test compress every other timing
-    # safely.
-    #
-    # With keepUntagged off this is the ONLY thing covering that gap, where before it backed up
-    # keepUntagged.pushedWithin. A builder that is down for longer than this can lose an unnamed
-    # output. That costs a rebuild rather than data -- nothing references an output before it is
-    # named -- so the default is not raised for it; set this higher if you would rather not.
+    # Minimum age before collection. Derived, but never below 3x imageBuild.buildPollInterval: a
+    # build's manifest is untagged from push until the controller names it (ADR 0054). With
+    # keepUntagged off this is the only cover for that gap; a builder down for longer can lose an
+    # unnamed output (costs a rebuild, not data). Raise it if you prefer.
     gcDelay: ""
-    # Report what collection would remove, without removing it. Useful when first tuning the window.
-    #
-    # Only honoured on v2.1.21 or later. Older versions still delete blobs during a "dry" run, so
-    # turning this on to look around destroys content.
+    # Report what collection would remove without removing it. Only safe on v2.1.21+; older
+    # versions delete blobs even in a dry run.
     dryRun: false
 
-  # Anonymous read, authenticated WRITE, enforced by the registry itself with no proxy in front.
+  # Anonymous READ, authenticated WRITE, enforced by zot. Reads are open because kubelets pull
+  # without credentials; restricting who can reach the registry is a NetworkPolicy matter.
   #
-  # Reads are open in the cluster because a kubelet pulls without credentials, so anything else
-  # breaks image pulls unless every workload carries an imagePullSecret. Unlike what came before
-  # this, that IS now a choice: zot can require authentication for reads. Restricting merely who
-  # can reach the registry is a NetworkPolicy question, not this registry's.
-  #
-  # The password is GENERATED at install and reused on upgrade. Nothing to create by hand: the chart
-  # writes both halves -- the htpasswd zot authenticates against, and the dockerconfigjson both
-  # controllers push with.
+  # The password is GENERATED at install and reused on upgrade; the chart writes both the htpasswd
+  # and the dockerconfigjson the controllers push with.
   auth:
     enabled: true
     username: composer
-    # Pin the password instead of generating one. Needed if you manage Secrets out of band, or if
-    # your GitOps tool refuses to leave chart-generated state in the cluster.
+    # Pin the password instead of generating one (e.g. when a GitOps tool rejects generated state).
     password: ""
 
-    # Supply the htpasswd Secret yourself instead of having the chart generate it. The Secret must
-    # hold an `htpasswd` key. Pair it with defaultRegistry.existingPushSecret when you manage both
-    # halves of the credential -- the chart refuses to render a configuration where it generates
-    # one half and you supply the other, because nothing would agree on the password.
+    # Supply the htpasswd Secret yourself (key `htpasswd`). Pair with
+    # defaultRegistry.existingPushSecret when you manage both halves; supplying only one half is
+    # refused, since nothing would agree on the password.
     existingHtpasswdSecret: ""
 
-  # The cluster's DNS domain. Used to address the registry Service internally, and later as a
-  # certificate SAN. Change it only if your cluster does not use cluster.local.
+  # The cluster DNS domain, used for the registry's internal address and certificate SANs.
   clusterDomain: cluster.local
 
-  # HOW WORKLOADS REACH THE REGISTRY. There is no default, and the chart refuses to install until
-  # this is set -- see the long note in templates/_publish.tpl for why.
-  #
-  # The short version: the CONTROLLERS always use the in-cluster Service and need nothing here.
-  # This is entirely about the kubelet, which resolves image references with the NODE's resolver
-  # and cannot see cluster DNS. Getting it wrong does not fail at install time on its own; it
-  # publishes successfully and then fails every pull with ErrImagePull, days later, somewhere else.
+  # HOW WORKLOADS (kubelets) REACH THE REGISTRY. No default: the chart refuses to install until
+  # set (see templates/_publish.tpl). The controllers always use the in-cluster Service. The
+  # kubelet resolves image references with the NODE's resolver, so a wrong choice publishes fine
+  # and then fails every pull with ErrImagePull.
   publish:
-    #   ingress       -- an Ingress is rendered; `host` is its hostname
-    #   nodePort      -- the Service is a NodePort; `host` is a name your NODES resolve to it,
-    #                    which needs a containerd certs.d drop-in per node (docs/registry.md)
+    #   ingress       -- an Ingress is rendered; `registry.host` is its hostname
+    #   nodePort      -- the Service is a NodePort; `registry.host` is a name your NODES resolve to
+    #                    it, plus a containerd certs.d drop-in per node (docs/registry.md)
     #   external      -- you run the registry; set registry.enabled=false and defaultRegistry.host
-    #   internalOnly  -- nothing outside the cluster pulls these images. A deliberate choice, not
-    #                    a default: useful when another system copies them onward.
+    #   internalOnly  -- nothing outside the cluster pulls these images, deliberately (e.g. another
+    #                    system copies them onward)
     mode: ""
 
-  # READ REPLICAS, in addition to the single registry pod. 0 means just the one.
+  # READ REPLICAS in addition to the single writer pod. 0 means just the writer.
   #
-  # These serve PULLS. They do not accept pushes and they do not garbage-collect, and that
-  # restriction is the entire design rather than a simplification -- see ADR 0041.
+  # They serve PULLS only: no pushes, no garbage collection (ADR 0041). zot serialises writes with
+  # an in-process mutex, so two processes writing one store lose tags (measured 2-4%, test/spike),
+  # and collection is a write too.
   #
-  # zot serialises repository writes with an IN-PROCESS mutex. A push is a read-modify-write of
-  # <repo>/index.json and nothing coordinates two processes doing it at once, so three instances
-  # over one store measurably lost 2-4% of tags that had returned 201 (test/spike reproduces it in
-  # about two minutes). Collection rewrites index.json too, so an instance that only serves pulls
-  # is still a mutator if it collects. Confining every mutation to one pod is what makes the rest
-  # safe, and it holds on object storage exactly as much as on a filesystem -- the race is between
-  # processes, not between clients of a disk.
+  # Buys: pulls survive a node drain. Does NOT buy write availability (pushes fail while the writer
+  # moves; reconciles retry), write throughput, or removal of the single point of failure -- that
+  # moves to the shared store.
   #
-  # WHAT THIS BUYS: a node drain stops taking pulls down with it. That is the failure people
-  # actually see -- ErrImagePull on workloads while the registry is being rescheduled.
-  #
-  # WHAT IT DOES NOT BUY, plainly:
-  #   * Write availability. While the writer is moving, pushes fail. Tolerable only because the
-  #     reconcile is idempotent and retries, so a failed push is a delayed publish, not a lost one.
-  #   * Write throughput. Every push still goes through one process.
-  #   * Removal of the single point of failure. It MOVES from the pod to the shared store, which
-  #     is now the availability floor for every pull in the cluster. Only worth it where that store
-  #     is itself redundant.
-  #
-  # Two prerequisites, both refused at render time if missing: one store every pod can see
-  # (storage.driver=s3, or persistence.accessMode=ReadWriteMany), and a shared metadata database
-  # (cache.driver, because BoltDB is a file one process opens exclusively).
+  # Requires (refused otherwise): a store every pod sees (storage.driver=s3, or
+  # persistence.accessMode=ReadWriteMany) and a shared metadata database (cache.driver).
   readReplicas: 0
 
-  # Resources for a read replica. They serve blobs and hold no write buffers, so they are cheaper
-  # than the writer.
+  # Resources for each read replica; they hold no write buffers, so less than the writer.
   readerResources:
     requests: {cpu: 50m, memory: 128Mi}
     limits: {memory: 512Mi}
@@ -512,11 +350,8 @@ registry:
   storage:
     driver: local
 
-    # Store a blob once even when several repositories reference it.
-    #
-    # Turn this OFF if concurrent pushes are slow: dedupe runs inside zot's registry-wide write lock,
-    # so it lengthens the window every other upload waits behind. Costs disk, and only shortens the
-    # critical section rather than removing it. docs/registry.md, ADR 0047.
+    # Store a blob once across repositories. Turn OFF if concurrent pushes are slow: dedupe runs
+    # inside zot's registry-wide write lock. Costs disk. docs/registry.md, ADR 0047.
     dedupe: true
     s3:
       bucket: ""
@@ -524,25 +359,21 @@ registry:
       regionEndpoint: ""
       rootDirectory: /zot
       secure: true
-      # Credentials come from the environment (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY) via this
-      # Secret, never from the config file -- a ConfigMap is visible in every `kubectl describe`.
+      # Secret with AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY, injected as env, never written to
+      # the config.
       existingSecret: ""
 
-  # The metadata database. `none` is BoltDB on local disk, which is a file ONE process opens
-  # exclusively and therefore cannot be shared -- which is why readReplicas>0 requires this.
+  # The metadata database. `none` is per-pod BoltDB, which cannot be shared -- readReplicas > 0
+  # needs redis or dynamodb.
   #
-  # WARNING, and it is the one most likely to bite: `extensions.search` records the pull timestamps
-  # that the retention policy's `pulledWithin` depends on. With read replicas that metadata lives
-  # HERE rather than in per-pod BoltDB -- so if redis is not persistent, a redis restart loses every
-  # pull timestamp, every image looks unpulled, and the next GC pass reclaims images your live
-  # objects still reference. That is ADR 0031's failure mode reintroduced by a component this chart
-  # does not manage, on a gcDelay fuse rather than a retention window. Use persistent redis.
+  # WARNING: this holds the pull timestamps `pulledWithin` retention depends on. If redis is not
+  # persistent, a restart makes every image look unpulled and the next GC pass reclaims images live
+  # objects still reference (ADR 0031's failure mode, on a gcDelay fuse). Use persistent redis.
+  # A redis URL with credentials moves the zot config into a Secret.
   cache:
     driver: none
     redis:
-      # Valkey works and is verified: zot speaks the redis protocol through go-redis, and a
-      # valkey server accepts the same URL. Measured against valkey 8 with 5,057 refresh pulls
-      # fanned across three instances, nothing lost.
+      # Valkey works too (verified against valkey 8).
       url: ""
       keyprefix: zot
     dynamodb:
@@ -556,30 +387,25 @@ registry:
       userDataTablename: ""
       versionTablename: ""
 
-  # TLS on the registry itself.
+  # TLS on the registry itself. Protects the push password, which otherwise crosses the pod network
+  # in an HTTP Basic header.
   #
-  # OFF by default, and that is not timidity -- turning it on invalidates the containerd drop-in on
-  # every node. zot has one listener, so it cannot serve HTTP and HTTPS at once: each node's
-  # hosts.toml has to move from http:// to https:// and, in selfSigned mode, learn the CA. Anyone
-  # terminating TLS at an ingress instead is unaffected.
-  #
-  # What it buys: today the generated push password crosses the pod network in an HTTP Basic
-  # header, readable by anything positioned to watch, with no trace in any log -- and that
-  # credential is the whole of the "only the controllers can push" guarantee. This closes it.
+  # OFF by default because enabling it breaks every node's containerd drop-in: zot serves HTTP or
+  # HTTPS, not both, so each hosts.toml must move to https:// and (selfSigned) trust the CA.
+  # Terminating TLS at an ingress instead is unaffected.
   tls:
     enabled: false
 
-    #   selfSigned  -- the chart generates a CA and a leaf, and distributes the CA to the
-    #                  controllers and to build Jobs. No dependencies. Does NOT renew: the chart
-    #                  refuses to render once the certificate is near expiry, and rotation is a
-    #                  documented manual sequence.
-    #   certManager -- the chart renders a Certificate and cert-manager owns renewal. Recommended
-    #                  if you run cert-manager, because renewal is the thing selfSigned cannot do.
-    #   secret      -- you supply a kubernetes.io/tls Secret and manage it yourself.
+    #   selfSigned  -- the chart generates a CA and leaf and distributes the CA to the controllers
+    #                  and build Jobs. Does NOT renew: the chart refuses to render near expiry, and
+    #                  rotation is manual.
+    #   certManager -- the chart renders a Certificate; cert-manager renews. Recommended if you
+    #                  run cert-manager.
+    #   secret      -- you supply and manage a kubernetes.io/tls Secret.
     mode: selfSigned
 
-    # Empty means "<release>-kube-oci-composer-registry-tls". In mode=secret this is the Secret you
-    # created; in mode=certManager it is the name cert-manager is told to write.
+    # Empty means "<release>-kube-oci-composer-registry-tls". mode=secret: the Secret you created;
+    # mode=certManager: the name cert-manager writes.
     secretName: ""
 
     certManager:
@@ -588,102 +414,78 @@ registry:
         name: ""
         group: cert-manager.io
       duration: 2160h
-      # Generous on purpose. zot reads its certificate once at startup, so a renewed Secret is not
-      # picked up until the pod restarts -- nothing in the chart can notice, because it does not
-      # own the Secret cert-manager rewrites. A long renewBefore leaves room to restart it.
+      # Generous on purpose: zot reads its certificate only at startup, so a renewal takes effect
+      # after a pod restart, which the chart cannot trigger.
       renewBefore: 360h
 
     selfSigned:
       caDays: 3650
       certDays: 365
-      # Refuse to render when the stored certificate is this close to expiring. An expired
-      # certificate here stops the retention refresh, and that reclaims images live objects still
-      # reference (ADR 0031) -- so this fails rather than warns.
+      # Refuse to render when the stored certificate is this close to expiry. An expired cert
+      # stops the retention refresh, which deletes live images (ADR 0031).
       failWithinDays: 1
 
-    # Extra SANs beyond the ones computed automatically (the Service names and registry.host).
+    # Extra SANs beyond the automatic ones (the Service names and registry.host).
     dnsNames: []
     ipAddresses: []
 
-    # How the CA reaches the controllers and the build Jobs. Turn it off when the certificate is
-    # already publicly trusted -- an ACME issuer, or a corporate CA your images already trust.
+    # Distribute the CA to the controllers and build Jobs. Turn off when the certificate is
+    # already trusted (ACME, a corporate CA baked into your images).
     trust:
       enabled: true
-      # A ConfigMap you maintain instead, holding the CA under `ca.crt`. The key name is fixed:
-      # it is what a kubernetes.io/tls Secret uses, so the two sources stay interchangeable.
+      # A ConfigMap you maintain instead, with the CA under the key `ca.crt`.
       existingConfigMap: ""
 
-  # A NetworkPolicy admitting traffic to the registry.
+  # A NetworkPolicy admitting traffic to the registry. A CONNECTIVITY guarantee, not a security
+  # control: build Jobs push from their own object's namespace, which default-deny would block.
   #
-  # It is a CONNECTIVITY guarantee, not a security control. Reads are anonymous by design and
-  # writes need the password, so restricting which namespace may connect adds no authority to
-  # either. What it buys is builds that work: a build Job runs in ITS OWN object's namespace and
-  # crosses a namespace boundary to push, and in a default-deny cluster nothing lets it through.
-  #
-  # Two things to know before narrowing it:
-  #
-  #   * The moment any policy selects the registry pod, that pod goes from "everything allowed" to
-  #     "only what is listed". This file therefore has to be complete, not merely correct.
-  #   * Image pulls come from the KUBELET, in the node's network namespace. No pod selector can
-  #     match them. That is what nodeCIDRs is for -- and on a cluster where pods and nodes sit on
-  #     different networks, leaving it empty turns every pull into a timeout that looks exactly
-  #     like a broken registry.
+  # Before narrowing it:
+  #   * Once any policy selects the registry pod, only what is listed is allowed.
+  #   * Image pulls come from the KUBELET in the node's network, which no pod selector matches.
+  #     Where node and pod networks differ, set nodeCIDRs, or pulls time out.
   networkPolicy:
     enabled: true
-    # Empty means every namespace, which is the default because a build can land anywhere.
-    # Listing namespaces asserts you know every one a build will ever run in.
+    # Empty means every namespace (a build can land anywhere). The release namespace is always
+    # admitted.
     allowedNamespaces: []
-    # CIDRs the kubelets pull from. Needed when node traffic is not already permitted -- check
-    # before assuming it is; the symptom of getting this wrong is a pull that hangs.
+    # CIDRs the kubelets pull from, if node traffic is not already permitted. Symptom of a
+    # missing entry: pulls hang.
     nodeCIDRs: []
 
-  # Rendered when publish.mode=ingress. The hostname comes from registry.host, with any port
-  # stripped -- an Ingress rule host is a hostname, not a registry reference.
-  #
-  # TLS terminates HERE, at the ingress, which is where almost everyone's certificate already is.
-  # That is what makes this the only mode needing nothing on the nodes: containerd pulls over HTTPS
-  # with a certificate it already trusts, so no certs.d drop-in and no CA distribution.
+  # Rendered when publish.mode=ingress, for registry.host with any port stripped. TLS terminates
+  # here, so nodes need no drop-in and no CA distribution.
   ingress:
     className: ""
     annotations: {}
     tls:
       enabled: true
-      # Leave empty when your ingress controller has a default certificate, or when cert-manager
-      # writes one from an annotation above. A name here that nothing creates is worse than none.
+      # Leave empty when the ingress controller has a default certificate or cert-manager writes
+      # one from an annotation. Do not name a Secret nothing creates.
       secretName: ""
 
-  # How the registry is reached.
-  #
-  # The CONTROLLERS always use in-cluster DNS, which needs nothing here.
+  # The Service workloads pull through (the read Service). The controllers always use in-cluster
+  # DNS.
   service:
     type: ClusterIP
     port: 5000
     nodePort: ""
 
-  # The hostname WORKLOADS pull from, and the only thing status.artifact.ref reports.
-  #
-  # It is not what the controllers connect to -- they always use the in-cluster Service -- so this
-  # name never has to resolve inside the cluster, and setting it can no longer break publishing.
-  # Required by every publish.mode except internalOnly.
+  # The hostname WORKLOADS pull from, and what status.artifact.ref reports. The controllers never
+  # connect to it, so it need not resolve inside the cluster. Required by every publish.mode except
+  # internalOnly.
   host: ""
 
   persistence:
-    # ON by default, unlike most optional components here, and for one reason: an ImageBuild's output
-    # cannot be reproduced from its spec, so an emptyDir turns every restart into permanent loss.
+    # ON by default: an ImageBuild's output cannot be reproduced, so an emptyDir loses it on every
+    # restart.
     enabled: true
     size: 20Gi
     storageClass: ""
-    # ReadWriteMany is what lets read replicas mount the same store. Required for readReplicas>0
-    # unless storage.driver is s3.
+    # ReadWriteMany lets read replicas share the store; required for readReplicas > 0 unless
+    # storage.driver is s3. The chart can only check what you ASKED for: a provisioner may bind
+    # RWX per-node and have pods serve different content. Confirm with `kubectl get pvc`.
     #
-    # The chart checks that you ASKED for it. It cannot check that you got it: accessModes on a
-    # claim is a request, and a provisioner that does not support ReadWriteMany either leaves the
-    # claim Pending (loud, fine) or binds it anyway and backs it per-node (silent, and the pods then
-    # serve different content behind one Service name). Confirm with `kubectl get pvc` before
-    # scaling up.
-    #
-    # NOT CHANGEABLE on an existing claim -- accessModes is immutable once bound, so the API server
-    # rejects the upgrade. See docs/registry.md for the migration.
+    # Immutable on an existing claim; see docs/registry.md for the migration.
     accessMode: ReadWriteOnce
 
   logLevel: info
@@ -692,44 +494,29 @@ registry:
     requests: {cpu: 50m, memory: 128Mi}
     limits: {memory: 1Gi}
 
-  # WHERE THE REGISTRY RUNS. Separate from the top-level nodeSelector/tolerations/affinity/
-  # priorityClassName, which place the CONTROLLERS, and separate on purpose.
-  #
-  # The reason to steer the registry is usually that it should NOT be where the controllers are.
-  # The controllers are stateless and cheap to move; the registry holds the store every pull in the
-  # cluster depends on. One shared set of keys would make "keep the controllers off the storage
-  # nodes" and "keep the registry ON them" the same setting.
-  #
-  # Until these existed there was no supported way to keep the registry off the nodes you are about
-  # to drain, so it was rescheduled alongside the very pods that needed to pull from it.
+  # Placement for the REGISTRY pods, separate from the top-level keys that place the controllers,
+  # so e.g. the registry can be kept on storage nodes and off nodes you are about to drain.
   nodeSelector: {}
   tolerations: []
   affinity: {}
   topologySpreadConstraints: []
 
-  # Worth setting to something above your workloads. It does not stop an eviction -- a drain evicts
-  # regardless of priority -- but it decides who gets a node back first when the remaining ones are
-  # tight, which is exactly the case during a cordon.
+  # Worth setting above your workloads: it does not stop evictions, but decides who gets a node
+  # back first when capacity is tight, as during a cordon.
   priorityClassName: ""
 
-  # How long zot gets to finish in-flight requests when it is told to stop.
+  # How long zot gets to finish in-flight requests on shutdown.
   terminationGracePeriodSeconds: 30
 
   podDisruptionBudget:
-    # NOT rendered while there is only one replica, and that is not an oversight: a budget of
-    # 1-of-1 can never be satisfied, so it blocks every drain forever -- the node never cordons,
-    # the cluster upgrade stalls, and nothing in the events explains why. A budget that cannot be
-    # met is worse than no budget.
+    # Rendered only with read replicas: a 1-of-1 budget can never be satisfied and would block
+    # every drain.
     enabled: true
-    # A floor rather than a ceiling, because "at least one registry is serving" is the sentence
-    # anyone actually wants.
     minAvailable: 1
 
-# Persistence for the layer cache.
-#
-# Not a system of record -- it holds fetched layer SOURCES, so anything lost is refetched from
-# upstream. An emptyDir is therefore correct and supported; a PVC only buys a faster restart.
-# (The images themselves live in the registry, which has its own registry.persistence.)
+# Persistence for the composer's layer cache. Not a system of record (layers are refetched), so
+# emptyDir is fine; a PVC only buys a faster restart. Images live in the registry
+# (registry.persistence).
 persistence:
   enabled: false
   storageClass: ""
@@ -766,10 +553,8 @@ livenessProbe:
   initialDelaySeconds: 15
   periodSeconds: 20
 
-# Readiness means the served store is warm, not merely that the process is up. After a restart the
-# pod stays out of the Service until its artifacts have been rebuilt, rather than answering 404 and
-# putting workloads into ImagePullBackOff. Rebuilding re-fetches every layer without a warm cache,
-# so allow generous time here.
+# Readiness means the served store is warm, so a restarted pod stays out of the Service until its
+# artifacts are rebuilt. Without a warm layer cache that re-fetches every layer; allow time.
 readinessProbe:
   initialDelaySeconds: 5
   periodSeconds: 10
