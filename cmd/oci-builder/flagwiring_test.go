@@ -7,17 +7,9 @@ import (
 	"testing"
 )
 
-// Every flag this binary defines must actually reach something.
-//
-// A flag can be declared, documented, parsed — and then never read, because an unset struct field
-// is legal Go and the compiler has nothing to say about it. That is not hypothetical:
-// --build-poll-interval shipped in exactly that state. It was bound to a variable, advertised in
-// values.yaml as the way to compress the retention clock, and consumed by the chart to derive the
-// registry's gcDelay — while the binary went on polling at its built-in default. The derivation
-// was then wrong in the unsafe direction: gcDelay guarded a gap shorter than the real one.
-//
-// The test is mechanical because the failure is. A flag variable referenced only where it is
-// declared and where it is bound is a flag that lies to whoever sets it.
+// TestEveryFlagIsActuallyRead: a flag variable referenced only where it is declared and bound is
+// parsed and ignored, which the compiler cannot catch (--build-poll-interval once shipped so, and
+// the chart derived gcDelay from a value the binary never used).
 func TestEveryFlagIsActuallyRead(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "main.go", nil, 0)
@@ -68,8 +60,7 @@ func TestEveryFlagIsActuallyRead(t *testing.T) {
 	})
 
 	for varName, flagName := range bound {
-		// The declaration and the flag.XxxVar argument. Anything beyond those two is the variable
-		// being put to work.
+		// The declaration and the flag.XxxVar argument; anything more is a real use.
 		if uses[varName] <= 2 {
 			t.Errorf("%s is bound to %s and then never read: it is parsed, documented and "+
 				"discarded, so setting it changes nothing. Pass it to whatever should honour it, "+

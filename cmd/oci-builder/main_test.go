@@ -5,17 +5,8 @@ import (
 	"testing"
 )
 
-// TestEveryJobFlagIsWired closes a hole every other layer is blind to.
-//
-// --context-base-url was defined, documented, rendered by the chart and mounted into the Job's
-// argv logic -- and never copied into the JobConfig the controller reads. So the whole feature was
-// inert: builds kept fetching source-controller directly and the endpoint served nobody. Not one
-// unit test noticed, because they all construct a JobConfig directly and never go through main;
-// only the e2e caught it, twenty minutes at a time.
-//
-// Reflection over both structs rather than a hand-written list of fields, for the reason
-// build.Inputs has the same guard: a list only covers what someone remembered to add, and the field
-// that gets forgotten is exactly the one that was just introduced.
+// TestEveryJobFlagIsWired: every jobFlags field must reach JobConfig (--context-base-url once did
+// not, and only the e2e noticed). Reflection, so a newly added field is covered automatically.
 func TestEveryJobFlagIsWired(t *testing.T) {
 	// Every field set to something distinguishable from its zero value.
 	in := jobFlags{
@@ -30,7 +21,7 @@ func TestEveryJobFlagIsWired(t *testing.T) {
 		Provenance:         true,
 	}
 
-	// Anything not set above would make this test lie about what it covers.
+	// A field left zero here would go unchecked.
 	flags := reflect.ValueOf(in)
 	for i := range flags.NumField() {
 		if flags.Field(i).IsZero() {

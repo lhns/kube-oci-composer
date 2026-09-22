@@ -6,10 +6,8 @@ import (
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 )
 
-// --gc-keep-builds was renamed to --keep-builds so both controllers spell it the same way. The
-// prefix was misleading anyway: the flag caps status.history, and collection merely honours that
-// cap. What must not happen is a chart values file written against the previous release turning
-// into a crash-loop on an unknown flag.
+// TestTheRenamedRetentionFlagStillAnswersToItsOldName: --gc-keep-builds, renamed to --keep-builds,
+// must keep working so an old values file does not crash-loop on an unknown flag.
 func TestTheRenamedRetentionFlagStillAnswersToItsOldName(t *testing.T) {
 	const def = ociv1alpha1.DefaultHistoryLimit
 

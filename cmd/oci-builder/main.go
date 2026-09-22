@@ -1,14 +1,9 @@
 // Command oci-builder runs the ImageBuild controller.
 //
-// A SECOND binary, deliberately. ADR 0004 rejected one binary with a flag — "a flag set to false
-// is a weaker guarantee than a component that does not exist" — and the RBAC makes the point
-// concrete: the composer's role cannot create a single object, while this one creates Jobs, which
-// is the ability to run arbitrary containers. Bundling would put that in every composer install.
-//
-// This binary itself runs no builds. It creates a Job per build and observes it, so its own pod
-// keeps the same posture the composer has: distroless, non-root, read-only root filesystem, no
-// privileges. The code from a git repository runs in a different pod, under a different service
-// account. See ADR 0025.
+// A separate binary from the composer (ADR 0004): creating Jobs means running arbitrary
+// containers, which a composer install must not be able to do. This process runs no builds
+// itself; it creates and observes a Job per build, and keeps the composer's locked-down pod
+// posture. ADR 0025.
 package main
 
 import (
@@ -56,9 +51,8 @@ func init() {
 }
 
 func main() {
-	// `oci-builder fetch-context ...` runs as the build pod's init container rather than as the
-	// controller. Dispatched before any flag or manager setup, because none of it applies: this
-	// process has no kubeconfig, no leader election and nothing to reconcile.
+	// `oci-builder fetch-context` is the build pod's init container: no flags, manager or
+	// kubeconfig of the controller apply.
 	if len(os.Args) > 1 && os.Args[1] == "fetch-context" {
 		runFetchContext(os.Args[2:])
 		return
@@ -143,13 +137,8 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
 
-	// Both images must be pinned, and this is refused at startup rather than warned about.
-	//
-	// Their digests are in the input hash, playing the role oci.AssemblyVersion plays for the
-	// composer: without them, an upgraded BuildKit would produce different output under an
-	// unchanged hash and the controller would keep serving the old artifact forever (ADR 0002).
-	// A floating tag would make that hash a claim the controller cannot honour, so it is better to
-	// fail to start than to start and be quietly wrong.
+	// Both images must be pinned, refused at startup: their digests are in the input hash, which
+	// a floating tag would make meaningless (ADR 0002).
 	for _, img := range []struct{ flag, value string }{
 		{"--buildkit-image", builderImage},
 		{"--dockerfile-frontend", frontendImage},
@@ -167,12 +156,8 @@ func main() {
 		}
 	}
 
-	// The fetcher is REQUIRED but only WARNED about when unpinned, unlike the two above, and the
-	// asymmetry is deliberate. Those are third-party images an operator chose; this is this
-	// operator's own binary, normally the very image this process is running from, so demanding a
-	// digest would mean looking one up for something the deployment already selected. Pinned by tag
-	// it still moves with a release, so a published unpack fix does reach the input hash; what a tag
-	// cannot catch is the same tag being republished with different content.
+	// The fetcher is required but only warned about when unpinned: it is normally this operator's
+	// own image, already chosen by the deployment, and a tag still moves with each release.
 	if fetcherImage == "" {
 		setupLog.Error(nil, "required flag is not set", "flag", "--fetcher-image")
 		os.Exit(1)
@@ -192,13 +177,8 @@ func main() {
 		LeaderElectionID:       "oci-builder.lhns.de",
 		Client: client.Options{
 			Cache: &client.CacheOptions{
-				// Secrets are read by name and read rarely. Caching them would mean WATCHING every
-				// Secret in the cluster -- which this controller's RBAC deliberately does not allow
-				// (get, not list or watch), so the cache would not merely be wasteful, it would fail
-				// to start. Reads go straight to the API server instead.
-				//
-				// The composer has always had this. The builder did not, and only got away with it
-				// because nothing here read a Secret until the default push credential existed.
+					// Read by name only: RBAC grants get, not list/watch, so a Secret cache could
+					// not even start.
 				DisableFor: []client.Object{&corev1.Secret{}},
 			},
 		},
@@ -208,9 +188,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Everything the two controllers share about publishing, trust and supply chain. Built here so
-	// a CA that cannot be read or a key that cannot sign fails the process rather than the first
-	// artifact -- the same reasoning the chart applies to an unpinned builder image.
+	// Built at startup so an unreadable CA or unusable signing key fails the process, not the
+	// first artifact.
 	registryTransport, registryCA, err := registry.Transport()
 	if err != nil {
 		setupLog.Error(err, "unable to trust the registry CA", "caFile", registry.CAFile)
@@ -240,8 +219,7 @@ func main() {
 		refresher = &retention.Refresher{
 			Client: mgr.GetClient(),
 			Source: source,
-			// The builder has no Readiness to borrow -- it serves nothing -- so completeness is
-			// answered from generation versus observedGeneration by the source itself.
+			// The builder serves nothing, so the source answers pending from generations itself.
 			Pending:  source,
 			Interval: refreshInterval,
 			//nolint:staticcheck // SA1019: the new events API has no Event method; same as above.
@@ -256,8 +234,7 @@ func main() {
 		}
 		setupLog.Info("retention refresh enabled", "interval", refreshInterval)
 	} else {
-		// Worth saying out loud on this kind in particular. A build cannot be reproduced from its
-		// spec (ADR 0025), so an image a registry reclaims here is gone rather than rebuildable.
+		// Especially worth saying here: a build cannot be reproduced from its spec (ADR 0025).
 		setupLog.Info("retention refresh DISABLED; a registry with an expiry policy will delete " +
 			"images this operator's builds still reference, and a build cannot be reproduced")
 	}
@@ -271,12 +248,8 @@ func main() {
 		Export:    exportFlags.Options(),
 		//nolint:staticcheck // SA1019: the new events API has no Event method; see the composer.
 		Recorder: mgr.GetEventRecorderFor("imagebuild-controller"),
-		// The controller GETs a user-supplied URL when a fetch context holds the Dockerfile, so it
-		// needs the same dial guard the composer has. Until spec.context.fetch existed, the only URL
-		// this binary ever fetched came from source-controller's own status -- which is why there was
-		// no guard here before, and why adding that field is what brought threat I6 to this
-		// controller. The FETCH INSIDE THE BUILD POD is deliberately unguarded: that pod is about to
-		// run arbitrary code from a Dockerfile and can already reach anything the pod network allows.
+		// Guarded, because a fetch context makes the controller GET a user-supplied URL (threat
+		// I6). The fetch inside the build pod is deliberately unguarded.
 		HTTPClient: guardedClient(fetchDenyPrivate),
 		JobConfig: newJobConfig(jobFlags{
 			BuilderImage:       builderImage,
@@ -297,8 +270,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// The context endpoint. Runs on every replica, not only the leader: it answers build pods, and
-	// a pod whose build was started by a leader that has since changed still needs its source.
+	// The context endpoint runs on every replica, not only the leader: build pods started under a
+	// previous leader still need their source.
 	if contextBaseURL == "" {
 		setupLog.Info("WARNING: --context-base-url is unset, so build pods will fetch " +
 			"source-controller directly. source-controller serves artifacts unauthenticated, so " +
@@ -342,12 +315,8 @@ func main() {
 	}
 }
 
-// jobFlags is every operator-supplied value a build Job needs.
-//
-// Its own type so newJobConfig can be tested. The literal it replaced was assembled inline, which
-// is how --context-base-url came to be defined, documented, rendered by the chart, and never
-// actually read: every unit test builds a JobConfig directly, so the whole feature was inert and
-// only the e2e noticed.
+// jobFlags is every operator-supplied value a build Job needs, as a type so newJobConfig can be
+// tested (TestEveryJobFlagIsWired).
 type jobFlags struct {
 	BuilderImage       string
 	FrontendImage      string

@@ -10,22 +10,14 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/types"
 )
 
-// ErrBadReference marks a pull failure that a retry cannot fix — a malformed reference, or a
-// multi-architecture index where a platform-specific digest is required. Typed rather than
-// string-matched, so the caller can map it to Stalled without inspecting the message.
+// ErrBadReference marks a pull failure that a retry cannot fix: a malformed reference, or an index
+// where a platform-specific digest is required. The caller maps it to Stalled.
 type ErrBadReference struct{ Reason string }
 
 func (e *ErrBadReference) Error() string { return e.Reason }
 
-// PullImage fetches a digest-pinned image whose layers become part of the composition.
-//
-// The reference is always built from the digest, never a tag, so what is pulled is exactly what
-// the spec named. That is the same rule every other source follows (ADR 0002), and here it also
-// means the pull is cacheable by the registry and reproducible across reconciles.
-//
-// Layers are contributed as they are rather than being unpacked and repacked. They are already
-// content-addressed; rebuilding them would change their digests, break sharing with anything else
-// using the same base, and force a re-upload of content the registry already has.
+// PullImage fetches a digest-pinned image whose layers become part of the composition (ADR 0002).
+// Layers are used as they are, never repacked, so their digests and registry sharing are kept.
 func PullImage(ctx context.Context, repository, digest string, opts ...remote.Option) (v1.Image, error) {
 	ref, err := name.NewDigest(repository + "@" + digest)
 	if err != nil {
@@ -39,18 +31,9 @@ func PullImage(ctx context.Context, repository, digest string, opts ...remote.Op
 		return nil, fmt.Errorf("pulling %s: %w", ref, err)
 	}
 
-	// A multi-architecture index is refused rather than resolved — WHEN the spec names no
-	// platforms, which is when this function is called.
-	//
-	// go-containerregistry would happily pick a platform for us, which is precisely the problem:
-	// the choice would be made by the controller's own defaults rather than by the spec, so the
-	// same ImageComposition could produce different output on different builds. Naming the
-	// platform-specific digest keeps the output a pure function of the spec, and the error says
-	// how to find it.
-	//
-	// The refusal was always conditional on the platform list not existing; it now says so, and
-	// points at the other way out. With spec.platforms set the choice comes FROM the spec, so an
-	// index base is correct and PullImageIndex is used instead.
+	// Without spec.platforms an index is refused rather than resolved by the controller's own
+	// defaults, which would make the output depend on more than the spec. With spec.platforms,
+	// PullImageIndex is used instead.
 	switch desc.MediaType {
 	case types.OCIImageIndex, types.DockerManifestList:
 		return nil, &ErrBadReference{Reason: fmt.Sprintf(
@@ -67,20 +50,10 @@ func PullImage(ctx context.Context, repository, digest string, opts ...remote.Op
 }
 
 // PullImageIndex fetches a digest-pinned base and returns the child image for each requested
-// platform.
+// platform (spec.platforms, ADR 0015).
 //
-// This is the multi-platform counterpart of PullImage, and the reason ADR 0015's refusal is
-// conditional rather than absolute: the platform list comes from the spec, so selecting a child is
-// spec-driven and the output stays a pure function of the spec.
-//
-// A single-platform manifest is accepted too, and satisfies exactly one requested platform — the
-// one it declares. Asking for two platforms from a base that is not an index is an error rather
-// than silently reusing the same child, which would produce an index whose children lie about what
-// they contain.
-//
-// A requested platform the base does not offer is an ErrBadReference: the spec asked for something
-// that does not exist, and substituting a near-match is how you end up shipping an amd64 binary to
-// an arm node.
+// A single-platform manifest satisfies only the one platform it declares. A requested platform the
+// base does not offer is an ErrBadReference, never a near-match substitute.
 func PullImageIndex(ctx context.Context, repository, digest string, platforms []v1.Platform,
 	opts ...remote.Option) (map[string]v1.Image, error) {
 	ref, err := name.NewDigest(repository + "@" + digest)
