@@ -264,6 +264,18 @@ func TestPullingByDigestKeepsAnUntaggedImageAlive(t *testing.T) {
 	// time this control spends untouched rather than time the subject spends unprotected.
 	abandonedDigest := pushUntaggedImageFrom(t, abandoned, "Dockerfile.other")
 
+	// It has to have been there, or "it is gone" is the same observation as "it never arrived".
+	// eventuallyGone returns on the first poll either way, and a control that was never published
+	// is exactly as vacuous as one that cannot expire -- it just fails in the green direction.
+	//
+	// HEAD, so this check is not itself the pull that starts the control's clock over.
+	if !manifestExistsByDigestWithoutPulling(t, abandoned, abandonedDigest) {
+		t.Fatalf("%s@%s was not in the registry immediately after being published, so it cannot "+
+			"serve as a control: either the digest-only push did not land, or it was collected "+
+			"before this line, which would mean the fixture expires faster than the test can "+
+			"observe it.%s", abandoned, abandonedDigest, registryLogs(t))
+	}
+
 	// LAST before the refresh, deliberately. An untagged manifest is protected by
 	// keepUntagged.pushedWithin for one window and no longer, and the first pull is what takes over
 	// from there -- so anything slow between this line and the next one is time the subject is
