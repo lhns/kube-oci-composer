@@ -19,16 +19,9 @@ func (e *ErrBadReference) Error() string { return e.Reason }
 // PullImage fetches a digest-pinned image whose layers become part of the composition (ADR 0002).
 // Layers are used as they are, never repacked, so their digests and registry sharing are kept.
 func PullImage(ctx context.Context, repository, digest string, opts ...remote.Option) (v1.Image, error) {
-	ref, err := name.NewDigest(repository + "@" + digest)
+	ref, desc, err := getPinned(ctx, repository, digest, opts)
 	if err != nil {
-		return nil, &ErrBadReference{
-			Reason: fmt.Sprintf("invalid image reference %s@%s: %v", repository, digest, err),
-		}
-	}
-
-	desc, err := remote.Get(ref, append(opts, remote.WithContext(ctx))...)
-	if err != nil {
-		return nil, fmt.Errorf("pulling %s: %w", ref, err)
+		return nil, err
 	}
 
 	// Without spec.platforms an index is refused rather than resolved by the controller's own
@@ -56,16 +49,9 @@ func PullImage(ctx context.Context, repository, digest string, opts ...remote.Op
 // base does not offer is an ErrBadReference, never a near-match substitute.
 func PullImageIndex(ctx context.Context, repository, digest string, platforms []v1.Platform,
 	opts ...remote.Option) (map[string]v1.Image, error) {
-	ref, err := name.NewDigest(repository + "@" + digest)
+	ref, desc, err := getPinned(ctx, repository, digest, opts)
 	if err != nil {
-		return nil, &ErrBadReference{
-			Reason: fmt.Sprintf("invalid image reference %s@%s: %v", repository, digest, err),
-		}
-	}
-
-	desc, err := remote.Get(ref, append(opts, remote.WithContext(ctx))...)
-	if err != nil {
-		return nil, fmt.Errorf("pulling %s: %w", ref, err)
+		return nil, err
 	}
 
 	out := make(map[string]v1.Image, len(platforms))
@@ -123,6 +109,22 @@ func PullImageIndex(ctx context.Context, repository, digest string, platforms []
 		out[platformKey(want)] = img
 	}
 	return out, nil
+}
+
+// getPinned fetches the descriptor of repository@digest. A malformed reference is an
+// ErrBadReference.
+func getPinned(ctx context.Context, repository, digest string, opts []remote.Option) (name.Digest, *remote.Descriptor, error) {
+	ref, err := name.NewDigest(repository + "@" + digest)
+	if err != nil {
+		return name.Digest{}, nil, &ErrBadReference{
+			Reason: fmt.Sprintf("invalid image reference %s@%s: %v", repository, digest, err),
+		}
+	}
+	desc, err := remote.Get(ref, append(opts, remote.WithContext(ctx))...)
+	if err != nil {
+		return name.Digest{}, nil, fmt.Errorf("pulling %s: %w", ref, err)
+	}
+	return ref, desc, nil
 }
 
 // platformMatches compares os/arch, and variant only when the request names one. A base child

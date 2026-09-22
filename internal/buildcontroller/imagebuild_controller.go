@@ -456,16 +456,18 @@ func (r *ImageBuildReconciler) startBuild(ctx context.Context, obj *ociv1alpha1.
 				// Terminal only when inline: only then does the fix raise a generation change.
 				return recon.Terminal("%s", err)
 			}
-			return fmt.Errorf("%w", err)
+			return err
 		}
 	}
 
+	buildName := jobName(obj, inputHash)
+
 	// Credentials must exist before the pod that mounts them.
-	pushSecret, err := r.pushSecretFor(ctx, obj, jobName(obj, inputHash))
+	pushSecret, err := r.pushSecretFor(ctx, obj, buildName)
 	if err != nil {
 		return err
 	}
-	caSecret, err := r.registryCASecretFor(ctx, obj, jobName(obj, inputHash))
+	caSecret, err := r.registryCASecretFor(ctx, obj, buildName)
 	if err != nil {
 		return err
 	}
@@ -473,7 +475,7 @@ func (r *ImageBuildReconciler) startBuild(ctx context.Context, obj *ociv1alpha1.
 	// Job rendering uses, not off `inline`, so the mount and its --local always agree.
 	var dockerfileSecret string
 	if projectedDockerfile(obj) {
-		dockerfileSecret, err = r.dockerfileSecretFor(ctx, obj, jobName(obj, inputHash), dockerfile)
+		dockerfileSecret, err = r.dockerfileSecretFor(ctx, obj, buildName, dockerfile)
 		if err != nil {
 			return err
 		}
@@ -483,7 +485,7 @@ func (r *ImageBuildReconciler) startBuild(ctx context.Context, obj *ociv1alpha1.
 	// ADR 0044.
 	var contextSecret string
 	if obj.Spec.Context.GetSourceRef() != nil && r.JobConfig.ContextBaseURL != "" {
-		contextSecret, err = r.contextTokenFor(ctx, obj, jobName(obj, inputHash))
+		contextSecret, err = r.contextTokenFor(ctx, obj, buildName)
 		if err != nil {
 			return err
 		}

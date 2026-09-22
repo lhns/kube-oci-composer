@@ -52,6 +52,8 @@ const (
 	InputHashLabel = "oci.lhns.de/input-hash"
 	// ManagedByLabel marks Jobs this controller owns.
 	ManagedByLabel = "app.kubernetes.io/managed-by"
+	// builderManager is ManagedByLabel's value on everything this controller creates.
+	builderManager = "kube-oci-builder"
 )
 
 // JobConfig is the operator-level configuration a build needs.
@@ -430,7 +432,7 @@ cat %s > /dev/termination-log
 			Name:      jobName(obj, inputHash),
 			Namespace: obj.Namespace,
 			Labels: map[string]string{
-				ManagedByLabel: "kube-oci-builder",
+				ManagedByLabel: builderManager,
 				InputHashLabel: shortHash(inputHash),
 			},
 		},
@@ -445,7 +447,7 @@ cat %s > /dev/termination-log
 				// namespaces can select build pods as a class.
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						ManagedByLabel: "kube-oci-builder",
+						ManagedByLabel: builderManager,
 						InputHashLabel: shortHash(inputHash),
 					},
 				},

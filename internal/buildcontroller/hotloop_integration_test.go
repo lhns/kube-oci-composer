@@ -39,20 +39,7 @@ func (c *countingReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 func TestAFailingBuildDoesNotSpinTheQueue(t *testing.T) {
 	ctx, k8s := integrationCtx(t)
 
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "hotloop"}}
-	if err := k8s.Create(ctx, ns); err != nil {
-		t.Fatalf("creating namespace: %v", err)
-	}
-
-	srv := contextServer(t, contextTarball(t, "", pinnedFrom))
-	src := fluxSource("hotloop", "src", srv.URL, "sha256:ctx", "main@sha1:abcd")
-	if err := k8s.Create(ctx, src); err != nil {
-		t.Fatalf("creating source: %v", err)
-	}
-	// No status subresource on the stand-in CRD, so a plain update writes status.
-	if err := k8s.Update(ctx, src); err != nil {
-		t.Fatalf("writing source status: %v", err)
-	}
+	srv := buildableNamespace(t, ctx, k8s, "hotloop")
 
 	obj := sampleBuild()
 	obj.Namespace = "hotloop"

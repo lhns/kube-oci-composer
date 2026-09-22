@@ -46,24 +46,10 @@ func tarGzMany(t *testing.T, files ...file) []byte {
 	return buf.Bytes()
 }
 
+// tarGz builds a single-file archive.
 func tarGz(t *testing.T, name, body string) []byte {
 	t.Helper()
-	var buf bytes.Buffer
-	zw := gzip.NewWriter(&buf)
-	tw := tar.NewWriter(zw)
-	if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(body))}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tw.Write([]byte(body)); err != nil {
-		t.Fatal(err)
-	}
-	if err := tw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := zw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return buf.Bytes()
+	return tarGzMany(t, file{name, body})
 }
 
 func digestOf(b []byte) string {

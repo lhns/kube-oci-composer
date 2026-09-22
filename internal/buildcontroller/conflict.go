@@ -166,45 +166,22 @@ func (r *ImageBuildReconciler) pushSecretFor(
 		return "", nil
 	}
 
-	var source corev1.Secret
+	var operatorSecret corev1.Secret
 	key := types.NamespacedName{Namespace: r.Default.Namespace, Name: r.Default.SecretName}
-	if err := r.Get(ctx, key, &source); err != nil {
+	if err := r.Get(ctx, key, &operatorSecret); err != nil {
 		if apierrors.IsNotFound(err) {
 			return "", recon.Pending("default push secret %s not found yet", key)
 		}
 		return "", fmt.Errorf("reading default push secret %s: %w", key, err)
 	}
 
-	copied := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      jobName + "-push",
-			Namespace: obj.Namespace,
-			Labels:    map[string]string{"app.kubernetes.io/managed-by": "kube-oci-builder"},
-			Annotations: map[string]string{
-				"oci.lhns.de/description": "Short-lived copy of the operator's registry credential, " +
-					"mounted by this build's Job. Owned by this build's Job and deleted with it.",
-			},
-		},
-		Type: source.Type,
-		Data: source.Data,
-	}
-	if err := ctrl.SetControllerReference(obj, copied, r.Scheme()); err != nil {
-		return "", fmt.Errorf("setting owner on the push credential: %w", err)
-	}
-
-	if err := r.Create(ctx, copied); err != nil {
-		if !apierrors.IsAlreadyExists(err) {
-			return "", fmt.Errorf("creating the push credential: %w", err)
-		}
-		// Left by an earlier attempt at this build: refresh it so a rotated password applies.
-		existing := &corev1.Secret{}
-		if err := r.Get(ctx, client.ObjectKeyFromObject(copied), existing); err != nil {
-			return "", fmt.Errorf("reading the existing push credential: %w", err)
-		}
-		existing.Data = source.Data
-		if err := r.Update(ctx, existing); err != nil {
-			return "", fmt.Errorf("refreshing the push credential: %w", err)
-		}
+	copied := perBuildSecret(obj, jobName+"-push", "Short-lived copy of the operator's registry credential, "+
+		"mounted by this build's Job. Owned by this build's Job and deleted with it.")
+	copied.Type = operatorSecret.Type
+	copied.Data = operatorSecret.Data
+	// On a retry the copy is refreshed, so a rotated password applies.
+	if err := r.createBuildSecret(ctx, obj, copied, "push credential"); err != nil {
+		return "", err
 	}
 	return copied.Name, nil
 }
@@ -220,37 +197,13 @@ func (r *ImageBuildReconciler) registryCASecretFor(
 		return "", nil
 	}
 
-	ca := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      jobName + "-registry-ca",
-			Namespace: obj.Namespace,
-			Labels:    map[string]string{"app.kubernetes.io/managed-by": "kube-oci-builder"},
-			Annotations: map[string]string{
-				"oci.lhns.de/description": "The registry CA this build's Job trusts. " +
-					"Not secret; a Secret only because the builder already has permission to " +
-					"write Secrets here. Owned by this build's Job and deleted with it.",
-			},
-		},
-		Type: corev1.SecretTypeOpaque,
-		Data: map[string][]byte{"ca.crt": r.JobConfig.RegistryCA},
-	}
-	if err := ctrl.SetControllerReference(obj, ca, r.Scheme()); err != nil {
-		return "", fmt.Errorf("setting owner on the registry CA: %w", err)
-	}
-
-	if err := r.Create(ctx, ca); err != nil {
-		if !apierrors.IsAlreadyExists(err) {
-			return "", fmt.Errorf("creating the registry CA: %w", err)
-		}
-		// Refresh so a rotated CA reaches a retried build.
-		existing := &corev1.Secret{}
-		if err := r.Get(ctx, client.ObjectKeyFromObject(ca), existing); err != nil {
-			return "", fmt.Errorf("reading the existing registry CA: %w", err)
-		}
-		existing.Data = ca.Data
-		if err := r.Update(ctx, existing); err != nil {
-			return "", fmt.Errorf("refreshing the registry CA: %w", err)
-		}
+	ca := perBuildSecret(obj, jobName+"-registry-ca", "The registry CA this build's Job trusts. "+
+		"Not secret; a Secret only because the builder already has permission to "+
+		"write Secrets here. Owned by this build's Job and deleted with it.")
+	ca.Data = map[string][]byte{"ca.crt": r.JobConfig.RegistryCA}
+	// On a retry the copy is refreshed, so a rotated CA applies.
+	if err := r.createBuildSecret(ctx, obj, ca, "registry CA"); err != nil {
+		return "", err
 	}
 	return ca.Name, nil
 }
@@ -269,30 +222,13 @@ func (r *ImageBuildReconciler) dockerfileSecretFor(
 		return "", nil
 	}
 
-	df := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      jobName + "-dockerfile",
-			Namespace: obj.Namespace,
-			Labels:    map[string]string{"app.kubernetes.io/managed-by": "kube-oci-builder"},
-			Annotations: map[string]string{
-				"oci.lhns.de/description": "The Dockerfile this build runs, as checked by the " +
-					"controller. Not secret; a Secret only because the builder already has " +
-					"permission to write Secrets here. Owned by this build's Job and deleted with it.",
-			},
-		},
-		Type:      corev1.SecretTypeOpaque,
-		Immutable: ptr.To(true),
-		Data:      map[string][]byte{dockerfileKey: content},
-	}
-	if err := ctrl.SetControllerReference(obj, df, r.Scheme()); err != nil {
-		return "", fmt.Errorf("setting owner on the Dockerfile: %w", err)
-	}
-
-	if err := r.Create(ctx, df); err != nil {
-		if !apierrors.IsAlreadyExists(err) {
-			return "", fmt.Errorf("creating the Dockerfile: %w", err)
-		}
-		// The name carries the input hash, so it already holds these bytes.
+	df := perBuildSecret(obj, jobName+"-dockerfile", "The Dockerfile this build runs, as checked by the "+
+		"controller. Not secret; a Secret only because the builder already has "+
+		"permission to write Secrets here. Owned by this build's Job and deleted with it.")
+	df.Immutable = ptr.To(true)
+	df.Data = map[string][]byte{dockerfileKey: content}
+	if err := r.createBuildSecret(ctx, obj, df, "Dockerfile"); err != nil {
+		return "", err
 	}
 	return df.Name, nil
 }
@@ -308,30 +244,57 @@ func (r *ImageBuildReconciler) contextTokenFor(
 		return "", fmt.Errorf("generating a context token: %w", err)
 	}
 
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      contextSecretName(jobName),
-			Namespace: obj.Namespace,
-			Labels:    map[string]string{"app.kubernetes.io/managed-by": "kube-oci-builder"},
-			Annotations: map[string]string{
-				"oci.lhns.de/description": "Lets this build fetch its own source through the " +
-					"builder, so the build pod never reaches source-controller. Owned by this build's Job and deleted with it.",
-			},
-		},
-		Type:      corev1.SecretTypeOpaque,
-		Immutable: ptr.To(true),
-		Data:      map[string][]byte{contextTokenKey: []byte(hex.EncodeToString(raw))},
-	}
-	if err := ctrl.SetControllerReference(obj, secret, r.Scheme()); err != nil {
-		return "", fmt.Errorf("setting owner on the context token: %w", err)
-	}
-
-	if err := r.Create(ctx, secret); err != nil {
-		if !apierrors.IsAlreadyExists(err) {
-			return "", fmt.Errorf("creating the context token: %w", err)
-		}
+	secret := perBuildSecret(obj, contextSecretName(jobName), "Lets this build fetch its own source through the "+
+		"builder, so the build pod never reaches source-controller. Owned by this build's Job and deleted with it.")
+	secret.Immutable = ptr.To(true)
+	secret.Data = map[string][]byte{contextTokenKey: []byte(hex.EncodeToString(raw))}
+	if err := r.createBuildSecret(ctx, obj, secret, "context token"); err != nil {
+		return "", err
 	}
 	return secret.Name, nil
+}
+
+// perBuildSecret is the skeleton of every Secret this controller creates for one build: in the
+// object's namespace, labelled as the builder's, and described for whoever finds it.
+func perBuildSecret(obj *ociv1alpha1.ImageBuild, name, description string) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name,
+			Namespace:   obj.Namespace,
+			Labels:      map[string]string{ManagedByLabel: builderManager},
+			Annotations: map[string]string{"oci.lhns.de/description": description},
+		},
+		Type: corev1.SecretTypeOpaque,
+	}
+}
+
+// createBuildSecret creates sec owned by obj; adoptBuildSecrets later re-owns it by the Job. If it
+// already exists, a mutable Secret has its data refreshed and an immutable one (whose name carries
+// its content) is left alone. what names the Secret in errors.
+func (r *ImageBuildReconciler) createBuildSecret(
+	ctx context.Context, obj *ociv1alpha1.ImageBuild, sec *corev1.Secret, what string,
+) error {
+	if err := ctrl.SetControllerReference(obj, sec, r.Scheme()); err != nil {
+		return fmt.Errorf("setting owner on the %s: %w", what, err)
+	}
+	err := r.Create(ctx, sec)
+	switch {
+	case err == nil:
+		return nil
+	case !apierrors.IsAlreadyExists(err):
+		return fmt.Errorf("creating the %s: %w", what, err)
+	case ptr.Deref(sec.Immutable, false):
+		return nil
+	}
+	existing := &corev1.Secret{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(sec), existing); err != nil {
+		return fmt.Errorf("reading the existing %s: %w", what, err)
+	}
+	existing.Data = sec.Data
+	if err := r.Update(ctx, existing); err != nil {
+		return fmt.Errorf("refreshing the %s: %w", what, err)
+	}
+	return nil
 }
 
 // buildSecretNames are the Secrets this controller creates for one Job. Derived, not collected
@@ -364,7 +327,7 @@ func (r *ImageBuildReconciler) adoptBuildSecrets(ctx context.Context, obj *ociv1
 		}
 		// Only ever touch a Secret this controller created: generated name, own label, and
 		// currently controlled by this object.
-		if sec.Labels["app.kubernetes.io/managed-by"] != "kube-oci-builder" {
+		if sec.Labels[ManagedByLabel] != builderManager {
 			continue
 		}
 		if !metav1.IsControlledBy(&sec, obj) {
