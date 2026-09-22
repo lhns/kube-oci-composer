@@ -84,6 +84,16 @@ func TestAConvergedBuildGainsItsDigestsOwnTagWithoutRebuilding(t *testing.T) {
 	if claimed[gone] {
 		t.Error("a record whose content is gone claims a tag that was never applied")
 	}
+	// And it is marked Lost, so it stops counting as waiting for its tag: otherwise the upgrade
+	// procedure's "wait until every entry is tagged" never finishes, and every pass asks again.
+	for _, rec := range got.Status.History {
+		if rec.Digest == gone && rec.Lost == nil {
+			t.Error("a history entry the registry no longer serves was not marked Lost")
+		}
+		if rec.Digest != gone && rec.Lost != nil {
+			t.Errorf("%s is served, and was marked Lost", rec.Digest)
+		}
+	}
 	// Applied once, not once per pass.
 	var own int
 	for _, tag := range got.Status.Artifact.Tags {

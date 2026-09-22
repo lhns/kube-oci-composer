@@ -204,6 +204,12 @@ type BuildRecord struct {
 	// Time the build was published.
 	// +optional
 	Time *metav1.Time `json:"time,omitempty"`
+
+	// Lost is when the registry was found no longer to serve this entry's digest, while the
+	// controller was giving it its own tag (ADR 0060). Set once, and the entry is not tried again:
+	// there is nothing left to protect, and it no longer counts as waiting for its tag.
+	// +optional
+	Lost *metav1.Time `json:"lost,omitempty"`
 }
 
 // +kubebuilder:validation:XValidation:rule="!(has(self.immutable) && has(self.onConflict)) || (self.immutable && self.onConflict == 'Fail') || (!self.immutable && self.onConflict == 'Overwrite')",message="immutable and onConflict contradict each other: immutable true means onConflict Fail, immutable false means onConflict Overwrite. immutable is deprecated; prefer setting onConflict alone."

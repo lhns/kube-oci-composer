@@ -651,6 +651,11 @@
                 "description": "InputHash the build was produced from. Written by ImageBuild only; ImageComposition's\nidentity is the output digest rather than the hash. See ADR 0025.",
                 "type": "string"
               },
+              "lost": {
+                "description": "Lost is when the registry was found no longer to serve this entry's digest, while the\ncontroller was giving it its own tag (ADR 0060). Set once, and the entry is not tried again:\nthere is nothing left to protect, and it no longer counts as waiting for its tag.",
+                "format": "date-time",
+                "type": "string"
+              },
               "manifests": {
                 "description": "Manifests are the CHILD manifest digests when this build is a multi-platform index. Empty\nfor a single-platform build, where Digest is the manifest itself.",
                 "items": {

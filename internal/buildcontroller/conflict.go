@@ -395,13 +395,14 @@ func (r *ImageBuildReconciler) stillPublished(ctx context.Context, obj *ociv1alp
 // artifact and every history entry (which a rollback pulls). Driven by status, so it costs nothing
 // once converged, and it needs only where the object publishes, so Reconcile runs it for suspended
 // objects and ones whose spec is otherwise invalid. Referrers need nothing here: BuildKit's
-// attestations are children of the image index, and a signature is a tag. Best effort: failures are
-// logged and retried next pass.
+// attestations are children of the image index, and a signature is a tag. A history entry the
+// registry no longer serves is marked Lost rather than retried forever. Best effort: other failures
+// are logged and retried next pass.
 func (r *ImageBuildReconciler) backfillDigestTags(ctx context.Context, obj *ociv1alpha1.ImageBuild) {
 	art := obj.Status.Artifact
 	pending := art != nil && art.Digest != "" && !recon.HasDigestTag(art.Tags, art.Digest)
 	for _, rec := range obj.Status.History {
-		if rec.Digest != "" && !recon.HasDigestTag(rec.Tags, rec.Digest) {
+		if recon.NeedsDigestTag(rec) {
 			pending = true
 		}
 	}
@@ -416,30 +417,31 @@ func (r *ImageBuildReconciler) backfillDigestTags(ctx context.Context, obj *ociv
 	public := r.Default.PublicRepository(reg.repo)
 	log := logf.FromContext(ctx)
 
-	// Applied once per digest even when the artifact and a history entry share it.
-	applied := map[string]bool{}
-	apply := func(digest string) bool {
-		if done, seen := applied[digest]; seen {
-			return done
+	outcome := recon.DigestTagOutcomes{}
+	apply := func(digest string) {
+		if _, seen := outcome[digest]; seen {
+			return
 		}
 		err := recon.ApplyDigestTag(reg.repo, digest, reg.refOpts, reg.opts)
+		outcome.Record(digest, err)
 		if err != nil && !recon.IsNotFound(err) {
 			log.Error(err, "applying the digest's own tag; will retry", "digest", digest)
 		}
-		applied[digest] = err == nil
-		return err == nil
 	}
-	own := func(digest string) string { return public + ":" + recon.DigestTag(digest) }
-
-	if art != nil && art.Digest != "" && !recon.HasDigestTag(art.Tags, art.Digest) && apply(art.Digest) {
-		art.Tags = append(art.Tags, own(art.Digest))
+	if art != nil && art.Digest != "" && !recon.HasDigestTag(art.Tags, art.Digest) {
+		apply(art.Digest)
 	}
-	for i := range obj.Status.History {
-		rec := &obj.Status.History[i]
-		if rec.Digest != "" && !recon.HasDigestTag(rec.Tags, rec.Digest) && apply(rec.Digest) {
-			rec.Tags = append(rec.Tags, own(rec.Digest))
+	for _, rec := range obj.Status.History {
+		if recon.NeedsDigestTag(rec) {
+			apply(rec.Digest)
 		}
 	}
+
+	own := func(digest string) string { return public + ":" + recon.DigestTag(digest) }
+	if art != nil && outcome.Tagged(art.Digest) && !recon.HasDigestTag(art.Tags, art.Digest) {
+		art.Tags = append(art.Tags, own(art.Digest))
+	}
+	outcome.MarkHistory(obj.Status.History, art, own, metav1.Now())
 }
 
 // registryAccess is everything needed to ask this object's registry a question.

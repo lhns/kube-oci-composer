@@ -646,12 +646,13 @@ func artifactStatus(t target, digest v1.Hash, own bool) *ociv1alpha1.ArtifactSta
 // Status-driven, so it costs nothing once every record claims the tag, and it needs only where the
 // object publishes: it runs for suspended objects and ones whose spec is otherwise invalid. It
 // patches just the tags, without touching observedGeneration, which would tell the refresher this
-// object had reconciled. Best effort: a failure is logged and retried next pass.
+// object had reconciled. A history entry the registry no longer serves is marked Lost rather than
+// retried forever. Best effort: other failures are logged and retried next pass.
 func (r *ImageCompositionReconciler) backfillDigestTags(ctx context.Context, obj *ociv1alpha1.ImageComposition) {
 	art := obj.Status.Artifact
 	pending := art != nil && art.Digest != "" && !recon.HasDigestTag(art.Tags, art.Digest)
 	for _, rec := range obj.Status.History {
-		if rec.Digest != "" && !recon.HasDigestTag(rec.Tags, rec.Digest) {
+		if recon.NeedsDigestTag(rec) {
 			pending = true
 		}
 	}
@@ -669,38 +670,35 @@ func (r *ImageCompositionReconciler) backfillDigestTags(ctx context.Context, obj
 	refOpts := r.refOptions(tgt.writeRepo)
 	logger := log.FromContext(ctx)
 
-	applied := map[string]bool{}
-	apply := func(digest string) bool {
-		if done, seen := applied[digest]; seen {
-			return done
+	outcome := recon.DigestTagOutcomes{}
+	apply := func(digest string) {
+		if _, seen := outcome[digest]; seen {
+			return
 		}
 		err := recon.ApplyDigestTagWithReferrers(tgt.writeRepo, digest, refOpts, opts)
+		outcome.Record(digest, err)
 		if err != nil && !recon.IsNotFound(err) {
 			logger.Error(err, "applying the digest's own tag; will retry", "digest", digest)
 		}
-		applied[digest] = err == nil
-		return err == nil
 	}
-
-	var artTagged bool
 	if art != nil && art.Digest != "" && !recon.HasDigestTag(art.Tags, art.Digest) {
-		artTagged = apply(art.Digest)
+		apply(art.Digest)
 	}
-	var history []string
 	for _, rec := range obj.Status.History {
-		if rec.Digest != "" && !recon.HasDigestTag(rec.Tags, rec.Digest) && apply(rec.Digest) {
-			history = append(history, rec.Digest)
+		if recon.NeedsDigestTag(rec) {
+			apply(rec.Digest)
 		}
 	}
-	if !artTagged && len(history) == 0 {
+	if !outcome.Changed() {
 		return
 	}
 
+	now := metav1.Now()
 	mark := func(st *ociv1alpha1.ImageCompositionStatus) {
-		if a := st.Artifact; artTagged && a != nil && a.Digest == art.Digest && !recon.HasDigestTag(a.Tags, a.Digest) {
+		if a := st.Artifact; a != nil && outcome.Tagged(a.Digest) && !recon.HasDigestTag(a.Tags, a.Digest) {
 			a.Tags = append(a.Tags, fmt.Sprintf("%s:%s", tgt.pullRepo, recon.DigestTag(a.Digest)))
 		}
-		markDigestTagged(st.History, history)
+		outcome.MarkHistory(st.History, st.Artifact, recon.DigestTag, now)
 	}
 	var latest ociv1alpha1.ImageComposition
 	if err := r.Get(ctx, client.ObjectKeyFromObject(obj), &latest); err != nil {
@@ -715,18 +713,6 @@ func (r *ImageCompositionReconciler) backfillDigestTags(ctx context.Context, obj
 	// So the rest of this reconcile sees what was just recorded: the cheap path checks the tag once
 	// status claims it, and the final status write would otherwise put the old tags back.
 	mark(&obj.Status)
-}
-
-// markDigestTagged records, on the history entries named, that their digest now carries its own
-// tag. Bare, like the rest of a composition's history tags.
-func markDigestTagged(history []ociv1alpha1.BuildRecord, digests []string) {
-	for _, d := range digests {
-		for i := range history {
-			if history[i].Digest == d && !recon.HasDigestTag(history[i].Tags, d) {
-				history[i].Tags = append(history[i].Tags, recon.DigestTag(d))
-			}
-		}
-	}
 }
 
 // remoteOptions builds registry auth for writeRepo, the repository actually pushed to, so the

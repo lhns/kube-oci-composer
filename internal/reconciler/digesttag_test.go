@@ -1,12 +1,17 @@
 package reconciler
 
 import (
+	"net/http"
 	"regexp"
 	"slices"
 	"strings"
 	"testing"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 
 	"github.com/lhns/kube-oci-composer/internal/attest"
 )
@@ -101,5 +106,34 @@ func TestAttestationsAreNamedTheSameWay(t *testing.T) {
 	}
 	if got, want := attest.OwnTag(h), DigestTag(aDigest); got != want {
 		t.Fatalf("attest.OwnTag = %q, DigestTag = %q", got, want)
+	}
+}
+
+// A backfill pass marks what it learned: tagged entries gain the tag, and an entry the registry no
+// longer serves is marked Lost -- except the current artifact, which its controller repairs rather
+// than retires.
+func TestMarkHistoryRetiresOnlyLostHistory(t *testing.T) {
+	const tagged, lost, current, failed = "sha256:aa", "sha256:bb", "sha256:cc", "sha256:dd"
+	o := DigestTagOutcomes{}
+	o.Record(tagged, nil)
+	o.Record(lost, &transport.Error{StatusCode: http.StatusNotFound})
+	o.Record(current, &transport.Error{StatusCode: http.StatusNotFound})
+	o.Record(failed, &transport.Error{StatusCode: http.StatusInternalServerError})
+
+	history := []ociv1alpha1.BuildRecord{{Digest: tagged}, {Digest: lost}, {Digest: current}, {Digest: failed}}
+	now := metav1.Now()
+	o.MarkHistory(history, &ociv1alpha1.ArtifactStatus{Digest: current}, DigestTag, now)
+
+	if !HasDigestTag(history[0].Tags, tagged) || history[0].Lost != nil {
+		t.Errorf("tagged entry: %+v", history[0])
+	}
+	if history[1].Lost == nil || NeedsDigestTag(history[1]) {
+		t.Errorf("an entry the registry answered 404 for was not retired: %+v", history[1])
+	}
+	if history[2].Lost != nil {
+		t.Error("the current artifact was marked Lost; its controller repairs it, it is not history to retire")
+	}
+	if history[3].Lost != nil || !NeedsDigestTag(history[3]) {
+		t.Errorf("a transient failure retired the entry; it must be retried: %+v", history[3])
 	}
 }

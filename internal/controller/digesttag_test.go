@@ -39,6 +39,7 @@ func preADR0060(t *testing.T, r *ImageCompositionReconciler, obj *ociv1alpha1.Im
 	latest.Status.History = []ociv1alpha1.BuildRecord{
 		{Digest: art, Tags: []string{"main"}},
 		{Digest: older},
+		{Digest: goneDigest},
 	}
 	if err := r.Status().Update(context.Background(), &latest); err != nil {
 		t.Fatalf("seeding status: %v", err)
@@ -60,11 +61,24 @@ func requireBackfilled(t *testing.T, r *ImageCompositionReconciler, obj *ociv1al
 		t.Errorf("status.artifact does not claim its digest tag: %+v", got.Status.Artifact)
 	}
 	for _, rec := range got.Status.History {
-		if !recon.HasDigestTag(rec.Tags, rec.Digest) {
+		switch {
+		case rec.Digest == goneDigest:
+			// Content 0.5.x already lost: marked, not retried forever, and no longer counted as
+			// waiting -- or the upgrade procedure's step 2 never finishes.
+			if rec.Lost == nil || recon.NeedsDigestTag(rec) {
+				t.Errorf("history entry %s, which the registry no longer serves, is not marked Lost: %+v",
+					rec.Digest, rec)
+			}
+		case !recon.HasDigestTag(rec.Tags, rec.Digest):
 			t.Errorf("history entry %s does not claim its digest tag: %v", rec.Digest, rec.Tags)
+		case rec.Lost != nil:
+			t.Errorf("history entry %s is served, and was marked Lost", rec.Digest)
 		}
 	}
 }
+
+// goneDigest is a history entry whose content the registry no longer has.
+const goneDigest = "sha256:" + "0000000000000000000000000000000000000000000000000000000000000000"
 
 // A composition published before ADR 0060 gains its digest's own tag -- on the artifact, on retained
 // history (what a rollback pulls), and on the attestations of both, which were pushed untagged and
@@ -80,7 +94,7 @@ func TestAConvergedCompositionIsBackfilledWithoutRepublishing(t *testing.T) {
 		t.Fatalf("reconcile: %v", err)
 	}
 	requireBackfilled(t, r, obj, repo, art, older, artSBOM, olderSBOM)
-	if got := reload(t, r, obj); got.Status.Artifact.Digest != art || len(got.Status.History) != 2 {
+	if got := reload(t, r, obj); got.Status.Artifact.Digest != art || len(got.Status.History) != 3 {
 		t.Errorf("the object was republished to add a tag (artifact %s, history %d); that reassembles "+
 			"every layer of every composition on upgrade", got.Status.Artifact.Digest, len(got.Status.History))
 	}

@@ -6,6 +6,10 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 )
 
 // DigestTag is the tag naming a manifest after its own digest: "digest-<hex>".
@@ -110,4 +114,48 @@ func ApplyDigestTagWithReferrers(repo, digest string, refOpts []name.Option, opt
 		}
 	}
 	return nil
+}
+
+// NeedsDigestTag reports whether a history entry is still waiting for its digest's own tag: it
+// names a digest, does not claim the tag, and has not been found lost.
+func NeedsDigestTag(rec ociv1alpha1.BuildRecord) bool {
+	return rec.Digest != "" && rec.Lost == nil && !HasDigestTag(rec.Tags, rec.Digest)
+}
+
+// DigestTagOutcomes records, per digest, what one backfill pass learned: tagged, or found gone.
+// A digest that failed any other way is absent and is retried next pass.
+type DigestTagOutcomes map[string]bool
+
+// Record notes the result of applying a digest's own tag.
+func (o DigestTagOutcomes) Record(digest string, err error) {
+	switch {
+	case err == nil:
+		o[digest] = true
+	case IsNotFound(err):
+		o[digest] = false
+	}
+}
+
+// Tagged reports whether digest was given its own tag on this pass.
+func (o DigestTagOutcomes) Tagged(digest string) bool { return o[digest] }
+
+// Changed reports whether this pass learned anything status should record.
+func (o DigestTagOutcomes) Changed() bool { return len(o) > 0 }
+
+// MarkHistory records the pass on history: a tagged entry gains its tag (as tagFor renders it, which
+// differs by kind), and an entry the registry no longer serves is marked Lost -- unless it is the
+// current artifact, whose loss is its controller's to repair, not a record to retire.
+func (o DigestTagOutcomes) MarkHistory(history []ociv1alpha1.BuildRecord, current *ociv1alpha1.ArtifactStatus,
+	tagFor func(string) string, now metav1.Time) {
+	for i := range history {
+		rec := &history[i]
+		tagged, known := o[rec.Digest]
+		switch {
+		case !known || !NeedsDigestTag(*rec):
+		case tagged:
+			rec.Tags = append(rec.Tags, tagFor(rec.Digest))
+		case current == nil || current.Digest != rec.Digest:
+			rec.Lost = now.DeepCopy()
+		}
+	}
 }
