@@ -6,10 +6,8 @@ import (
 	"testing"
 )
 
-// registryConfigs returns every zot config the chart renders, keyed by its ConfigMap name.
-//
-// Both the writer and the read replicas carry one, and their differences are what several tests are
-// about, so this returns the lot rather than guessing which one a caller means.
+// registryConfigs returns every zot config the chart renders (writer and read replicas), keyed by
+// ConfigMap name.
 func registryConfigs(t *testing.T, args ...string) map[string]map[string]any {
 	t.Helper()
 	out := map[string]map[string]any{}
@@ -45,14 +43,9 @@ func registryConfig(t *testing.T, args ...string) map[string]any {
 	return nil
 }
 
-// TestTheRegistryAlwaysStatesItsReadTimeout is the regression that would silently restore the bug.
-//
-// zot's CLI injects defaultReadTimeout = 60s when this key is absent, and Go's ReadTimeout bounds
-// the WHOLE request including the body -- so it counts time queued behind zot's registry-wide
-// upload lock. Measured: twenty concurrent 1MB pushes take 3.9-6.1s each. A large layer on slower
-// storage passes 60s having transferred nothing, and the retry queues behind the next one.
-//
-// Absent this key the chart looks fine and the registry cannot accept a large push. ADR 0047.
+// TestTheRegistryAlwaysStatesItsReadTimeout: when the key is absent zot defaults to 60s, and Go's
+// ReadTimeout bounds the whole request including time queued behind zot's upload lock, so large
+// pushes cannot finish. ADR 0047.
 func TestTheRegistryAlwaysStatesItsReadTimeout(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -72,10 +65,8 @@ func TestTheRegistryAlwaysStatesItsReadTimeout(t *testing.T) {
 	}
 }
 
-// TestDedupeIsStatedAndSettable — the lever for lock contention, and it must reach the config.
-//
-// Default true, which is what zot does anyway: turning it off trades disk for a shorter critical
-// section, and that is the operator's call.
+// TestDedupeIsStatedAndSettable: dedupe (default true, as in zot) trades disk for lock contention,
+// and turning it off must reach the config.
 func TestDedupeIsStatedAndSettable(t *testing.T) {
 	storage, _ := registryConfig(t)["storage"].(map[string]any)
 	if got, ok := storage["dedupe"].(bool); !ok || !got {
@@ -88,8 +79,7 @@ func TestDedupeIsStatedAndSettable(t *testing.T) {
 	}
 }
 
-// TestAnEmptyReadTimeoutIsRefused — rendering no key silently restores zot's 60s, which is the
-// failure being fixed. A plausible edit must not reintroduce it quietly.
+// TestAnEmptyReadTimeoutIsRefused: an empty value would silently restore zot's 60s default.
 func TestAnEmptyReadTimeoutIsRefused(t *testing.T) {
 	out := renderExpectingFailure(t, "--set", "registry.readTimeout=")
 	if !strings.Contains(out, "registry.readTimeout must be set") {
@@ -97,11 +87,9 @@ func TestAnEmptyReadTimeoutIsRefused(t *testing.T) {
 	}
 }
 
-// TestKeepTagsAlsoKeysOnPushRecency — `pulledWithin` alone makes every artifact's survival depend on
-// the refresher having already run, and a freshly built image sits in that gap.
-//
-// The entries are OR'ed, so this is a floor and not a second window: zot records a push timestamp
-// per digest and only when that digest is new, so a republish does not renew it.
+// TestKeepTagsAlsoKeysOnPushRecency: with `pulledWithin` alone, a freshly built image is unprotected
+// until the refresher runs. The rules are OR'ed, so pushedWithin is a floor, not a second window
+// (zot records the push time only when a digest is new).
 func TestKeepTagsAlsoKeysOnPushRecency(t *testing.T) {
 	storage, _ := registryConfig(t)["storage"].(map[string]any)
 	retention, _ := storage["retention"].(map[string]any)
@@ -112,13 +100,8 @@ func TestKeepTagsAlsoKeysOnPushRecency(t *testing.T) {
 	policy, _ := policies[0].(map[string]any)
 	keepTags, _ := policy["keepTags"].([]any)
 
-	// ONE entry, carrying BOTH rules -- and the count is the assertion, not an incidental detail.
-	//
-	// zot's getTagPolicy returns on the first pattern that matches, so a second entry whose patterns
-	// are also ".*" is never evaluated. Written as two entries, only pulledWithin was ever in force
-	// while the config appeared to say otherwise, and a tag pushed but never pulled was protected by
-	// nothing. An earlier version of THIS test accepted either shape -- it asked whether some entry
-	// carried each rule -- which is how that reached a release.
+	// Exactly ONE entry carrying both rules: zot's getTagPolicy stops at the first matching pattern,
+	// so a second ".*" entry is never evaluated.
 	if len(keepTags) != 1 {
 		t.Fatalf("keepTags has %d entries; it must have exactly ONE carrying both rules, because "+
 			"zot matches the first pattern and stops. A second .* entry is dead configuration that "+

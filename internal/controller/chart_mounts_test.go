@@ -7,23 +7,10 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// TestEveryMountedSecretAndConfigMapIsRendered is a structural guard, not a test of one bug.
-//
-// The bug it was written for: the registry Deployment mounted `<fullname>-registry-htpasswd`
-// whenever `registry.auth.enabled`, while the template producing that Secret was gated on
-// something else entirely (`not defaultRegistry.existingPushSecret`). One combination of values
-// therefore rendered a pod referencing a Secret the same render did not create, and the pod wedged
-// on it. Nothing in the chart tests looked at the relationship between the two.
-//
-// The class is what matters: a mount and the object it mounts are written in different files, under
-// different conditions, by people making different changes. This asserts the invariant those
-// conditions exist to preserve, across the toggle matrix, so the next divergence fails here rather
-// than in someone's cluster.
-//
-// Scoped to names the CHART generates. A Secret the operator supplies -- `existingHtpasswdSecret`,
-// `existingPushSecret`, a TLS Secret from cert-manager -- is deliberately absent from the render,
-// and demanding it would make this guard fire on correct configurations, which is how guards get
-// deleted.
+// TestEveryMountedSecretAndConfigMapIsRendered: across the toggle matrix, every Secret/ConfigMap a
+// workload mounts is created by the same render, or the pod wedges. Mounts and the objects they
+// reference are gated by conditions in different templates, so they can diverge. Operator-supplied
+// names are deliberately excluded.
 func TestEveryMountedSecretAndConfigMapIsRendered(t *testing.T) {
 	matrix := []struct {
 		name string
@@ -33,8 +20,7 @@ func TestEveryMountedSecretAndConfigMapIsRendered(t *testing.T) {
 		{"auth disabled", []string{"--set", "registry.auth.enabled=false"}},
 		{"a pinned password", []string{"--set", "registry.auth.password=hunter2"}},
 		{
-			// The combination that produced the bug. It is refused outright now, so it is
-			// exercised here in each of its resolved forms instead.
+			// A divergent combination; refused as such now, so each resolved form is exercised.
 			"own push credential, own htpasswd",
 			[]string{
 				"--set", "defaultRegistry.existingPushSecret=mine",
@@ -65,8 +51,7 @@ func TestEveryMountedSecretAndConfigMapIsRendered(t *testing.T) {
 		{"compositions disabled", []string{"--set", "imageComposition.enabled=false"}},
 	}
 
-	// Names the operator supplies rather than the chart. Kept as values so the test says out loud
-	// which references it is deliberately not checking.
+	// Names the operator supplies rather than the chart.
 	supplied := map[string]bool{"mine": true, "my-htpasswd": true}
 
 	for _, tc := range matrix {
@@ -116,11 +101,8 @@ func TestEveryMountedSecretAndConfigMapIsRendered(t *testing.T) {
 				}
 			}
 
-			// Vacuity is asserted on the default install only. Some combinations legitimately
-			// mount nothing -- with no bundled registry and no layer-cache PVC there is no
-			// volume in the release at all -- and failing those would be asserting the wrong
-			// thing. But if the DEFAULT render ever stops having mounts, this guard has quietly
-			// stopped guarding, which is the failure mode worth catching.
+			// Vacuity is checked on the defaults only: some combinations legitimately mount
+			// nothing.
 			if tc.name == "defaults" && len(mounts) == 0 {
 				t.Fatal("the default render mounts nothing; this guard would pass vacuously")
 			}

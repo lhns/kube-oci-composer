@@ -5,17 +5,9 @@ import (
 	"testing"
 )
 
-// TestTheControllersNeverGetThePublicHost is the whole point of the internal/public split, asserted
-// at the layer where it used to be wrong.
-//
-// Before this, `registry.host` fed `--default-registry`, so setting it to a node-resolvable name
-// pointed the controllers at a name cluster DNS cannot resolve and every object failed with
-// `no such host` before publishing anything. Leaving it unset produced images no Pod could pull.
-// There was no correct value.
-//
-// Now `--default-registry` is the in-cluster Service in every mode that installs one, and the
-// public name travels separately in `--public-registry-host`, which only ever reaches
-// status.artifact.ref.
+// TestTheControllersNeverGetThePublicHost pins the internal/public split: `--default-registry` is
+// the in-cluster Service (cluster DNS may not resolve the public name), and the public name travels
+// only as `--public-registry-host`, for status.artifact.ref.
 func TestTheControllersNeverGetThePublicHost(t *testing.T) {
 	const public = "oci-composer.internal:30500"
 
@@ -42,17 +34,14 @@ func TestTheControllersNeverGetThePublicHost(t *testing.T) {
 	if !strings.Contains(out, "--default-registry=test-release-kube-oci-composer-registry.oci-composer.svc.cluster.local:5000") {
 		t.Errorf("--default-registry must be the in-cluster Service:\n%s", grepFlags(out))
 	}
-	// The Service name speaks plain HTTP until registry.tls exists, and it is what the controllers
-	// now always talk to — so it must be on the insecure list in every mode, not only when no
-	// public host is set. That conditional was the second half of the original defect.
+	// Without TLS the Service speaks plain HTTP, so it is insecure in every mode, public host or not.
 	if !strings.Contains(out, "--insecure-registry=test-release-kube-oci-composer-registry.oci-composer.svc.cluster.local:5000") {
 		t.Errorf("the in-cluster Service must be marked insecure; without it the controllers try TLS against plain HTTP:\n%s", grepFlags(out))
 	}
 }
 
-// TestNoPublicHostFlagWhenThereIsNoPublicHost — an unset public host must not render an empty flag.
-// Empty means "same as internal" in the Go code, and an explicit `--public-registry-host=` would
-// say the same thing in a way that invites the two to drift.
+// TestNoPublicHostFlagWhenThereIsNoPublicHost: an unset public host renders no flag rather than an
+// empty one.
 func TestNoPublicHostFlagWhenThereIsNoPublicHost(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -73,18 +62,15 @@ func TestNoPublicHostFlagWhenThereIsNoPublicHost(t *testing.T) {
 	}
 }
 
-// TestChartRefusesAnUndecidedPublishMode covers the deliberate breaking change: `helm install` with
-// no arguments no longer works, because there is no answer to "how do workloads reach this
-// registry" that is right on every cluster. The failure moves from ErrImagePull days later to a
-// message at install time.
+// TestChartRefusesAnUndecidedPublishMode: no publish mode is right on every cluster, so the chart
+// refuses at install time rather than producing images that fail with ErrImagePull later.
 func TestChartRefusesAnUndecidedPublishMode(t *testing.T) {
 	out := renderRawExpectingFailure(t)
 
 	if !strings.Contains(out, "registry.publish.mode") {
 		t.Fatalf("the refusal must name the value to set:\n%s", out)
 	}
-	// All four ways out, because an operator hitting this cannot derive them and the right one
-	// depends on a cluster the chart cannot see.
+	// The refusal must name every option.
 	for _, mode := range []string{"ingress", "nodePort", "external", "internalOnly"} {
 		if !strings.Contains(out, mode) {
 			t.Errorf("the refusal must offer %q as an option; got:\n%s", mode, out)
@@ -92,8 +78,8 @@ func TestChartRefusesAnUndecidedPublishMode(t *testing.T) {
 	}
 }
 
-// TestEachPublishModeAssertsWhatMakesItTrue — a mode that renders without the values it depends on
-// is a mode that lied. The operator answered the question and still gets images nothing can pull.
+// TestEachPublishModeAssertsWhatMakesItTrue: a mode must refuse to render without the values it
+// depends on, or it produces images nothing can pull.
 func TestEachPublishModeAssertsWhatMakesItTrue(t *testing.T) {
 	cases := []struct {
 		name string
@@ -129,8 +115,8 @@ func TestEachPublishModeAssertsWhatMakesItTrue(t *testing.T) {
 	}
 }
 
-// TestTheIngressServesTheWholeRegistryAPI — a path-scoped ingress answers the version check and
-// then fails the blob upload, which reads as a broken registry rather than a broken route.
+// TestTheIngressServesTheWholeRegistryAPI: a path-scoped Ingress passes the version check and then
+// fails blob uploads.
 func TestTheIngressServesTheWholeRegistryAPI(t *testing.T) {
 	out := render(t,
 		"--set", "registry.publish.mode=ingress",

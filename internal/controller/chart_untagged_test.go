@@ -5,14 +5,8 @@ import (
 	"testing"
 )
 
-// A build's manifest is UNTAGGED between being pushed and being named by this controller (ADR
-// 0054), and untagged is exactly what a registry's collector reclaims. gcDelay is the only thing
-// standing between the two.
-//
-// This is not hypothetical. The e2e ran gcDelay=1s and lost a build's manifest before it could be
-// named; because it was the repository's only content the repository went too, which is why the
-// read-back failed NAME_UNKNOWN rather than reporting a missing manifest. It was intermittent
-// because zot walks repositories on a rotation, so a green run proved nothing.
+// TestAShortGCDelayIsRefusedWhileUntaggedManifestsAreCollected: a build's manifest is untagged
+// between push and being named (ADR 0054), and gcDelay is all that keeps the collector off it.
 func TestAShortGCDelayIsRefusedWhileUntaggedManifestsAreCollected(t *testing.T) {
 	out := renderExpectingFailure(t, "--set", "registry.retention.gcDelay=1s")
 	for _, want := range []string{"gcDelay", "deleteUntagged", "untagged", "buildPollInterval"} {
@@ -23,9 +17,8 @@ func TestAShortGCDelayIsRefusedWhileUntaggedManifestsAreCollected(t *testing.T) 
 	}
 }
 
-// Turning untagged collection off removes the race rather than out-running it, so any delay is
-// then safe. That combination is what a test wanting a one-second collector should use, and it is
-// what the e2e now does.
+// TestDisablingUntaggedCollectionPermitsAnyDelay: with untagged collection off there is no race,
+// so any delay is safe (the e2e relies on this).
 func TestDisablingUntaggedCollectionPermitsAnyDelay(t *testing.T) {
 	out := render(t,
 		"--set", "registry.retention.gcDelay=1s",
@@ -35,8 +28,7 @@ func TestDisablingUntaggedCollectionPermitsAnyDelay(t *testing.T) {
 	}
 }
 
-// The default has to stay on the permitted side of its own check -- a guard that the shipped
-// values violate is a guard nobody can keep.
+// TestTheDefaultRetentionSettingsRender: the shipped defaults pass their own guard.
 func TestTheDefaultRetentionSettingsRender(t *testing.T) {
 	out := render(t)
 	if !strings.Contains(out, `"deleteUntagged": true`) {
@@ -45,8 +37,7 @@ func TestTheDefaultRetentionSettingsRender(t *testing.T) {
 	}
 }
 
-// The derived values must reproduce the literals they replaced, or this was a change to what is
-// deployed rather than to how it is expressed -- and nobody asked for a change to what is deployed.
+// TestTheDerivedDefaultsMatchTheValuesTheyReplaced: deriving the defaults did not change them.
 func TestTheDerivedDefaultsMatchTheValuesTheyReplaced(t *testing.T) {
 	out := render(t)
 	for _, want := range []string{
@@ -61,8 +52,8 @@ func TestTheDerivedDefaultsMatchTheValuesTheyReplaced(t *testing.T) {
 	}
 }
 
-// Shortening the poll shortens the gcDelay floor with it, which is what lets a test compress the
-// whole clock and still have retention tests that measure something.
+// TestTheNamingGapFloorTracksThePollInterval: the gcDelay floor scales with buildPollInterval, so
+// tests can compress the whole clock.
 func TestTheNamingGapFloorTracksThePollInterval(t *testing.T) {
 	out := render(t,
 		"--set", "retention.window=30s",
@@ -74,9 +65,8 @@ func TestTheNamingGapFloorTracksThePollInterval(t *testing.T) {
 	}
 }
 
-// keepUntagged with pulledWithin alone matches NOTHING for content that was just pushed and never
-// pulled -- which is precisely what a build publishing by digest produces. It read as protection
-// and was none. Off by default now (ADR 0060); this holds for anyone turning it back on.
+// TestFreshlyPushedUntaggedContentIsKept: keepUntagged with pulledWithin alone matches nothing
+// just pushed and never pulled. Off by default (ADR 0060); this holds when turned on.
 func TestFreshlyPushedUntaggedContentIsKept(t *testing.T) {
 	out := render(t, "--set", "registry.retention.keepUntagged=true")
 	idx := strings.Index(out, `"keepUntagged"`)
@@ -90,13 +80,9 @@ func TestFreshlyPushedUntaggedContentIsKept(t *testing.T) {
 	}
 }
 
-// The e2e reads gcDelay, gcInterval and deleteUntagged back out of the deployed ConfigMap and
-// refuses to run a retention test whose watch window cannot outlast them. That is what stops a
-// retention test passing while measuring nothing.
-//
-// It depends on this JSON shape. If the chart ever moved or renamed one of these, the helpers would
-// read an empty string, the assertions would never fire, and the tests would go quiet in exactly the
-// way they exist to prevent -- so the shape is asserted here, where no cluster is needed.
+// TestTheRenderedConfigCarriesWhatTheE2EAssertsAgainst: the e2e reads gcDelay, gcInterval and
+// deleteUntagged from the deployed config to check its retention tests can measure something; if
+// the shape moved, those helpers would read "" and the checks would silently never fire.
 func TestTheRenderedConfigCarriesWhatTheE2EAssertsAgainst(t *testing.T) {
 	storage, ok := registryConfig(t)["storage"].(map[string]any)
 	if !ok {
@@ -128,12 +114,8 @@ func TestTheRenderedConfigCarriesWhatTheE2EAssertsAgainst(t *testing.T) {
 	}
 }
 
-// keepUntagged can be switched off, and off means ABSENT from the policy -- not an empty object.
-//
-// Configuring it at all is what makes zot keep every manifest that ever carried a tag: the last tag
-// going deletes the digest's statistics, and with keepUntagged present a statistics-less untagged
-// manifest is retained without being evaluated. An empty `"keepUntagged": {}` would still be
-// present, so it would still pin them. ADR 0060.
+// TestKeepUntaggedOffLeavesNoRuleBehind: off means ABSENT, not `{}`. Any keepUntagged rule makes zot
+// retain untagged manifests that lost their statistics with their last tag. ADR 0060.
 func TestKeepUntaggedOffLeavesNoRuleBehind(t *testing.T) {
 	cfg := registryConfig(t, "--set", "registry.retention.keepUntagged=false")
 	storage, _ := cfg["storage"].(map[string]any)
@@ -147,7 +129,7 @@ func TestKeepUntaggedOffLeavesNoRuleBehind(t *testing.T) {
 		t.Errorf("keepUntagged=false still renders a keepUntagged rule, which is what pins retired "+
 			"manifests forever: %v", policy["keepUntagged"])
 	}
-	// Reclaiming is still what it is for, and gcDelay still covers the naming gap -- alone, now.
+	// gcDelay alone now covers the naming gap.
 	if policy["deleteUntagged"] != true {
 		t.Errorf("deleteUntagged = %v; with keepUntagged off, nothing would reclaim anything", policy["deleteUntagged"])
 	}
@@ -156,8 +138,7 @@ func TestKeepUntaggedOffLeavesNoRuleBehind(t *testing.T) {
 	}
 }
 
-// OFF by default, one release after the digest tag -- which gave every object that release to be
-// backfilled. On, zot keeps every manifest whose last tag expired, and the layers behind it.
+// TestKeepUntaggedIsOffByDefault: on, zot keeps every manifest whose last tag expired (ADR 0060).
 func TestKeepUntaggedIsOffByDefault(t *testing.T) {
 	cfg := registryConfig(t)
 	storage, _ := cfg["storage"].(map[string]any)
@@ -170,13 +151,8 @@ func TestKeepUntaggedIsOffByDefault(t *testing.T) {
 	}
 }
 
-// The scheduler delay is set where values.yaml documents it -- registry.retention -- and reaches
-// the registry from there.
-//
-// It did not. The template read registry.gcMaxSchedulerDelay while values.yaml documented
-// registry.retention.gcMaxSchedulerDelay, so an operator setting the documented key got zot's
-// default, silently. The e2e passed only because up.sh set the undocumented one; nothing rendered
-// the documented path until this.
+// TestTheSchedulerDelayIsReadFromWhereItIsDocumented: registry.retention.gcMaxSchedulerDelay, as
+// values.yaml documents it, reaches the registry.
 func TestTheSchedulerDelayIsReadFromWhereItIsDocumented(t *testing.T) {
 	storage, _ := registryConfig(t, "--set", "registry.retention.gcMaxSchedulerDelay=1s")["storage"].(map[string]any)
 	if got, _ := storage["gcMaxSchedulerDelay"].(string); got != "1s" {

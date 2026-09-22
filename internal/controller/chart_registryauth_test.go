@@ -5,26 +5,16 @@ import (
 	"testing"
 )
 
-// TestChartRefusesAHalfSuppliedRegistryCredential covers the configuration that used to wedge the
-// registry pod, and explains why refusing is the right answer rather than repairing.
-//
-// `defaultRegistry.existingPushSecret` says "I brought my own credential". `registry.auth.enabled`
-// says "the bundled registry wants a password the chart generates". Those are two halves of one
-// matched pair and only one of them has been replaced, so nothing in the release agrees on what the
-// password is.
-//
-// Repairing it silently is worse than refusing, and the tempting repair is the trap: gate the
-// htpasswd Secret on `auth.enabled` alone and `registryPassword` has no `-push` Secret left to read
-// the previous value out of, so every `helm upgrade` mints a fresh `randAlphaNum 32`. The registry
-// then demands a password that exists nowhere — including in the credential the operator supplied.
-// It renders forever and never works.
+// TestChartRefusesAHalfSuppliedRegistryCredential: an own push credential with a chart-generated
+// htpasswd leaves the two halves disagreeing about the password. It must be refused, not repaired:
+// gating the htpasswd Secret on auth.enabled alone leaves no `-push` Secret to reuse the password
+// from, so every upgrade would mint a new one that exists nowhere else.
 func TestChartRefusesAHalfSuppliedRegistryCredential(t *testing.T) {
 	out := renderExpectingFailure(t, "--set", "defaultRegistry.existingPushSecret=mine")
 
 	for _, want := range []string{
 		"existingPushSecret",
-		// The message must name every way out, because an operator who hits this has no way to
-		// derive them and the right choice depends on how they manage Secrets.
+		// Every way out must be named.
 		"registry.auth.password",
 		"registry.auth.existingHtpasswdSecret",
 		"registry.auth.enabled=false",
@@ -35,8 +25,8 @@ func TestChartRefusesAHalfSuppliedRegistryCredential(t *testing.T) {
 	}
 }
 
-// TestChartAcceptsEveryResolutionOfTheCredentialSplit is the other half. A guard that fires on
-// correct configurations gets deleted, and all three of these are correct.
+// TestChartAcceptsEveryResolutionOfTheCredentialSplit: the guard must not fire on correct
+// configurations.
 func TestChartAcceptsEveryResolutionOfTheCredentialSplit(t *testing.T) {
 	cases := []struct {
 		name string
@@ -64,8 +54,7 @@ func TestChartAcceptsEveryResolutionOfTheCredentialSplit(t *testing.T) {
 			},
 		},
 		{
-			// The ordinary BYO-registry shape: no bundled zot at all, so there is no second half
-			// to disagree with.
+			// No bundled registry, so there is no second half to disagree with.
 			"an external registry entirely",
 			[]string{
 				"--set", "registry.enabled=false",
