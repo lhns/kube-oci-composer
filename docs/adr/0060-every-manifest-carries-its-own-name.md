@@ -34,13 +34,22 @@ which `keepUntagged` then pins.
 
 ## Decision
 
-**Both kinds name everything they publish after its own digest, `sha256-<hex>`,** beside whatever
+**Both kinds name everything they publish after its own digest, `digest-<hex>`,** beside whatever
 the spec asks for. Digest-only publications and attestation referrers included.
 
 - A rolling tag is then never a manifest's last tag, so moving it takes nothing with it.
 - Everything live carries a tag that the refresher's pulls renew — a pull by digest renews the tag
   on that digest, measured — so nothing live depends on `keepUntagged`. The chart can drop it, and
   a retired manifest is then reclaimed `gcDelay` after its last tag expires, layers included.
+
+**Not `sha256-<hex>`.** That was the first choice, and it made every artifact immortal. It is the
+OCI referrers tag schema — where a client without the Referrers API keeps the referrers index *for*
+subject `sha256:<hex>` — and zot treats any tag matching `sha256\-[A-Za-z0-9]*$`, unanchored at the
+start, as one: `OnUpdateManifest` returns before recording it, so retention never has statistics
+for it and keeps it (`"tag statistics not found"`). The e2e's digest-only control caught it,
+surviving 600s. The name also collides with that schema on any registry: a referrers fallback would
+read the manifest as an index, or overwrite the tag. So the name contains no `sha256-` anywhere, and
+a unit test holds it to that.
 
 Rules that make it safe:
 
@@ -63,9 +72,13 @@ Also: a gone `status.artifact` is no longer as quiet as expired history. The ref
 
 - **Storage is bounded again on the bundled registry**, once `keepUntagged` is off. Before, it only
   grew.
+- **Multi-platform images are covered whole.** Measured against zot v2.1.21 with `keepUntagged`
+  off: while an index was refreshed the way the refresher does it — the index and its amd64 child —
+  all 17 children and 34 blobs survived, including platforms and attestation manifests nothing
+  pulled. Once refreshing stopped, all of them were reclaimed. zot keeps what a live index references.
 - **One more tag per build**, in the registry and in `status.artifact.tags` / `status.history`. It
   appears in a tag listing, so an image-automation policy that picks from every tag has to exclude
-  `^sha256-` — the same filter cosign's `sha256-<hex>.sig` already needs.
+  `^digest-`.
 - **ADR 0031's guarantee now rests on "everything we publish carries a tag"**, not on pull recency
   applying to untagged content. That is load-bearing and tested per kind, plus a structural parity
   test that both kinds do it.

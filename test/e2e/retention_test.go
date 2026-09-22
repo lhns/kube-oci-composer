@@ -223,7 +223,7 @@ func TestExpiryIsNotPrompt(t *testing.T) {
 // mode and what it publishes may be what a running workload pulls. Two things are asserted about it,
 // and both used to be false:
 //
-//   - It is NAMED, after its own digest (sha256-<hex>). Left untagged it was protected only by
+//   - It is NAMED, after its own digest (digest-<hex>). Left untagged it was protected only by
 //     keepUntagged, and configuring keepUntagged is what made zot keep every retired manifest
 //     forever: removing a manifest's last tag deletes the digest's statistics, and zot then retains
 //     a statistics-less untagged manifest without evaluating it. The layers it referenced were never

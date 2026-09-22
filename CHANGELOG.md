@@ -7,7 +7,7 @@ may change between minor versions.
 
 ### Changed
 
-- **Every published manifest is also tagged with its own digest, `sha256-<hex>`**
+- **Every published manifest is also tagged with its own digest, `digest-<hex>`**
   ([ADR 0060](docs/adr/0060-every-manifest-carries-its-own-name.md)). This applies to both kinds,
   including digest-only publications and attestations. It closes two zot behaviours:
   - Moving a rolling tag deleted the previous build out from under anything pinned to it
@@ -17,7 +17,7 @@ may change between minor versions.
   **What operators see:** one more tag per build, in the registry and in `status.artifact.tags`.
   Objects published before this gain the tag on their next reconcile; nothing is rebuilt or
   republished to get it. An image-automation policy that picks from every tag should exclude
-  `^sha256-`, as it already must for cosign's `.sig`.
+  `^digest-`.
 
 - **New: `registry.retention.keepUntagged`, on by default in this release, off from the next.**
   Configuring zot's `keepUntagged` is what kept every retired manifest, and every layer it

@@ -22,7 +22,7 @@
 // without the protection below, fails.
 //
 // The protection is ADR 0060. Every manifest the controllers publish is also named after its own
-// digest (sha256-<hex>), so a rolling tag is never a manifest's last tag, and moving it takes
+// digest (digest-<hex>), so a rolling tag is never a manifest's last tag, and moving it takes
 // nothing with it. A second, per-build tag in the spec had the same effect in that run's control,
 // which is what localised the cause to the tag descriptor and made this the fix.
 //
@@ -147,8 +147,9 @@ If the digest's own tag %q is missing from the tags below, that is where this br
 	}
 }
 
-// ownTag is ADR 0060's tag for a digest, as the registry lists it.
-func ownTag(digest string) string { return strings.Replace(digest, ":", "-", 1) }
+// ownTag is ADR 0060's tag for a digest, as the registry lists it. Written out rather than imported:
+// the e2e checks the controller's behaviour, so it should not borrow the controller's definition.
+func ownTag(digest string) string { return "digest-" + strings.TrimPrefix(digest, "sha256:") }
 
 // applyRollingTagBuild creates or updates an ImageBuild that publishes under the MOVING tag.
 //

@@ -264,7 +264,7 @@ extend retention: zot writes a push timestamp per *digest* and only when that di
 republishing an existing digest does not renew it, and anything the refresher touches has a later
 pull than push. Pull recency remains the mechanism.
 
-**Everything the controllers publish carries a tag**: its own digest, `sha256-<hex>`, beside the
+**Everything the controllers publish carries a tag**: its own digest, `digest-<hex>`, beside the
 spec's tags. That includes digest-only publications and attestations
 ([ADR 0060](adr/0060-every-manifest-carries-its-own-name.md)). The reason is two zot behaviours:
 
@@ -291,7 +291,14 @@ to something that still covers every repository the controllers publish to, or n
 ever expires.
 
 **Image-automation policies see the extra tag.** A policy that picks from every tag has to exclude
-`^sha256-`. Cosign's `sha256-<hex>.sig` already requires that filter.
+`^digest-`.
+
+**Not `sha256-<hex>`, which a registry may reserve.** That is the OCI referrers tag schema, the
+tag where a client without the Referrers API keeps the referrers index for a subject. zot treats
+any tag matching `sha256\-[A-Za-z0-9]*$` as one: it never records the tag in its metadata, so
+retention never evaluates it and keeps it forever. The first version of this change used that
+name and made every artifact immortal. If you add tags of your own, avoid `sha256-` anywhere in
+them.
 
 ### TLS
 

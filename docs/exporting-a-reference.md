@@ -43,7 +43,7 @@ Keep it to the objects that need it.
 spec:
   push:
     repository: registry.example.com/team-a/app
-    # No tags at all: publish by digest. The only name is the digest's own sha256-<hex> tag
+    # No tags at all: publish by digest. The only name is the digest's own digest-<hex> tag
     # (ADR 0060), which cannot be remeaned.
     writeRefTo:
       namespace: flux-system

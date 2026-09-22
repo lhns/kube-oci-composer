@@ -73,9 +73,9 @@ values, means the same thing on `ImageBuild`. See [ADR 0029](docs/adr/0029-three
 
 **`push.tags` is optional.** Omit it and the artifact is published by digest alone, which is all
 a workload pinned by Flux image-automation needs. Either way, every artifact is also tagged with its
-own digest, `sha256-<hex>`, so a moving tag can never take the previous build with it
+own digest, `digest-<hex>`, so a moving tag can never take the previous build with it
 ([ADR 0060](docs/adr/0060-every-manifest-carries-its-own-name.md)). An image policy that picks from
-every tag should exclude `^sha256-`, as it already must for cosign's `.sig` tags.
+every tag should exclude `^digest-`.
 
 **Not templating with Helm?** `push.ref` takes a full image reference and uses its *tag*,
 ignoring the host and repository. Anything that already rewrites image references can then set it —

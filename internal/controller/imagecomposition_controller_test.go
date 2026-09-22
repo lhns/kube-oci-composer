@@ -415,8 +415,7 @@ func TestTagListingWorks(t *testing.T) {
 	}
 	// Exactly the tags that were asked for, plus the ONE derived tag ADR 0060 adds, and nothing
 	// else. The listing is what a scanner sees, so anything more would show up as a candidate
-	// release. The derived one does too -- it has the shape of cosign's sha256-<hex>.sig, and an
-	// image policy excludes it the same way.
+	// release. The derived one does too, and an image policy excludes it by its prefix, digest-.
 	want := []string{"main", recon.DigestTag(art.Digest)}
 	slices.Sort(tags)
 	slices.Sort(want)

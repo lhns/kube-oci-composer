@@ -8,7 +8,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 )
 
-// DigestTag is the tag naming a manifest after its own digest: "sha256-<hex>".
+// DigestTag is the tag naming a manifest after its own digest: "digest-<hex>".
 //
 // Both kinds apply it to everything they publish, beside whatever the spec asks for. ADR 0060. It
 // exists for two behaviours of the bundled registry, zot:
@@ -19,10 +19,23 @@ import (
 //     reclaimed. Content that always carries a tag while it is live is what lets the chart stop
 //     configuring keepUntagged, which is what pins such manifests.
 //
-// Derived from the content, so it can never be remeaned and can never conflict. cosign's ".sig"
-// tag is the same transformation with a suffix.
+// Derived from the content, so it can never be remeaned and can never conflict.
+//
+// NOT "sha256-<hex>", which was the first choice and made every artifact immortal. That is the OCI
+// referrers tag schema -- where a client without the Referrers API keeps the referrers index FOR
+// subject sha256:<hex> -- and zot treats any tag matching `sha256\-[A-Za-z0-9]*$` (unanchored at the
+// start) as one: it never records it in its metadata, so retention never evaluates it and keeps it
+// forever. It would also have collided with that schema on any other registry: a referrers
+// fallback would read our manifest as an index, or overwrite the tag. So the name contains no
+// "sha256-" anywhere.
+//
+// Only the hex: every digest here is sha256, and the tag has 128 characters to fit in.
 func DigestTag(digest string) string {
-	return strings.Replace(digest, ":", "-", 1)
+	_, hex, found := strings.Cut(digest, ":")
+	if !found {
+		hex = digest
+	}
+	return "digest-" + hex
 }
 
 // PublishTags is tags with the digest's own tag appended.

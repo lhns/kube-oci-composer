@@ -7,7 +7,7 @@ Amends [0010](0010-workloads-reference-digests.md), which said a workload must n
 tag.
 
 **Superseded in part by [0060](0060-every-manifest-carries-its-own-name.md)**: removing the auto-generated content tag was right for
-consumers, and a controller-applied `sha256-<hex>` tag is back for the registry's sake. The
+consumers, and a controller-applied `digest-<hex>` tag is back for the registry's sake. The
 consumer still chooses the tag it references.
 
 ## Context

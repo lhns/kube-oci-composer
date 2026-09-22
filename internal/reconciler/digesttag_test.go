@@ -17,7 +17,7 @@ const aDigest = "sha256:7e35cc903ff8ef186dfff1db5a96f1f06bd0fa3553ff11a4978fad3d
 // fails at the last step.
 func TestTheDigestsOwnTagIsAValidTag(t *testing.T) {
 	got := DigestTag(aDigest)
-	if want := "sha256-7e35cc903ff8ef186dfff1db5a96f1f06bd0fa3553ff11a4978fad3d8c09fde3"; got != want {
+	if want := "digest-7e35cc903ff8ef186dfff1db5a96f1f06bd0fa3553ff11a4978fad3d8c09fde3"; got != want {
 		t.Fatalf("DigestTag = %q, want %q", got, want)
 	}
 	if !tagPattern.MatchString(got) {
@@ -29,8 +29,25 @@ func TestTheDigestsOwnTagIsAValidTag(t *testing.T) {
 	}
 	// The whole digest, never a prefix: two builds sharing a prefix would share a tag, and a
 	// shared tag MOVES -- which is the failure this exists to prevent.
-	if !regexp.MustCompile(`^sha256-[0-9a-f]{64}$`).MatchString(got) {
+	if !regexp.MustCompile(`^digest-[0-9a-f]{64}$`).MatchString(got) {
 		t.Errorf("%q is not the full digest", got)
+	}
+}
+
+// The name must not be one a registry reserves. "sha256-<hex>" was, and it made every artifact
+// immortal: it is the OCI referrers tag schema, and zot matches it with the unanchored regex below
+// (pkg/common/common.go, IsReferrersTag, v2.1.21), never records such a tag in its metadata, and so
+// never lets retention evaluate it. cosign's conventions are reserved the same way in practice.
+func TestTheDigestsOwnTagIsNotAReservedName(t *testing.T) {
+	got := DigestTag(aDigest)
+	for _, reserved := range []struct{ what, pattern string }{
+		{"zot's referrers tag (OCI referrers tag schema)", `sha256\-[A-Za-z0-9]*$`},
+		{"cosign's signature, attestation and SBOM tags", `^sha256-[0-9a-f]+\.(sig|att|sbom)$`},
+	} {
+		if regexp.MustCompile(reserved.pattern).MatchString(got) {
+			t.Errorf("%q matches %s (%s); a registry treats it as that rather than as a tag, "+
+				"and zot keeps such a tag forever", got, reserved.what, reserved.pattern)
+		}
 	}
 }
 
@@ -66,7 +83,7 @@ func TestHasDigestTagReadsEitherShapeStatusStores(t *testing.T) {
 		{name: "qualified, as status.artifact stores it", tags: []string{"host/ns/app:main", "host/ns/app:" + own}, want: true},
 		{name: "bare, as a composition's history stores it", tags: []string{"main", own}, want: true},
 		{name: "absent: published before the tag existed", tags: []string{"host/ns/app:main"}, want: false},
-		{name: "another digest's tag is not this one's", tags: []string{"host/ns/app:sha256-" + strings.Repeat("0", 64)}, want: false},
+		{name: "another digest's tag is not this one's", tags: []string{"host/ns/app:digest-" + strings.Repeat("0", 64)}, want: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := HasDigestTag(tc.tags, aDigest); got != tc.want {

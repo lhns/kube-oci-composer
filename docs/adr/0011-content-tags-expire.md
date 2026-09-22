@@ -10,7 +10,7 @@ removed it in favour of consumer-chosen spec-hash tags. Everything here about *w
 risky and how it is gated stands unchanged; only the name of what expires has moved. `status.history`
 now records a list of tags per build rather than one content tag.
 
-Since [0060](0060-every-manifest-carries-its-own-name.md), every build also carries `sha256-<hex>`, its own digest as a tag, so none has no
+Since [0060](0060-every-manifest-carries-its-own-name.md), every build also carries `digest-<hex>`, its own digest as a tag, so none has no
 tags at all: that tag is what keeps an untagged manifest from being either unprotected or, with
 zot's `keepUntagged`, unreclaimable.
 
