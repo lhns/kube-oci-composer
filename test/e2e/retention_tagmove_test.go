@@ -1,38 +1,34 @@
 //go:build e2e
 
-// Does moving a rolling tag delete the digest it moved off?
+// Moving a rolling tag must not delete the digest it moved off.
 //
 // ADR 0031 says an image named by a live object's retained status.history is never deleted, by
-// anything. ADR 0010 tells workloads to reference digests, so the digest a rolling tag USED to
-// point at is not a historical curiosity: it is what a running pod re-pulls when it is rescheduled,
-// and what a rollback resolves to.
+// anything. ADR 0010 tells workloads to reference digests, so the digest a rolling tag USED to point
+// at is not a historical curiosity: it is what a running pod re-pulls when it is rescheduled, and
+// what a rollback resolves to.
 //
-// retention_test.go and retention_controller_test.go together establish that nothing EXPIRES out
-// from under a live object. This file asks a different question, and the distinction is the whole
-// point of it: whether publishing the NEXT build destroys the previous one as a side effect of the
-// push itself -- before any retention decision is ever taken, and therefore where no amount of
-// refreshing can help. The refresher pulls (internal/retention/refresher.go: `remote.Image`, a GET
-// and never a push), and a pull cannot resurrect content the registry has already dropped.
+// retention_test.go and retention_controller_test.go establish that nothing EXPIRES out from under
+// a live object. This file is about a different mechanism, and the distinction is the point of it:
+// whether publishing the NEXT build destroys the previous one as a side effect of the push itself --
+// before any retention decision is taken, and therefore where no amount of refreshing can help. The
+// refresher pulls, and a pull cannot resurrect content the registry has already dropped.
 //
-// Everything here is therefore asserted PROMPTLY -- seconds after the second build publishes, well
-// inside gcDelay and far inside the retention window -- so that "it expired" is not available as an
-// explanation for a failure. That promptness is not decoration; it is what separates this file's
-// question from the two files next to it.
+// It did, and this file was written to find out. zot v2.1.21 drops a manifest from the repository
+// index when its LAST tag moves to another digest: CheckIfIndexNeedsUpdate splices out the
+// descriptor carrying the tag and does not re-add the old digest untagged (zot#4444). The first
+// version of this test, run through the real controller with a single rolling tag, saw the previous
+// digest 404 about five seconds after the next push, with no retention decision logged for it at
+// all -- run 35760893931. That run is this test's negative control, on record: the same sequence,
+// without the protection below, fails.
 //
-// Established by hand against zot v2.1.21 with this chart's rendered policy, which is what these
-// tests exist to confirm or refute through the REAL controller path:
+// The protection is ADR 0060. Every manifest the controllers publish is also named after its own
+// digest (sha256-<hex>), so a rolling tag is never a manifest's last tag, and moving it takes
+// nothing with it. A second, per-build tag in the spec had the same effect in that run's control,
+// which is what localised the cause to the tag descriptor and made this the fix.
 //
-//   - Moving a tag from digest A to digest B makes A stop resolving within about a second of the
-//     push, with no retention decision logged for it at all. zot's CheckIfIndexNeedsUpdate
-//     (pkg/storage/common/common.go) splices the descriptor carrying the tag out of
-//     index.Manifests and appends the new one, without re-adding the old digest as an untagged
-//     entry.
-//   - A digest carrying a SECOND, unique tag survived, because a separate descriptor still names
-//     it. The spec-hash-tag pattern this project recommends is therefore protective -- but nothing
-//     enforces it: push.tags is entirely user-supplied and no controller adds a per-build tag.
-//
-// The two tests below are that pair. If they behave as the harness predicts, the first documents
-// the defect and the second documents the workaround.
+// Everything here is asserted PROMPTLY -- seconds after the second build publishes, well inside
+// gcDelay and far inside the retention window -- so that "it expired" is never available as an
+// explanation for a failure.
 package e2e
 
 import (
@@ -42,186 +38,134 @@ import (
 	"time"
 )
 
-// rollingTag is the name both tests move. Named once, because the failure message quotes it and a
-// message naming a different tag from the one the fixture pushed would be worse than no message.
+// rollingTag is the name the test moves. Named once, because the failure message quotes it.
 const rollingTag = "main"
 
-// TestMovingARollingTagKeepsThePreviousDigest is the question, stated as the guarantee.
+// TestMovingARollingTagKeepsThePreviousDigest is the guarantee, through the real controller.
 //
 // One object, built twice from different content, publishing under one rolling tag with
-// onConflict: Overwrite -- which is what the CRD documents as the correct setting for a tag meant
-// to move ("A tag meant to MOVE therefore conflicts under Fail ... and wants Overwrite instead").
-// So this is not an exotic configuration; it is the configuration the API tells people to use.
+// onConflict: Overwrite -- what the CRD documents as the setting for a tag meant to move. So this is
+// not an exotic configuration; it is the one the API tells people to use.
 //
-// The object is NEVER deleted, unlike the fixtures in retention_test.go. That is deliberate: a live
-// object is precisely the condition ADR 0031's guarantee is stated over, and the controller is
-// refreshing both of its history entries throughout.
+// The object is never deleted. A live object is precisely the condition ADR 0031's guarantee is
+// stated over, and the controller is refreshing both of its history entries throughout.
 func TestMovingARollingTagKeepsThePreviousDigest(t *testing.T) {
 	t.Parallel()
-	rollingTagMoveCase(t, "tagmove", "[main]", "[main]", "")
-}
 
-// TestASecondUniqueTagSurvivesTheRollingTagMoving is the same sequence with the recommended
-// workaround applied, and it earns its place by being the CONTROL for the test above.
-//
-// If both behave as the hand-driven harness predicts -- this one green, the one above red -- then
-// the difference between them is exactly one extra tag, which localises the mechanism to the tag
-// descriptor rather than to retention, to the controller, or to anything about the content. If they
-// behave the SAME way, whichever way, then the explanation is somewhere else and the first test's
-// failure message is wrong about the cause.
-//
-// The unique tag is per-build, which is what a spec-hash tag would be in a real deployment.
-func TestASecondUniqueTagSurvivesTheRollingTagMoving(t *testing.T) {
-	t.Parallel()
-	rollingTagMoveCase(t, "tagmove-unique", "[main, build-a]", "[main, build-b]", "build-a")
-}
+	repo := keepaliveRepo("tagmove")
+	name := keepaliveRepo("tagmove")
 
-// rollingTagMoveCase runs the whole sequence: publish, republish different content under the same
-// rolling tag, then ask -- at once -- whether the first digest is still there.
-//
-// survivingTag is the unique tag the first build carried, or "" when it carried only the rolling
-// one. It is reported rather than asserted on its own: the digest is what a pinned workload names,
-// and a tag that resolves while the digest does not would be a stranger finding than either
-// outcome this is looking for.
-func rollingTagMoveCase(t *testing.T, suffix, firstTags, secondTags, survivingTag string) {
-	t.Helper()
-
-	repo := keepaliveRepo(suffix)
-	name := keepaliveRepo(suffix)
-
-	// FIRST BUILD. Dockerfile, under the rolling tag.
-	applyRollingTagBuild(t, name, "Dockerfile", repo, firstTags)
+	applyRollingTagBuild(t, name, "Dockerfile", repo)
 	first := awaitPublishedDigest(t, name, "")
 
-	// It has to have been there, or "it is gone" is indistinguishable from "it never arrived" --
-	// the trap the untagged control in retention_test.go fell into.
+	// It has to have been there, or "it is gone" is indistinguishable from "it never arrived".
 	//
-	// HEAD, not GET, and for a reason that matters more here than anywhere else in this suite: a
-	// GET goes through zot's OnGetManifest -> UpdateStatsOnDownload and stamps the digest's
-	// lastPullTimestamp. A check that renews what it is checking makes the check itself protective,
-	// and a test whose own probes are the reason the subject survives measures nothing.
+	// HEAD, not GET: a GET stamps the digest's lastPullTimestamp, and a check that renews what it is
+	// checking makes the check itself the protection.
 	if !manifestExistsByDigestWithoutPulling(t, repo, first) {
 		t.Fatalf("%s@%s did not resolve immediately after its own build reported it published, "+
-			"so this test has no subject. Either the push did not land or status.artifact.digest "+
-			"names something the registry does not have.%s", repo, first, registryLogs(t))
+			"so this test has no subject.%s", repo, first, registryLogs(t))
 	}
 
-	// SECOND BUILD, same object, different content, same rolling tag.
-	//
-	// A DIFFERENT Dockerfile rather than a nudged annotation, because if the two builds produce the
-	// same digest the tag never moves and every assertion below passes vacuously. This suite has
-	// already paid for that mistake once, with a negative control that shared a digest with its
-	// subject, so the digests are asserted to differ rather than assumed to.
-	applyRollingTagBuild(t, name, "Dockerfile.other", repo, secondTags)
+	// A different Dockerfile rather than a nudged annotation: if the two builds produce the same
+	// digest the tag never moves and everything below passes vacuously. Asserted, not assumed.
+	applyRollingTagBuild(t, name, "Dockerfile.other", repo)
 	second := awaitPublishedDigest(t, name, first)
 	published := time.Now()
-
 	if second == first {
 		t.Fatalf("both builds produced %s, so the rolling tag never moved and this test asks "+
 			"nothing. The two Dockerfiles must differ in content.", first)
 	}
 
-	// THE ASSERTION, taken at once.
-	//
-	// Order matters: the registry is asked before the API server, because every second spent
-	// reading status is a second in which expiry becomes a marginally more available explanation
-	// for a 404. The object's state is gathered afterwards, purely to close off "the object went
-	// away" as a reading of the result.
+	// THE ASSERTION, taken at once -- the registry before the API server, so every second spent
+	// reading status is not a second in which expiry becomes an available explanation.
 	alive := manifestExistsByDigestWithoutPulling(t, repo, first)
 	elapsed := time.Since(published)
+	tags := tagsList(t, repo)
 
 	st := buildStatus(t, name)
 	ready := readyCondition(st)
 	inHistory := historyHasDigest(st, first)
 
-	gcDelay := deployedGCDelay(t)
-	t.Logf("%s: first=%s second=%s; first digest alive=%v, checked %s after the second publish "+
-		"(gcDelay=%s, window=%s); Ready=%+v, first digest in history=%v; tags now: %s",
-		repo, first, second, alive, elapsed.Round(time.Millisecond), gcDelay, retentionWindow,
-		ready, inHistory, tagsList(t, repo))
+	t.Logf("%s: first=%s second=%s; first alive=%v, checked %s after the second publish "+
+		"(gcDelay=%s, window=%s); Ready=%+v, first in history=%v; tags now: %s",
+		repo, first, second, alive, elapsed.Round(time.Millisecond), deployedGCDelay(t),
+		retentionWindow, ready, inHistory, tags)
 
-	// The object's own state, so a failure below cannot be dismissed as the object having gone.
-	// Checked whether or not the digest survived: a live, Ready object still listing the digest is
-	// the precondition that makes the registry's answer mean anything.
+	// The object's own state, so a failure cannot be dismissed as the object having gone: a live,
+	// Ready object still listing the digest is what makes the registry's answer mean anything.
 	if ready == nil || ready.Status != "True" {
-		t.Errorf("%s is not Ready after its second build (%+v), so the guarantee this test is "+
-			"about -- an image named by a LIVE object's history -- is not in force and the "+
-			"registry's answer below is about something else", name, ready)
+		t.Errorf("%s is not Ready after its second build (%+v), so the guarantee under test is not "+
+			"in force and the registry's answer below is about something else", name, ready)
 	}
 	if !inHistory {
-		t.Errorf("%s no longer lists %s in status.history after the second build, so ADR 0031's "+
-			"guarantee does not cover it and this test is measuring the wrong thing. history now: "+
-			"%s", name, first, historySummary(st))
+		t.Errorf("%s no longer lists %s in status.history, so ADR 0031 does not cover it and this "+
+			"test is measuring the wrong thing. history: %s", name, first, historySummary(st))
 	}
 
-	if alive {
-		// It survived the prompt check, which is the one that isolates the mechanism. Whether it
-		// then expires is a different question -- the one retention_controller_test.go answers --
-		// so it is reported and not asserted.
-		if survivingTag != "" {
-			t.Logf("the unique tag %s:%s resolves: %v", repo, survivingTag,
-				strings.Contains(tagsList(t, repo), `"`+survivingTag+`"`))
-		}
-		sleepInCluster(t, windowSeconds(t))
-		t.Logf("after a further %s (one full retention window) with the object still live, "+
-			"%s@%s alive=%v; tags now: %s", retentionWindow, repo, first,
-			manifestExistsByDigestWithoutPulling(t, repo, first), tagsList(t, repo))
-		return
+	if !alive {
+		t.Fatalf(`%s@%s stopped resolving %s after a LATER BUILD OF THE SAME OBJECT moved %q off it.
+
+Publishing a new build under a rolling tag DELETED content a live, Ready object still lists in
+status.history. A workload pinned to that digest -- what ADR 0010 tells workloads to do -- gets a
+404 when it is rescheduled, and a rollback cannot resolve its image.
+
+Not expiry: the check was taken %s after the push, while the controller was refreshing every
+digest in history. zot drops a manifest whose LAST tag moves (zot#4444), and ADR 0060 answers that
+by naming every published manifest after its own digest, so the rolling tag is never the last one.
+If the digest's own tag %q is missing from the tags below, that is where this broke.
+
+  first:     %s
+  second:    %s
+  history:   %s
+  tags now:  %s%s`,
+			repo, first, elapsed.Round(time.Millisecond), rollingTag,
+			elapsed.Round(time.Millisecond), ownTag(first),
+			first, second, historySummary(st), tags, registryLogs(t))
 	}
 
-	t.Fatalf(`%s@%s stopped resolving %s after a LATER BUILD OF THE SAME OBJECT moved %q off it.
+	// And it survived for the reason ADR 0060 says, not by luck: the previous build still carries a
+	// name of its own while the rolling tag has moved on. If a future zot keeps the digest without
+	// it, this is what reports that the reason changed.
+	if !strings.Contains(tags, `"`+ownTag(first)+`"`) {
+		t.Errorf("%s@%s survived, but without its own tag %s -- so something other than ADR 0060 "+
+			"kept it (did zot#4444 get fixed?). tags now: %s", repo, first, ownTag(first), tags)
+	}
+	if got := tagDigest(t, repo, rollingTag); got != second {
+		t.Errorf("%s:%s resolves to %q, want the second build %s; the tag did not move, so this "+
+			"test did not test a move", repo, rollingTag, got, second)
+	}
 
-What that means, plainly: publishing a new build under a rolling tag DELETED content that a live,
-Ready object still lists in status.history. A workload that pinned that digest -- which is what
-ADR 0010 tells workloads to do -- gets a 404 the next time it is rescheduled, and a rollback to the
-previous build cannot resolve its image.
-
-This is not expiry, and the timings are here so that cannot be argued. The check above was taken %s
-after the second build published. The object was live and Ready across the whole sequence, so the
-controller was refreshing every digest in status.history with a GET throughout -- which is exactly
-what resets the recency the %s window is measured against. For expiry to explain this, the window
-would have had to lapse inside that %s gap, on a digest that was being pulled.
-
-(gcDelay=%s is reported for completeness rather than as part of the argument: it floors how YOUNG
-content can be collected, and this digest is minutes old, so it bounds nothing here.)
-
-If it were expiry the registry would have logged a retention decision for this digest. The logs
-below are included so that can be read rather than guessed at.
-
-It is a side effect of the PUSH, and that is why the refresher cannot defend against it. The
-refresher GETs %s@<digest> to renew recency (internal/retention/refresher.go). Renewing recency on
-content the registry has already removed from the index is not something a pull can do, so this
-failure is invisible to every mechanism ADR 0031 relies on.
-
-  first build:  %s  tags %s
-  second build: %s  tags %s
-  Ready:        %+v
-  history:      %s
-  tags now:     %s%s`,
-		repo, first, elapsed.Round(time.Millisecond), rollingTag,
-		elapsed.Round(time.Millisecond), retentionWindow,
-		elapsed.Round(time.Millisecond), gcDelay, repo,
-		first, firstTags, second, secondTags, ready, historySummary(st),
-		tagsList(t, repo), registryLogs(t))
+	// Then the ordinary half of the guarantee: with the object live, the refresher keeps the
+	// previous build -- digest AND its own tag -- alive past a full window. The own tag is renewed
+	// by the refresher's pulls like any other name it records.
+	sleepInCluster(t, watchFor(t))
+	if !manifestExistsByDigestWithoutPulling(t, repo, first) {
+		t.Fatalf("%s@%s survived the tag move but was collected within %ds while its object was "+
+			"live and listed it in history. tags now: %s%s", repo, first, watchFor(t),
+			tagsList(t, repo), registryLogs(t))
+	}
 }
 
-// applyRollingTagBuild creates or updates an ImageBuild that publishes under a MOVING tag.
+// ownTag is ADR 0060's tag for a digest, as the registry lists it.
+func ownTag(digest string) string { return strings.Replace(digest, ":", "-", 1) }
+
+// applyRollingTagBuild creates or updates an ImageBuild that publishes under the MOVING tag.
 //
-// onConflict: Overwrite is not a workaround for this test's convenience -- it is what the CRD
-// documents for a tag meant to move, and under the default (Fail) the second build would be refused
-// before it ever ran, which is a different and already-tested behaviour.
-func applyRollingTagBuild(t *testing.T, name, dockerfile, repository, tags string) {
+// onConflict: Overwrite is not a convenience for this test -- it is what the CRD documents for a
+// tag meant to move. Under the default (Fail) the second build is refused before it runs, which is a
+// different behaviour and already tested.
+func applyRollingTagBuild(t *testing.T, name, dockerfile, repository string) {
 	t.Helper()
-	applyBuildToTagged(t, name, dockerfile, buildRegistry+"/"+repository, tags,
+	applyBuildToTagged(t, name, dockerfile, buildRegistry+"/"+repository, "["+rollingTag+"]",
 		"    onConflict: Overwrite")
 }
 
 // awaitPublishedDigest waits for the object to report a published digest that is not `previous`.
 //
-// Polled at one second rather than at the suite's five, and locally rather than in-cluster. The
-// whole value of this file rests on asking the registry PROMPTLY after the push, and a five-second
-// poll would put most of gcDelay between the push and the question for no reason. kubectl talks to
-// the API server and never to the registry, so polling cannot renew anything.
+// Polled at one second rather than the suite's five. The value of this file rests on asking the
+// registry PROMPTLY after the push, and kubectl talks to the API server, never to the registry, so
+// polling it cannot renew anything.
 func awaitPublishedDigest(t *testing.T, name, previous string) string {
 	t.Helper()
 
@@ -257,9 +201,8 @@ func historyHasDigest(st dockerBuildStatus, digest string) bool {
 	return false
 }
 
-// historySummary renders status.history for a failure message. "It is gone" with nothing else is
-// not much of an answer, and the tags each record carries are what decide whether a descriptor
-// still names the digest.
+// historySummary renders status.history for a failure message, tags included: the tags each record
+// carries are what decide whether a descriptor still names the digest.
 func historySummary(st dockerBuildStatus) string {
 	if len(st.History) == 0 {
 		return "(empty)"

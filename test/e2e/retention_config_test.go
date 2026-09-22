@@ -7,7 +7,8 @@
 // single sitting:
 //
 //   - deleteUntagged was switched off to dodge an unrelated race, and
-//     TestPullingByDigestKeepsAnUntaggedImageAlive went on passing while measuring nothing: the
+//     the untagged retention test (now TestADigestOnlyPublicationIsKeptWhilePulledAndReclaimedOnceRetired)
+//     went on passing while measuring nothing: the
 //     manifest survived because collection was disabled, not because pulling protected it.
 //   - a gcDelay floor was very nearly set to 10m, which would have made EVERY retention test
 //     vacuous, because nothing younger than gcDelay is ever collected and they all refresh for 90s.
@@ -31,8 +32,9 @@ type zotRetention struct {
 		GCMaxSchedulerDelay string `json:"gcMaxSchedulerDelay"`
 		Retention           struct {
 			Policies []struct {
-				Repositories   []string `json:"repositories"`
-				DeleteUntagged *bool    `json:"deleteUntagged"`
+				Repositories   []string        `json:"repositories"`
+				DeleteUntagged *bool           `json:"deleteUntagged"`
+				KeepUntagged   json.RawMessage `json:"keepUntagged"`
 			} `json:"policies"`
 		} `json:"retention"`
 	} `json:"storage"`
@@ -142,6 +144,21 @@ func requireUntaggedCollection(t *testing.T, repository string) {
 					"collected and this test would pass without measuring anything. It exists to "+
 					"show that PULLING keeps one alive.", repository)
 			}
+		}
+	}
+}
+
+// requireKeepUntaggedOff fails when the registry configures keepUntagged, under which a manifest
+// whose last tag has expired is kept forever -- so a control waiting for one to be reclaimed would
+// wait out its deadline and blame the registry for collecting nothing. ADR 0060; up.sh turns it off.
+func requireKeepUntaggedOff(t *testing.T) {
+	t.Helper()
+	for _, p := range deployedRetention(t).Storage.Retention.Policies {
+		if len(p.KeepUntagged) > 0 {
+			t.Fatalf("the registry configures keepUntagged (%s). With it, zot keeps every manifest "+
+				"whose last tag expired, without evaluating it, so nothing this test publishes can be "+
+				"reclaimed and its control can never fire. Set registry.retention.keepUntagged=false.",
+				p.KeepUntagged)
 		}
 	}
 }
