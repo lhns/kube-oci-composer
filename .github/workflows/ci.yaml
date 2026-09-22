@@ -4,28 +4,20 @@ on:
   push:
     branches: [main]
   pull_request:
-  # Callable, so the release workflow can gate on the SAME pipeline rather than
-  # re-declaring a subset of it. That subset is how v0.2.0 and v0.2.1 published
-  # green while `verify` and `e2e` were red: release ran `make test` only, which
-  # passes happily on drifted codegen and a broken e2e.
+  # Callable, so release gates on this same pipeline rather than a subset of it.
   workflow_call:
 
 permissions:
   contents: read
 
-# The group name is LITERAL, not ${{ github.workflow }}. Under workflow_call that expression
-# resolves to the CALLER's workflow, so ci and e2e both computed "release-<ref>" when the release
-# workflow invoked them -- one concurrency group, cancel-in-progress, and the two cancelled each
-# other. v0.2.2's first release run died exactly that way: every ci job green, e2e cancelled,
-# release skipped.
+# A LITERAL group name: under workflow_call ${{ github.workflow }} is the caller's, so ci and e2e
+# would share one group when release calls them, and cancel each other.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # The gate. Cheap, and covers the failures that make every other job's result
-  # meaningless — so nothing else starts until it passes. Everything below is
-  # `needs: unit`, which is what stops a broken build from burning e2e minutes.
+  # The cheap gate: every other job `needs: unit`.
   unit:
     runs-on: ubuntu-latest
     steps:
@@ -36,11 +28,7 @@ jobs:
           cache: true
 
       - name: Verify generated output is committed
-        # Generated CRDs, RBAC and deepcopy drifting from the source is the failure that is
-        # invisible until something behaves differently in a cluster than it does in the repo.
-        # It also fails silently across machines: `make generate` uses whatever controller-gen
-        # is installed, so a version bump only shows up here. See the Makefile's controller-gen
-        # rule for why that is now a version check rather than an existence check.
+        # Generated CRDs, RBAC and deepcopy must match the source and the pinned controller-gen.
         run: make verify
 
       - run: make test
@@ -72,14 +60,10 @@ jobs:
           cache: true
       - uses: golangci/golangci-lint-action@v9
         with:
-          # Built from source with the toolchain setup-go just installed. The prebuilt binaries
-          # lag the Go release, and a linter built with an older Go refuses to parse a go.mod
-          # targeting a newer one — which is what broke this job.
+          # Built with the installed Go: prebuilt binaries lag Go releases and refuse a newer
+          # go.mod. Settings, including the timeout, are in .golangci.yml.
           install-mode: goinstall
           version: latest
-          # Settings live in .golangci.yml now, including the timeout: v9 installs golangci-lint
-          # v2, which reads its config from there and needs one anyway (see that file for what the
-          # v1 -> v2 default change surfaced).
 
   chart:
     runs-on: ubuntu-latest
@@ -90,33 +74,35 @@ jobs:
       - run: make chart-lint
 
       - name: Render the option combinations that have their own code paths
-        # `helm lint` renders default values only, so a template that breaks under a
-        # non-default combination renders fine here and fails at install time. These are the
-        # combinations the chart actually branches on.
+        # `helm lint` renders defaults only; these are the combinations the chart branches on.
         run: |
           set -euo pipefail
-          # registry.publish.mode has no default: the chart refuses to install until an operator
-          # says how workloads reach the registry (ADR 0037). None of these cases is about that
-          # question, so they answer it once and get on with what they are checking.
+          # publish.mode has no default (ADR 0037) and none of these cases is about it.
           MODE="--set registry.publish.mode=internalOnly"
-          # Each component toggled off on its own. imageBuild.enabled=false is the one that matters
-          # most: it must remove the RBAC, not just the controller (ADR 0033).
+          # Each component toggled off on its own.
           helm template t charts/kube-oci-composer $MODE --set imageComposition.enabled=false > /dev/null
           helm template t charts/kube-oci-composer $MODE --set imageBuild.enabled=false > /dev/null
-          # No bundled registry: the BYO shape, where the operator supplies a registry and its
-          # credential. This has to keep working -- it is the reason defaultRegistry exists
-          # separately from registry.
-          helm template t charts/kube-oci-composer $MODE             --set registry.enabled=false             --set defaultRegistry.host=ghcr.io/example             --set defaultRegistry.existingPushSecret=my-push-secret > /dev/null
-          # NodePort with a pinned port plus a node-resolvable host, which is the arrangement a
-          # workload actually pulls through.
-          helm template t charts/kube-oci-composer $MODE             --set registry.service.type=NodePort             --set registry.service.nodePort=30500             --set registry.host=oci.example.com:30500 > /dev/null
+          # No bundled registry: bring your own registry and credential.
+          helm template t charts/kube-oci-composer $MODE \
+            --set registry.enabled=false \
+            --set defaultRegistry.host=ghcr.io/example \
+            --set defaultRegistry.existingPushSecret=my-push-secret > /dev/null
+          # NodePort with a pinned port and a node-resolvable host.
+          helm template t charts/kube-oci-composer $MODE \
+            --set registry.service.type=NodePort \
+            --set registry.service.nodePort=30500 \
+            --set registry.host=oci.example.com:30500 > /dev/null
           # Persistence, S3 layer cache and metrics on.
-          helm template t charts/kube-oci-composer $MODE             --set registry.persistence.enabled=true             --set registry.persistence.storageClass=cephfs             --set operator.s3.endpoint=https://s3.test             --set operator.s3.bucket=blobs             --set metrics.serviceMonitor.enabled=true > /dev/null
+          helm template t charts/kube-oci-composer $MODE \
+            --set registry.persistence.enabled=true \
+            --set registry.persistence.storageClass=cephfs \
+            --set operator.s3.endpoint=https://s3.test \
+            --set operator.s3.bucket=blobs \
+            --set metrics.serviceMonitor.enabled=true > /dev/null
 
       - name: imageBuild.enabled=false must remove the Job RBAC, not just the controller
-        # A toggle that leaves the Role behind is a setting that LOOKS like a security control and
-        # is not one. ADR 0033 accepted a default install that can run arbitrary containers only
-        # because turning it off removes the permission.
+        # ADR 0033 accepts a default install that can run arbitrary containers only because this
+        # toggle removes the permission.
         run: |
           set -euo pipefail
           MODE="--set registry.publish.mode=internalOnly"
@@ -127,9 +113,8 @@ jobs:
           echo "OK: the RBAC went with the controller."
 
       - name: The bundled registry renders, and its retention policy protects something
-        # Each of the settings checked here fails by silently protecting NOTHING rather than by
-        # erroring, which is how they were found: seven e2e runs that read like the registry was
-        # broken when the policy simply matched nothing. See ADR 0031 and docs/registry.md.
+        # Each setting checked here fails by silently protecting nothing rather than by erroring.
+        # ADR 0031, docs/registry.md.
         run: |
           set -euo pipefail
           MODE="--set registry.publish.mode=internalOnly"
@@ -139,12 +124,8 @@ jobs:
           helm template t charts/kube-oci-composer $MODE | python3 hack/check-bundled-registry.py docs/registry.md
 
       - name: The chart must REFUSE a retention margin too thin to be a guarantee
-        # Threat-model gap D7. The window and the refresh interval were unfixable while they lived
-        # in different systems; one chart renders both, so it compares them.
-        #
-        # A guard is only a guard if it fails, and this one is why that rule exists: the first
-        # version lived in a _partials file whose `include` Helm never executes, so it passed every
-        # falsification case while doing nothing at all.
+        # Threat-model gap D7. Each guard must actually fail the render (a check in a _partials
+        # file that nothing includes never runs).
         run: |
           set -euo pipefail
           MODE="--set registry.publish.mode=internalOnly"
@@ -173,8 +154,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
       - name: Build the image (no push)
-        # The release workflow is the only other place this Dockerfile is built, and there a
-        # failure means a tag is already pushed. Building it here makes that a PR failure.
+        # Otherwise only release builds it, after the tag is pushed.
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -186,8 +166,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Build the builder image (no push)
-        # Same Dockerfile, other binary. Built here for the same reason: a compile error in
-        # cmd/oci-builder must be a PR failure rather than a tag-time one.
+        # Same Dockerfile, other binary, same reason.
         uses: docker/build-push-action@v7
         with:
           context: .
