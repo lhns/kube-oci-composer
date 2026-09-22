@@ -138,6 +138,29 @@ func ExportRef(
 	return written, c.Update(ctx, cm)
 }
 
+// RecordExport reconciles what was just written against what was written last time.
+//
+// Removes the previous ConfigMap when the spec moved it to another namespace, or stopped asking
+// for one at all: a consumer substitutes from whatever it finds, so a ConfigMap nobody maintains
+// is worse than none. Reports whether the record changed, so the caller can skip a status write
+// on the steady path -- which is most passes.
+//
+// The status write itself stays with the caller, because the two kinds patch status differently
+// and that is the only part that legitimately differs. Everything above it was duplicated, and had
+// already started to drift.
+func RecordExport(
+	ctx context.Context, c client.Client, obj client.Object,
+	prev, written *ociv1alpha1.RefExportStatus,
+) (changed bool, err error) {
+	if prev != nil && written != nil && *prev == *written {
+		return false, nil
+	}
+	if err := DeleteExportedRef(ctx, c, obj, prev); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // DeleteExportedRef removes a ConfigMap this controller wrote for this object.
 //
 // Needed because a cross-namespace owner reference is invalid, so Kubernetes will not reclaim one

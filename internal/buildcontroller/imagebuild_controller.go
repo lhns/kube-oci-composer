@@ -1110,7 +1110,7 @@ func (r *ImageBuildReconciler) refreshNow(ctx context.Context, obj *ociv1alpha1.
 // publish -- a consumer substitutes whatever it finds, and a missing key substitutes the empty
 // string with no complaint from anything.
 func (r *ImageBuildReconciler) exportRef(ctx context.Context, obj *ociv1alpha1.ImageBuild) error {
-	if obj.Spec.Push == nil || obj.Spec.Push.WriteRefTo == nil || obj.Status.Artifact == nil {
+	if obj.Spec.Push.GetWriteRefTo() == nil || obj.Status.Artifact == nil {
 		return nil
 	}
 	written, err := recon.ExportRef(ctx, r.Client, obj, obj.Spec.Push.WriteRefTo, r.Export,
@@ -1130,11 +1130,8 @@ func (r *ImageBuildReconciler) exportRef(ctx context.Context, obj *ociv1alpha1.I
 func (r *ImageBuildReconciler) recordExport(
 	ctx context.Context, obj *ociv1alpha1.ImageBuild, written *ociv1alpha1.RefExportStatus,
 ) error {
-	prev := obj.Status.RefExport
-	if prev != nil && written != nil && *prev == *written {
-		return nil
-	}
-	if err := recon.DeleteExportedRef(ctx, r.Client, obj, prev); err != nil {
+	changed, err := recon.RecordExport(ctx, r.Client, obj, obj.Status.RefExport, written)
+	if err != nil || !changed {
 		return err
 	}
 	patch := client.MergeFrom(obj.DeepCopy())

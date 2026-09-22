@@ -467,13 +467,6 @@ func buildJob(obj *ociv1alpha1.ImageBuild, inputHash, contextURL, contextDigest 
 		env = append(env, corev1.EnvVar{Name: "SSL_CERT_FILE", Value: caBundlePath})
 	}
 
-	// buildctl writes the pushed digest to a file in an emptyDir, which the controller cannot read.
-	// Copying it to the termination log is what gets it back out: Kubernetes surfaces that in the
-	// pod's container status, which is the supported channel for a small result and needs no exec
-	// and no log scraping.
-	//
-	// The `sh -c "$@"` form passes the buildctl arguments positionally, so nothing here has to
-	// quote them and an argument containing a space cannot break the script.
 	// The CA prelude, when there is one.
 	//
 	// SSL_CERT_FILE REPLACES Go's system pool rather than adding to it, so pointing it straight at
@@ -493,6 +486,13 @@ func buildJob(obj *ociv1alpha1.ImageBuild, inputHash, contextURL, contextDigest 
 		caPrelude = fmt.Sprintf(`{ cat /etc/ssl/certs/ca-certificates.crt 2>/dev/null || true; cat %s/ca.crt; } > %s
 `, registryCAPath, caBundlePath)
 	}
+	// buildctl writes the pushed digest to a file in an emptyDir, which the controller cannot read.
+	// Copying it to the termination log is what gets it back out: Kubernetes surfaces that in the
+	// pod's container status, which is the supported channel for a small result and needs no exec
+	// and no log scraping.
+	//
+	// The `sh -c "$@"` form passes the buildctl arguments positionally, so nothing here has to
+	// quote them and an argument containing a space cannot break the script.
 	script := fmt.Sprintf(`set -e
 %sbuildctl-daemonless.sh "$@"
 cat %s > /dev/termination-log

@@ -817,13 +817,8 @@ func (r *ImageCompositionReconciler) exportRef(
 		}
 	}
 
-	// Removes the previous ConfigMap when the spec moved it, or stopped asking for one: a consumer
-	// substitutes from whatever it finds, so one nobody maintains is worse than none.
-	prev := obj.Status.RefExport
-	if prev != nil && written != nil && *prev == *written {
-		return nil
-	}
-	if err := recon.DeleteExportedRef(ctx, r.Client, obj, prev); err != nil {
+	changed, err := recon.RecordExport(ctx, r.Client, obj, obj.Status.RefExport, written)
+	if err != nil || !changed {
 		return err
 	}
 	return r.patchStatus(ctx, obj, func(o *ociv1alpha1.ImageComposition) {

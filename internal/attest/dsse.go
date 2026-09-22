@@ -17,6 +17,16 @@ type dsseEnvelope struct {
 }
 
 type dsseSignature struct {
+	// KeyID is always empty, and stays that way deliberately.
+	//
+	// DSSE makes it optional, and a verifier that has one key does not need to be told which. It
+	// is serialised rather than omitted because dropping it -- or adding omitempty -- changes the
+	// envelope's bytes, and the envelope is an artifact this project publishes: every attestation
+	// would get a new digest under an unchanged spec. That is the ADR 0057 shape, a format change
+	// masquerading as a tidy, and it belongs in a change that means to do it.
+	//
+	// Nothing is weakened by the empty value: the signature covers the PAE-encoded payload, not
+	// this JSON.
 	KeyID string `json:"keyid"`
 	Sig   string `json:"sig"`
 }

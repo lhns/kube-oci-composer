@@ -35,28 +35,15 @@ const retentionWindow = "30s"
 // of repositories in the registry, and the bundled registry now holds every image the whole suite
 // produces, build caches included. TestExpiryIsNotPrompt records the same thing from the other side.
 //
-// This is a deadline for "did it happen at all", not a measurement of when. Overshooting costs
-// nothing when collection is prompt, because the poll returns as soon as the tag goes.
+// A deadline for "did it happen at all", not a measurement of when: overshooting costs nothing,
+// because the poll returns as soon as the tag goes, while undershooting fails the suite and reads
+// like a retention bug.
 //
-// It used to be a constant, raised from 420 to 600 after it fired on main: the control survived the
-// full 420s, which fails the suite rather than letting every retention assertion pass vacuously.
-// ONE added ImageBuild -- one more repository in the rotation -- was enough, which said the value
-// had no margin left rather than that anything had broken.
-//
-// It is now a floor with a computed term above it, and the floor is doing most of the work.
-//
-// The computed term exists so that adding a test which pushes a new repository lengthens this
-// automatically, instead of quietly spending margin somebody else was relying on -- which is how
-// the old constant was outgrown by ONE added ImageBuild.
-//
-// The floor exists because the model behind the computed term is not trustworthy. It assumes a
-// repository is reached every (repositories x gcInterval); a run with a one-second sweep, where
-// that model predicted a 121s deadline would be ample, failed with the control still alive. So the
-// estimate is treated as a lower bound on how long to wait and never as permission to wait less
-// than the value this suite is known to pass on.
-//
-// Overshooting costs nothing when collection is prompt: the poll returns as soon as the tag goes.
-// Undershooting fails the suite and reads like a retention bug.
+// A computed term over a floor. The term lengthens this automatically when a test adds a
+// repository, instead of spending margin somebody else was relying on -- which is how the old
+// constant of 420 was outgrown by ONE added ImageBuild. The floor exists because the model behind
+// the term, that a repository is reached every (repositories x gcInterval), is not trustworthy: a
+// run with a one-second sweep failed at the 121s that model predicted was ample.
 func collectionDeadline(t *testing.T) int {
 	t.Helper()
 	const floor = 600
