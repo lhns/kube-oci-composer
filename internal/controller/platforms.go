@@ -22,13 +22,11 @@ func declaredPlatforms(obj *ociv1alpha1.ImageComposition) ([]oci.Platform, error
 	for _, s := range obj.Spec.Platforms {
 		p, err := oci.ParsePlatform(s)
 		if err != nil {
-			// The CRD pattern already rejects this shape, so reaching here means a spec that
-			// somehow passed validation. Terminal either way: retrying cannot reparse it.
+			// The CRD pattern already rejects this; retrying cannot reparse it.
 			return nil, recon.Terminal("spec.platforms: %v", err)
 		}
 		if _, dup := seen[p.String()]; dup {
-			// Two identical children would produce an index with an ambiguous descriptor, and a
-			// puller picking between them gets to choose which of two identical things it means.
+			// Two identical children would make the index's descriptors ambiguous.
 			return nil, recon.Terminal("spec.platforms: %s is listed twice", p)
 		}
 		seen[p.String()] = struct{}{}
@@ -40,9 +38,8 @@ func declaredPlatforms(obj *ociv1alpha1.ImageComposition) ([]oci.Platform, error
 // assemble builds the artifact: one image when the spec names at most one platform, an index over
 // per-platform children when it names several.
 //
-// The single-platform path is deliberately unchanged from before this feature existed — same
-// function, same inputs, same output digest — because every artifact already in the estate is
-// built that way and must not churn.
+// The single-platform path must keep producing the same digest as before multi-platform support,
+// or every existing artifact would churn.
 func (r *ImageCompositionReconciler) assemble(ctx context.Context, obj *ociv1alpha1.ImageComposition,
 	declared []oci.Platform, inputs []oci.LayerInput, cfg oci.Config, workDir string) (builtArtifact, error) {
 
@@ -63,8 +60,7 @@ func (r *ImageCompositionReconciler) assemble(ctx context.Context, obj *ociv1alp
 		return builtArtifact{}, err
 	}
 
-	// Exactly one platform named: still a single manifest, but the platform comes from the spec
-	// rather than from the base or the runtime.
+	// Exactly one platform named: a single manifest, with the platform from the spec.
 	if len(declared) == 1 {
 		img, err := oci.AssembleAs(base, inputs, cfg, declared[0], workDir)
 		if err != nil {
@@ -105,8 +101,7 @@ func (r *ImageCompositionReconciler) resolveBases(ctx context.Context, obj *ociv
 	repository, digest := base.Repository()
 	byKey, err := source.PullImageIndex(ctx, repository, digest, want, opts...)
 	if err != nil {
-		// A platform the base does not offer needs a spec change — either a different base or
-		// a shorter platform list — so retrying would repeat the same failure hourly.
+		// A platform the base does not offer is a bad reference: only a spec change fixes it.
 		return nil, pullFailure("base image", err)
 	}
 

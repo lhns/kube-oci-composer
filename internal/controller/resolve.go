@@ -17,26 +17,17 @@ import (
 	"github.com/lhns/kube-oci-composer/internal/source"
 )
 
-// resolveInputs turns spec layers into assembly inputs, resolving digests where they are not
-// declared.
-//
-// Ordering is preserved exactly: layers are contributed in declaration order and nothing here
-// reorders, groups or promotes any entry.
-//
-// `fetch` carries its digest in the spec. `sourceRef` and `configMap` do not, and theirs is
-// resolved here — from the Flux source's status.artifact, or by hashing the ConfigMap's content.
-// Resolution happens BEFORE the input hash is computed, so a change to a referenced source or
-// ConfigMap moves the hash and triggers a rebuild, exactly as editing a declared digest would.
-// See ADR 0002.
-//
-// Path is deliberately left empty for remote sources: nothing is fetched until the short-circuit
-// has decided a build is actually needed — including an image layer's manifest, whose digest is
-// declared in the spec and so needs nothing from a registry to hash.
-
 // imagePulls maps an input's index to the spec entry describing how to pull it, for the entries
-// whose content is another image. The fetch phase uses it; nothing else does.
+// whose content is another image. Only the fetch phase uses it.
 type imagePulls map[int]*ociv1alpha1.ImageSource
 
+// resolveInputs turns spec layers into assembly inputs, in declaration order, resolving digests
+// where they are not declared.
+//
+// `sourceRef` and `configMap` digests are resolved here, BEFORE the input hash, so a change to the
+// referenced object moves the hash exactly as editing a declared digest would (ADR 0002). Path is
+// left empty for remote sources: nothing is fetched until the short-circuit decides a build is
+// needed.
 func (r *ImageCompositionReconciler) resolveInputs(ctx context.Context, obj *ociv1alpha1.ImageComposition, workDir string) ([]oci.LayerInput, imagePulls, error) {
 	inputs := make([]oci.LayerInput, 0, len(obj.Spec.Layers))
 	pulls := imagePulls{}
@@ -72,9 +63,8 @@ func (r *ImageCompositionReconciler) resolveInputs(ctx context.Context, obj *oci
 			}
 			in.URL = art.URL
 			in.Digest = art.Digest
-			// The revision identifies the CONTENT; the digest identifies the tarball carrying it.
-			// source-controller re-packs on restart, so hashing the digest rebuilt every
-			// composition consuming this source for bytes that had not changed.
+			// The revision identifies the CONTENT; the tarball digest moves whenever
+			// source-controller re-packs.
 			in.Identity = art.Revision
 			// source-controller always publishes a gzipped tar, whatever the source kind.
 			in.Unpack = oci.UnpackTarGz
@@ -86,17 +76,14 @@ func (r *ImageCompositionReconciler) resolveInputs(ctx context.Context, obj *oci
 			if err != nil {
 				var nf *source.ErrNotFound
 				if errors.As(err, &nf) {
-					// Creating the ConfigMap fixes this, not editing the layer, so it waits
-					// rather than stalls. ConfigMaps are watched, so the wait is usually over
-					// the moment one appears.
+					// Pending: creating the ConfigMap (which is watched) fixes it.
 					return nil, nil, recon.Pending("layer %q: %s", l.Name, err)
 				}
 				return nil, nil, fmt.Errorf("layer %q: %w", l.Name, err)
 			}
 			if resolved.Empty {
-				// An optional ConfigMap that is absent, or one with no entries. Contributing an
-				// empty layer would still change the output digest, so skip the entry entirely
-				// and let the composition be exactly what it would have been without it.
+				// Absent-and-optional, or empty: skipped entirely, since even an empty layer
+				// would change the output digest.
 				continue
 			}
 			in.Digest = resolved.Digest
@@ -104,11 +91,8 @@ func (r *ImageCompositionReconciler) resolveInputs(ctx context.Context, obj *oci
 			in.Unpack = oci.UnpackTarGz
 
 		case l.Image != nil:
-			// Not pulled here. The digest is declared in the spec, so the hash needs nothing from
-			// the registry — and pulling would make every reconcile of an image layer cost a
-			// manifest round trip even when the short-circuit is about to decide there is nothing
-			// to do. The pull is recorded for the fetch phase, exactly as Path is left empty for
-			// every other remote source.
+			// Not pulled here: the digest is declared, so the hash needs nothing from the
+			// registry. The pull is recorded for the fetch phase.
 			repository, digest := l.Image.Repository()
 			in.URL = repository
 			in.Digest = digest
@@ -120,8 +104,7 @@ func (r *ImageCompositionReconciler) resolveInputs(ctx context.Context, obj *oci
 			in.Remove = l.Remove
 
 		default:
-			// CEL already enforces the union, so this only fires for a verb the CRD permits and
-			// this build does not implement.
+			// CEL enforces the union; this fires only for a verb this build does not implement.
 			return nil, nil, recon.Terminal("layer %q: no supported source is set", l.Name)
 		}
 
@@ -167,8 +150,7 @@ func parseMode(layer, which, value string) (int64, error) {
 	}
 	mode, err := strconv.ParseInt(value, 8, 32)
 	if err != nil {
-		// Terminal: CEL already constrains the pattern, so reaching here means a spec that
-		// somehow passed validation and still cannot be interpreted.
+		// CEL already constrains the pattern; retrying cannot reinterpret it.
 		return 0, recon.Terminal("layer %q: %s mode %q is not octal", layer, which, value)
 	}
 	return mode, nil
@@ -176,8 +158,7 @@ func parseMode(layer, which, value string) (int64, error) {
 
 // resolveBase pulls the base image, if one is declared.
 //
-// Called after the short-circuit, so an unchanged spec costs one HEAD rather than a registry
-// round trip per base image on every interval.
+// Called after the short-circuit, so an unchanged spec never pulls its base.
 func (r *ImageCompositionReconciler) resolveBase(ctx context.Context, obj *ociv1alpha1.ImageComposition) (v1.Image, error) {
 	if obj.Spec.Base == nil {
 		return nil, nil
@@ -199,13 +180,9 @@ func (r *ImageCompositionReconciler) resolveBase(ctx context.Context, obj *ociv1
 
 // resolveFluxSource reads the referenced source's published artifact.
 func (r *ImageCompositionReconciler) resolveFluxSource(ctx context.Context, obj *ociv1alpha1.ImageComposition, ref *ociv1alpha1.SourceRefSource) (source.FluxArtifact, error) {
-	// Optional by design (ADR 0026): pinning every source would make a composition that tracks a
-	// branch impossible. Unpinned is a choice, with two consequences.
+	// Pinning is optional by design (ADR 0026), unless the operator requires it cluster-wide (T1).
 	if ref.Revision == "" {
-		// Threat-model gap T1: the operator had no way to decide otherwise for a whole cluster.
-		// Terminal, unlike the revision MISMATCH below -- what fixes an absent pin is editing this
-		// spec, which bumps the generation; what fixes a mismatch is the source catching up, which
-		// does not.
+		// Terminal, unlike the revision MISMATCH below: an absent pin is fixed by editing this spec.
 		if r.RequirePinnedSources {
 			return source.FluxArtifact{}, recon.Terminal(
 				"layer source %s/%s names no revision, and this controller runs with "+
@@ -215,10 +192,8 @@ func (r *ImageCompositionReconciler) resolveFluxSource(ctx context.Context, obj 
 		warnUnpinnedUnderFail(r.Recorder, obj, ref)
 	}
 
-	// Same namespace only. The controller's RBAC is cluster-wide, so without this a tenant who can
-	// create an ImageComposition could name any namespace's source and bake its content into an
-	// image they control and can read — the one tenancy boundary a spec could cross on its own.
-	// Terminal because editing THIS spec is what fixes it.
+	// Same namespace only: the controller's RBAC is cluster-wide, so otherwise a tenant could bake
+	// any namespace's source into an image they can read.
 	ns := obj.Namespace
 	if ref.Namespace != "" && ref.Namespace != obj.Namespace {
 		return source.FluxArtifact{}, recon.Terminal(
@@ -230,35 +205,21 @@ func (r *ImageCompositionReconciler) resolveFluxSource(ctx context.Context, obj 
 	if err != nil {
 		var nf *source.ErrNotFound
 		if errors.As(err, &nf) {
-			// NOT terminal. Creating the source is what fixes this, and that does not bump
-			// this object's generation — so stalling would wait forever for an event that
-			// cannot come. Applying a composition and its GitRepository in one commit
-			// routinely lands here for a second.
+			// Pending: creating the source does not bump this generation.
 			return source.FluxArtifact{}, recon.Pending("source %s %s/%s not found yet", ref.Kind, ns, ref.Name)
 		}
 		var nr *source.ErrNotReady
 		if errors.As(err, &nr) {
-			// Pending for the same reason and one degree more sharply: the source exists, but its
-			// status describes a spec that is no longer the one in the cluster. Waiting is the only
-			// safe answer — building from that artifact publishes the PREVIOUS revision's content
-			// under the tag the current revision was supposed to get, and a tag's first publish has
-			// nothing for the immutability guard to refuse. See ADR 0026.
-			//
-			// Not terminal: source-controller catching up bumps no generation here, and the source
-			// is watched, so the wait normally ends within seconds.
+			// The source's status describes a superseded spec. Building now would publish the
+			// PREVIOUS revision under the current tag, which no guard catches on a first publish
+			// (ADR 0026). The source is watched, so the wait usually ends within seconds.
 			return source.FluxArtifact{}, recon.Pending("%s", err)
 		}
-		// Everything else — including "no artifact yet" — is transient. source-controller may
-		// simply not have finished its first reconcile.
+		// Everything else, including "no artifact yet", is transient.
 		return source.FluxArtifact{}, err
 	}
-	// The spec asked for a specific revision, so anything else waits rather than being consumed.
-	//
-	// PENDING, not terminal, and the distinction is the whole of ADR 0009's rule: what fixes this
-	// is the SOURCE catching up, which is a different object and raises no generation bump here.
-	// Stalling would wait for an event that cannot come. The source is watched, so the usual case
-	// resolves in seconds; a revision that never arrives costs one cheap GET every 30 seconds and
-	// says plainly what it is waiting for.
+	// A pinned revision that has not arrived yet is Pending, not terminal: the SOURCE catching up
+	// fixes it, which bumps no generation here (ADR 0009).
 	if !ociv1alpha1.RevisionMatches(ref.Revision, art.Revision) {
 		return source.FluxArtifact{}, recon.Pending(
 			"source %s/%s is at revision %q, waiting for %q",
@@ -271,17 +232,15 @@ func (r *ImageCompositionReconciler) resolveFluxSource(ctx context.Context, obj 
 // warnUnpinnedUnderFail says so when an unpinned layer feeds tags that cannot move. The caller has
 // already established that the layer is unpinned.
 //
-// A digest-only publish is silent: the name IS the content, so a different build gets a different
-// name and collides with nothing. Repeats aggregate, the API server counting by
-// (reason, message, object), so an object left unpinned costs one event with a rising count.
+// A digest-only publish is silent, since it collides with nothing. Repeats aggregate into one event
+// with a rising count.
 func warnUnpinnedUnderFail(
 	recorder record.EventRecorder, obj *ociv1alpha1.ImageComposition, ref *ociv1alpha1.SourceRefSource,
 ) {
 	if obj.Spec.Push.ResolveConflictPolicy() != ociv1alpha1.ConflictFail {
 		return
 	}
-	// An unusable ref fails the reconcile a moment later with a message about the ref, which is the
-	// better complaint than one about pinning.
+	// An unusable ref fails the reconcile later with a better message.
 	tags, err := recon.EffectiveTags(obj.Spec.Push.GetTags(), obj.Spec.Push.GetRef())
 	if err != nil || len(tags) == 0 {
 		return

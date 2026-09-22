@@ -1,13 +1,8 @@
 // Package reconciler holds the parts of a reconcile loop that both kinds need identically: the
 // error triage that decides Stalled from Reconciling, condition writing, and history rotation.
 //
-// Shared deliberately, and it does not weaken ADR 0004's separation. That ADR separates
-// COMPONENTS — separate binaries, charts and RBAC, and it rejected a feature flag because "a flag
-// set to false is a weaker guarantee than a component that does not exist". A shared library is not
-// a shared controller; api/v1alpha1 is already imported by both.
-//
-// What is NOT shared is which failures qualify as terminal or pending. That is a property of the
-// call sites, and each controller documents its own bar.
+// A shared library does not weaken ADR 0004's separation of components. Which failures count as
+// terminal or pending is NOT shared; each controller documents its own bar.
 package reconciler
 
 import (
@@ -50,12 +45,9 @@ func IsTerminal(err error) bool {
 	return errors.As(err, &t)
 }
 
-// PendingError marks a dependency that is absent or not ready yet.
-//
-// Neither terminal nor an ordinary transient failure: it is fixed by changing a DIFFERENT object,
-// which does not bump this generation, and "the GitRepository applied one second after me does not
-// exist yet" is a normal step in converging a commit rather than something to log as an error and
-// back off exponentially over. It reports Reconciling and retries on a short fixed interval.
+// PendingError marks a dependency that is absent or not ready yet. It is fixed by changing a
+// DIFFERENT object (no generation bump), and is a normal step in converging rather than an error,
+// so it reports Reconciling and retries on a short fixed interval instead of backing off.
 type PendingError struct{ err error }
 
 func (p *PendingError) Error() string { return p.err.Error() }
@@ -70,11 +62,8 @@ func IsPending(err error) bool {
 	return errors.As(err, &p)
 }
 
-// Event records one, if a recorder was wired. Nil is normal in tests that do not care.
-//
-// Truncated because the API server rejects an over-long event message outright, and the cases that
-// produce one — a build's stderr, a list of every unpinned FROM — are exactly the failures worth
-// seeing. Losing the whole event to keep the tail is the wrong trade.
+// Event records one, if a recorder was wired (nil is normal in tests). The message is truncated
+// because the API server rejects an over-long one outright, losing the event.
 func Event(rec record.EventRecorder, obj runtime.Object, eventType, reason, msg string) {
 	if rec == nil {
 		return
@@ -109,10 +98,8 @@ func Truncate(s string, n int) string {
 	return validUTF8(s[:n])
 }
 
-// TruncateTail keeps the END instead.
-//
-// For anything derived from a LOG, the end is the part worth having: a build's failure is its last
-// lines, so cutting from the front keeps the base image being pulled and throws away the error.
+// TruncateTail keeps the END instead, for anything derived from a log: a build's failure is in
+// its last lines.
 func TruncateTail(s string, n int) string {
 	if len(s) <= n {
 		return s
@@ -124,11 +111,8 @@ func TruncateTail(s string, n int) string {
 	return marker + validUTF8(s[len(s)-(n-len(marker)):])
 }
 
-// validUTF8 drops whatever the cut left behind.
-//
-// Both functions slice BYTES, so either end can land mid-rune. Go's JSON encoder would replace the
-// fragment rather than fail, so the symptom is a mangled message rather than a rejected write --
-// which is worse, because it looks like the log said that.
+// validUTF8 drops a rune fragment left by slicing bytes; the JSON encoder would otherwise mangle
+// it silently into the message.
 func validUTF8(s string) string { return strings.ToValidUTF8(s, "") }
 
 // Interval is spec.interval, or an hour. The CRD defaults it, so the fallback covers an object
@@ -142,14 +126,9 @@ func Interval(d *metav1.Duration) time.Duration {
 
 // RecordHistory prepends a build and trims to the limit.
 //
-// A nil record means the reconcile converged without publishing and must not touch history:
-// appending on every interval would fill the list with duplicates of the current build and evict
-// genuinely distinct older ones within hours.
-//
-// A rebuild that reproduces an earlier digest MOVES that entry to the front rather than duplicating
-// it. Reverting a change and reverting it back is ordinary, and each round trip would otherwise burn
-// two retention slots on one artifact — which matters more now that rebuilds are known to reproduce
-// (ADR 0027).
+// A nil record means the reconcile converged without publishing and leaves history alone, so
+// interval reconciles do not evict distinct older builds. A rebuild that reproduces an earlier
+// digest (ADR 0027) moves that entry to the front instead of duplicating it.
 func RecordHistory(history []ociv1alpha1.BuildRecord, record *ociv1alpha1.BuildRecord, limit int) []ociv1alpha1.BuildRecord {
 	if record == nil {
 		return history
@@ -172,20 +151,14 @@ func RecordHistory(history []ociv1alpha1.BuildRecord, record *ociv1alpha1.BuildR
 	return out
 }
 
-// tagPattern is the CRD's own constraint on a tag, applied here too because a tag arriving via
-// a ref never passed through that validation.
-//
-// Shared by both kinds: publish.ref and push.ref mean the same thing, and a second copy is how the
-// two would stop meaning the same thing.
+// tagPattern is the CRD's own constraint on a tag, applied here because a tag arriving via a ref
+// never passed through that validation. Shared so publish.ref and push.ref cannot diverge.
 var tagPattern = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9._-]*$`)
 
-// tagFromRef extracts the tag from a full image reference, and NOTHING else — the host and
-// repository are the caller's business, not this field's.
+// TagFromRef extracts only the tag from a full image reference.
 //
-// Deliberately hand-parsed rather than handed to name.ParseReference, which would default a bare
-// "my-artifact" to "index.docker.io/library/my-artifact:latest". Inventing a `latest` out of an
-// untemplated placeholder is exactly the wrong answer: it would publish a moving tag nobody asked
-// for. No tag in, no tag out.
+// Hand-parsed because name.ParseReference would default a bare "my-artifact" to ":latest" and
+// publish a moving tag nobody asked for. No tag in, no tag out.
 func TagFromRef(ref string) (string, error) {
 	if ref == "" {
 		return "", nil
@@ -205,7 +178,7 @@ func TagFromRef(ref string) (string, error) {
 	return tag, nil
 }
 
-// effectiveTags is the explicit list plus whatever ref carries, in order and without duplicates.
+// EffectiveTags is the explicit list plus whatever ref carries, in order and without duplicates.
 func EffectiveTags(tags []string, ref string) ([]string, error) {
 	fromRef, err := TagFromRef(ref)
 	if err != nil {

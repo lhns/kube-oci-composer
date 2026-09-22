@@ -15,12 +15,8 @@ import (
 // Published is what a registry currently holds for a target: what each tag resolves to, and
 // whether the digest recorded in status is still present.
 //
-// Gathered in one place because two separate decisions depend on it — whether there is anything to
-// do, and whether doing it would remean a tag — and both must agree about what is out there.
-//
-// Shared between the two kinds because the question is the same one. The composer has asked it
-// since it had tags; the builder asked it of nothing at all, which is why `push.immutable` was
-// advertised in its CRD and enforced nowhere.
+// Gathered once because two decisions depend on it -- whether there is anything to do, and
+// whether doing it would remean a tag -- and both must agree.
 type Published struct {
 	// Tags maps tag -> the digest it resolves to. Absent means the tag does not exist.
 	Tags map[string]string
@@ -47,11 +43,9 @@ func (p Published) Matches(digest string) bool {
 // Conflicts returns the first tag that exists and resolves to something other than digest, with
 // what it currently holds. Empty tag means there is no conflict.
 //
-// Returned rather than acted on, because the three policies do three different things with the
-// same fact and only the caller knows which applies.
+// Returned rather than acted on: only the caller knows which tag policy applies.
 func (p Published) Conflicts(tags []string, digest string) (tag, current string) {
-	// Ranged over the caller's slice rather than the map, so the answer is deterministic: map
-	// iteration order would make the reported tag vary between reconciles of an unchanged object.
+	// Ranged over the slice, not the map, so the reported tag is deterministic.
 	for _, t := range tags {
 		if cur, ok := p.Tags[t]; ok && cur != digest {
 			return t, cur
@@ -63,9 +57,8 @@ func (p Published) Conflicts(tags []string, digest string) (tag, current string)
 // ResolvePublished asks the registry what repo's tags currently resolve to, and whether prev's
 // digest is still there.
 //
-// A HEAD failure is deliberately not an error: the ordinary cause is that the reference does not
-// exist yet, or that a serving store was emptied by a restart. Treating it as failure would turn
-// the first reconcile of every new object into an error.
+// A HEAD failure is deliberately not an error: usually the reference does not exist yet, or the
+// store was emptied by a restart.
 func ResolvePublished(
 	repo string, tags []string, prev *ociv1alpha1.ArtifactStatus,
 	refOpts []name.Option, opts []remote.Option,
@@ -82,9 +75,8 @@ func ResolvePublished(
 		}
 	}
 
-	// The digest has to be checked separately rather than inferred from the tags, because a build
-	// with no tags has nothing else to go on — and because a tag resolving correctly does not prove
-	// the digest reference itself survived a storage wipe.
+	// Checked separately rather than inferred from the tags: a build may have no tags, and a tag
+	// resolving does not prove the digest reference survived a storage wipe.
 	if prev != nil && prev.Digest != "" {
 		ref, err := name.ParseReference(fmt.Sprintf("%s@%s", repo, prev.Digest), refOpts...)
 		if err == nil {
@@ -98,10 +90,8 @@ func ResolvePublished(
 
 // IsNotFound distinguishes "the registry says this is gone" from "the registry did not answer".
 //
-// The difference is the difference between an alarm and a warning, and between rebuilding and
-// waiting: a 404 means something has ALREADY been lost, while a timeout means it might be about to
-// be. Anything that acts on a loss must treat only the first as one, or a registry outage becomes a
-// cluster-wide stampede of whatever that action is.
+// A 404 means something is ALREADY lost; a timeout only that it might be. Anything acting on a loss
+// must treat only the first as one, or a registry outage becomes a cluster-wide stampede.
 func IsNotFound(err error) bool {
 	var terr *transport.Error
 	if errors.As(err, &terr) {

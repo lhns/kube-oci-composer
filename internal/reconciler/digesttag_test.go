@@ -34,10 +34,9 @@ func TestTheDigestsOwnTagIsAValidTag(t *testing.T) {
 	}
 }
 
-// The name must not be one a registry reserves. "sha256-<hex>" was, and it made every artifact
-// immortal: it is the OCI referrers tag schema, and zot matches it with the unanchored regex below
-// (pkg/common/common.go, IsReferrersTag, v2.1.21), never records such a tag in its metadata, and so
-// never lets retention evaluate it. cosign's conventions are reserved the same way in practice.
+// The name must not be one a registry reserves. "sha256-<hex>" is the OCI referrers tag schema: zot
+// matches it with the unanchored regex below (pkg/common/common.go, IsReferrersTag, v2.1.21) and
+// never lets retention evaluate it, making every artifact immortal. cosign's tags are reserved too.
 func TestTheDigestsOwnTagIsNotAReservedName(t *testing.T) {
 	got := DigestTag(aDigest)
 	for _, reserved := range []struct{ what, pattern string }{
@@ -93,9 +92,8 @@ func TestHasDigestTagReadsEitherShapeStatusStores(t *testing.T) {
 	}
 }
 
-// attest repeats the transformation rather than importing this package. Two copies of a naming rule
-// drift apart quietly, and a drifted copy names attestations something the refresher, the chart and
-// the docs do not know about.
+// attest repeats the transformation rather than importing this package; this keeps the two copies
+// from drifting.
 func TestAttestationsAreNamedTheSameWay(t *testing.T) {
 	h, err := v1.NewHash(aDigest)
 	if err != nil {

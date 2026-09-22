@@ -18,16 +18,9 @@ import (
 // RemoteAuth builds the options for talking to a registry: the transport to trust, and the
 // credential to present.
 //
-// One implementation, because there were three -- the composer's, the builder's and the
-// refresher's -- and transport.go states the rule this file now keeps: "all four places that talk
-// to a registry have to agree about what is trusted, and a fourth copy of the decision is how they
-// stop agreeing." The copies were still identical when they were found, which is the good case;
-// the point is that nothing was holding them that way.
-//
-// The credential rule is the load-bearing part and it lives in DefaultRegistry.CredentialFor: the
-// operator's credential reaches the operator's own registry and nowhere else. A credential sent to
-// a host a tenant chose is exfiltrated whether the request carrying it reads or writes, so the
-// refresher is bound by it exactly as the publish paths are.
+// Shared by the composer, the builder and the refresher so they agree. The credential rule lives
+// in DefaultRegistry.CredentialFor, and binds the read-only refresher exactly as it binds the
+// publish paths: a credential sent to a tenant-chosen host is exfiltrated either way.
 type RemoteAuth struct {
 	// Reader fetches the Secret. A client.Reader rather than a full client: nothing here writes.
 	Reader client.Reader
@@ -38,20 +31,15 @@ type RemoteAuth struct {
 	// Default decides whose credential applies to which host.
 	Default DefaultRegistry
 
-	// Soft reports a credential that is absent or unusable -- conditions that ordinarily resolve
-	// on their own, as a Secret arrives from SOPS or a Kustomization applied moments later.
-	//
-	// A reconciler passes Pending, so the object waits and says what it is waiting for. A
-	// background refresher passes fmt.Errorf, because it has no object to make pending and a
-	// failure there is counted rather than surfaced. Nil means Pending.
+	// Soft reports a credential that is absent or unusable, which usually resolves on its own as
+	// the Secret arrives. A reconciler passes Pending; a background refresher, with no object to make
+	// pending, passes fmt.Errorf. Nil means Pending.
 	Soft func(format string, args ...any) error
 }
 
 // Options returns the remote options for one repository.
 //
-// The repository is passed in rather than derived, because each caller resolves it differently --
-// a build's push target, a composition's write repo, a reference read back out of status -- and
-// that derivation is the part that legitimately differs.
+// The repository is passed in because each caller derives it differently.
 func (a RemoteAuth) Options(
 	ctx context.Context, namespace, repository string, push *ociv1alpha1.Push,
 ) ([]remote.Option, error) {

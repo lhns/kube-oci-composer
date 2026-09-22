@@ -42,12 +42,10 @@ type ExportOptions struct {
 
 // ExportName is the ConfigMap an object writes, derived from the object and never chosen.
 //
-// Two objects therefore cannot ask for the same ConfigMap, which is what makes taking over another
-// object's export impossible rather than merely refused; and because an object's name cannot
-// change, neither can its export's (ADR 0056). The kind is in it because both kinds share a
-// namespace; the namespace is in it because one target collects exports from the whole cluster.
-// Takes a Scheme rather than reading the object's TypeMeta: controller-runtime clears that on a
-// typed read, so the GVK on a fetched object is empty and the name would silently lose its kind.
+// Two objects therefore cannot ask for the same ConfigMap, so taking over another object's export
+// is impossible rather than merely refused (ADR 0056). Kind and namespace are in it because both
+// kinds share a namespace and one target namespace collects exports cluster-wide. Takes a Scheme
+// because controller-runtime clears TypeMeta on a typed read.
 func ExportName(obj client.Object, scheme *runtime.Scheme) (string, error) {
 	gvk, err := apiutil.GVKForObject(obj, scheme)
 	if err != nil {
@@ -58,9 +56,8 @@ func ExportName(obj client.Object, scheme *runtime.Scheme) (string, error) {
 
 // ExportRef writes the published reference into the ConfigMap this object owns.
 //
-// Only after a confirmed publish, and all keys or none: a consumer substitutes whatever it finds,
-// a missing key substitutes the empty string with no complaint, and the ConfigMap is replaced
-// wholesale so one key is never updated while another is stale.
+// Only after a confirmed publish, and all keys or none: a consumer silently substitutes an empty
+// string for a missing key, so the ConfigMap is replaced wholesale.
 //
 // Returns what was written, for status.refExport.
 func ExportRef(
@@ -122,9 +119,8 @@ func ExportRef(
 		return nil, fmt.Errorf("reading %s/%s: %w", spec.Namespace, name, err)
 	}
 
-	// Writing over a ConfigMap this controller did not create for THIS object would replace its
-	// contents wholesale. A substitution source is exactly the kind of object a human writes by
-	// hand, and another object's export is one a consumer is already reading.
+	// Never overwrite a ConfigMap not written for THIS object: a hand-written one or another
+	// object's export.
 	if !ownedBy(cm, obj) {
 		return nil, Terminal(
 			"ConfigMap %s/%s exists and is not this object's export (managed-by %q, owner %s/%s); "+
@@ -140,14 +136,9 @@ func ExportRef(
 
 // RecordExport reconciles what was just written against what was written last time.
 //
-// Removes the previous ConfigMap when the spec moved it to another namespace, or stopped asking
-// for one at all: a consumer substitutes from whatever it finds, so a ConfigMap nobody maintains
-// is worse than none. Reports whether the record changed, so the caller can skip a status write
-// on the steady path -- which is most passes.
-//
-// The status write itself stays with the caller, because the two kinds patch status differently
-// and that is the only part that legitimately differs. Everything above it was duplicated, and had
-// already started to drift.
+// Removes the previous ConfigMap when the spec moved or dropped it, since an unmaintained one is
+// worse than none. Reports whether the record changed so the caller can skip a status write; the
+// write itself stays with the caller because the two kinds patch status differently.
 func RecordExport(
 	ctx context.Context, c client.Client, obj client.Object,
 	prev, written *ociv1alpha1.RefExportStatus,
@@ -164,9 +155,8 @@ func RecordExport(
 // DeleteExportedRef removes a ConfigMap this controller wrote for this object.
 //
 // Needed because a cross-namespace owner reference is invalid, so Kubernetes will not reclaim one
-// written into another namespace -- everything else a build creates it does (ADR 0050). Takes what
-// was actually written rather than what the spec now asks for, so moving or removing writeRefTo
-// cleans up rather than strands.
+// written into another namespace (ADR 0050). Takes what was actually written rather than what the
+// spec now asks for, so moving or removing writeRefTo cleans up.
 func DeleteExportedRef(
 	ctx context.Context, c client.Client, obj client.Object, written *ociv1alpha1.RefExportStatus,
 ) error {
@@ -191,8 +181,7 @@ func DeleteExportedRef(
 
 // ownedBy reports whether this ConfigMap is the export this controller wrote for this object.
 //
-// One predicate for both writing and deleting: when those disagreed, an object could overwrite
-// another object's export while refusing to delete it.
+// One predicate for both writing and deleting, so the two cannot disagree.
 func ownedBy(cm *corev1.ConfigMap, obj client.Object) bool {
 	return cm.Labels[ManagedByLabel] == managedBy &&
 		cm.Labels[ownerNamespaceLabel] == obj.GetNamespace() &&
@@ -209,9 +198,7 @@ func decorate(
 	for k, v := range spec.Labels {
 		cm.Labels[k] = v
 	}
-	// After the object's, so neither the watch marker nor the ownership labels can be turned off by
-	// a spec that sets the same keys -- losing the first silently disables the feature, and losing
-	// the others makes this ConfigMap indistinguishable from a hand-written one.
+	// After the object's, so a spec cannot override the watch marker or the ownership labels.
 	for k, v := range watch {
 		cm.Labels[k] = v
 	}
@@ -229,8 +216,8 @@ func decorate(
 
 // checkKeys refuses metadata the operator has not permitted.
 //
-// Refused rather than dropped: a dropped key leaves a ConfigMap that looks correct while whatever
-// was meant to select on it never does.
+// Refused rather than dropped: a dropped key leaves a ConfigMap that looks right but that no
+// selector matches.
 func checkKeys(set map[string]string, allowed []string, what string) error {
 	for k := range set {
 		if !keyAllowed(k, allowed) {
@@ -259,9 +246,8 @@ func keyAllowed(key string, allowed []string) bool {
 
 // ParseLabels turns a comma-separated key=value flag into labels.
 //
-// Malformed pairs are dropped rather than refused: an unparseable entry here would otherwise stop
-// the controller starting over a cosmetic setting, and the label's absence shows up the first time
-// a consumer does not notice a change.
+// Malformed pairs are dropped rather than refused, so a cosmetic setting cannot stop the
+// controller starting.
 func ParseLabels(v string) map[string]string {
 	out := map[string]string{}
 	for _, pair := range strings.Split(v, ",") {

@@ -11,11 +11,8 @@ import (
 // builtArtifact is what a build produced: either one image manifest, or an index over one child
 // per platform.
 //
-// The two are kept behind a single type rather than branching at every call site because the
-// places that must handle both are exactly the places where forgetting one is silent — publishing
-// (an index needs its children written first), persistence (an index restored without its children
-// serves 404), and garbage collection (children that nothing records get swept out from under a
-// retained index). A type with one method each makes those three the same shape.
+// One type rather than a branch at every call site, because forgetting the index case is silent:
+// an index needs its children written, and children nothing records get garbage-collected.
 type builtArtifact struct {
 	// exactly one of these is set
 	img v1.Image
