@@ -1,15 +1,8 @@
 package controller
 
 import (
-	"archive/tar"
-	"bytes"
-	"compress/gzip"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -27,48 +20,9 @@ import (
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 )
 
-// tarball builds a gzipped tar and serves it, returning the URL and digest — standing in for what
-// source-controller publishes.
-func tarball(t *testing.T, files map[string]string) (url, digest string) {
-	t.Helper()
-
-	var buf bytes.Buffer
-	zw := gzip.NewWriter(&buf)
-	tw := tar.NewWriter(zw)
-	for name, body := range files {
-		if err := tw.WriteHeader(&tar.Header{
-			Name: name, Mode: 0o644, Size: int64(len(body)), Typeflag: tar.TypeReg,
-		}); err != nil {
-			t.Fatalf("tar header: %v", err)
-		}
-		if _, err := tw.Write([]byte(body)); err != nil {
-			t.Fatalf("tar body: %v", err)
-		}
-	}
-	if err := tw.Close(); err != nil {
-		t.Fatalf("closing tar: %v", err)
-	}
-	if err := zw.Close(); err != nil {
-		t.Fatalf("closing gzip: %v", err)
-	}
-	payload := buf.Bytes()
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(payload)
-	}))
-	t.Cleanup(srv.Close)
-
-	sum := sha256.Sum256(payload)
-	return srv.URL + "/artifact.tar.gz", "sha256:" + hex.EncodeToString(sum[:])
-}
-
-// gitRepository builds an unstructured Flux GitRepository with a published artifact.
-//
-// It is deliberately a source that has CAUGHT UP: generation equals observedGeneration and Ready is
-// True, which is what source-controller publishes once it has fetched the revision its spec names.
-// Anything less is a source whose status.artifact describes an older spec, and the resolver refuses
-// to build from one (ADR 0026) — so a helper that omitted these fields would quietly be testing the
-// unhappy path everywhere.
+// gitRepository builds an unstructured Flux GitRepository with a published artifact. It has CAUGHT
+// UP (observedGeneration == generation, Ready=True); anything less the resolver refuses to build
+// from (ADR 0026).
 func gitRepository(name, namespace, url, digest, revision string) *unstructured.Unstructured {
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(schema.GroupVersionKind{
@@ -118,8 +72,8 @@ func configMapLayer(name, cmName string, optional bool, target string) ociv1alph
 	}
 }
 
-// TestConfigMapDigestIsResolved — the spec declares no digest, so the controller must produce one
-// from the content. Without it the input hash would be blind to the ConfigMap changing.
+// TestConfigMapDigestIsResolved — the spec declares no digest, so the controller must derive one
+// from the content, or the input hash would be blind to ConfigMap edits.
 func TestConfigMapDigestIsResolved(t *testing.T) {
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: "settings", Namespace: "default"},
@@ -143,8 +97,8 @@ func TestConfigMapDigestIsResolved(t *testing.T) {
 	}
 }
 
-// TestConfigMapContentChangesTheInputHash — this is the property that makes rebuilds happen. If a
-// ConfigMap edit did not move the hash, the short-circuit would skip the rebuild entirely.
+// TestConfigMapContentChangesTheInputHash — a ConfigMap edit must move the hash, or the
+// short-circuit would skip the rebuild.
 func TestConfigMapContentChangesTheInputHash(t *testing.T) {
 	hashFor := func(value string) string {
 		cm := &corev1.ConfigMap{
@@ -161,8 +115,7 @@ func TestConfigMapContentChangesTheInputHash(t *testing.T) {
 		return oci.InputHash(inputs, oci.Config{}, "", nil)
 	}
 
-	// Bound to variables rather than compared inline: two identical calls in one expression read
-	// as a tautology to a linter, when the point is that separate invocations agree.
+	// Bound to variables: two identical calls compared inline read as a tautology to a linter.
 	first, again := hashFor("level=INFO"), hashFor("level=INFO")
 	if first == hashFor("level=DEBUG") {
 		t.Fatal("changing ConfigMap content did not change the input hash")
@@ -172,8 +125,8 @@ func TestConfigMapContentChangesTheInputHash(t *testing.T) {
 	}
 }
 
-// TestConfigMapKeyOrderDoesNotAffectTheDigest — Go map iteration is randomised, so without an
-// explicit sort the same ConfigMap would hash differently between reconciles and rebuild forever.
+// TestConfigMapKeyOrderDoesNotAffectTheDigest — map iteration is randomised; without a sort the
+// same ConfigMap would hash differently between reconciles and rebuild forever.
 func TestConfigMapKeyOrderDoesNotAffectTheDigest(t *testing.T) {
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: "many", Namespace: "default"},
@@ -198,9 +151,8 @@ func TestConfigMapKeyOrderDoesNotAffectTheDigest(t *testing.T) {
 	}
 }
 
-// TestMissingConfigMapIsPending — a non-optional ConfigMap that is absent is waited for, not
-// stalled on. Creating the ConfigMap is the fix, and that bumps no generation here; ConfigMaps
-// are watched, so in practice the wait ends the moment one appears.
+// TestMissingConfigMapIsPending — an absent non-optional ConfigMap is waited for, not stalled on:
+// creating it bumps no generation here.
 func TestMissingConfigMapIsPending(t *testing.T) {
 	obj := composition("cm", configMapLayer("settings", "absent", false, "/config"))
 	r := reconcilerWith(t)
@@ -209,20 +161,18 @@ func TestMissingConfigMapIsPending(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for a missing non-optional ConfigMap")
 	}
-	var te *recon.TerminalError
-	if asTerminalErr(err, &te) {
+	if recon.IsTerminal(err) {
 		t.Fatal("a missing ConfigMap must not be terminal; creating it bumps no generation here")
 	}
-	var pe *recon.PendingError
-	if !errors.As(err, &pe) {
+	if !recon.IsPending(err) {
 		t.Fatalf("expected a recon.PendingError, got %T: %v", err, err)
 	}
 }
 
-// TestOptionalConfigMapContributesNothing — and specifically contributes NOTHING, not an empty
-// layer, which would still change the output digest.
+// TestOptionalConfigMapContributesNothing — an absent optional ConfigMap contributes NOTHING, not
+// an empty layer, which would still change the output digest.
 func TestOptionalConfigMapContributesNothing(t *testing.T) {
-	url, digest := tarball(t, map[string]string{"lib/a.jar": "aaa"})
+	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 
 	withOptional := composition("cm",
 		urlLayer("core", url, digest, "/core"),
@@ -264,10 +214,9 @@ func TestConfigMapKeyWithSeparatorIsRejected(t *testing.T) {
 	}
 }
 
-// TestSourceRefDigestComesFromTheSource — resolved, not declared. The spec carries no digest and
-// must not need one.
+// TestSourceRefDigestComesFromTheSource — resolved, not declared in the spec.
 func TestSourceRefDigestComesFromTheSource(t *testing.T) {
-	url, digest := tarball(t, map[string]string{"config/app.conf": "x"})
+	url, digest := contentServer(t, map[string]string{"config/app.conf": "x"})
 	repo := gitRepository("platform-config", "default", url, digest, "main@sha1:abcd")
 
 	obj := composition("git", ociv1alpha1.Layer{
@@ -300,7 +249,7 @@ func TestSourceRefDigestComesFromTheSource(t *testing.T) {
 
 // TestSourceRefDefaultsToTheObjectNamespace — the common case is a source in the same namespace.
 func TestSourceRefDefaultsToTheObjectNamespace(t *testing.T) {
-	url, digest := tarball(t, map[string]string{"a": "1"})
+	url, digest := contentServer(t, map[string]string{"a": "1"})
 	repo := gitRepository("local", "default", url, digest, "main@sha1:abcd")
 
 	obj := composition("git", ociv1alpha1.Layer{
@@ -315,12 +264,9 @@ func TestSourceRefDefaultsToTheObjectNamespace(t *testing.T) {
 	}
 }
 
-// TestMissingSourceIsPendingNotTerminal — a composition and its GitRepository applied in ONE
-// commit race, and the loser used to stall permanently while the source it needed sat there
-// Ready. Applying both together is the normal case, so this must converge on its own.
-//
-// Stalling is only safe when editing this object's spec is the fix, because the generation change
-// is the wake-up. Creating the source raises no event here, so a stall here waits forever.
+// TestMissingSourceIsPendingNotTerminal — a composition and its GitRepository applied in one
+// commit race, and must converge on their own. Creating the source bumps no generation here, so
+// stalling would wait forever.
 func TestMissingSourceIsPendingNotTerminal(t *testing.T) {
 	obj := composition("git", ociv1alpha1.Layer{
 		Name:      "content",
@@ -333,18 +279,16 @@ func TestMissingSourceIsPendingNotTerminal(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for a source that does not exist")
 	}
-	var te *recon.TerminalError
-	if asTerminalErr(err, &te) {
+	if recon.IsTerminal(err) {
 		t.Fatal("a source that does not exist YET must not be terminal; creating it bumps no generation here")
 	}
-	var pe *recon.PendingError
-	if !errors.As(err, &pe) {
+	if !recon.IsPending(err) {
 		t.Fatalf("expected a recon.PendingError, got %T: %v", err, err)
 	}
 }
 
-// TestSourceWithoutAnArtifactIsTransient — source-controller may simply not have reconciled yet,
-// which resolves itself. Stalling would need a human to intervene for a race.
+// TestSourceWithoutAnArtifactIsTransient — source-controller may not have reconciled yet, which
+// resolves itself.
 func TestSourceWithoutAnArtifactIsTransient(t *testing.T) {
 	repo := &unstructured.Unstructured{}
 	repo.SetGroupVersionKind(schema.GroupVersionKind{
@@ -364,16 +308,15 @@ func TestSourceWithoutAnArtifactIsTransient(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for a source with no artifact")
 	}
-	var te *recon.TerminalError
-	if asTerminalErr(err, &te) {
+	if recon.IsTerminal(err) {
 		t.Fatal("a source that has not published yet must be transient, not Stalled")
 	}
 }
 
-// TestLayerOrderIsPreservedAcrossSourceKinds — layers are contributed in declaration order, and
-// mixing source kinds must not reorder anything. See ADR 0003.
+// TestLayerOrderIsPreservedAcrossSourceKinds — declaration order survives mixing source kinds
+// (ADR 0003).
 func TestLayerOrderIsPreservedAcrossSourceKinds(t *testing.T) {
-	url, digest := tarball(t, map[string]string{"lib/a.jar": "aaa"})
+	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: "settings", Namespace: "default"},
 		Data:       map[string]string{"app.conf": "x"},
@@ -411,13 +354,10 @@ func TestLayerOrderIsPreservedAcrossSourceKinds(t *testing.T) {
 func asTerminalErr(err error, target **recon.TerminalError) bool { return errors.As(err, target) }
 
 // TestSourceRefRefusesAnotherNamespace — the controller's RBAC over Flux sources is cluster-wide,
-// so without this a tenant who can create an ImageComposition could name any namespace's source and
-// bake its content into an image they control and can read. It is the one tenancy boundary a spec
-// could otherwise cross on its own.
-//
-// Terminal rather than pending: editing this spec is what fixes it.
+// so otherwise a tenant could bake any namespace's source into an image they can read. Terminal:
+// editing this spec is the fix.
 func TestSourceRefRefusesAnotherNamespace(t *testing.T) {
-	url, digest := tarball(t, map[string]string{"secrets/app.conf": "not yours"})
+	url, digest := contentServer(t, map[string]string{"secrets/app.conf": "not yours"})
 	repo := gitRepository("platform-config", "other-team", url, digest, "main@sha1:abcd")
 
 	obj := composition("cross", ociv1alpha1.Layer{
@@ -441,10 +381,9 @@ func TestSourceRefRefusesAnotherNamespace(t *testing.T) {
 	}
 }
 
-// The same namespace stated explicitly must still work — the field is not banned, only a value
-// pointing somewhere else.
+// The field is not banned, only a value pointing at another namespace.
 func TestSourceRefAllowsItsOwnNamespaceStatedExplicitly(t *testing.T) {
-	url, digest := tarball(t, map[string]string{"config/app.conf": "x"})
+	url, digest := contentServer(t, map[string]string{"config/app.conf": "x"})
 	repo := gitRepository("platform-config", "default", url, digest, "main@sha1:abcd")
 
 	obj := composition("explicit", ociv1alpha1.Layer{
@@ -461,11 +400,10 @@ func TestSourceRefAllowsItsOwnNamespaceStatedExplicitly(t *testing.T) {
 	}
 }
 
-// TestSourceRefHashesTheRevisionNotTheTarball — source-controller re-packs artifacts on restart, so
-// the tarball's digest moves while the revision it describes does not. Hashing the digest rebuilt
-// every composition consuming that source for bytes that were identical.
+// TestSourceRefHashesTheRevisionNotTheTarball — source-controller re-packs artifacts on restart,
+// moving the tarball digest but not the revision; hashing the digest would rebuild for nothing.
 func TestSourceRefHashesTheRevisionNotTheTarball(t *testing.T) {
-	url, digest := tarball(t, map[string]string{"config/app.conf": "x"})
+	url, digest := contentServer(t, map[string]string{"config/app.conf": "x"})
 	repo := gitRepository("platform-config", "default", url, digest, "main@sha1:abcd")
 
 	obj := composition("identity", ociv1alpha1.Layer{
@@ -489,15 +427,8 @@ func TestSourceRefHashesTheRevisionNotTheTarball(t *testing.T) {
 	}
 }
 
-// TestHistoryRecordsWhereEachLayerCameFrom — the gap that made ADR 0026's incident expensive.
-//
-// A wrong artifact was published and the only way to find out was to pull the manifest, fetch the
-// layer and read its payload, because nothing linked the digest to what produced it. This proves
-// the record reaches history; TestSourceRefHashesTheRevisionNotTheTarball proves a Flux source
-// contributes its revision to it.
-//
-// A fetch layer records no revision, and that is correct rather than missing: its declared digest
-// IS its identity, so there is nothing else to name.
+// TestHistoryRecordsWhereEachLayerCameFrom — history links each artifact to the inputs that
+// produced it (ADR 0026). A fetch layer records no revision: its declared digest IS its identity.
 func TestHistoryRecordsWhereEachLayerCameFrom(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("provenance", urlLayer("core", url, digest, "/core"))
@@ -524,19 +455,11 @@ func TestHistoryRecordsWhereEachLayerCameFrom(t *testing.T) {
 	}
 }
 
-// TestSourceRefRevisionRefusesTheWrongRevision reproduces the incident behind ADR 0026 from the
-// consuming side.
-//
-// A generator moved a GitRepository to v0.6.8 and rotated the composition's spec-hash tag in one
-// apply. The source had not cloned the new tag yet, so its artifact still described v0.6.5 — and
-// the composition published v0.6.5's content under v0.6.8's tag, permanently, because a tag's first
-// publish has nothing to compare against.
-//
-// The staleness check catches that by comparing generation against observedGeneration, which is the
-// source reporting on itself. This is the independent version: the spec states what it expects, so
-// a mismatch waits regardless of whether the source's bookkeeping is right.
+// TestSourceRefRevisionRefusesTheWrongRevision — the incident behind ADR 0026, from the consuming
+// side: a source still serving v0.6.5 must not be built under a spec expecting v0.6.8. Independent
+// of the staleness check, which trusts the source's own observedGeneration.
 func TestSourceRefRevisionRefusesTheWrongRevision(t *testing.T) {
-	url, digest := tarball(t, map[string]string{"config/app.conf": "old"})
+	url, digest := contentServer(t, map[string]string{"config/app.conf": "old"})
 	repo := gitRepository("platform-config", "default", url, digest, "v0.6.5@sha1:aaaaaaa")
 
 	obj := composition("pinned", ociv1alpha1.Layer{
@@ -552,8 +475,7 @@ func TestSourceRefRevisionRefusesTheWrongRevision(t *testing.T) {
 	if err == nil {
 		t.Fatalf("built from the wrong revision: %+v", inputs)
 	}
-	// Pending, not terminal: the SOURCE catching up is what fixes this, and that raises no
-	// generation bump here, so stalling would wait for an event that cannot come.
+	// Pending, not terminal: the SOURCE catching up is the fix, which bumps no generation here.
 	if !recon.IsPending(err) {
 		t.Errorf("a revision that has not arrived yet is not pending: %v", err)
 	}
@@ -564,7 +486,7 @@ func TestSourceRefRevisionRefusesTheWrongRevision(t *testing.T) {
 
 // The tag half is enough, because a generator knows the tag and not the commit.
 func TestSourceRefRevisionAcceptsTheTagAlone(t *testing.T) {
-	url, digest := tarball(t, map[string]string{"config/app.conf": "x"})
+	url, digest := contentServer(t, map[string]string{"config/app.conf": "x"})
 	repo := gitRepository("platform-config", "default", url, digest, "v0.6.8@sha1:b739efb5")
 
 	obj := composition("tagpin", ociv1alpha1.Layer{
@@ -583,7 +505,7 @@ func TestSourceRefRevisionAcceptsTheTagAlone(t *testing.T) {
 
 // Unset must stay unchanged: the field is opt-in, and every existing object omits it.
 func TestSourceRefWithoutARevisionConsumesWhatIsPublished(t *testing.T) {
-	url, digest := tarball(t, map[string]string{"config/app.conf": "x"})
+	url, digest := contentServer(t, map[string]string{"config/app.conf": "x"})
 	repo := gitRepository("platform-config", "default", url, digest, "whatever@sha1:1234")
 
 	obj := composition("unpinned", ociv1alpha1.Layer{

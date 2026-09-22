@@ -19,16 +19,11 @@ import (
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 )
 
-// A composition may reference things it does not own: a Flux source, a Secret, a ConfigMap. None
-// of those raise an event on this object when they are created, so treating their absence as
-// terminal wedges the composition permanently — the fix arrives and nothing wakes up to notice.
-//
-// This is not hypothetical. A consumer applied four compositions and their GitRepositories in one
-// commit; the one that lost the race went Stalled and sat there reporting "source not found"
-// while the GitRepository it named was Ready in the same namespace. Only deleting it cleared it.
+// A missing dependency the composition does not own (Flux source, Secret, ConfigMap) raises no
+// event on it when created, so treating its absence as terminal would wedge the composition.
 
-// pendingReconciler is registryReconciler plus the Flux source kinds, so a test can reconcile a
-// sourceRef composition end to end and then create the source underneath it.
+// pendingReconciler is registryReconciler plus the Flux source kinds, so a test can create the
+// source after the composition has already reconciled.
 func pendingReconciler(t *testing.T, objs ...client.Object) *ImageCompositionReconciler {
 	t.Helper()
 
@@ -67,15 +62,13 @@ func TestMissingSourceRequeuesWithoutStalling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("waiting on a dependency must not be returned to the queue as an error: %v", err)
 	}
-	// A fixed short retry, not exponential backoff: this is a normal step in converging a
-	// commit, and backing off would make a one-second race take minutes to clear.
+	// A fixed short retry, not exponential backoff, so a one-second race clears in seconds.
 	if res.RequeueAfter != pendingRetryInterval {
 		t.Fatalf("RequeueAfter %v, want %v", res.RequeueAfter, pendingRetryInterval)
 	}
 
 	got := reload(t, r, obj)
-	// The whole point. Stalled here would mean waiting for a generation change that creating
-	// the GitRepository does not produce.
+	// Stalled would wait for a generation change that creating the GitRepository never produces.
 	if meta.FindStatusCondition(got.Status.Conditions, ociv1alpha1.StalledCondition) != nil {
 		t.Fatal("a dependency that does not exist yet must never set Stalled")
 	}
@@ -88,10 +81,8 @@ func TestMissingSourceRequeuesWithoutStalling(t *testing.T) {
 	}
 }
 
-// TestCompositionRecoversWhenTheSourceAppears — the half that actually proves "never stuck".
-// Conditions could be perfect and the object could still never build again; this reconciles a
-// composition whose source is absent, creates the source, and requires the very next reconcile
-// to publish. No annotation, no delete, no human.
+// TestCompositionRecoversWhenTheSourceAppears — the half that proves "never stuck": once the
+// source is created, the very next reconcile must publish, with no human intervention.
 func TestCompositionRecoversWhenTheSourceAppears(t *testing.T) {
 	obj := composition("recovers", ociv1alpha1.Layer{
 		Name:      "content",
@@ -107,9 +98,7 @@ func TestCompositionRecoversWhenTheSourceAppears(t *testing.T) {
 		t.Fatal("must not be Ready while its source is missing")
 	}
 
-	// The GitRepository lands, exactly as it would a moment after the composition in a
-	// same-commit apply.
-	url, digest := tarball(t, map[string]string{"plugin/a.jar": "aaa"})
+	url, digest := contentServer(t, map[string]string{"plugin/a.jar": "aaa"})
 	repo := gitRepository("arrives-later", "default", url, digest, "main@sha1:abcd")
 	if err := r.Create(t.Context(), repo); err != nil {
 		t.Fatalf("creating the source: %v", err)

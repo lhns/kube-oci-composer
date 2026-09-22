@@ -9,8 +9,7 @@ import (
 	"github.com/lhns/kube-oci-composer/internal/reconciler"
 )
 
-// unpinned builds a composition consuming a source without naming a revision. That is legal, and
-// under the default configuration it must stay legal -- see the second test.
+// unpinnedComposition consumes a source without naming a revision, which is legal by default.
 func unpinnedComposition() *ociv1alpha1.ImageComposition {
 	return composition("git", ociv1alpha1.Layer{
 		Name: "config",
@@ -21,17 +20,11 @@ func unpinnedComposition() *ociv1alpha1.ImageComposition {
 	})
 }
 
-// TestRequirePinnedSourcesRefusesAnUnpinnedLayer covers threat-model gap T1.
-//
-// `sourceRef.revision` is optional on purpose (ADR 0026): a composition that tracks a branch is a
-// legitimate thing to want. What T1 recorded was that an operator had no way to decide otherwise
-// for their cluster, so an unpinned source was an unreviewable gap rather than a choice.
-//
-// A branch or semver range moves with NO generation bump here, which is why this matters: the
-// staleness check has nothing to compare against, and the layer silently becomes whatever the
-// branch is at now.
+// TestRequirePinnedSourcesRefusesAnUnpinnedLayer covers threat-model gap T1: `sourceRef.revision`
+// is optional (ADR 0026), and this flag lets an operator require it cluster-wide. An unpinned
+// source moves with no generation bump, so the layer silently becomes whatever the branch is now.
 func TestRequirePinnedSourcesRefusesAnUnpinnedLayer(t *testing.T) {
-	url, digest := tarball(t, map[string]string{"config/app.conf": "x"})
+	url, digest := contentServer(t, map[string]string{"config/app.conf": "x"})
 	repo := gitRepository("platform-config", "default", url, digest, "main@sha1:abcd")
 
 	r := reconcilerWith(t, repo)
@@ -41,9 +34,7 @@ func TestRequirePinnedSourcesRefusesAnUnpinnedLayer(t *testing.T) {
 	if err == nil {
 		t.Fatal("an unpinned source must be refused under --require-pinned-sources")
 	}
-	// TERMINAL, not Pending. What fixes an absent pin is editing this spec, which bumps the
-	// generation; a Pending would wait forever for an event that cannot come. That is the same
-	// distinction ADR 0009 draws, and getting it backwards here would hang the object.
+	// TERMINAL, not Pending (ADR 0009): editing this spec is the fix, and it bumps the generation.
 	if !reconciler.IsTerminal(err) {
 		t.Fatalf("must be terminal -- editing the spec is what fixes it; got %v", err)
 	}
@@ -52,12 +43,10 @@ func TestRequirePinnedSourcesRefusesAnUnpinnedLayer(t *testing.T) {
 	}
 }
 
-// TestAnUnpinnedLayerIsFineByDefault is the half that keeps ADR 0026's decision intact.
-//
-// Optionality is deliberate. This flag adds a way to opt out of it; it must not quietly become the
-// default, because that would break every composition that legitimately tracks a branch.
+// TestAnUnpinnedLayerIsFineByDefault keeps ADR 0026 intact: the flag is opt-in, or every
+// composition that tracks a branch would break.
 func TestAnUnpinnedLayerIsFineByDefault(t *testing.T) {
-	url, digest := tarball(t, map[string]string{"config/app.conf": "x"})
+	url, digest := contentServer(t, map[string]string{"config/app.conf": "x"})
 	repo := gitRepository("platform-config", "default", url, digest, "main@sha1:abcd")
 
 	r := reconcilerWith(t, repo) // RequirePinnedSources not set
@@ -66,11 +55,9 @@ func TestAnUnpinnedLayerIsFineByDefault(t *testing.T) {
 	}
 }
 
-// TestAPinnedLayerStillResolvesUnderTheFlag — the flag refuses an ABSENT pin, and nothing else.
-// A pinned source must resolve exactly as before, or turning the flag on would break the
-// configurations it is meant to require.
+// TestAPinnedLayerStillResolvesUnderTheFlag — the flag refuses an ABSENT pin and nothing else.
 func TestAPinnedLayerStillResolvesUnderTheFlag(t *testing.T) {
-	url, digest := tarball(t, map[string]string{"config/app.conf": "x"})
+	url, digest := contentServer(t, map[string]string{"config/app.conf": "x"})
 	repo := gitRepository("platform-config", "default", url, digest, "main@sha1:abcd")
 
 	obj := composition("git", ociv1alpha1.Layer{

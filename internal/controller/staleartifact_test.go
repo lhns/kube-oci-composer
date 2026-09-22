@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -15,30 +14,19 @@ import (
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 )
 
-// The incident these tests exist for, plainly:
-//
-// A generator bumped a GitRepository's spec.ref.tag from v0.6.5 to v0.6.8 and rotated the
-// composition's spec-hash publish tag in the SAME apply. The composition reconciles immediately on
-// a spec change; the GitRepository does not — source-controller has to clone the new tag first. In
-// that window the GitRepository was Ready=True with a status.artifact still describing v0.6.5, and
-// the composer believed it. The new tag did not exist yet, so nothing short-circuited, the layer
-// cache served the old tarball from disk without a single network call, and tag
-// `sf1ddb722b12a49a2` — the spec hash for v0.6.8 — was published pointing at v0.6.5's content.
-//
-// That is PERMANENT. The immutable-tag guard refuses to MOVE a tag; it cannot validate a tag's
-// FIRST publish, because there is nothing yet to conflict with. When the composer later rebuilt
-// correctly it produced a different digest, the guard correctly refused, and the object went
-// Stalled/ImmutableTagConflict — which is how the bug was found at all. See ADR 0026.
+// ADR 0026: a source whose spec has moved on but whose status.artifact still describes the
+// previous revision must not be built from. The new tag's FIRST publish would carry the old
+// content, and the immutable-tag guard cannot catch a first publish.
 
-// staleSource takes a caught-up source and moves its spec forward without its status: exactly what
-// the API server leaves behind between a spec write and source-controller's next reconcile.
+// staleSource bumps a caught-up source's generation without its status, as between a spec write
+// and source-controller's next reconcile.
 func staleSource(obj *unstructured.Unstructured) *unstructured.Unstructured {
 	obj.SetGeneration(obj.GetGeneration() + 1)
 	return obj
 }
 
-// notReadySource keeps the artifact but flips the Ready condition, the shape of a source whose last
-// fetch failed and which is therefore still advertising the previous revision's tarball.
+// notReadySource keeps the artifact but sets Ready=False: a failed fetch still advertising the
+// previous revision.
 func notReadySource(obj *unstructured.Unstructured, reason string) *unstructured.Unstructured {
 	_ = unstructured.SetNestedSlice(obj.Object, []any{
 		map[string]any{"type": "Ready", "status": "False", "reason": reason},
@@ -54,16 +42,10 @@ func sourceRefComposition(name, sourceName string) *ociv1alpha1.ImageComposition
 	})
 }
 
-// TestStaleSourceArtifactIsNeverPublished — the regression test for the incident above.
-//
-// The source's status.artifact describes revision A while its spec has already moved to revision B.
-// Building here publishes A's content under B's tag, permanently, because a tag's first publish is
-// the one thing the immutability guard cannot catch. So: no build, no publish, and Reconciling with
-// DependencyNotReady until the source catches up.
+// TestStaleSourceArtifactIsNeverPublished — no build, no publish, and Reconciling/DependencyNotReady
+// until the source catches up.
 func TestStaleSourceArtifactIsNeverPublished(t *testing.T) {
-	// The artifact still served is the PREVIOUS release's, which is the whole hazard: it fetches
-	// perfectly, hashes perfectly, and assembles into a perfectly valid image of the wrong version.
-	url, digest := tarball(t, map[string]string{"app/version.json": `{"version": "0.6.5"}`})
+	url, digest := contentServer(t, map[string]string{"app/version.json": `{"version": "0.6.5"}`})
 	repo := staleSource(gitRepository("app", "default", url, digest, "v0.6.5@sha1:aaaa"))
 
 	obj := sourceRefComposition("app-image", "app")
@@ -74,8 +56,6 @@ func TestStaleSourceArtifactIsNeverPublished(t *testing.T) {
 		t.Fatalf("waiting for a source to catch up must not be an error: %v", err)
 	}
 
-	// Asserted first because it is the damage: everything below is how the object should REPORT
-	// the wait, and this is what happens if it does not wait at all.
 	got := reload(t, r, obj)
 	if got.Status.Artifact != nil {
 		t.Fatalf("published %q from a source whose status describes the PREVIOUS revision; "+
@@ -91,8 +71,7 @@ func TestStaleSourceArtifactIsNeverPublished(t *testing.T) {
 	if meta.IsStatusConditionTrue(got.Status.Conditions, ociv1alpha1.ReadyCondition) {
 		t.Fatal("Ready=True while the referenced source has not observed its own spec")
 	}
-	// Not Stalled: source-controller catching up bumps no generation on this object, so a stall
-	// would wait for an event that cannot arrive.
+	// Not Stalled: the source catching up bumps no generation on this object.
 	if meta.FindStatusCondition(got.Status.Conditions, ociv1alpha1.StalledCondition) != nil {
 		t.Fatal("a source that has not caught up yet must never set Stalled")
 	}
@@ -102,11 +81,10 @@ func TestStaleSourceArtifactIsNeverPublished(t *testing.T) {
 	}
 }
 
-// TestStaleSourceIsPendingNotTerminal — the triage half, at the resolver where the decision is made.
-// Terminal would be wrong for the same reason it is wrong for a missing source: the fix happens in
+// TestStaleSourceIsPendingNotTerminal — the triage half, at the resolver: the fix happens in
 // another object and raises no generation change here.
 func TestStaleSourceIsPendingNotTerminal(t *testing.T) {
-	url, digest := tarball(t, map[string]string{"a": "1"})
+	url, digest := contentServer(t, map[string]string{"a": "1"})
 	repo := staleSource(gitRepository("app", "default", url, digest, "v0.6.5@sha1:aaaa"))
 	obj := sourceRefComposition("app-image", "app")
 	r := reconcilerWith(t, repo)
@@ -115,21 +93,18 @@ func TestStaleSourceIsPendingNotTerminal(t *testing.T) {
 	if err == nil {
 		t.Fatal("resolved a source whose status.artifact predates its own spec")
 	}
-	var te *recon.TerminalError
-	if asTerminalErr(err, &te) {
+	if recon.IsTerminal(err) {
 		t.Fatal("a source that has not caught up must not be terminal")
 	}
-	var pe *recon.PendingError
-	if !errors.As(err, &pe) {
+	if !recon.IsPending(err) {
 		t.Fatalf("expected a recon.PendingError, got %T: %v", err, err)
 	}
 }
 
-// TestNotReadySourceIsNotConsumed — a source whose fetch failed keeps serving its last good
-// artifact. That artifact is by definition not the revision the spec now names, so it is waited for
-// rather than built from.
+// TestNotReadySourceIsNotConsumed — a failed source keeps serving its last good artifact, which is
+// not the revision its spec names, so it is waited for rather than built from.
 func TestNotReadySourceIsNotConsumed(t *testing.T) {
-	url, digest := tarball(t, map[string]string{"app/version.json": `{"version": "0.6.5"}`})
+	url, digest := contentServer(t, map[string]string{"app/version.json": `{"version": "0.6.5"}`})
 	repo := notReadySource(gitRepository("app", "default", url, digest, "v0.6.5@sha1:aaaa"),
 		"GitOperationFailed")
 
@@ -150,12 +125,10 @@ func TestNotReadySourceIsNotConsumed(t *testing.T) {
 	}
 }
 
-// TestCaughtUpSourceStillBuilds — the counterweight. A refusal that is too eager is worse than the
-// bug it prevents: it would stall every sourceRef composition in the cluster on a check nobody
-// asked for. A source with generation == observedGeneration and Ready=True must build exactly as
-// it always did.
+// TestCaughtUpSourceStillBuilds — the counterweight: generation == observedGeneration and
+// Ready=True must build, or every sourceRef composition would stall.
 func TestCaughtUpSourceStillBuilds(t *testing.T) {
-	url, digest := tarball(t, map[string]string{"app/version.json": `{"version": "0.6.8"}`})
+	url, digest := contentServer(t, map[string]string{"app/version.json": `{"version": "0.6.8"}`})
 	repo := gitRepository("app", "default", url, digest, "v0.6.8@sha1:bbbb")
 
 	obj := sourceRefComposition("app-image", "app")
@@ -173,12 +146,9 @@ func TestCaughtUpSourceStillBuilds(t *testing.T) {
 	}
 }
 
-// TestSourceChangeEnqueuesReferencingCompositions — the companion fix. Without a watch, a source
-// finishing its fetch is invisible until spec.interval, which defaults to an hour: the composition
-// above would sit correctly refusing to build for up to an hour after the content it wants arrived.
-//
-// Cross-namespace matters here and is the reason this mapping lists cluster-wide: pointing a
-// composition at a shared source in flux-system is the ordinary arrangement.
+// TestSourceChangeEnqueuesReferencingCompositions — without this watch a source catching up would
+// go unnoticed until spec.interval (an hour). The mapping lists cluster-wide because a shared
+// source in flux-system is the ordinary arrangement.
 func TestSourceChangeEnqueuesReferencingCompositions(t *testing.T) {
 	sameNamespace := sourceRefComposition("same-namespace", "app")
 
@@ -190,8 +160,7 @@ func TestSourceChangeEnqueuesReferencingCompositions(t *testing.T) {
 		To: "/content",
 	})
 
-	// Same name, different kind — must not match, or a Bucket edit would rebuild a Git-backed
-	// composition.
+	// Same name, different kind: must not match.
 	otherKind := composition("other-kind", ociv1alpha1.Layer{
 		Name:      "content",
 		SourceRef: &ociv1alpha1.SourceRefSource{Kind: "Bucket", Name: "app"},
@@ -207,8 +176,7 @@ func TestSourceChangeEnqueuesReferencingCompositions(t *testing.T) {
 
 	got := r.compositionsForSource("GitRepository")(context.Background(), changed)
 
-	// Only the composition that explicitly names flux-system: "same-namespace" defaults to its own
-	// namespace, which is a different source that happens to share a name.
+	// Only the one naming flux-system: "same-namespace" defaults to its own namespace.
 	want := []reconcile.Request{{
 		NamespacedName: types.NamespacedName{Namespace: "default", Name: "cross-namespace"},
 	}}

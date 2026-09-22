@@ -10,16 +10,9 @@ import (
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 )
 
-// TestAnUnpinnedSourceUnderFailIsAnnounced covers the combination behind a field incident: a tag
-// that cannot move fed by a source that can.
-//
-// The tag is computed by the consumer and lands with the spec while the source catches up
-// separately, so a build in that window publishes the PREVIOUS revision under the new tag -- and
-// provenance records the revision on the manifest, so the corrective build is guaranteed to differ
-// and Fail refuses it. ADR 0052.
-//
-// The caller establishes that the layer is unpinned; pinning is covered by the wiring test below,
-// where the condition actually lives.
+// TestAnUnpinnedSourceUnderFailIsAnnounced — a tag that cannot move, fed by a source that can,
+// can wedge: a build before the source catches up publishes the old revision under the new tag,
+// and Fail refuses the corrective build (ADR 0052). Pinning is covered by the wiring test below.
 func TestAnUnpinnedSourceUnderFailIsAnnounced(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -43,14 +36,13 @@ func TestAnUnpinnedSourceUnderFailIsAnnounced(t *testing.T) {
 			want: false,
 		},
 		{
-			// The one structurally safe configuration: the name IS the content, so a build from a
-			// different revision gets a different name and collides with nothing.
+			// Digest-only: a different revision gets a different name and collides with nothing.
 			name: "Fail, digest-only",
 			push: &ociv1alpha1.Push{Repository: "ghcr.io/me/app"},
 			want: false,
 		},
 		{
-			// No push block at all resolves to Fail, and publishes by digest. Same reasoning.
+			// No push block resolves to Fail, digest-only.
 			name: "no push block",
 			push: nil,
 			want: false,
@@ -86,7 +78,7 @@ func TestAnUnpinnedSourceUnderFailIsAnnounced(t *testing.T) {
 			if !strings.Contains(got, ociv1alpha1.ReasonUnpinnedSource) {
 				t.Errorf("event = %q, want it to name %s", got, ociv1alpha1.ReasonUnpinnedSource)
 			}
-			// The message has to be actionable: which source, and what to do about it.
+			// Actionable: which source, and what to do about it.
 			for _, want := range []string{"GitRepository/ext", "revision:"} {
 				if !strings.Contains(got, want) {
 					t.Errorf("event does not mention %q: %s", want, got)
@@ -96,11 +88,8 @@ func TestAnUnpinnedSourceUnderFailIsAnnounced(t *testing.T) {
 	}
 }
 
-// TestTheUnpinnedWarningIsActuallyWired is the half the table above cannot cover.
-//
-// Every case there calls warnUnpinnedUnderFail directly, so all of them would pass unchanged if
-// nothing ever called it. This drives resolveInputs, the path a reconcile takes, and so it is also
-// where pinning is covered: the revision check lives at the call site, not in the helper.
+// TestTheUnpinnedWarningIsActuallyWired drives resolveInputs, proving warnUnpinnedUnderFail is
+// called at all. Pinning is covered here because the revision check lives at the call site.
 func TestTheUnpinnedWarningIsActuallyWired(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -112,13 +101,13 @@ func TestTheUnpinnedWarningIsActuallyWired(t *testing.T) {
 		{"pinned", "main@sha1:abcd", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			url, digest := tarball(t, map[string]string{"config/app.conf": "x"})
+			url, digest := contentServer(t, map[string]string{"config/app.conf": "x"})
 			repo := gitRepository("platform-config", "default", url, digest, "main@sha1:abcd")
 
 			obj := unpinnedComposition()
 			obj.Spec.Layers[0].SourceRef.Revision = tc.revision
-			// The shared fixture publishes with immutable: false, which resolves to Overwrite and
-			// cannot wedge. The incident's configuration is the default policy over a moving source.
+			// The shared fixture's immutable: false resolves to Overwrite, which cannot wedge; use
+			// the default policy instead.
 			obj.Spec.Push = &ociv1alpha1.Push{Tags: []string{"s0eff05b20f86b0e9"}}
 
 			r := reconcilerWith(t, repo)
