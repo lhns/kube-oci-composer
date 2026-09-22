@@ -10,11 +10,11 @@ metadata:
   labels:
     {{- include "kube-oci-composer.componentLabels" (dict "ctx" . "component" "builder") | nindent 4 }}
 rules:
+  # patch: the finalizer below is added and removed by patching the object, only for an ImageBuild
+  # that exports into ANOTHER namespace (such a ConfigMap cannot be owner-referenced). ADR 0056.
   - apiGroups: [oci.lhns.de]
     resources: [imagebuilds]
-    verbs: [get, list, watch]
-  # Finalizer, only for deleting a ConfigMap exported into ANOTHER namespace, which cannot be
-  # owner-referenced. ADR 0056.
+    verbs: [get, list, watch, patch]
   - apiGroups: [oci.lhns.de]
     resources: [imagebuilds/finalizers]
     verbs: [update]

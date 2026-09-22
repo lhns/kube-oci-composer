@@ -55,6 +55,7 @@ rules:
   verbs:
   - get
   - list
+  - patch
   - watch
 - apiGroups:
   - oci.lhns.de

@@ -252,3 +252,43 @@ func TestTheWatchLabelDoesNotDependOnTheAllowList(t *testing.T) {
 		t.Errorf("an allow-list was rendered from nothing; got:\n%s", got)
 	}
 }
+
+// TestBothRolesGrantTheWritesTheControllersMakeOnTheirOwnKind: the chart matching the markers
+// proves they agree, not that they are enough. Both were missing `patch` on imagebuilds, which the
+// builder needs to add the export finalizer -- so every ImageBuild exporting into another namespace
+// failed before it could build, and the sync test above passed. The e2e never exports across
+// namespaces, and the integration tests run as an admin.
+//
+// Structural: a controller that calls r.Patch or r.Update on its own object must hold that verb.
+func TestBothRolesGrantTheWritesTheControllersMakeOnTheirOwnKind(t *testing.T) {
+	for _, tc := range []struct {
+		pkg, role, resource string
+	}{
+		{"buildcontroller", "rbac-builder", "imagebuilds"},
+		{"controller", "rbac", "imagecompositions"},
+	} {
+		role, err := readClusterRole(filepath.Join("..", "..", "config", tc.role, "role.yaml"))
+		if err != nil {
+			t.Fatalf("reading %s: %v", tc.role, err)
+		}
+		granted := map[string]bool{}
+		for _, rule := range role.Rules {
+			if containsString(rule.APIGroups, "oci.lhns.de") && containsString(rule.Resources, tc.resource) {
+				for _, v := range rule.Verbs {
+					granted[v] = true
+				}
+			}
+		}
+		for file, body := range controllerSources(t) {
+			if packageOf(file) != tc.pkg {
+				continue
+			}
+			for call, verb := range map[string]string{"r.Patch(ctx, obj": "patch", "r.Update(ctx, obj": "update"} {
+				if strings.Contains(body, call) && !granted[verb] {
+					t.Errorf("%s calls %s…) on its %s, but config/%s grants no %q on %s",
+						filepath.Base(file), call, tc.resource, tc.role, verb, tc.resource)
+				}
+			}
+		}
+	}
+}

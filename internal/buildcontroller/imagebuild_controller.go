@@ -79,7 +79,9 @@ type ImageBuildReconciler struct {
 	RequirePinnedSources bool
 }
 
-// +kubebuilder:rbac:groups=oci.lhns.de,resources=imagebuilds,verbs=get;list;watch
+// patch: the export finalizer is added and removed by patching the object itself; the finalizers
+// subresource grant below does not cover that.
+// +kubebuilder:rbac:groups=oci.lhns.de,resources=imagebuilds,verbs=get;list;watch;patch
 // +kubebuilder:rbac:groups=oci.lhns.de,resources=imagebuilds/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=oci.lhns.de,resources=imagebuilds/finalizers,verbs=update
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
