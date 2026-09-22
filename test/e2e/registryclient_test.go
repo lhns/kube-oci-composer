@@ -55,12 +55,25 @@ func registryRequest(t *testing.T, _, method, path, body, contentType string) st
 	t.Helper()
 	ensureCurlPod(t)
 
-	args := []string{"-n", buildNamespace, "exec", curlPod, "--",
-		"curl", "-s", "-i", "-X", method,
-		"-H", "Accept: application/vnd.oci.image.manifest.v1+json," +
-			"application/vnd.oci.image.index.v1+json," +
-			"application/vnd.docker.distribution.manifest.v2+json," +
-			"application/vnd.docker.distribution.manifest.list.v2+json,*/*"}
+	// HEAD goes through curl's own --head, NOT `-X HEAD`.
+	//
+	// `-X HEAD` sends the right method and then waits for a body that a HEAD response never has:
+	// zot sets Content-Length to the manifest's length on HEAD, so curl blocks until it gives up,
+	// and the exec hangs for its whole timeout. `-I` tells curl the response is headers-only. It
+	// also implies -i, so the status line is still in the output the callers match on.
+	method = strings.ToUpper(method)
+	verb := []string{"-i", "-X", method}
+	if method == "HEAD" {
+		verb = []string{"-I"}
+	}
+
+	args := []string{"-n", buildNamespace, "exec", curlPod, "--", "curl", "-s"}
+	args = append(args, verb...)
+	args = append(args,
+		"-H", "Accept: application/vnd.oci.image.manifest.v1+json,"+
+			"application/vnd.oci.image.index.v1+json,"+
+			"application/vnd.docker.distribution.manifest.v2+json,"+
+			"application/vnd.docker.distribution.manifest.list.v2+json,*/*")
 	if contentType != "" {
 		args = append(args, "-H", contentType)
 	}

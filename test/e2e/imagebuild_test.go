@@ -171,6 +171,26 @@ spec:
 // repository -- which is the only way to produce a real tag conflict.
 func applyBuildTo(t *testing.T, name, dockerfile, repository string, extraSpec ...string) {
 	t.Helper()
+	applyBuildToTagged(t, name, dockerfile, repository, "[v1]", extraSpec...)
+}
+
+// applyBuildToUntagged publishes BY DIGEST ONLY: push.tags is empty, so nothing ever names the
+// manifest.
+//
+// That is a supported publishing mode (Push.Tags: "Empty pushes by digest only") and it is what
+// ADR 0010 tells users to consume, but for the retention tests it is more than a convenience: it
+// is the only way to obtain an untagged manifest a registry will still reason about. See the note
+// in retention_test.go on why a manifest that was untagged by DELETING its tag is not the same
+// thing.
+func applyBuildToUntagged(t *testing.T, name, dockerfile, repository string, extraSpec ...string) {
+	t.Helper()
+	applyBuildToTagged(t, name, dockerfile, repository, "[]", extraSpec...)
+}
+
+// applyBuildToTagged is the shared body: tags is a YAML list literal, so a caller can ask for no
+// tags at all.
+func applyBuildToTagged(t *testing.T, name, dockerfile, repository, tags string, extraSpec ...string) {
+	t.Helper()
 	applyStdin(t, fmt.Sprintf(`
 apiVersion: oci.lhns.de/v1alpha1
 kind: ImageBuild
@@ -188,9 +208,9 @@ spec:
   timeout: 10m
   push:
     repository: %s
-    tags: [v1]
+    tags: %s
 %s
-`, name, buildNamespace, dockerfile, repository, strings.Join(extraSpec, "\n")))
+`, name, buildNamespace, dockerfile, repository, tags, strings.Join(extraSpec, "\n")))
 	t.Cleanup(func() {
 		_, _ = kubectl(t, "-n", buildNamespace, "delete", "imagebuild", name, "--ignore-not-found")
 	})

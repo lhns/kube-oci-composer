@@ -134,9 +134,13 @@ Each of these can silently defeat the guarantee, and silence is the failure mode
 
    Measured against a real image, a pull does renew recency, and the guarantee holds.
 
-   The refresh uses `GET`, because that is unambiguously a pull. Whether `HEAD` also renews recency
-   is untested and there is no reason to find out: the saving is a few KB on the one request the
-   whole guarantee depends on.
+   The refresh uses `GET`, because that is unambiguously a pull. `HEAD` does **not** renew recency:
+   zot records a download from `GetManifest` only, through `meta.OnGetManifest` ->
+   `UpdateStatsOnDownload`, and the `HEAD` handler resolves the manifest without touching the
+   metadata database. That was once written here as untested and not worth finding out; it became
+   worth finding out for the opposite reason to the one expected. Nothing about the refresh changes
+   — it keeps using `GET` — but a TEST that watches for a deletion has to ask with `HEAD`, or the
+   watching renews what it is waiting to see die.
 
    **Both references are pulled, and the honest reason is safety rather than measured necessity.**
    An earlier draft of this record claimed that pulling only the digest lets the tag be collected,
@@ -205,6 +209,22 @@ which is acceptable — but it does mean **storage is not bounded on any particu
 capacity planning cannot treat the window as a deadline. It also means a test asserting that
 something has been collected must WAIT for it rather than check once; asserting it promptly is how
 the suite's own negative control ended up green by luck.
+
+**A manifest that LOST its tag is never reclaimed at all, and that is a leak rather than a hazard.**
+Measured against zot v2.1.21 with this chart's rendered policy: deleting the last tag pointing at a
+digest deletes that digest's statistics with it (`RemoveRepoReference`), an untagged manifest with
+no statistics is retained unconditionally rather than evaluated
+(`decision=keep reason="untagged manifest statistics not found"`), and a pull cannot restore the
+statistics because `UpdateStatsOnDownload` refuses to create them for a digest no tag names. So such
+a manifest is immortal, while a manifest **published** untagged — what a build produces before it is
+named ([0054](0054-name-it-after-you-push-it.md)), and what `push.tags: []` publishes —
+expires and is collected normally.
+
+It falls on the leaking side of the asymmetry this record is built on, so nothing about the
+guarantee changes. Two things do follow. Capacity planning should not assume retagging or untagging
+frees anything. And a test that wants to watch an untagged manifest be collected has to publish one
+untagged rather than untag one — the e2e did the latter for a while, which made its negative control
+unable to fire and its survival assertion evidence of nothing.
 
 **`ImageBuild` makes the registry a system of record.** Its content cannot be rebuilt
 ([0025](0025-dockerfile-builds-as-a-second-kind.md)), so for that kind this guarantee is the only
