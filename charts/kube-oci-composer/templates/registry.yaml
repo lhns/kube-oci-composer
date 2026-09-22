@@ -1,14 +1,7 @@
 {{- if .Values.registry.enabled }}
 {{- /*
-The WRITE endpoint. ClusterIP always, and it selects the single writer even when read replicas
-exist.
-
-Every push in the system goes here, and that is the load-bearing property: zot serialises repository
-writes with an in-process mutex, so two instances writing one repository lose content (ADR 0041).
-Confining writes to one pod is what makes the read replicas safe.
-
-It is deliberately NOT the Service workloads pull from -- that is registry-read, which fans out.
-Nothing outside the cluster needs to reach this one, so registry.service.type does not apply to it.
+The WRITE Service: always ClusterIP, selecting only the single writer. Every push goes here, which
+is what keeps the read replicas safe (ADR 0041). Workloads pull through registry-read instead.
 */}}
 apiVersion: v1
 kind: Service
@@ -26,20 +19,9 @@ spec:
       targetPort: registry
 ---
 {{- /*
-A StatefulSet ALWAYS, at one replica when clustering is off.
-
-Not conditional, and that is deliberate. Switching kinds on `cluster.enabled=true` would put a
-landmine under that value: Helm would create a StatefulSet with the same name while the Deployment's
-ReplicaSet still owned pods matching the same selector, and the two controllers would fight -- on
-the day the operator is already changing storage, cache and TLS.
-
-What it also fixes: a StatefulSet's rolling update terminates pod-0 BEFORE creating its
-replacement, so the ReadWriteOnce deadlock that forced `strategy: Recreate` stops existing.
-
-DELIBERATELY NOT volumeClaimTemplates. That would create `data-<sts>-0` and orphan the existing
-PVC -- which for ImageBuild is the system of record, since its output cannot be rebuilt from its
-spec (ADR 0025). It would look exactly like total data loss with the bytes still sitting in a
-volume nobody is looking at. The named PVC stays a plain volume.
+The writer. A StatefulSet so a rolling update stops pod-0 before starting its replacement (no
+ReadWriteOnce deadlock). Deliberately NOT volumeClaimTemplates: that would create a new
+`data-<sts>-0` claim and orphan the existing PVC, which for ImageBuild is the only copy (ADR 0025).
 */}}
 apiVersion: apps/v1
 kind: StatefulSet
@@ -49,14 +31,7 @@ metadata:
     {{- include "kube-oci-composer.componentLabels" (dict "ctx" . "component" "registry") | nindent 4 }}
 spec:
   serviceName: {{ include "kube-oci-composer.registryFullname" . }}-headless
-  {{- /*
-  Always one, and this is the design rather than a limitation waiting to be lifted.
-
-  zot serialises repository writes with an in-process mutex: a push is a read-modify-write of
-  <repo>/index.json, and two processes doing it at once lose tags that returned 201 -- measured at
-  2-4% (test/spike). A second writer would silently drop content. Read capacity scales through
-  registry.readReplicas instead, which never mutate the store. ADR 0041.
-  */}}
+  {{- /* Always one: a second writer silently drops tags (ADR 0041). Reads scale via readReplicas. */}}
   replicas: 1
   selector:
     matchLabels:
@@ -67,11 +42,7 @@ spec:
         # A config change has to restart the pod; zot reads its config once at startup.
         checksum/config: {{ include (print $.Template.BasePath "/registry-config.yaml") . | sha256sum }}
       labels:
-        {{- /*
-        The registry-role label goes on the POD TEMPLATE only, never on spec.selector above: a
-        StatefulSet's selector is immutable. This is what puts the writer into the read Service
-        alongside the replicas.
-        */}}
+        {{- /* The serve-role label is on the pod template only; the selector above is immutable. */}}
         {{- include "kube-oci-composer.registryPodLabels" (dict "ctx" . "component" "registry") | nindent 8 }}
     spec:
       terminationGracePeriodSeconds: {{ .Values.registry.terminationGracePeriodSeconds }}
@@ -79,11 +50,7 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- /*
-      Placement is registry-scoped, NOT the top-level values the controllers use. The point of
-      steering the registry is usually to put it somewhere the controllers are not -- one shared
-      set of keys could not express "controllers off the storage nodes, registry on them".
-      */}}
+      {{- /* Registry-scoped placement, separate from the controllers' top-level values. */}}
       {{- with .Values.registry.priorityClassName }}
       priorityClassName: {{ . }}
       {{- end }}
@@ -110,86 +77,9 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: registry
-          image: {{ .Values.registry.image | quote }}
-          args: ["serve", "/etc/zot/config.json"]
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: [ALL]
-          ports:
-            - name: registry
-              containerPort: 5000
-          volumeMounts:
-            - {name: config, mountPath: /etc/zot}
-            - {name: data, mountPath: /var/lib/registry}
-            {{- if .Values.registry.auth.enabled }}
-            - {name: auth, mountPath: /etc/zot/auth, readOnly: true}
-            {{- end }}
-            {{- if .Values.registry.tls.enabled }}
-            - {name: tls, mountPath: /etc/zot/tls, readOnly: true}
-            {{- end }}
-          {{- /*
-          The scheme has to follow the listener: zot serves one or the other, and an HTTP probe
-          against a TLS port fails every check.
-
-          A self-signed certificate costs nothing here. The kubelet's HTTPS prober sets
-          InsecureSkipVerify and does no hostname verification -- which it has to, since it probes
-          the POD IP and that is in no SAN list. The handshake still has to complete, so a
-          certificate zot could not load still fails the probe, which is the part worth keeping.
-
-          Not downgraded to tcpSocket: that would pass while zot answered 500 on /v2/, and
-          exercising the registry API is the whole value of this probe.
-          */}}
-          {{- with .Values.registry.storage.s3.existingSecret }}
-          {{- /*
-          Credentials as env, never in the config file. A ConfigMap is visible in every
-          `kubectl describe`, which is the same rule TestChartCredentialsAreNotFlags enforces for
-          the composer's own S3. The distribution driver honours the standard AWS chain, so
-          omitting accesskey/secretkey from the JSON is all that is required.
-          */}}
-          envFrom:
-            - secretRef:
-                name: {{ . }}
-          {{- end }}
-          {{- $scheme := ternary "HTTPS" "HTTP" .Values.registry.tls.enabled }}
-          readinessProbe:
-            httpGet: {path: /v2/, port: registry, scheme: {{ $scheme }}}
-            initialDelaySeconds: 2
-          livenessProbe:
-            httpGet: {path: /v2/, port: registry, scheme: {{ $scheme }}}
-            initialDelaySeconds: 10
-          resources:
-            {{- toYaml .Values.registry.resources | nindent 12 }}
+        {{- include "kube-oci-composer.registryContainer" (dict "ctx" . "resources" .Values.registry.resources) | nindent 8 }}
       volumes:
-        - name: config
-          {{- if include "kube-oci-composer.registryConfigIsSecret" . }}
-          secret:
-            secretName: {{ include "kube-oci-composer.registryFullname" . }}
-          {{- else }}
-          configMap:
-            name: {{ include "kube-oci-composer.registryFullname" . }}
-          {{- end }}
-        {{- if .Values.registry.tls.enabled }}
-        - name: tls
-          secret:
-            secretName: {{ include "kube-oci-composer.registryTLSSecretName" . }}
-        {{- end }}
-        {{- if .Values.registry.auth.enabled }}
-        - name: auth
-          secret:
-            secretName: {{ .Values.registry.auth.existingHtpasswdSecret | default (printf "%s-htpasswd" (include "kube-oci-composer.registryFullname" .)) }}
-        {{- end }}
-        - name: data
-        {{- if .Values.registry.persistence.enabled }}
-          persistentVolumeClaim:
-            claimName: {{ include "kube-oci-composer.registryFullname" . }}
-        {{- else }}
-          # emptyDir means every restart loses every image. Tolerable for a demo; for ImageBuild it
-          # means losing content that cannot be rebuilt, which is why persistence defaults ON.
-          emptyDir: {}
-        {{- end }}
+        {{- include "kube-oci-composer.registryVolumes" (dict "ctx" . "config" (include "kube-oci-composer.registryFullname" .)) | nindent 8 }}
 {{- if .Values.registry.persistence.enabled }}
 ---
 apiVersion: v1
@@ -199,8 +89,7 @@ metadata:
   labels:
     {{- include "kube-oci-composer.componentLabels" (dict "ctx" . "component" "registry") | nindent 4 }}
   annotations:
-    # Kept when the release is uninstalled. For ImageBuild these bytes are the only copy, and a
-    # `helm uninstall` typed in the wrong terminal is not a good enough reason to lose them.
+    # Survives `helm uninstall`: for ImageBuild these bytes are the only copy.
     helm.sh/resource-policy: keep
 spec:
   accessModes: [{{ .Values.registry.persistence.accessMode }}]

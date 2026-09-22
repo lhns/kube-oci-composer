@@ -247,3 +247,81 @@ The registry flags both controllers take, so they cannot drift apart. Only suppl
 - --signing-key-secret={{ required "supplyChain.signing.existingSecret is required when signing is enabled" $sc.signing.existingSecret }}
 {{- end }}
 {{- end -}}
+
+{{- /*
+The zot container, shared by the writer and the read replicas; the role lives in the config.
+Call with (dict "ctx" $ "resources" <resources>).
+*/}}
+{{- define "kube-oci-composer.registryContainer" -}}
+{{- $r := .ctx.Values.registry -}}
+- name: registry
+  image: {{ $r.image | quote }}
+  args: ["serve", "/etc/zot/config.json"]
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
+  ports:
+    - name: registry
+      containerPort: 5000
+  volumeMounts:
+    - {name: config, mountPath: /etc/zot}
+    - {name: data, mountPath: /var/lib/registry}
+    {{- if $r.auth.enabled }}
+    - {name: auth, mountPath: /etc/zot/auth, readOnly: true}
+    {{- end }}
+    {{- if $r.tls.enabled }}
+    - {name: tls, mountPath: /etc/zot/tls, readOnly: true}
+    {{- end }}
+  {{- with $r.storage.s3.existingSecret }}
+  {{- /* S3 credentials as env from a Secret, never in the config file. */}}
+  envFrom:
+    - secretRef:
+        name: {{ . }}
+  {{- end }}
+  {{- /*
+  The scheme follows the listener. The kubelet's HTTPS prober skips verification (it probes the pod
+  IP), so a self-signed cert is fine; not tcpSocket, which would pass while /v2/ answered 500.
+  */}}
+  {{- $scheme := ternary "HTTPS" "HTTP" $r.tls.enabled }}
+  readinessProbe:
+    httpGet: {path: /v2/, port: registry, scheme: {{ $scheme }}}
+    initialDelaySeconds: 2
+  livenessProbe:
+    httpGet: {path: /v2/, port: registry, scheme: {{ $scheme }}}
+    initialDelaySeconds: 10
+  resources:
+    {{- toYaml .resources | nindent 4 }}
+{{- end -}}
+
+{{- /* The zot pod volumes. Call with (dict "ctx" $ "config" <config object name>). */}}
+{{- define "kube-oci-composer.registryVolumes" -}}
+{{- $r := .ctx.Values.registry -}}
+- name: config
+  {{- if include "kube-oci-composer.registryConfigIsSecret" .ctx }}
+  secret:
+    secretName: {{ .config }}
+  {{- else }}
+  configMap:
+    name: {{ .config }}
+  {{- end }}
+{{- if $r.tls.enabled }}
+- name: tls
+  secret:
+    secretName: {{ include "kube-oci-composer.registryTLSSecretName" .ctx }}
+{{- end }}
+{{- if $r.auth.enabled }}
+- name: auth
+  secret:
+    secretName: {{ $r.auth.existingHtpasswdSecret | default (printf "%s-htpasswd" (include "kube-oci-composer.registryFullname" .ctx)) }}
+{{- end }}
+- name: data
+{{- if $r.persistence.enabled }}
+  persistentVolumeClaim:
+    claimName: {{ include "kube-oci-composer.registryFullname" .ctx }}
+{{- else }}
+  {{- /* Lost on every restart: for ImageBuild, content that cannot be rebuilt. */}}
+  emptyDir: {}
+{{- end }}
+{{- end -}}
