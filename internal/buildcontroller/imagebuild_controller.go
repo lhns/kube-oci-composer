@@ -1130,13 +1130,18 @@ func (r *ImageBuildReconciler) exportRef(ctx context.Context, obj *ociv1alpha1.I
 func (r *ImageBuildReconciler) recordExport(
 	ctx context.Context, obj *ociv1alpha1.ImageBuild, written *ociv1alpha1.RefExportStatus,
 ) error {
-	changed, err := recon.RecordExport(ctx, r.Client, obj, obj.Status.RefExport, written)
-	if err != nil || !changed {
+	if _, err := recon.RecordExport(ctx, r.Client, obj, obj.Status.RefExport, written); err != nil {
 		return err
 	}
-	patch := client.MergeFrom(obj.DeepCopy())
+	// Mutate, do NOT patch. Reconcile takes one status patch at the end, and a second one here
+	// destroys the first: controller-runtime writes the server's response back into the object, so
+	// an intermediate patch replaces the in-memory status with whatever the server held -- which
+	// at that moment is the status from BEFORE this reconcile. recordSuccess has already set
+	// Artifact and InputHash in memory and they had not been persisted yet, so they were silently
+	// dropped and the object never converged: it rebuilt every pass, produced a new digest every
+	// time, and rewrote this very ConfigMap, rolling whatever consumed it.
 	obj.Status.RefExport = written
-	return r.Status().Patch(ctx, obj, patch)
+	return nil
 }
 
 // pollInterval is how often a running Job is re-observed, defaulted here rather than at
