@@ -27,8 +27,12 @@ def config_from(stream):
     raise SystemExit("no bundled registry ConfigMap rendered")
 
 
+def policy_of(cfg):
+    return cfg["storage"]["retention"]["policies"][0]
+
+
 def problems(cfg):
-    policy = cfg["storage"]["retention"]["policies"][0]
+    policy = policy_of(cfg)
     found = []
 
     # Pull recency is only recorded when the metadata database exists. Without it every tag expires
@@ -59,10 +63,24 @@ def problems(cfg):
         found.append("the keepTags entry does not key on pushedWithin, so a tag pushed and never "
                      "pulled is protected by nothing")
 
-    # Tagged and untagged manifests are governed independently, and ADR 0010 has workloads pin
-    # digests -- so an untagged manifest may be exactly what a rescheduled pod pulls.
-    if not policy.get("keepUntagged", {}).get("pulledWithin"):
-        found.append("keepUntagged does not key on pulledWithin, so digest-pinned images are unprotected")
+    # keepUntagged is optional since ADR 0060 -- the controllers name everything they publish after
+    # its own digest, so nothing live is untagged -- and configuring it is what pins every retired
+    # manifest forever. What each shape still has to get right:
+    keep_untagged = policy.get("keepUntagged")
+    if keep_untagged is not None:
+        # Configured: it has to protect what it claims to. Pull recency alone matches nothing for a
+        # manifest that was just pushed and never pulled.
+        if not keep_untagged.get("pulledWithin"):
+            found.append("keepUntagged does not key on pulledWithin, so digest-pinned images are "
+                         "unprotected")
+        if not keep_untagged.get("pushedWithin"):
+            found.append("keepUntagged does not key on pushedWithin, so freshly pushed untagged "
+                         "content matches no rule")
+    elif not cfg["storage"].get("gcDelay"):
+        # Not configured: gcDelay is then the ONLY cover for a build's output between being pushed
+        # and being named (ADR 0054). zot's default is shorter than that gap under load.
+        found.append("keepUntagged is off and gcDelay is not set, so nothing covers a build's "
+                     "output between its push and the controller naming it")
 
     return found
 
@@ -136,7 +154,11 @@ def main():
             return 1
         print(f"OK: {sys.argv[1]} agrees with the rendered config.")
 
-    print("OK: the policy keys on pull recency and covers both tags and digests.")
+    if policy_of(cfg).get("keepUntagged") is None:
+        print("OK: the policy keys on pull recency; live content is tagged, and untagged content is "
+              "reclaimed after gcDelay.")
+    else:
+        print("OK: the policy keys on pull recency and covers both tags and digests.")
     return 0
 
 

@@ -17,6 +17,7 @@
 package e2e
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -214,93 +215,91 @@ func TestExpiryIsNotPrompt(t *testing.T) {
 		waited, retentionWindow, manifestExistsByDigest(t, repo, digest), tagsList(t, repo))
 }
 
-// Untagged is not unreferenced. ADR 0010 makes referencing images BY DIGEST the recommended usage,
-// so a manifest with no tag may be what a running workload pulls, and retention has to keep those
-// alive on the same terms — which zot spells `keepUntagged`.
+// A digest-only publication is kept while it is pulled, and reclaimed -- layers included -- once
+// nothing pulls it. The end-to-end case for ADR 0060, and the only test here that watches bytes
+// actually leave the registry.
 //
-// Distinct from the guarantee test above, where the manifest keeps its tag throughout: here nothing
-// ever names the manifest, so it is protected by `keepUntagged` alone.
+// ADR 0010 makes referencing images BY DIGEST the recommended usage, so `push.tags: []` is a real
+// mode and what it publishes may be what a running workload pulls. Two things are asserted about it,
+// and both used to be false:
 //
-// PUBLISHED UNTAGGED, not untagged afterwards, and that distinction is the whole reason this test
-// was measuring nothing for as long as it was. An earlier version pushed with a tag and then
-// DELETED the tag -- which reads like the same state and is not one, in zot v2.1.21:
+//   - It is NAMED, after its own digest (digest-<hex>). Left untagged it was protected only by
+//     keepUntagged, and configuring keepUntagged is what made zot keep every retired manifest
+//     forever: removing a manifest's last tag deletes the digest's statistics, and zot then retains
+//     a statistics-less untagged manifest without evaluating it. The layers it referenced were never
+//     freed -- measured, 252 blob sweeps reclaimed 9 blobs.
+//   - So once its own tag expires it is reclaimed. The registry runs WITHOUT keepUntagged here, and
+//     requireKeepUntaggedOff refuses to run otherwise: with it configured the control below is
+//     pinned and can never fire.
 //
-//   - BoltDB.RemoveRepoReference deletes Statistics[digest] once no tag points at the digest.
-//   - GetUntaggedCandidates skips any untagged digest with no statistics, and
-//     GetRetainedUntaggedFromMetaDB then RETAINS it unconditionally, logging
-//     `decision=keep reason="untagged manifest statistics not found"`.
-//   - UpdateStatsOnDownload refuses to recreate statistics for a digest no tag points at
-//     (ErrImageMetaNotFound), so pulling it cannot undo any of that.
-//
-// So a manifest untagged by tag deletion is never collected and never evaluated: both halves of
-// this test passed on that, the control could not fire no matter how long it waited, and the
-// survival half was evidence of nothing. Reproduced against zot v2.1.21 with this chart's rendered
-// policy: untagged-by-deletion survives indefinitely, while a manifest PUSHED untagged is
-// collected in about a window and is retained by `pulledWithin` while it is being pulled.
-//
-// Publishing by digest is also the honest fixture. It is what a build does before the controller
-// names it (ADR 0054) and what `push.tags: []` publishes, so this measures the registry's treatment
-// of content this project actually produces.
-func TestPullingByDigestKeepsAnUntaggedImageAlive(t *testing.T) {
+// The subject survives on its own tag's pull recency, renewed by pulls BY DIGEST -- which is what
+// the controller's refresher issues, and so the property the whole scheme rests on. The control is
+// the same kind of publication, left alone.
+func TestADigestOnlyPublicationIsKeptWhilePulledAndReclaimedOnceRetired(t *testing.T) {
 	t.Parallel()
 
-	repo := keepaliveRepo("untagged")
-	abandoned := keepaliveRepo("untagged-control")
+	repo := keepaliveRepo("digestonly")
+	abandoned := keepaliveRepo("digestonly-control")
 
 	requireUntaggedCollection(t, repo)
+	requireKeepUntaggedOff(t)
 	seconds := watchFor(t)
-	requireCollectionPossible(t, time.Duration(seconds)*time.Second, "an untagged manifest")
+	requireCollectionPossible(t, time.Duration(seconds)*time.Second, "a digest-only publication")
 
-	// THE NEGATIVE CONTROL, and this test went without one for too long. Asserting that a pulled
-	// manifest survives says nothing unless an unpulled one dies: a registry that never collects
-	// anything satisfies the first half perfectly. requireUntaggedCollection reads the config and
-	// requireCollectionPossible checks gcDelay, but neither proves the collector ever arrived --
-	// and at least once it did not, within a window this test called sufficient.
-	//
-	// Built from a DIFFERENT Dockerfile, so it has its own digest -- cheap insurance rather than a
-	// known requirement, for the reason pushTinyImageFrom gives.
-	//
-	// FIRST, because it is the one that has to age: a build takes minutes, and every one of them is
-	// time this control spends untouched rather than time the subject spends unprotected.
+	// THE CONTROL, FIRST, because it is the one that has to age: a build takes minutes, and every one
+	// of them is time it spends untouched. From a DIFFERENT Dockerfile, so it has its own digest and
+	// a layer no other image in this repository shares.
 	abandonedDigest := pushUntaggedImageFrom(t, abandoned, "Dockerfile.other")
 
 	// It has to have been there, or "it is gone" is the same observation as "it never arrived".
-	// eventuallyGone returns on the first poll either way, and a control that was never published
-	// is exactly as vacuous as one that cannot expire -- it just fails in the green direction.
-	//
-	// HEAD, so this check is not itself the pull that starts the control's clock over.
+	// HEAD, so the check is not itself the pull that starts the control's clock over.
 	if !manifestExistsByDigestWithoutPulling(t, abandoned, abandonedDigest) {
 		t.Fatalf("%s@%s was not in the registry immediately after being published, so it cannot "+
-			"serve as a control: either the digest-only push did not land, or it was collected "+
-			"before this line, which would mean the fixture expires faster than the test can "+
-			"observe it.%s", abandoned, abandonedDigest, registryLogs(t))
+			"serve as a control.%s", abandoned, abandonedDigest, registryLogs(t))
 	}
+	// And it was named after its own digest -- the first half of ADR 0060, on the mode it matters
+	// most for.
+	if tags := tagsList(t, abandoned); !strings.Contains(tags, `"`+ownTag(abandonedDigest)+`"`) {
+		t.Fatalf("a push.tags: [] publication was left untagged (tags: %s). Untagged content is what "+
+			"a collector reclaims by age, whoever is pulling it by digest.", tags)
+	}
+	// The layer to watch go. Its top layer is the one this Dockerfile adds, so nothing else in the
+	// repository holds it. Read with a GET -- a pull -- deliberately while the control is minutes old:
+	// its push recency covers it for the same window anyway, so this moves its clock by seconds.
+	layer := topLayer(t, abandoned, abandonedDigest)
 
-	// LAST before the refresh, deliberately. An untagged manifest is protected by
-	// keepUntagged.pushedWithin for one window and no longer, and the first pull is what takes over
-	// from there -- so anything slow between this line and the next one is time the subject is
-	// relying on the collector not having reached its repository yet.
+	// LAST before the refresh: until the first pull, the subject's own tag is protected only by push
+	// recency, for one window.
 	digest := pushUntaggedImage(t, repo)
 	if abandonedDigest == digest {
 		t.Fatalf("the control and its subject are the same content (%s); a control that cannot be "+
 			"told apart from what it is controlling for is not worth having", digest)
 	}
 
+	// Pulled BY DIGEST only, never by its tag -- as the refresher does.
 	refreshFor(t, repo, digest, seconds)
 
 	if !manifestExistsByDigest(t, repo, digest) {
-		t.Fatalf("an untagged manifest was collected while being pulled by digest. ADR 0010 tells "+
-			"users to reference digests, so this deletes content a rescheduled pod re-pulls. Set "+
-			"deleteUntagged: false. (%s@%s)", repo, digest)
+		t.Fatalf("a digest-only publication was collected while being pulled by digest. ADR 0010 "+
+			"tells users to reference digests, so this deletes content a rescheduled pod re-pulls. "+
+			"(%s@%s)\ntags now: %s%s", repo, digest, tagsList(t, repo), registryLogs(t))
+	}
+	if tags := tagsList(t, repo); !strings.Contains(tags, `"`+ownTag(digest)+`"`) {
+		t.Fatalf("%s@%s survived, but its own tag did not: pulls by digest did not renew it, so a "+
+			"digest-only publication is kept alive only until the tag's window runs out -- by the "+
+			"refresher as much as by this test. tags now: %s%s", repo, digest, tags, registryLogs(t))
 	}
 
+	// THE NEGATIVE CONTROL, and it is the leak's test as much as the guarantee's: the manifest has to
+	// GO once nothing pulls it, and then the bytes it held have to go with it.
 	eventuallyGone(t, abandoned, abandonedDigest, collectionDeadline(t))
+	eventuallyBlobGone(t, abandoned, layer, collectionDeadline(t))
 }
 
-// eventuallyGone waits for an untagged manifest to actually be collected.
+// eventuallyGone waits for a manifest to actually be collected.
 //
-// The digest-side counterpart of eventuallyUntagged: keepUntagged is a separate rule from keepTags,
-// so a control that only watches tags cannot speak for digest-addressed content.
+// The digest-side counterpart of eventuallyUntagged: a tag going is not its manifest going, and a
+// control that only watches tags cannot speak for the content -- or for the bytes behind it.
 //
 // HEAD, and that is the whole of this control's correctness -- for the reason eventuallyUntagged
 // states and this function ignored. A GET is a pull: zot's GetManifest handler calls
@@ -325,11 +324,63 @@ func eventuallyGone(t *testing.T, repository, digest string, maxSeconds int) {
 		sleepInCluster(t, 10)
 	}
 
-	t.Fatalf("%s@%s survived %ds untagged and unpulled -- polled with HEAD, so this wait did not "+
-		"renew it -- and so this suite cannot observe an untagged manifest being collected at all, "+
-		"which is the only thing that makes the assertion above evidence of anything. Check "+
-		"deleteUntagged, keepUntagged, and the repository glob against %q.%s",
-		repository, digest, maxSeconds, repository, registryLogs(t))
+	t.Fatalf("%s@%s survived %ds unpulled -- polled with HEAD, so this wait did not renew it -- and "+
+		"so this suite cannot observe a manifest being collected at all, which is the only thing "+
+		"that makes the assertion above evidence of anything. Check deleteUntagged and the "+
+		"repository glob against %q -- and keepUntagged: if it is configured, zot keeps a manifest "+
+		"whose last tag expired forever, logging `untagged manifest statistics not found`.\n"+
+		"tags now: %s%s",
+		repository, digest, maxSeconds, repository, tagsList(t, repository), registryLogs(t))
+}
+
+// eventuallyBlobGone waits for a blob to leave a repository once no manifest there references it.
+//
+// The part of retention anyone actually pays for. A manifest is a few kilobytes; its layers are the
+// image. zot frees a blob only once nothing references it and it is older than gcDelay, so this is
+// asked AFTER the manifest is gone, and only of a layer nothing else in the repository holds.
+// A HEAD on a blob records nothing, so polling cannot keep it alive.
+func eventuallyBlobGone(t *testing.T, repository, digest string, maxSeconds int) {
+	t.Helper()
+
+	for waited := 0; waited < maxSeconds; waited += 10 {
+		if !blobExists(t, repository, digest) {
+			return
+		}
+		sleepInCluster(t, 10)
+	}
+
+	t.Fatalf("%s's layer %s survived %ds after the only manifest referencing it was collected. The "+
+		"registry is reclaiming manifests and keeping their bytes, which is the leak ADR 0060 was "+
+		"written against in a different shape.%s", repository, digest, maxSeconds, registryLogs(t))
+}
+
+func blobExists(t *testing.T, repository, digest string) bool {
+	t.Helper()
+	return strings.Contains(
+		registryRequest(t, "head-"+shortName(repository, "blob"), "HEAD",
+			fmt.Sprintf("/v2/%s/blobs/%s", repository, digest), "", ""),
+		"200 OK")
+}
+
+// topLayer is the last layer of a single-platform manifest: the one its own Dockerfile added.
+func topLayer(t *testing.T, repository, digest string) string {
+	t.Helper()
+	out := registryRequest(t, "get-"+shortName(repository, "layers"), "GET",
+		fmt.Sprintf("/v2/%s/manifests/%s", repository, digest), "", "")
+	i := strings.Index(out, "{")
+	if i < 0 {
+		t.Fatalf("no manifest body for %s@%s:\n%s", repository, digest, out)
+	}
+	var mf struct {
+		Layers []struct {
+			Digest string `json:"digest"`
+		} `json:"layers"`
+	}
+	if err := json.Unmarshal([]byte(out[i:]), &mf); err != nil || len(mf.Layers) == 0 {
+		t.Fatalf("%s@%s is not a single-platform manifest with layers (%v); this test needs one to "+
+			"watch a layer go:\n%s", repository, digest, err, out[i:])
+	}
+	return mf.Layers[len(mf.Layers)-1].Digest
 }
 
 // refreshBothFor pulls a tag AND a digest every two seconds for the given number of seconds,
@@ -439,7 +490,7 @@ func pushTinyImage(t *testing.T, repository string) string {
 // not what zot does: statistics live in the per-repository metadata (BoltDB repoMeta.Statistics,
 // keyed by digest WITHIN a repository), so two repositories are independent. The control was not
 // being renewed by its subject's pulls; it was being retained because untagging it had deleted its
-// statistics, which is the defect TestPullingByDigestKeepsAnUntaggedImageAlive now describes.
+// statistics -- the defect ADR 0060 describes, and that keepUntagged turns into a permanent leak.
 //
 // Distinct content is kept anyway -- it costs one build, the test still asserts the digests differ,
 // and a control that cannot be confused with its subject is worth that much on its own.
@@ -448,13 +499,10 @@ func pushTinyImageFrom(t *testing.T, repository, dockerfile string) string {
 	return publishFixture(t, repository, dockerfile, applyBuildTo)
 }
 
-// pushUntaggedImage publishes a fixture BY DIGEST ONLY -- push.tags is empty, so no name is ever
-// applied to it.
+// pushUntaggedImage publishes a fixture with push.tags empty -- the digest-only mode.
 //
-// The only untagged manifest a registry can still reason about: see the note on
-// TestPullingByDigestKeepsAnUntaggedImageAlive for what deleting a tag does to zot's statistics
-// instead, and why an untagged-by-deletion fixture makes every assertion about untagged content
-// vacuous.
+// Not untagged any more, and that is the point: the controller names it after its own digest (ADR
+// 0060), so the only name it carries is one no other content can take.
 func pushUntaggedImage(t *testing.T, repository string) string {
 	t.Helper()
 	return pushUntaggedImageFrom(t, repository, "Dockerfile")
@@ -559,5 +607,5 @@ func manifestExistsByDigestWithoutPulling(t *testing.T, repository, digest strin
 // something else: in zot v2.1.21 the digest's statistics go with the last tag that named it, after
 // which the collector retains the manifest unconditionally and never evaluates it against any rule.
 // A fixture made that way cannot be collected and cannot be protected -- it is inert, and so is
-// every assertion about it. Untagged fixtures are PUBLISHED untagged instead, which is also the
-// state a real build is in before it is named (ADR 0054).
+// every assertion about it. With keepUntagged configured, it is also what every tag
+// EXPIRING did to the manifest behind it -- which is what ADR 0060 came out of.

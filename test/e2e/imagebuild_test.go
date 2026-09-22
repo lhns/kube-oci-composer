@@ -66,13 +66,23 @@ func buildEventually(t *testing.T, what string, fn func() error) {
 // an outcome may legitimately take depends on whether it builds anything.
 func buildEventuallyWithin(t *testing.T, timeout time.Duration, what string, fn func() error) {
 	t.Helper()
+	buildEventuallyPolling(t, timeout, interval, what, fn)
+}
+
+// buildEventuallyPolling is buildEventuallyWithin with the poll rate stated too.
+//
+// The rate is normally irrelevant -- a build takes minutes and five seconds of slack costs nothing
+// -- but one caller measures the gap between a push and a question about the registry, and there
+// the poll interval IS the measurement's resolution. See awaitPublishedDigest.
+func buildEventuallyPolling(t *testing.T, timeout, poll time.Duration, what string, fn func() error) {
+	t.Helper()
 	deadline := time.Now().Add(timeout)
 	var last error
 	for time.Now().Before(deadline) {
 		if last = fn(); last == nil {
 			return
 		}
-		time.Sleep(interval)
+		time.Sleep(poll)
 	}
 
 	ctrl, _ := kubectl(t, "-n", operatorNamespace, "logs", "deploy/kube-oci-composer-builder", "--tail=120")
@@ -102,7 +112,18 @@ type dockerBuildStatus struct {
 		PodName string `json:"podName"`
 		Message string `json:"message"`
 	} `json:"lastAttempt"`
+	// History is the retained record of past builds, newest first. ADR 0031's guarantee is stated
+	// over exactly this list -- an image named by a live object's retained history is never
+	// deleted -- so a test asking whether that guarantee holds has to read it rather than infer it
+	// from status.artifact, which only ever names the LATEST build.
+	History    []buildRecord     `json:"history"`
 	Conditions []statusCondition `json:"conditions"`
+}
+
+// buildRecord is the part of a status.history entry these tests read.
+type buildRecord struct {
+	Digest string   `json:"digest"`
+	Tags   []string `json:"tags"`
 }
 
 type statusCondition struct {

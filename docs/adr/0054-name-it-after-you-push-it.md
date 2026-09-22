@@ -5,6 +5,9 @@
 Accepted. Makes true what [ADR 0029](0029-three-valued-tag-conflict-policy.md) already claimed,
 and removes the asymmetry it recorded as unavoidable.
 
+Amended by [0060](0060-every-manifest-carries-its-own-name.md): every accepted publish also gets `digest-<hex>`, digest-only ones included,
+and with the chart's `keepUntagged` off, `gcDelay` alone covers the window between push and naming.
+
 ## Context
 
 ADR 0029 says the conflict policy is *"identical on both kinds, deliberately. An operator moving

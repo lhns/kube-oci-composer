@@ -152,15 +152,23 @@ data:
                   "pulledWithin": {{ $.Values.retention.window | quote }},
                   "pushedWithin": {{ $.Values.retention.window | quote }}
                 }
-              ],
+              ]
+              {{- if $.Values.registry.retention.keepUntagged }},
               {{- /*
-              Pull recency alone leaves freshly pushed untagged content matching NOTHING, which is
-              what a build publishing by digest produces until the controller names it.
+              Only when asked for, because configuring it at all is what makes zot keep, forever,
+              every manifest that ever carried a tag: removing the last tag deletes the digest's
+              statistics, and with keepUntagged configured a statistics-less untagged manifest is
+              retained without being evaluated. The layers it references are never freed. See
+              values.yaml and ADR 0060.
+
+              Pull recency alone would leave freshly pushed untagged content matching NOTHING, so
+              when it is configured it carries push recency too.
               */}}
               "keepUntagged": {
                 "pulledWithin": {{ $.Values.retention.window | quote }},
                 "pushedWithin": {{ $.Values.retention.window | quote }}
               }
+              {{- end }}
             }
           ]
         }

@@ -785,3 +785,61 @@ func TestASkippedCycleGetsLoud(t *testing.T) {
 type staticSource struct{}
 
 func (staticSource) Targets(context.Context) ([]Target, error) { return nil, nil }
+
+// The current artifact going missing is NOT expired history, and must not be as quiet as it.
+//
+// ADR 0049 made a gone reference silent so history aging out could not hold an object Degraded
+// forever. It drew no line between that and the artifact in status -- what every workload
+// referencing the object pulls -- and a rolling tag moving deleted exactly that under a Ready object
+// (zot#4444), with nothing but a RetentionLost in the event stream to say so. ADR 0060 amends it:
+// history stays quiet, the current artifact is a failure, and one that persists escalates.
+func TestALostCurrentArtifactIsLoudAndEscalates(t *testing.T) {
+	reg := newRegistry(t, digestA)
+	obj := buildWith(reg, "app", []ociv1alpha1.BuildRecord{
+		{Digest: digestA},
+		{Digest: digestB},
+	}, &ociv1alpha1.ArtifactStatus{Digest: digestA})
+
+	events := record.NewFakeRecorder(200)
+	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithObjects(obj).Build()
+	r := &Refresher{
+		Client:             c,
+		Source:             sourceFor(obj, c),
+		Pending:            allReconciled{},
+		Recorder:           events,
+		InsecureRegistries: []string{reg.host()},
+	}
+
+	for i := 0; i < DegradedAfter; i++ {
+		if _, err := r.RefreshOnce(context.Background()); err != nil {
+			t.Fatalf("refreshing: %v", err)
+		}
+	}
+
+	var degraded, artifactLost int
+	for {
+		select {
+		case ev := <-events.Events:
+			switch {
+			case strings.Contains(ev, ociv1alpha1.ReasonRetentionDegraded):
+				degraded++
+			case strings.Contains(ev, ociv1alpha1.ReasonArtifactLost):
+				artifactLost++
+			}
+			continue
+		default:
+		}
+		break
+	}
+	if artifactLost == 0 {
+		t.Error("the artifact every workload pulls is gone and no ArtifactLost was raised; it read " +
+			"exactly like history expiring")
+	}
+	if degraded == 0 {
+		t.Errorf("the current artifact stayed gone for %d cycles without escalating", DegradedAfter)
+	}
+	// Still refreshing what survives.
+	if !containsRef(reg.requests(), digestB) {
+		t.Error("the reference that still exists stopped being refreshed")
+	}
+}

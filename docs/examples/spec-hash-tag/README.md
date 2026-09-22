@@ -48,6 +48,11 @@ Render it yourself:
 helm template demo docs/examples/spec-hash-tag/
 ```
 
+The controller also tags every artifact with its own digest, `digest-<hex>`
+([ADR 0060](../../adr/0060-every-manifest-carries-its-own-name.md)). That tag is for the registry,
+so a moving tag can never orphan a build. It is not something to reference: the spec-hash tag is
+still the name your workload uses.
+
 ## The two things people get wrong
 
 **1. Do not hash `.Values`.** Hash the *rendered* partial. A template change can alter the spec

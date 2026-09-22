@@ -216,6 +216,13 @@ func SignatureTag(digest v1.Hash) string {
 	return strings.Replace(digest.String(), ":", "-", 1) + ".sig"
 }
 
+// OwnTag names a manifest after its own digest: "digest-<hex>". The same string as
+// reconciler.DigestTag, repeated rather than imported so this package stays free of the
+// controller's dependencies; see there for why it is not "sha256-<hex>". ADR 0060.
+func OwnTag(digest v1.Hash) string {
+	return "digest-" + digest.Hex
+}
+
 // VerifiedSignatureExists reports whether a signature THIS KEY made is already attached.
 //
 // Verification rather than comparison, because ECDSA is randomised: signing the same payload twice

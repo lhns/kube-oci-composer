@@ -7,6 +7,26 @@ may change between minor versions.
 
 ### Changed
 
+- **Every published manifest is also tagged with its own digest, `digest-<hex>`**
+  ([ADR 0060](docs/adr/0060-every-manifest-carries-its-own-name.md)). This applies to both kinds,
+  including digest-only publications and attestations. It closes two zot behaviours:
+  - Moving a rolling tag deleted the previous build out from under anything pinned to it
+    ([zot#4444](https://github.com/project-zot/zot/issues/4444)).
+  - Retired images were never reclaimed while `keepUntagged` was configured.
+
+  **What operators see:** one more tag per build, in the registry and in `status.artifact.tags`.
+  Objects published before this gain the tag on their next reconcile; nothing is rebuilt or
+  republished to get it. An image-automation policy that picks from every tag should exclude
+  `^digest-`.
+
+- **New: `registry.retention.keepUntagged`, on by default in this release, off from the next.**
+  Configuring zot's `keepUntagged` is what kept every retired manifest, and every layer it
+  referenced, forever. Measured: 252 blob sweeps reclaimed 9 blobs. With it off, a retired manifest
+  is reclaimed `gcDelay` after its last tag expires. **Turn it off only once every object has
+  reconciled on this release.** Before that, a still-untagged digest-only publication or
+  attestation is collected by age. Content attached by hand (`cosign attest`) is untagged and loses
+  its protection with it.
+
 - **BREAKING: every artifact's digest changes, because the Go toolchain moved to 1.27**
   ([ADR 0057](docs/adr/0057-the-toolchain-is-an-input.md)). Go 1.27 changes `compress/flate`'s
   output: identical `diff_id`, identical config digest, a compressed layer 202 → 204 bytes. Nothing
@@ -72,6 +92,13 @@ may change between minor versions.
   ADR 0029 had to accept as unavoidable.
 
 ### Fixed
+
+- **A lost current artifact is no longer as quiet as expired history.** The refresher now raises
+  `ArtifactLost` when `status.artifact` itself is gone, and counts it towards `RetentionDegraded`.
+  History that aged out stays quiet ([ADR 0049](docs/adr/0049-a-reference-that-is-gone-is-a-fact-not-a-failure.md)).
+
+- **`registry.retention.gcMaxSchedulerDelay` was ignored.** The template read
+  `registry.gcMaxSchedulerDelay`, a key `values.yaml` never documented.
 
 - **`keepTags`' `pushedWithin` rule was never evaluated** ([ADR 0057](docs/adr/0057-the-toolchain-is-an-input.md)).
   It was rendered as a second policy entry whose `patterns` also matched everything, and zot stops

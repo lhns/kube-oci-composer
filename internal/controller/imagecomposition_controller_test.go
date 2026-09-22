@@ -133,6 +133,7 @@ func build(t *testing.T, r *ImageCompositionReconciler, obj *ociv1alpha1.ImageCo
 	}
 	obj.Status.Artifact = res.Artifact
 	obj.Status.InputHash = res.InputHash
+	markDigestTagged(obj.Status.History, res.DigestTagged)
 	obj.Status.History = recon.RecordHistory(obj.Status.History, res.Record, r.historyLimit(obj))
 	return res.Artifact
 }
@@ -163,7 +164,11 @@ func TestPublishingIsIdempotent(t *testing.T) {
 	if !strings.HasPrefix(art.Ref, host+"/default/plugins:main@") {
 		t.Fatalf("ref %q does not name the registry it was published to", art.Ref)
 	}
-	if want := []string{host + "/default/plugins:main"}; !slices.Equal(art.Tags, want) {
+	// The spec's tag, then the digest's own (ADR 0060) -- last, so it cannot move ref or revision.
+	if want := []string{
+		host + "/default/plugins:main",
+		host + "/default/plugins:" + recon.DigestTag(art.Digest),
+	}; !slices.Equal(art.Tags, want) {
 		t.Fatalf("tags %v, want %v", art.Tags, want)
 	}
 
@@ -356,6 +361,9 @@ func TestImmutableTagRefusesToBeRemeaned(t *testing.T) {
 
 // TestDigestOnlyPublishing — no tags at all is a supported mode, for anyone pinning digests via
 // image automation. The content must still be pullable.
+//
+// And it is named after its own digest, which is the point of ADR 0060 for this mode: an untagged
+// manifest is what a registry's collector reclaims by age, whoever is pulling it.
 func TestDigestOnlyPublishing(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("untagged", urlLayer("core", url, digest, "/core"))
@@ -363,8 +371,8 @@ func TestDigestOnlyPublishing(t *testing.T) {
 	r, host := registryReconciler(t, obj)
 
 	art := build(t, r, obj, "first")
-	if len(art.Tags) != 0 {
-		t.Fatalf("tags %v, want none", art.Tags)
+	if want := []string{host + "/default/untagged:" + recon.DigestTag(art.Digest)}; !slices.Equal(art.Tags, want) {
+		t.Fatalf("tags %v, want only the digest's own %v", art.Tags, want)
 	}
 	if art.Ref != fmt.Sprintf("%s/default/untagged@%s", host, art.Digest) {
 		t.Fatalf("ref %q is not a bare digest reference", art.Ref)
@@ -402,18 +410,17 @@ func TestTagListingWorks(t *testing.T) {
 		t.Fatalf("listing tags: %v", err)
 	}
 
-	// Exactly the tags that were asked for, and nothing invented alongside them. The listing is
-	// what a scanner sees, so a stray derived tag would show up as a candidate release.
-	if !slices.Contains(tags, "main") {
-		t.Fatalf(`tag "main" missing from listing %v`, tags)
-	}
-	for _, tag := range tags {
-		if tag != "main" {
-			t.Fatalf("unexpected extra tag %q in listing %v", tag, tags)
-		}
-	}
 	if art.Digest == "" {
 		t.Fatal("nothing was published, so the listing proves nothing")
+	}
+	// Exactly the tags that were asked for, plus the ONE derived tag ADR 0060 adds, and nothing
+	// else. The listing is what a scanner sees, so anything more would show up as a candidate
+	// release. The derived one does too, and an image policy excludes it by its prefix, digest-.
+	want := []string{"main", recon.DigestTag(art.Digest)}
+	slices.Sort(tags)
+	slices.Sort(want)
+	if !slices.Equal(tags, want) {
+		t.Fatalf("listing %v, want exactly %v", tags, want)
 	}
 }
 

@@ -190,6 +190,39 @@ func TestBothKindsHonourOnConflict(t *testing.T) {
 	}
 }
 
+// TestBothKindsNameEverythingAfterItsDigest — ADR 0060 is enforced on both kinds or it protects
+// neither reliably: the chart stops configuring keepUntagged on the strength of it, and an untagged
+// manifest from the kind that forgot is then reclaimed by age under a live object. Structural, like
+// the onConflict guard above; the behaviour is tested per kind.
+func TestBothKindsNameEverythingAfterItsDigest(t *testing.T) {
+	want := map[string]bool{"controller": false, "buildcontroller": false}
+	backfill := map[string]bool{"controller": false, "buildcontroller": false}
+	for file, body := range controllerSources(t) {
+		pkg := packageOf(file)
+		if _, ok := want[pkg]; !ok {
+			continue
+		}
+		if strings.Contains(body, "recon.PublishTags(") {
+			want[pkg] = true
+		}
+		if strings.Contains(body, "backfillDigestTags(") {
+			backfill[pkg] = true
+		}
+	}
+	for pkg, ok := range want {
+		if !ok {
+			t.Errorf("%s never publishes the digest's own tag; its untagged output is reclaimed by "+
+				"age once keepUntagged is off", pkg)
+		}
+	}
+	for pkg, ok := range backfill {
+		if !ok {
+			t.Errorf("%s never backfills the digest's own tag, so objects published before ADR "+
+				"0060 stay unprotected until they next change", pkg)
+		}
+	}
+}
+
 // TestBothKindsRecordAKeptTagInStatus — Keep is the one outcome where an object is Ready while NOT
 // having published what its spec produces. Without a record in status that is a silent divergence,
 // which is the ADR 0026 failure shape exactly.

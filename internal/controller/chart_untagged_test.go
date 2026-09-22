@@ -128,6 +128,50 @@ func TestTheRenderedConfigCarriesWhatTheE2EAssertsAgainst(t *testing.T) {
 	}
 }
 
+// keepUntagged can be switched off, and off means ABSENT from the policy -- not an empty object.
+//
+// Configuring it at all is what makes zot keep every manifest that ever carried a tag: the last tag
+// going deletes the digest's statistics, and with keepUntagged present a statistics-less untagged
+// manifest is retained without being evaluated. An empty `"keepUntagged": {}` would still be
+// present, so it would still pin them. ADR 0060.
+func TestKeepUntaggedOffLeavesNoRuleBehind(t *testing.T) {
+	cfg := registryConfig(t, "--set", "registry.retention.keepUntagged=false")
+	storage, _ := cfg["storage"].(map[string]any)
+	retention, _ := storage["retention"].(map[string]any)
+	policies, _ := retention["policies"].([]any)
+	if len(policies) == 0 {
+		t.Fatal("no retention policy rendered")
+	}
+	policy, _ := policies[0].(map[string]any)
+	if _, present := policy["keepUntagged"]; present {
+		t.Errorf("keepUntagged=false still renders a keepUntagged rule, which is what pins retired "+
+			"manifests forever: %v", policy["keepUntagged"])
+	}
+	// Reclaiming is still what it is for, and gcDelay still covers the naming gap -- alone, now.
+	if policy["deleteUntagged"] != true {
+		t.Errorf("deleteUntagged = %v; with keepUntagged off, nothing would reclaim anything", policy["deleteUntagged"])
+	}
+	if v, _ := storage["gcDelay"].(string); v == "" {
+		t.Error("no gcDelay, which with keepUntagged off is the only cover for a build's unnamed output")
+	}
+}
+
+// ON by default in this release, and deliberately. Turning it off before every object has
+// reconciled on a controller that applies the digest tag would expose a digest-only publication or
+// an attestation still untagged from before -- to collection by age, while a workload pulls it. The
+// next release flips it once that has had a release to happen.
+func TestKeepUntaggedStaysOnUntilObjectsHaveBeenBackfilled(t *testing.T) {
+	cfg := registryConfig(t)
+	storage, _ := cfg["storage"].(map[string]any)
+	retention, _ := storage["retention"].(map[string]any)
+	policies, _ := retention["policies"].([]any)
+	policy, _ := policies[0].(map[string]any)
+	if _, present := policy["keepUntagged"]; !present {
+		t.Error("keepUntagged is off by default in the release that introduces the digest tag; " +
+			"objects published before it have not been backfilled yet")
+	}
+}
+
 // The scheduler delay is set where values.yaml documents it -- registry.retention -- and reaches
 // the registry from there.
 //

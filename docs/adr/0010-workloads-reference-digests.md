@@ -14,7 +14,9 @@ Two mechanisms described below no longer exist:
   default; omitting it publishes by digest alone.
 - **The auto-generated `<tag>-<digest[:12]>` content tag is gone** (0017). It existed only because
   the tag was a moving pointer and nothing else offered an immutable handle. A spec-hash tag is
-  one, and the digest always was.
+  one, and the digest always was. [0060](0060-every-manifest-carries-its-own-name.md) brings back a digest-derived tag, `digest-<hex>`,
+  for a different reason: not as a handle for consumers, but so a registry never holds a manifest
+  whose only tag can move.
 
 The permanence claim is also amended by [0011](0011-content-tags-expire.md) and
 [0013](0013-persist-manifests.md).

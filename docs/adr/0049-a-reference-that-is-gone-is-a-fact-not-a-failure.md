@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted.
+Accepted. Narrowed by [0060](0060-every-manifest-carries-its-own-name.md): a gone `status.artifact` is a failure, not a fact; this
+record's silence holds for history.
 
 ## Context
 

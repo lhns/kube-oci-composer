@@ -18,14 +18,14 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0007](0007-packaging.md) | Packaging: OCI chart and image published to ghcr | Accepted |
 | [0008](0008-supply-chain.md) | Supply chain: referrers for SBOM and signatures; key-based signing, not keyless | Accepted, amended by 0040 |
 | [0009](0009-flux-conventions-without-dependency.md) | Flux conventions without a Flux dependency, and the name | Accepted |
-| [0010](0010-workloads-reference-digests.md) | Workloads reference digests, never tags | Accepted |
-| [0011](0011-content-tags-expire.md) | Content tags expire: mark-and-sweep garbage collection | Accepted, amends 0010 |
+| [0010](0010-workloads-reference-digests.md) | Workloads reference digests, never tags | Accepted, amended by 0060 |
+| [0011](0011-content-tags-expire.md) | Content tags expire: mark-and-sweep garbage collection | Accepted, amends 0010; amended by 0060 |
 | [0012](0012-keep-pkg-registry.md) | Keep `pkg/registry`; own only the blob handler | Moot since [0035](0035-a-registry-is-the-only-publication-path.md) |
 | [0013](0013-persist-manifests.md) | Persist manifests so published builds survive a restart | Moot since [0035](0035-a-registry-is-the-only-publication-path.md) |
 | [0014](0014-pluggable-storage.md) | Pluggable storage and a two-tier input cache | Accepted; the serving half is moot since [0035](0035-a-registry-is-the-only-publication-path.md) |
 | [0015](0015-base-images-are-platform-pinned.md) | Base images are platform-pinned; config inheritance is opt-in | Accepted |
 | [0016](0016-the-scope-line-is-determinism.md) | The scope line is determinism, not Dockerfile parity | Accepted, supersedes 0004 and part of 0003 |
-| [0017](0017-updating-the-consumed-digest.md) | How a workload's digest reference gets updated | Accepted, amends 0010 |
+| [0017](0017-updating-the-consumed-digest.md) | How a workload's digest reference gets updated | Accepted, amends 0010; superseded in part by 0060 |
 | [0018](0018-multi-architecture-output.md) | Multi-architecture output | Accepted, implemented |
 | [0020](0020-is-the-supply-chain-work-worth-building.md) | Is the supply-chain work worth building? | **Closed by [0040](0040-the-supply-chain-work-is-worth-building.md)**, in favour of building it |
 | [0021](0021-active-standby-or-shared-storage.md) | Active/standby, or shared storage for the serving endpoint | Moot since [0035](0035-a-registry-is-the-only-publication-path.md) |
@@ -38,7 +38,7 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0028](0028-the-kind-is-called-imagebuild.md) | The kind is called ImageBuild | Accepted, reverses 0025's naming |
 | [0029](0029-three-valued-tag-conflict-policy.md) | A tag conflict has three answers, not two | Accepted, amends 0017 |
 | [0030](0030-a-real-registry-serves-both-kinds.md) | A real registry serves both kinds, and zot is the one we ship | Accepted, amends 0006 |
-| [0031](0031-the-retention-guarantee.md) | Live objects' images are never reclaimed, by anything | Accepted, sharpens 0011; corrected by 0057 |
+| [0031](0031-the-retention-guarantee.md) | Live objects' images are never reclaimed, by anything | Accepted, sharpens 0011; corrected by 0057; amended by 0060 |
 | [0032](0032-the-embedded-registrys-future.md) | The embedded registry stays, and stops being the default | **Superseded by [0035](0035-a-registry-is-the-only-publication-path.md)** |
 | [0033](0033-one-chart-one-namespace.md) | One chart, one namespace, toggleable components | Accepted, reverses 0004's packaging |
 | [0034](0034-a-default-registry.md) | A default registry, and whose credential is used | Accepted, amends 0030 and 0031 |
@@ -56,16 +56,17 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0046](0046-a-failure-explains-itself-in-status.md) | A failure explains itself in status | **Accepted** |
 | [0047](0047-uploads-serialise-on-one-registry-lock.md) | Uploads serialise on one registry lock, and the timeout counts the waiting | **Accepted** |
 | [0048](0048-retention-addresses-the-registry-it-can-reach.md) | Retention addresses the registry it can reach | **Accepted** |
-| [0049](0049-a-reference-that-is-gone-is-a-fact-not-a-failure.md) | A reference that is gone is a fact, not a failure | **Accepted** |
+| [0049](0049-a-reference-that-is-gone-is-a-fact-not-a-failure.md) | A reference that is gone is a fact, not a failure | **Accepted**, narrowed by 0060 |
 | [0050](0050-a-builds-secrets-belong-to-the-build.md) | A build's Secrets belong to the build | **Accepted** |
 | [0051](0051-a-build-that-lost-its-image-rebuilds-it.md) | A build that lost its image rebuilds it | **Accepted** |
 | [0052](0052-a-tag-that-cannot-move-needs-a-source-that-cannot-either.md) | A tag that cannot move needs a source that cannot either | **Accepted** |
 | [0053](0053-a-publish-is-protected-before-the-reconcile-returns.md) | A publish is protected before the reconcile returns | **Accepted** |
-| [0054](0054-name-it-after-you-push-it.md) | Name it after you push it | **Accepted** |
+| [0054](0054-name-it-after-you-push-it.md) | Name it after you push it | **Accepted**, amended by 0060 |
 | [0055](0055-exporting-a-reference-a-consumer-cannot-compute.md) | Exporting a reference a consumer cannot compute | Superseded in part by 0056 |
 | [0056](0056-the-controller-is-the-namespace-boundary.md) | The controller is the namespace boundary | **Accepted** |
 | [0057](0057-the-toolchain-is-an-input.md) | The toolchain is an input to the artifact | **Accepted** |
 | [0059](0059-what-causes-a-rebuild.md) | What causes a rebuild | **Accepted** |
+| [0060](0060-every-manifest-carries-its-own-name.md) | Every manifest carries its own name | **Accepted**, supersedes part of 0017 |
 
 ## Open questions
 

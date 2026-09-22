@@ -361,18 +361,34 @@ registry:
 
     # Whether a manifest with no tag pointing at it is collected.
     #
-    # Leave it true in production. It is what eventually reclaims an ImageBuild refused under
+    # Leave it true in production. It is what reclaims a manifest once nothing names it: content
+    # whose object was retired and whose tags expired, and an ImageBuild refused under
     # onConflict: Fail, whose content is uploaded and then deliberately not named (ADR 0054).
     #
-    # EVENTUALLY, not promptly, and that is a deliberate trade. keepUntagged carries pushedWithin,
-    # so anything recently pushed is protected whether or not it has a tag -- which is what keeps a
-    # build's output alive during the moment between being pushed and being named. The same rule
-    # protects a refused build, so its content occupies space for a full retention window rather
-    # than going at the next sweep. One window cannot do one without the other.
-    #
-    # Setting this false switches off untagged collection entirely, which also removes the race
-    # gcDelay otherwise guards -- so the chart accepts any gcDelay once it is false.
+    # Setting this false switches off untagged collection entirely -- nothing is ever reclaimed --
+    # which also removes the race gcDelay otherwise guards, so the chart accepts any gcDelay then.
     deleteUntagged: true
+
+    # Whether to configure zot's keepUntagged rule, which keeps an untagged manifest while it is
+    # pulled or recently pushed.
+    #
+    # It exists to protect content nothing names. The controllers no longer publish any: every
+    # manifest they write -- digest-only publications and attestations included -- is named after
+    # its own digest (sha256-<hex>), so it is governed by the tag rule for as long as it is live
+    # (ADR 0060).
+    #
+    # And configuring it has a cost that is not in zot's documentation. Removing a manifest's last
+    # tag deletes the digest's statistics; with keepUntagged configured, zot then retains a
+    # statistics-less untagged manifest without evaluating it -- forever, along with every layer it
+    # references. So with this on, every retired image stays on disk. Off, it is reclaimed gcDelay
+    # after its last tag expires.
+    #
+    # Turn it OFF only once every ImageBuild and ImageComposition has reconciled on a controller
+    # that applies the digest tag: until then, a digest-only publication or an attestation may be
+    # untagged, and off means it is collected by age while a workload is still pulling it. The
+    # default flips to false in the next release. Content attached by hand (cosign attest, oras
+    # attach) is untagged and loses its protection with it.
+    keepUntagged: true
 
     # How long a collection task may be held back before it runs, at most. Empty leaves zot's
     # default of 30 seconds.
@@ -401,6 +417,11 @@ registry:
     # the collector reclaims -- so this never derives below three times imageBuild.buildPollInterval,
     # however short the window gets. That floor is what lets a test compress every other timing
     # safely.
+    #
+    # With keepUntagged off this is the ONLY thing covering that gap, where before it backed up
+    # keepUntagged.pushedWithin. A builder that is down for longer than this can lose an unnamed
+    # output. That costs a rebuild rather than data -- nothing references an output before it is
+    # named -- so the default is not raised for it; set this higher if you would rather not.
     gcDelay: ""
     # Report what collection would remove, without removing it. Useful when first tuning the window.
     #

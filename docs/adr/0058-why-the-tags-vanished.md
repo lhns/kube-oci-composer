@@ -19,6 +19,7 @@ be this.** They were things found while looking, each defensible on its own:
 | [ADR 0053](0053-a-publish-is-protected-before-the-reconcile-returns.md) | nothing refreshed a new artifact until the next scheduled cycle, up to an hour later | **as a contributing condition** — it is the window the others act in |
 | [ADR 0054](0054-name-it-after-you-push-it.md) | a build's manifest was untagged while being named, and got collected | no — that is a *build*, and produces `NAME_UNKNOWN` on a fresh repository, not a vanished tag |
 | [ADR 0057](0057-the-toolchain-is-an-input.md) | `keepTags`' `pushedWithin` rule was never evaluated | **this is the candidate** |
+| [0060](0060-every-manifest-carries-its-own-name.md) | moving a manifest's last tag dropped the manifest ([zot#4444](https://github.com/project-zot/zot/issues/4444)) | no — it deletes the *previous digest*; the tag stays, resolving to the new content |
 
 ### The candidate
 
