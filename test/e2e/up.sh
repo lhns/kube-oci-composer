@@ -99,10 +99,37 @@ E2E_REGISTRY="$REGISTRY_HOST"
 
 # BOTH images, before the single install that references them. imagePullPolicy is Never in the e2e,
 # so an image that is not loaded is ErrImageNeverPull rather than a pull attempt.
-make docker-build IMG="$IMG"
-make docker-build-builder BUILDER_IMG="$BUILDER_IMG"
-kind load docker-image "$IMG" --name "$CLUSTER"
-kind load docker-image "$BUILDER_IMG" --name "$CLUSTER"
+#
+# CI builds both ONCE, with a layer cache, and hands over an archive (e2e.yaml's images job). Run
+# directly, nothing is set and they are built here as before.
+#
+# Set-but-missing is an ERROR, not a fallback: quietly building instead would hide a broken
+# artifact step and hand back exactly the time the archive exists to save.
+E2E_IMAGE_ARCHIVE="${E2E_IMAGE_ARCHIVE:-}"
+if [ -n "$E2E_IMAGE_ARCHIVE" ]; then
+  if [ ! -f "$E2E_IMAGE_ARCHIVE" ]; then
+    echo "E2E_IMAGE_ARCHIVE=$E2E_IMAGE_ARCHIVE does not exist" >&2
+    exit 1
+  fi
+  kind load image-archive "$E2E_IMAGE_ARCHIVE" --name "$CLUSTER"
+else
+  make docker-build IMG="$IMG"
+  make docker-build-builder BUILDER_IMG="$BUILDER_IMG"
+  kind load docker-image "$IMG" --name "$CLUSTER"
+  kind load docker-image "$BUILDER_IMG" --name "$CLUSTER"
+fi
+
+# Checked now rather than discovered later: with pullPolicy=Never an image the node lacks is
+# ErrImageNeverPull, which arrives as a helm --wait timeout five minutes from here.
+for node in $(kind get nodes --name "$CLUSTER"); do
+  have="$(docker exec "$node" crictl images -o json)"
+  for want in "$IMG" "$BUILDER_IMG"; do
+    if ! printf '%s' "$have" | grep -q "\"$want\"\|\"docker.io/$want\""; then
+      echo "$want is not on node $node after loading" >&2
+      exit 1
+    fi
+  done
+done
 
 # CRDs are NOT applied here any more: the chart installs them from templates/ (ADR 0033), and Helm
 # refuses to adopt a CRD it did not create. Letting the chart do it also means the e2e exercises
