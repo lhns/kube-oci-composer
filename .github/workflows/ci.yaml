@@ -137,6 +137,9 @@ jobs:
           helm template t charts/kube-oci-composer $MODE --set registry.auth.password=fixed-for-render > /dev/null
           helm template t charts/kube-oci-composer $MODE --set registry.persistence.enabled=false > /dev/null
           helm template t charts/kube-oci-composer $MODE | python3 hack/check-bundled-registry.py docs/registry.md
+          # And the configuration the e2e runs and the next release defaults to (ADR 0060).
+          helm template t charts/kube-oci-composer $MODE --set registry.retention.keepUntagged=false \
+            | python3 hack/check-bundled-registry.py
 
       - name: The chart must REFUSE a retention margin too thin to be a guarantee
         # Threat-model gap D7. The window and the refresh interval were unfixable while they lived

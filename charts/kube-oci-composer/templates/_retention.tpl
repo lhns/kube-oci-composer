@@ -251,11 +251,14 @@ untagged is precisely what the collector reclaims. When it was the repository's 
 repository goes with it, which is why losing this race reads as NAME_UNKNOWN rather than a missing
 manifest.
 
-keepUntagged.pushedWithin protects a freshly pushed manifest in any repository the policy MATCHES,
-so for the shipped repositories: ["**"] this guard is belt-and-braces. It still earns its place:
-scope repositories to a prefix and everything outside it matches no policy at all, where zot's
-default is to collect untagged manifests and there is no keepUntagged to save them. That is the
-configuration the e2e runs, and the one this was written after.
+With registry.retention.keepUntagged on, its pushedWithin also covers a freshly pushed manifest in
+any repository the policy matches, and this guard backs it up. With it off -- the target
+configuration, ADR 0060 -- this guard is the only cover the gap has. Either way it matters wherever
+the policy does not reach: scope repositories to a prefix and everything outside it matches no
+policy at all, where zot's default is to collect untagged manifests. That is the configuration the
+e2e runs, and the one this was written after.
+
+Losing the race costs a rebuild, not data: nothing references a build's output before it is named.
 
 Refused rather than warned, for the same reason as the window check: the failure mode is deletion.
 deleteUntagged: false removes the race instead of out-running it and is accepted at any delay.
