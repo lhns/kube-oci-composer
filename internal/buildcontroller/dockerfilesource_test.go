@@ -11,11 +11,8 @@ import (
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 )
 
-// A Dockerfile that does not live in the build context.
-//
-// The shared property under test is that the bytes the pod builds are the bytes the controller
-// hashed and ran CheckPinnedBases over — whatever they came from. Everything else here is a
-// consequence of that.
+// A Dockerfile that does not live in the build context. The shared property: the pod builds the
+// exact bytes the controller hashed and checked.
 
 func dockerfileConfigMap(name, key, content string) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
@@ -32,8 +29,8 @@ func usingConfigMapDockerfile(name, key string) func(*ociv1alpha1.ImageBuild) {
 	}
 }
 
-// TestADockerfileCanComeFromAConfigMap — the modular form: a platform team owns the recipe, an
-// application team owns the ImageBuild.
+// TestADockerfileCanComeFromAConfigMap: a platform team owns the recipe, an application team the
+// ImageBuild.
 func TestADockerfileCanComeFromAConfigMap(t *testing.T) {
 	obj := buildOf(t, usingConfigMapDockerfile("recipes", "Dockerfile"))
 	r := harness(t, "", obj, dockerfileConfigMap("recipes", "Dockerfile", pinnedFrom))
@@ -46,8 +43,8 @@ func TestADockerfileCanComeFromAConfigMap(t *testing.T) {
 		t.Fatalf("want one Job, got %d", len(jobs))
 	}
 
-	// The bytes reach the pod through a Secret the controller owns, holding what it checked, never
-	// the user ConfigMap — which the kubelet would re-read at pod start.
+	// Through a controller-owned Secret holding the checked bytes, never the user's ConfigMap,
+	// which the kubelet would re-read at pod start.
 	var sec corev1.Secret
 	key := types.NamespacedName{Namespace: obj.Namespace, Name: jobs[0].Name + "-dockerfile"}
 	if err := r.Get(t.Context(), key, &sec); err != nil {
@@ -61,10 +58,8 @@ func TestADockerfileCanComeFromAConfigMap(t *testing.T) {
 	}
 }
 
-// TestAMissingConfigMapWaitsRatherThanStalling.
-//
-// Creating the ConfigMap fixes it, not editing this spec — and applying an ImageBuild and its
-// ConfigMap in one commit hits this on a race, so stalling would wedge an object about to be fine.
+// TestAMissingConfigMapWaitsRatherThanStalling: creating the ConfigMap is the fix, and applying
+// both in one commit can race.
 func TestAMissingConfigMapWaitsRatherThanStalling(t *testing.T) {
 	obj := buildOf(t, usingConfigMapDockerfile("absent", "Dockerfile"))
 	r := harness(t, "", obj)
@@ -84,8 +79,7 @@ func TestAMissingConfigMapWaitsRatherThanStalling(t *testing.T) {
 	}
 }
 
-// TestAMissingKeyWaitsToo — same reasoning: adding the key is a fix that raises no generation
-// change here, so a terminal condition would leave the object asleep once it was made.
+// TestAMissingKeyWaitsToo: adding the key raises no generation change here.
 func TestAMissingKeyWaitsToo(t *testing.T) {
 	obj := buildOf(t, usingConfigMapDockerfile("recipes", "Dockerfile.prod"))
 	r := harness(t, "", obj, dockerfileConfigMap("recipes", "Dockerfile", pinnedFrom))
@@ -98,11 +92,8 @@ func TestAMissingKeyWaitsToo(t *testing.T) {
 	}
 }
 
-// TestEditingTheConfigMapMovesTheInputHash is what makes this source usable at all.
-//
-// Before this change the Dockerfile's content needed no hashing, because it rode inside the
-// content-addressed context. That stopped being true here, and the failure would have been silent:
-// an edited recipe finding an unchanged hash and never rebuilding.
+// TestEditingTheConfigMapMovesTheInputHash: the content is outside the context digest, so it
+// must be hashed itself.
 func TestEditingTheConfigMapMovesTheInputHash(t *testing.T) {
 	obj := buildOf(t, usingConfigMapDockerfile("recipes", "Dockerfile"))
 	r := harness(t, "", obj, dockerfileConfigMap("recipes", "Dockerfile", pinnedFrom))
@@ -130,10 +121,7 @@ func TestEditingTheConfigMapMovesTheInputHash(t *testing.T) {
 	}
 }
 
-// TestRenamingTheConfigMapAloneDoesNotRebuild is the negative control for the test above.
-//
-// It is what proves CONTENT is hashed rather than identity: the same bytes under a different name
-// are the same build, and rebuilding for a rename would be the same mistake as hashing a fetch URL.
+// TestRenamingTheConfigMapAloneDoesNotRebuild: content is hashed, not identity.
 func TestRenamingTheConfigMapAloneDoesNotRebuild(t *testing.T) {
 	first := buildOf(t, usingConfigMapDockerfile("recipes", "Dockerfile"))
 	r := harness(t, "", first,
@@ -157,15 +145,9 @@ func TestRenamingTheConfigMapAloneDoesNotRebuild(t *testing.T) {
 	}
 }
 
-// TestAConfigMapDockerfileCannotBePinned.
-//
-// --require-pinned-sources exists so an operator can insist every input is pinned. A ConfigMap is
-// mutable by construction and can never satisfy that, so it is refused rather than quietly exempt —
-// a flag that silently does not apply to one source is worse than one that says so.
-// The context revision is PINNED here on purpose, so the ConfigMap is the only unpinned input. The
-// first version of this test left it unpinned and passed with the refusal deleted — the object
-// stalled, but for the context, not for the Dockerfile. A rejection for the wrong reason is a
-// passing test that proves nothing, so the message is asserted too.
+// TestAConfigMapDockerfileCannotBePinned: a ConfigMap is mutable, so --require-pinned-sources
+// refuses it. The context is pinned so the ConfigMap is the only possible reason, and the message
+// is asserted so a refusal for another reason does not pass.
 func TestAConfigMapDockerfileCannotBePinned(t *testing.T) {
 	obj := buildOf(t, func(o *ociv1alpha1.ImageBuild) {
 		usingConfigMapDockerfile("recipes", "Dockerfile")(o)
@@ -188,9 +170,6 @@ func TestAConfigMapDockerfileCannotBePinned(t *testing.T) {
 }
 
 // TestAConfigMapEditEnqueuesOnlyTheBuildsThatReadIt covers the watch.
-//
-// Without it an edit is noticed only at the next interval — an hour by default — and editing the
-// recipe while nothing happens reads as the controller being broken.
 func TestAConfigMapEditEnqueuesOnlyTheBuildsThatReadIt(t *testing.T) {
 	reader := buildOf(t, usingConfigMapDockerfile("recipes", "Dockerfile"))
 	other := buildOf(t, func(o *ociv1alpha1.ImageBuild) { o.Name = "unrelated" })
@@ -205,8 +184,7 @@ func TestAConfigMapEditEnqueuesOnlyTheBuildsThatReadIt(t *testing.T) {
 		t.Errorf("enqueued %q, want %q", reqs[0].Name, reader.Name)
 	}
 
-	// A same-named ConfigMap in another namespace is a different object and must not rebuild
-	// anything: the reference resolves in the object's own namespace and nowhere else (I4).
+	// A same-named ConfigMap in another namespace is unrelated (I4).
 	elsewhere := dockerfileConfigMap("recipes", "Dockerfile", pinnedFrom)
 	elsewhere.Namespace = "team-b"
 	if got := r.buildsForConfigMap(t.Context(), elsewhere); len(got) != 0 {
@@ -214,21 +192,15 @@ func TestAConfigMapEditEnqueuesOnlyTheBuildsThatReadIt(t *testing.T) {
 	}
 }
 
-// TestAnImageContextDefersTheFromCheckToTheFetcher.
-//
-// The guard is not skipped, it moves. Reading one file out of an image controller-side would mean
-// giving a process shared by every namespace registry credentials for arbitrary user-named
-// repositories, and pulling gigabytes through it. Refusing the combination was the other option and
-// is worse: it would mean `path` — the default, and what most people want — silently not working
-// with one context kind.
+// TestAnImageContextDefersTheFromCheckToTheFetcher: the controller cannot read an image without
+// registry credentials for arbitrary repositories, so the fetcher runs the FROM check instead.
 func TestAnImageContextDefersTheFromCheckToTheFetcher(t *testing.T) {
 	obj := buildOf(t, func(o *ociv1alpha1.ImageBuild) {
 		o.Spec.Context = &ociv1alpha1.BuildContext{Image: &ociv1alpha1.ImageSource{
 			Ref: "ghcr.io/me/ctx@sha256:" + strings.Repeat("a", 64),
 		}}
 	})
-	// The harness serves an UNPINNED Dockerfile. If the controller were reading it, this would be
-	// refused and no Job would exist.
+	// The harness serves an unpinned Dockerfile: if the controller read it, no Job would exist.
 	r := harness(t, "FROM golang:1.26\n", obj)
 
 	if _, err := reconcileOnce(t, r, obj); err != nil {
@@ -239,8 +211,7 @@ func TestAnImageContextDefersTheFromCheckToTheFetcher(t *testing.T) {
 		t.Fatalf("want one Job, got %d", len(jobs))
 	}
 
-	// And the fetcher must be told to run the check, or the guard is genuinely gone rather than
-	// moved. This assertion is the whole safety of the arrangement.
+	// The fetcher must be told to run the check, or the guard is gone rather than moved.
 	args := strings.Join(jobs[0].Spec.Template.Spec.InitContainers[0].Args, " ")
 	if !strings.Contains(args, "--dockerfile=Dockerfile") {
 		t.Errorf("the fetcher was not told which Dockerfile to check, so an unpinned FROM would "+
@@ -251,8 +222,8 @@ func TestAnImageContextDefersTheFromCheckToTheFetcher(t *testing.T) {
 	}
 }
 
-// TestAProjectedDockerfileIsNotCheckedTwice — a Dockerfile from the spec or a ConfigMap is not in
-// the tree, so pointing the fetcher at a path there would fail on a file that does not exist.
+// TestAProjectedDockerfileIsNotCheckedTwice: it is not in the tree, so the fetcher must not look
+// for it there.
 func TestAProjectedDockerfileIsNotCheckedTwice(t *testing.T) {
 	obj := buildOf(t, func(o *ociv1alpha1.ImageBuild) {
 		o.Spec.Dockerfile = &ociv1alpha1.DockerfileSource{
