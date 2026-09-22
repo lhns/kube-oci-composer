@@ -1,15 +1,5 @@
 {{- if .Values.registry.enabled }}
-{{- /*
-The headless Service that gives each member a stable DNS name.
-
-Rendered unconditionally, because the StatefulSet names it as `serviceName` whether or not
-clustering is on, and a StatefulSet pointing at a Service that does not exist has no stable network
-identity for its pods.
-
-publishNotReadyAddresses is load-bearing for clustering: members have to resolve each other DURING
-startup, before any of them is ready. Without it a cold cluster cannot form -- every member waits
-for peers that DNS refuses to name until they are ready, and none of them ever is.
-*/}}
+{{- /* The headless Service the StatefulSet names as its `serviceName`. */}}
 apiVersion: v1
 kind: Service
 metadata:

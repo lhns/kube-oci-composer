@@ -15,8 +15,7 @@ metadata:
     {{- include "kube-oci-composer.componentLabels" (dict "ctx" . "component" "composer") | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
-  # Recreate, not RollingUpdate: with persistence enabled the layer cache is a ReadWriteOnce
-  # volume, and a rolling update would deadlock waiting for the old pod to release it.
+  # Recreate: a rolling update would deadlock on the ReadWriteOnce cache volume.
   strategy:
     type: Recreate
   selector:
@@ -76,8 +75,7 @@ spec:
             {{- include "kube-oci-composer.registryArgs" (dict "ctx" $ "supplyChain" .Values.operator.supplyChain) | trim | nindent 12 }}
           {{- if .Values.operator.s3.existingSecret }}
           env:
-            # Credentials as environment variables, never as flags: flags are visible in ps, in the
-            # pod spec, and in every kubectl describe.
+            # Credentials as env, never flags (visible in ps and kubectl describe).
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
@@ -90,8 +88,8 @@ spec:
                   key: AWS_SECRET_ACCESS_KEY
           {{- end }}
           env:
-            # The default push credential is read from the CONTROLLER's namespace, not the
-            # object's: it belongs to the operator, not to a tenant. See ADR H.
+            # The default push credential is read from the CONTROLLER's namespace: it belongs to
+            # the operator, not to a tenant.
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:
@@ -104,15 +102,13 @@ spec:
               containerPort: {{ include "kube-oci-composer.port" .Values.operator.healthProbeBindAddress }}
               protocol: TCP
           livenessProbe:
-            # A bare ping. A standby replica is alive and must not be restarted merely for not
-            # being the leader.
+            # A bare ping: a non-leader standby is alive.
             httpGet:
               path: /healthz
               port: probes
             {{- toYaml .Values.livenessProbe | nindent 12 }}
           readinessProbe:
-            # Reports whether the served store is warm, so the pod joins the Service only once it
-            # has something to serve.
+            # Ready once the served store is warm.
             httpGet:
               path: /readyz
               port: probes
@@ -130,10 +126,8 @@ spec:
       volumes:
         {{- include "kube-oci-composer.registryCAVolume" $ | nindent 8 }}
 
-        # The layer CACHE, and only that. It used to sit beside a blob store holding served
-        # artifacts; that store is gone, and what is left is a cache -- losing it costs a refetch,
-        # not a failed pull, which is why emptyDir is a reasonable default and a PVC only buys a
-        # faster restart.
+        # The layer cache: losing it costs a refetch, so emptyDir is fine and a PVC only speeds
+        # up restarts.
         - name: cache
           {{- if .Values.persistence.enabled }}
           persistentVolumeClaim:
@@ -141,8 +135,7 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
-        # Assembly writes layer tarballs to a temp directory, so /tmp must be writable even though
-        # the root filesystem is not.
+        # Assembly writes temp tarballs; the root filesystem is read-only.
         - name: tmp
           emptyDir: {}
       {{- with .Values.nodeSelector }}

@@ -1,8 +1,6 @@
 {{- if .Values.imageComposition.enabled }}
 {{/*
-Generated from the kubebuilder markers in internal/controller. chart_rbac_test.go asserts these
-rules match what controller-gen produces, so the chart cannot silently grant more or less than the
-controller actually uses.
+Must match the kubebuilder markers in internal/controller; chart_rbac_test.go asserts it.
 */}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -20,21 +18,14 @@ rules:
   - apiGroups: ["oci.lhns.de"]
     resources: ["imagecompositions/finalizers"]
     verbs: ["update"]
-  # get only. Secrets are read by name and deliberately not cached; list and watch would mean
-  # watching every Secret in the cluster to read one push credential.
+  # get only: Secrets are read by name, not cached.
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get"]
-  # ConfigMaps ARE cached, unlike Secrets, because configMapRef layers are watched: an edit must
-  # rebuild promptly rather than at the next interval. That costs an informer over all ConfigMaps,
-  # which is the price of not appearing to ignore edits for an hour.
-  #
-  # The write verbs are push.writeRefTo's, and they are the only objects this controller creates
-  # anywhere. Cluster-wide because RBAC is granted before an object exists, so permitting an export
-  # into whatever namespace its object lives in means permitting it everywhere; the controller is
-  # the boundary instead, confined to the object's own namespace or one named in
-  # --ref-export-namespaces, and deleting only what carries its managed-by and owner labels.
-  # ADR 0056. No deletecollection, ever.
+  # Watched, so configMapRef layer edits rebuild promptly. The write verbs are push.writeRefTo's
+  # and cluster-wide because RBAC precedes the object; the controller is the boundary (own namespace
+  # or --ref-export-namespaces, deletes only its own labelled ConfigMaps). ADR 0056. No
+  # deletecollection.
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "list", "watch", "create", "update", "delete"]

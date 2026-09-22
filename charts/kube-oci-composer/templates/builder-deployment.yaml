@@ -1,21 +1,16 @@
 {{- if .Values.imageBuild.enabled }}
 {{/*
-A nicer error than the controller's, which refuses to start on the same condition. Both images'
-digests are part of every build's input hash, so a floating tag would let an upgraded builder
-change output without changing the hash. See ADR 0025.
+Mirrors the controller's startup check with a clearer error: both digests are in every build's input
+hash, so a floating tag could change output without changing the hash. ADR 0025.
 */}}
 {{- range $field, $image := dict "buildkitImage" .Values.imageBuild.buildkitImage "dockerfileFrontend" .Values.imageBuild.dockerfileFrontend }}
 {{- if not (contains "@sha256:" $image) }}
-{{- fail (printf "builder.%s must be pinned by digest (repo:tag@sha256:...). See ADR 0025." $field) }}
+{{- fail (printf "imageBuild.%s must be pinned by digest (repo:tag@sha256:...). See ADR 0025." $field) }}
 {{- end }}
 {{- end }}
 {{/*
-fetcherImage is checked only when SET, unlike the two above, and the difference is what it is.
-Those are third-party images an operator chooses; this one is this operator's own binary, and left
-empty it is the image this very chart is deploying. Demanding a digest for it would mean looking one
-up for an image the chart already picked. Pinned by TAG it still moves with the chart's appVersion,
-so a released unpack fix does reach the input hash -- what it does not catch is the same tag being
-republished with different content.
+fetcherImage is checked only when set: left empty it is this chart's own builder image, pinned by
+tag to appVersion, which still moves the input hash on upgrade.
 */}}
 {{- if and .Values.imageBuild.fetcherImage (not (contains "@sha256:" .Values.imageBuild.fetcherImage)) }}
 {{- fail "imageBuild.fetcherImage must be pinned by digest when set explicitly (repo:tag@sha256:...); leave it empty to use this chart's own builder image." }}
@@ -42,8 +37,6 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: {{ include "kube-oci-composer.builderServiceAccountName" . }}
-      {{- /* image.pullSecrets, not imagePullSecrets -- the latter is not a key this chart has, so
-      this block silently rendered nothing and the builder could never use a pull secret. */}}
       {{- with .Values.image.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -58,11 +51,7 @@ spec:
             - --metrics-bind-address={{ .Values.imageBuild.metricsBindAddress }}
             - --health-probe-bind-address={{ .Values.imageBuild.healthProbeBindAddress }}
             - --context-bind-address={{ .Values.imageBuild.contextBindAddress }}
-            {{- /*
-            The URL BUILD PODS use, so it must resolve from any namespace: the Service DNS, never
-            localhost. Unset would leave build pods fetching source-controller directly, which the
-            binary warns about at startup.
-            */}}
+            {{- /* Used by build pods in any namespace: Service DNS, never localhost. */}}
             - --context-base-url=http://{{ include "kube-oci-composer.builderFullname" . }}-context.{{ .Release.Namespace }}.svc.{{ .Values.registry.clusterDomain }}:{{ include "kube-oci-composer.port" .Values.imageBuild.contextBindAddress }}
             - --leader-elect={{ .Values.imageBuild.leaderElect }}
             - --buildkit-image={{ .Values.imageBuild.buildkitImage }}
@@ -83,8 +72,8 @@ spec:
             - --require-pinned-sources
             {{- end }}
           env:
-            # The default push credential is read from the CONTROLLER's namespace, not the
-            # object's: it belongs to the operator, not to a tenant. See ADR H.
+            # The default push credential is read from the CONTROLLER's namespace: it belongs to
+            # the operator, not to a tenant.
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:
