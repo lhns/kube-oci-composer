@@ -186,9 +186,10 @@ func TestInputHashCoversConfig(t *testing.T) {
 // bumping oci.AssemblyVersion rebuilds every artifact in every cluster. If this fails, either the
 // change was deliberate (update the constant) or it is a bug.
 func TestInputHashIsPinned(t *testing.T) {
-	// Last re-recorded for AssemblyVersion 3 (ADR 0057). See also
+	// v0.5.1's value, restored with AssemblyVersion 2 (ADR 0057): an upgrade from 0.5.1 must not
+	// move any composition's hash, or every spec-hash + onConflict: Fail object stalls. See also
 	// TestUnsetPlatformMatchesTheOldHardcodedDefault.
-	const want = "sha256:f0faf228562e7c0c249bb4d987ee06877d98cf1944ef1b95027e9a8ee387510c"
+	const want = "sha256:44707f767d306f79c4980c16934438ef5863382380433b2a8963e18a7b97935b"
 
 	got := oci.InputHash([]oci.LayerInput{
 		{Name: "core", URL: "https://example/x.tgz", Digest: "sha256:1111", Unpack: oci.UnpackTarGz, Target: "/core"},

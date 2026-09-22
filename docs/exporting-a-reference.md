@@ -87,8 +87,9 @@ refExport:
 ```
 
 **Allow-listing a namespace permits every object in the cluster to create a ConfigMap there**, under
-a name carrying its own kind and namespace — so nothing can collide with or overwrite anything else,
-but they can all write. `flux-system` parameterises a whole cluster, so treat listing it as the
+a name carrying its own kind and namespace — so no two objects write the same ConfigMap, but they can
+all write. The keys inside are yours to choose; two exports' keys only meet where one Kustomization
+lists both in `substituteFrom`, so keep them distinct there. `flux-system` parameterises a whole cluster, so treat listing it as the
 privilege it is. [ADR 0056](adr/0056-the-controller-is-the-namespace-boundary.md) records why the
 controller enforces this rather than RBAC, and what that costs.
 

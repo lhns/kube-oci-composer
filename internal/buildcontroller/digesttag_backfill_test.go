@@ -114,3 +114,72 @@ func TestALostDigestTagIsALoss(t *testing.T) {
 			"called healthy")
 	}
 }
+
+// preADR0060Build is an ImageBuild as a 0.5.x controller left it: published, with neither the
+// artifact nor an older retained build carrying its own tag.
+func preADR0060Build(t *testing.T, mutate func(*ociv1alpha1.ImageBuild)) (r *ImageBuildReconciler, obj *ociv1alpha1.ImageBuild, repo, current, older string) {
+	t.Helper()
+	host := startRegistry(t)
+	repo = host + "/team/app"
+	_, current = pushByDigest(t, repo)
+	tagAs(t, repo, "v1", current)
+	_, older = pushByDigest(t, repo)
+
+	obj = buildOf(t, func(b *ociv1alpha1.ImageBuild) {
+		b.Spec.Push = &ociv1alpha1.Push{Repository: repo, Tags: []string{"v1"}}
+		mutate(b)
+		b.Status.Artifact = &ociv1alpha1.ArtifactStatus{Digest: current, Tags: []string{repo + ":v1"}}
+		b.Status.History = []ociv1alpha1.BuildRecord{{Digest: current, Tags: []string{repo + ":v1"}}, {Digest: older}}
+	})
+	r = harness(t, pinnedFrom, obj)
+	r.JobConfig.InsecureRegistries = []string{host}
+	r.Recorder = record.NewFakeRecorder(20)
+	return r, obj, repo, current, older
+}
+
+func requireBuildBackfilled(t *testing.T, r *ImageBuildReconciler, obj *ociv1alpha1.ImageBuild, repo string, digests ...string) *ociv1alpha1.ImageBuild {
+	t.Helper()
+	for _, d := range digests {
+		if got := tagResolvesTo(t, repo, recon.DigestTag(d)); got != d {
+			t.Errorf("%s has no tag of its own (resolves to %q)", d, got)
+		}
+	}
+	got := reload(t, r, obj)
+	if a := got.Status.Artifact; a == nil || !recon.HasDigestTag(a.Tags, a.Digest) {
+		t.Errorf("status.artifact does not claim its digest tag: %+v", got.Status.Artifact)
+	}
+	for _, rec := range got.Status.History {
+		if !recon.HasDigestTag(rec.Tags, rec.Digest) {
+			t.Errorf("history entry %s does not claim its digest tag: %v", rec.Digest, rec.Tags)
+		}
+	}
+	return got
+}
+
+// Suspended builds are backfilled too: their content is as exposed as anyone's, and the upgrade
+// procedure waits for every object to carry the tag.
+func TestASuspendedBuildIsStillBackfilled(t *testing.T) {
+	r, obj, repo, current, older := preADR0060Build(t, func(b *ociv1alpha1.ImageBuild) { b.Spec.Suspend = true })
+	if _, err := reconcileOnce(t, r, obj); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	got := requireBuildBackfilled(t, r, obj, repo, current, older)
+	if c := conditionOf(got, ociv1alpha1.ReadyCondition); c == nil || c.Reason != ociv1alpha1.ReasonSuspended {
+		t.Errorf("the object is no longer reported suspended: %+v", c)
+	}
+}
+
+// So are builds whose spec no longer reconciles: a stalled object still has published content.
+func TestAStalledBuildIsStillBackfilled(t *testing.T) {
+	// An invalid ref is terminal, and leaves the repository to publish to intact.
+	r, obj, repo, current, older := preADR0060Build(t, func(b *ociv1alpha1.ImageBuild) {
+		b.Spec.Push.Ref = "registry.example/app:not a tag"
+	})
+	if _, err := reconcileOnce(t, r, obj); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	got := requireBuildBackfilled(t, r, obj, repo, current, older)
+	if c := conditionOf(got, ociv1alpha1.ReadyCondition); c == nil || c.Reason != ociv1alpha1.ReasonInvalidSpec {
+		t.Errorf("the broken spec did not stall, so this test did not test a stalled object: %+v", c)
+	}
+}

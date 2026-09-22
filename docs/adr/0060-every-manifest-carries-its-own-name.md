@@ -57,12 +57,17 @@ Rules that make it safe:
   content stays untagged and reclaimable. Naming it would make it permanent.
 - **Appended last.** `status.artifact.revision` and `.ref` are built from the spec's first tag and
   do not move.
-- **Backfilled, never rebuilt.** Objects published before this gain the tag on their converged
-  path, driven by status. Reading the missing tag as a loss would have rebuilt every `ImageBuild` on
-  upgrade — to a different digest — and reassembled every composition.
-- **Chart order.** `registry.retention.keepUntagged` ships on, and defaults off one release later.
-  Off before objects are backfilled exposes a still-untagged digest-only publication or attestation
-  to collection by age, while something pulls it.
+- **Backfilled, never rebuilt.** Objects published before this gain the tag on their first
+  reconcile, driven by status alone -- before the suspend check and anything that can stall, so
+  suspended and stalled objects are covered. The composer's SBOM and provenance referrers are tagged
+  with their subject. Reading the missing tag as a loss would have rebuilt every `ImageBuild` on
+  upgrade -- to a different digest -- and reassembled every composition.
+- **Upgrade order.** Both halves ship in one release: the tag, and `registry.retention.keepUntagged`
+  off by default. Off before objects are backfilled exposes a still-untagged digest-only
+  publication or attestation to collection while something pulls it. So the upgrade from 0.5.x
+  keeps it on until every object carries the tag, and NOTES says so on exactly that upgrade: it
+  looks up the live registry config and warns only when this render is the one removing
+  `keepUntagged`. A warning rather than a refusal, by choice.
 
 Also: a gone `status.artifact` is no longer as quiet as expired history. The refresher raises
 `ArtifactLost` for it and counts it towards the Degraded escalation. History stays quiet, as ADR

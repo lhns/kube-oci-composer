@@ -5,67 +5,55 @@ may change between minor versions.
 
 ## [Unreleased]
 
+Upgrading from 0.5.x with the bundled registry: follow the three steps in the first entry.
+
 ### Changed
 
-- **BREAKING (for anything attached by hand): `registry.retention.keepUntagged` now defaults to
-  `false`** ([ADR 0060](docs/adr/0060-every-manifest-carries-its-own-name.md)). Retired images are
-  reclaimed, layers included, `gcDelay` after their last tag expires. Before, they stayed on disk
-  forever.
+- **BREAKING: every published image is also tagged with its own digest, and the bundled registry
+  stops keeping untagged content** ([ADR 0060](docs/adr/0060-every-manifest-carries-its-own-name.md)).
+  Both kinds add a `digest-<hex>` tag to everything they publish, beside the spec's tags:
+  digest-only publications and the composer's SBOM and provenance attestations included. Two things
+  follow:
+  - Moving a rolling tag (`tags: [main]`, `onConflict: Overwrite`) no longer deletes the previous
+    build. zot dropped a manifest when its last tag moved off it, even while `status.history` still
+    listed it ([zot#4444](https://github.com/project-zot/zot/issues/4444)).
+  - Nothing live is untagged any more, so the new `registry.retention.keepUntagged` defaults to
+    `false`. With it on, as in 0.5.1, zot keeps every manifest that lost its last tag, and all its
+    layers, forever. Off, a retired image is collected at the first sweep once it is older than
+    `gcDelay`.
 
-  **What operators see:** a large one-time drop in registry storage over the first few sweeps
-  after upgrading, as everything leaked so far is reclaimed.
+  **What operators see:** one more tag per build, in the registry and in `status.artifact.tags`; an
+  image-automation policy that picks from every tag should exclude `^digest-`. Once the upgrade is
+  complete, registry storage drops sharply over the first sweeps as retired images are reclaimed.
+  Content attached by hand (`cosign attest`, `oras attach`) is untagged and is now collected by age;
+  `keepUntagged: true` keeps it, and brings the leak back.
 
-  **Upgrading from 0.5.x or earlier, keep `keepUntagged` on until objects have reconciled.** Content published before this release
-  carries no digest tag until its object reconciles, and a digest-only publication or attestation
-  that is still untagged is collected by age while something pulls it:
+  **Upgrading from 0.5.x.** Content published by 0.5.x has no `digest-` tag until its object
+  reconciles under 0.6.0 (nothing is rebuilt or republished to add it). Until then an untagged
+  digest-only publication or attestation can be collected while something still pulls it. So:
 
-  1. Upgrade with `registry.retention.keepUntagged: true`.
-  2. Wait until every object has reconciled: `observedGeneration` matches `generation`, and
-     `status.artifact.tags` includes a `digest-` tag. The default interval is 1h.
-  3. Remove the override.
+  1. Upgrade with `--set registry.retention.keepUntagged=true`.
+  2. Wait until every object has a `digest-` tag on `status.artifact` **and on every
+     `status.history` entry**, which is what a rollback pulls. Both controllers add them on startup,
+     suspended and stalled objects included, so this usually takes minutes. This lists the objects
+     still missing one; wait until it prints nothing:
 
-  Content attached by hand (`cosign attest`, `oras attach`) is untagged and is reclaimed by age;
-  `keepUntagged: true` protects it again, at the cost of the leak.
+     ```sh
+     kubectl get imagecompositions,imagebuilds -A -o json | jq -r '.items[]
+       | select([.status.artifact // empty] + (.status.history // [])
+                | any(.digest and ((.tags // []) | any(test(":digest-|^digest-")) | not)))
+       | "\(.kind) \(.metadata.namespace)/\(.metadata.name)"'
+     ```
 
-- **Every published manifest is also tagged with its own digest, `digest-<hex>`**
-  ([ADR 0060](docs/adr/0060-every-manifest-carries-its-own-name.md)). This applies to both kinds,
-  including digest-only publications and attestations. It closes two zot behaviours:
-  - Moving a rolling tag deleted the previous build out from under anything pinned to it
-    ([zot#4444](https://github.com/project-zot/zot/issues/4444)).
-  - Retired images were never reclaimed while `keepUntagged` was configured.
+  3. Upgrade again without the override.
 
-  **What operators see:** one more tag per build, in the registry and in `status.artifact.tags`.
-  Objects published before this gain the tag on their next reconcile; nothing is rebuilt or
-  republished to get it. An image-automation policy that picks from every tag should exclude
-  `^digest-`.
+  The chart's NOTES print these steps on any upgrade that turns `keepUntagged` off: on step 3, where
+  they confirm what you already did, and on an upgrade that skipped step 1.
 
-- **New: `registry.retention.keepUntagged`, on by default in this release, off from the next.**
-  Configuring zot's `keepUntagged` is what kept every retired manifest, and every layer it
-  referenced, forever. Measured: 252 blob sweeps reclaimed 9 blobs. With it off, a retired manifest
-  is reclaimed `gcDelay` after its last tag expires. **Turn it off only once every object has
-  reconciled on this release.** Before that, a still-untagged digest-only publication or
-  attestation is collected by age. Content attached by hand (`cosign attest`) is untagged and loses
-  its protection with it.
-
-- **BREAKING: every artifact's digest changes, because the Go toolchain moved to 1.27**
-  ([ADR 0057](docs/adr/0057-the-toolchain-is-an-input.md)). Go 1.27 changes `compress/flate`'s
-  output: identical `diff_id`, identical config digest, a compressed layer 202 → 204 bytes. Nothing
-  in this project changed.
-
-  `AssemblyVersion` moves 2 → 3 in the same change, which is what makes every cluster **rebuild
-  deliberately** rather than serve old bytes under an unchanged input hash.
-
-  **What operators see:** every `ImageComposition` rebuilds once on upgrade and republishes. Where
-  a spec-hash tag is used as recommended, the tag is unchanged and the content under it moves —
-  which `onConflict: Fail`, the default, **refuses**. Expect one stall per object, resolved by the
-  rebuild that follows, and budget storage for one extra copy of everything.
-
-  This was the failing half of a dependency bump that also carried four library updates; those went
-  separately and moved no bytes.
-
-- **BREAKING: retention is configured by one value, and the rest is derived.** `retention.window`
-  moves to the top level and becomes the base; the refresh interval, the sweep interval and the
-  collection delay are computed from it and need no attention.
+- **BREAKING: retention is set by one value, `retention.window`, and the rest is derived.**
+  `registry.retention.window` moves to `retention.window`, because the controllers read it too,
+  whichever registry stores your images. The old key is **refused** at render; if you copied 0.5.1's
+  `values.yaml` whole, delete it and set `retention.window` instead.
 
   ```yaml
   retention:
@@ -76,181 +64,96 @@ may change between minor versions.
       gcFactor: 120     # gcInterval = window / this
   ```
 
-  **The defaults render exactly what they rendered before** — 720h window, 1h refresh, 6h sweep, 1h
-  delay — so this changes how retention is expressed, not what is deployed. Everything stays
-  overridable, and an override that breaks a relationship is refused at render.
+  `registry.retention.gcDelay` is `max(refreshInterval, 3 × imageBuild.buildPollInterval)`
+  (`buildPollInterval` is new, default `15s`): a build's output is untagged between its push and the
+  controller tagging it, and the floor keeps the collector off it meanwhile. The new
+  `registry.retention.deleteUntagged` (default `true`) set to `false` stops untagged collection
+  entirely, and with it the need for that floor.
 
-  **`registry.retention.window` is now `retention.window`.** It moved because it is not a property
-  of the bundled registry: it describes whichever registry stores your images. With an external
-  registry you now *declare* what that registry does, and the chart derives your refresh cadence
-  from it.
+  **The defaults render what 0.5.1 rendered:** 720h window, 1h refresh, 6h `gcInterval`, 1h
+  `gcDelay`. Each derived value can still be set explicitly (`retention.refreshInterval`,
+  `registry.retention.gcInterval`, `registry.retention.gcDelay`); a combination that could lose
+  images is refused at render.
 
-  **The refresh-margin check no longer skips external registries.** It was gated on
-  `registry.enabled`, so the deployment the chart can help least — somebody else's registry, whose
-  policy it cannot read — was the one deployment it declined to check. Setting `retention.window: ""`
-  is how you say "my registry expires nothing", which is what makes disabling refreshing safe.
+  **With an external registry** (`registry.enabled: false`), `retention.window` declares your
+  registry's expiry, and the refresh-margin check now applies to you as well; in 0.5.1 it covered
+  only the bundled registry. If your registry expires nothing, set `retention.window: ""`: with
+  refreshing disabled and a window set, the chart refuses to render.
 
-  `gcDelay` is the one value that does **not** derive from the window: it guards a wall-clock gap,
-  not the retention clock. See Fixed, below.
+- **BREAKING: `ImageBuild` evaluates `onConflict` against the digest the build produced**, as
+  `ImageComposition` already did ([ADR 0054](docs/adr/0054-name-it-after-you-push-it.md)). In 0.5.1
+  the check ran before the build, against the object's previous digest, so a tag holding this
+  object's own previous build never counted as a conflict and `onConflict: Fail` rarely fired. The
+  build Job now pushes by digest only, and the controller applies the tags afterwards.
 
-- **BREAKING: `onConflict` is now evaluated against the digest the build produced, on `ImageBuild`
-  too** ([ADR 0054](docs/adr/0054-name-it-after-you-push-it.md)). The build Job uploads by digest
-  and names nothing; the controller applies the tags afterwards, when the digest exists.
+  **What operators see:** an `ImageBuild` with a tag meant to move, such as `latest` beside a
+  spec-hash tag, stalls on every change under `Fail`, the default. Set `onConflict: Overwrite` on
+  it. Under `Keep`, `status.conflict` now records the dropped digest.
 
-  Previously buildctl pushed *and* named in one operation, so the check ran before the build and
-  substituted the object's **previous** digest for the one it could not know. That substitution
-  exempted a tag holding this object's own previous digest — the ordinary case — so **an object
-  remeaning its own tag was never a conflict**, and `onConflict: Fail` was close to inert here. The
-  CRD and [ADR 0029](docs/adr/0029-three-valued-tag-conflict-policy.md) both described the exact
-  behaviour; only the composer implemented it.
-
-  **A tag meant to move now conflicts under `Fail`.** `latest` published alongside a spec-hash tag,
-  under the default policy, will stall on every change — that is changing what `latest` means. Set
-  `onConflict: Overwrite` on such an object.
-
-  `onConflict: Keep` now records a **real** `dropped` digest instead of an empty field, which
-  ADR 0029 had to accept as unavoidable.
+- **The release toolchain is unchanged, Go 1.27 as since 0.5.0, so it moves no digest.** It is now
+  pinned by digest, and CI fails if it and `go.mod` disagree
+  ([ADR 0057](docs/adr/0057-the-toolchain-is-an-input.md)).
 
 ### Fixed
 
-- **A lost current artifact is no longer as quiet as expired history.** The refresher now raises
-  `ArtifactLost` when `status.artifact` itself is gone, and counts it towards `RetentionDegraded`.
-  History that aged out stays quiet ([ADR 0049](docs/adr/0049-a-reference-that-is-gone-is-a-fact-not-a-failure.md)).
+- **One suspended `ImageBuild` stopped the retention refresh for every image in the cluster, and
+  said so only at `info`.** Suspending never updated its `observedGeneration`, and a refresh cycle
+  is skipped whole while any object is unreconciled, so images were protected only until the window
+  ran out. Suspending now updates it, and three consecutive skipped cycles are logged as an error.
 
-- **`registry.retention.gcMaxSchedulerDelay` was ignored.** The template read
-  `registry.gcMaxSchedulerDelay`, a key `values.yaml` never documented.
+- **With `operator.s3.existingSecret` set, the S3 credentials never reached the composer.** The
+  chart rendered two `env:` lists on its container and the second replaced the first, so the S3
+  layer cache ran unauthenticated.
 
-- **`keepTags`' `pushedWithin` rule was never evaluated** ([ADR 0057](docs/adr/0057-the-toolchain-is-an-input.md)).
-  It was rendered as a second policy entry whose `patterns` also matched everything, and zot stops
-  at the first matching entry — so only `pulledWithin` was ever in force, while the configuration
-  and its comment said otherwise.
+- **A newly published image was unprotected until the next refresh cycle, up to an hour by
+  default** ([ADR 0053](docs/adr/0053-a-publish-is-protected-before-the-reconcile-returns.md),
+  [ADR 0057](docs/adr/0057-the-toolchain-is-an-input.md)). A sweep in that gap could reclaim content
+  minutes old, reliably so for a digest the registry had stored before, because zot keeps a digest's
+  first push time. A publish now refreshes its own image before the reconcile returns, and the
+  registry also keeps any tag pushed within `retention.window`.
 
-  **A tag that had been pushed and never pulled was protected by nothing**, which is exactly a
-  freshly published spec-hash tag before the refresher first reaches it. What held that line was
-  refresh-at-publish ([ADR 0053](docs/adr/0053-a-publish-is-protected-before-the-reconcile-returns.md)),
-  not this rule.
+- **A missing current artifact was reported like expired history.** When `status.artifact` itself
+  is gone from the registry, the refresher now raises `ArtifactLost` and counts it towards
+  `RetentionDegraded`. Expired history entries are still reported only in the `RetentionLost`
+  summary ([ADR 0049](docs/adr/0049-a-reference-that-is-gone-is-a-fact-not-a-failure.md)).
 
-  Now one entry carrying both rules, which is what zot OR-s. A chart test asserts the **count**,
-  because the previous one asked only whether *some* entry carried each rule — a question both
-  shapes answer yes to, and how this reached a release.
-
-- **A build's own image could be collected before the controller could name it.** Publishing by
-  digest ([ADR 0054](docs/adr/0054-name-it-after-you-push-it.md)) leaves the manifest **untagged**
-  until the controller applies the tags, and untagged is exactly what a registry's collector
-  reclaims — zot deletes untagged manifests by default, and `keepUntagged` could not save one that
-  had only ever been pushed. When the manifest was the repository's only content the repository
-  went with it, so the read-back failed `NAME_UNKNOWN`.
-
-  Only reachable with a short `registry.retention.gcDelay`: the shipped `1h` against a window
-  bounded by the 15s Job poll is a margin of 240. The e2e ran `1s` and lost builds intermittently.
-
-  - `gcDelay` is now **derived from `imageBuild.buildPollInterval`** -- never below three times it,
-    since that poll is what bounds the gap -- and the chart **refuses an override that goes below
-    it** while untagged collection is on.
-  - New `registry.retention.deleteUntagged`, previously hardcoded — set it `false` to remove the
-    race rather than out-run it, which is what a fast collector needs.
-  - `keepUntagged` gained `pushedWithin`. With `pulledWithin` alone, freshly pushed content matched
-    no rule at all.
-  - `values.yaml` claimed a repository matching no policy is never collected. **That is false** —
-    zot's default for an unmatched repository is to delete untagged manifests — and the e2e was
-    written trusting it.
-
-- **A freshly published artifact was unprotected until the next refresh cycle**
-  ([ADR 0053](docs/adr/0053-a-publish-is-protected-before-the-reconcile-returns.md)). The retention
-  refresh ran only on a ticker, so between a push and the next cycle — an hour by default — the
-  artifact held no lease at all. A registry that expires on pull recency has no record that
-  anything was pushed, and zot in particular carries an **old** push timestamp onto a new tag when
-  the digest is one it has seen before, so a collection pass inside that window reclaims content
-  that is minutes old. Reported from a live cluster as tags vanishing shortly after publication.
-
-  A publish now renews its own lease before the reconcile returns.
-
-- **A skipped refresh cycle was reported as though it were harmless.** If any object has not been
-  reconciled, the refresher declines the whole cycle — correctly, since a partial view would
-  under-refresh silently — but it said so only at `info`, while a *failed* cycle was escalated.
-  Both protect nothing, and a skip is the worse of the two because it does not clear on its own:
-  one object stuck behind its generation stops the refresh for **every** object in the cluster.
-  Consecutive skips now escalate.
-
-- **The bundled registry is pinned to zot v2.1.21**, up from v2.1.20, which could delete layers
-  that published images still needed. The damage was hard to recognise: the tag kept resolving and
-  the pull failed partway with a missing layer, which reads as a broken image rather than a registry
-  that reclaimed too much. Everything this project publishes was exposed, because BuildKit attaches
-  SBOM and provenance manifests and that makes every artifact an index — the case v2.1.20 got wrong.
-
-  Also in v2.1.20, `retention.dryRun` was not dry. It still deleted blobs, so turning it on to see
-  what collection *would* do destroyed content. The values file said the opposite.
-
-  **It does not fix everything.** zot records an image's push time the first time it sees that
-  digest and never updates it, so republishing identical content does not renew it. That is
-  unchanged in v2.1.21 and shapes the next entry.
-
-- **`keepTags` also keys on `pushedWithin` now**, alongside `pulledWithin`, and a tag survives if
-  either keeps it. Previously an image was protected only once the retention refresher had reached
-  it, leaving it exposed between being built and that first refresh.
-
-  This helps brand-new content only. Because of the push timestamp above, republishing the same
-  digest renews nothing — and an image the refresher is already touching has a more recent pull
-  than push regardless.
+- **The bundled registry is pinned to zot v2.1.21**, up from v2.1.20, which could delete layers that
+  published images still needed (every image this project publishes is an index, the case v2.1.20
+  got wrong), and whose `retention.dryRun` still deleted blobs. **If you copied 0.5.x's
+  `values.yaml` whole, it pins `registry.image` to v2.1.20:** remove that override, especially now
+  that collection reclaims more.
 
 ### Added
 
-- **A Warning when a layer's source can move but its tags cannot**
-  ([ADR 0052](docs/adr/0052-a-tag-that-cannot-move-needs-a-source-that-cannot-either.md)). A
-  `sourceRef` layer with no `revision`, in an object publishing tags under `onConflict: Fail` (the
-  default), now raises `UnpinnedSource`.
+- **An `UnpinnedSource` Warning when a layer's source can move but its tags cannot**
+  ([ADR 0052](docs/adr/0052-a-tag-that-cannot-move-needs-a-source-that-cannot-either.md)). Raised
+  on an `ImageComposition` with a `sourceRef` layer that has no `revision`, publishing tags under
+  `onConflict: Fail` (the default). The tag follows the spec at once, but the Flux source catches up
+  separately; a build in that gap publishes the previous revision under the new tag, and the
+  corrected build then conflicts with it and stalls. A warning, not a refusal: add `revision:`, set
+  `operator.requirePinnedSources: true` to require it everywhere, or use a conflict policy that
+  tolerates a moving source. Digest-only publications are never flagged.
 
-  That combination is what wedges a composition. A spec-hash tag is computed by the consumer and
-  lands with the spec, while the source it names catches up separately — so a build starting in
-  that window publishes the previous revision under the new tag, and the corrective build is
-  refused because provenance records the source revision on the manifest and the two therefore
-  differ. The tag cannot be corrected afterwards.
-
-  A warning, not a refusal: tracking a branch stays legal. Add `revision:` to the `sourceRef`, or
-  use `--require-pinned-sources` to require it cluster-wide, or choose a conflict policy that
-  tolerates a moving source. A digest-only publish is never flagged — the name is the content, so
-  it cannot wedge.
-
-- **`push.writeRefTo`, exporting the published reference into a ConfigMap**
+- **`push.writeRefTo` exports the published reference into a ConfigMap**, on both kinds, for a
+  consumer such as a Flux Kustomization's `postBuild.substituteFrom`
   ([ADR 0055](docs/adr/0055-exporting-a-reference-a-consumer-cannot-compute.md),
-  [ADR 0056](docs/adr/0056-the-controller-is-the-namespace-boundary.md)). For a Flux
-  `postBuild.substituteFrom` consumer. Off by default, on **both kinds**.
-
-  On `ImageBuild` the reference cannot be known in advance: the digest is an observation rather
-  than a function of the spec. On `ImageComposition` it is computable from the spec hash, but only
-  by reproducing that hash on the consuming side, which is not trivial. Publishing this way needs
-  **no tag at all**, so no tag can be remeaned.
-
-  Writes the full ref as well as the bare digest, and replaces the ConfigMap wholesale so a
-  consumer never sees one key updated and another stale. An incomplete reference is never written
-  — a missing key substitutes the empty string and Flux says nothing.
-
-  **The ConfigMap name is derived, not chosen**: `<kind>-<namespace>-<object name>`, e.g.
-  `imagebuild-team-a-app`. That is the name a consuming Kustomization spells in
-  `substituteFrom`. Two objects therefore cannot ask for the same ConfigMap, so one cannot take
-  over another's export.
-
-  **An object may always export into its own namespace; anywhere else needs
-  `--ref-export-namespaces`.** That list is enforced by the controller, not by RBAC: RBAC is
-  granted before an object exists, so permitting an export into whatever namespace its object
-  lives in would mean permitting it everywhere. Both ClusterRoles therefore carry ConfigMap
-  `create`/`update`/`delete` and the controller is the boundary — see ADR 0056 for what that
-  costs. Allow-listing a namespace permits every object in the cluster to write into it, under a
-  name carrying its own kind and namespace.
-
-  **No watch label is set by default** — `refExport.labels` adds none unless you set it, and the
-  values file shows what Flux wants. It must be a **label**, not an annotation: kustomize-controller
-  selects it with `--watch-configs-label-selector`, and a label selector cannot match an
-  annotation. An object may add its own labels and annotations, but only keys the operator permits
-  with `refExport.allowedLabels` / `refExport.allowedAnnotations`, and never the watch marker or
-  the ownership labels.
-
-  **The export has a lifecycle.** `status.refExport` records what was written, so moving
-  `writeRefTo.namespace` or removing the field removes the ConfigMap rather than stranding it. An
-  export into the object's own namespace is owner-referenced and reclaimed by Kubernetes; only a
-  cross-namespace one adds a finalizer, since that owner reference would be invalid.
-
-  **The digest becomes state outside git**, so a revert no longer reverts the running image.
+  [ADR 0056](docs/adr/0056-the-controller-is-the-namespace-boundary.md)). Off unless set. It matters
+  most for `ImageBuild`, whose digest cannot be computed from its spec, and lets an object publish
+  with no tag at all.
+  - Writes the full reference (`keys.ref`) and/or the bare digest (`keys.digest`), replacing the
+    ConfigMap whole; an incomplete reference is never written.
+  - The ConfigMap is named `<kind>-<namespace>-<name>`, e.g. `imagebuild-team-a-app`, so two
+    objects never share one.
+  - An object may export into its own namespace. Any other namespace must be listed in
+    `refExport.namespaces`, which lets every object in the cluster write there, each under its own
+    name. The controller enforces this, not RBAC.
+  - Flux reacts to a change only if the ConfigMap carries the label
+    `reconcile.fluxcd.io/watch: Enabled`; set `refExport.labels: reconcile.fluxcd.io/watch=Enabled`.
+    Objects may add only the labels and annotations listed in `refExport.allowedLabels` and
+    `refExport.allowedAnnotations`.
+  - Moving or removing `writeRefTo` deletes the ConfigMap it wrote.
+  - **The cost:** the digest becomes state outside git, so reverting a commit no longer reverts the
+    running image.
 
 ## [0.5.1] - 2026-09-07
 

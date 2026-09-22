@@ -267,12 +267,13 @@ registry:
     # digest-<hex> tag (ADR 0060) -- so it is off by default.
     #
     # Hazard: with it on, zot keeps every manifest that ever lost its last tag, and its layers,
-    # FOREVER (removing the tag deletes the stats it would evaluate). Off, such content goes
-    # gcDelay after its last tag expires.
+    # FOREVER (removing the tag deletes the stats it would evaluate). Off, such content goes at the
+    # first sweep after its last tag expires, once older than gcDelay.
     #
-    # Upgrading from 0.5.x or earlier: set true for the upgrade, wait until every object's
-    # status.artifact.tags includes a digest- tag, then remove it. Content attached by hand
-    # (cosign attest, oras attach) is untagged and is collected by age while this is off.
+    # Upgrading from 0.5.x or earlier: set true for the upgrade, wait until every object carries a
+    # digest- tag on its artifact AND every history entry (NOTES prints a check on that upgrade),
+    # then remove it. Content attached by hand (cosign attest, oras attach) is untagged and is
+    # collected by age while this is off.
     keepUntagged: false
 
     # Upper bound on zot's random per-repository delay before a collection task runs. Empty keeps
@@ -286,10 +287,10 @@ registry:
     gcFactor: 120
     gcInterval: ""
 
-    # Minimum age before collection. Derived, but never below 3x imageBuild.buildPollInterval: a
-    # build's manifest is untagged from push until the controller names it (ADR 0054). With
-    # keepUntagged off this is the only cover for that gap; a builder down for longer can lose an
-    # unnamed output (costs a rebuild, not data). Raise it if you prefer.
+    # Minimum age before collection: max(refresh interval, 3x imageBuild.buildPollInterval). The
+    # floor covers a build's manifest between its push and the controller naming it (ADR 0054);
+    # with keepUntagged off it is the only cover. A builder down for longer can lose an unnamed
+    # output (costs a rebuild, not data). Raise it if you prefer.
     gcDelay: ""
     # Report what collection would remove without removing it. Only safe on v2.1.21+; older
     # versions delete blobs even in a dry run.

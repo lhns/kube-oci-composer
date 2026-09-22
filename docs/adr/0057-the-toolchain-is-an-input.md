@@ -5,6 +5,15 @@
 Accepted. Records a property of [ADR 0002](0002-content-addressed-inputs.md)'s `AssemblyVersion` that was
 always true and never written down, plus a zot behaviour the chart had wrong.
 
+**Corrected before release: the `AssemblyVersion` 2 → 3 bump below is withdrawn.** The principle
+stands; the premise did not. The release image had been built with Go 1.27 since v0.5.0 (the
+`Dockerfile` said `golang:1.27`); only `go.mod`, and so CI, was on 1.26. So production digests never
+moved with this change, and the bump alone would have changed every composition's input hash on
+upgrade -- and, under a spec-hash tag with `onConflict: Fail`, stalled every one of them
+permanently, since a terminal conflict is not retried. The toolchain that counts is the one the
+release image is built with, so CI now fails if the `Dockerfile`'s Go minor differs from `go.mod`'s,
+and the `Dockerfile` pins its image by digest.
+
 ## Context
 
 Two things found on the same afternoon, from opposite directions, that turn out to be the same

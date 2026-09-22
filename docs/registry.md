@@ -168,9 +168,9 @@ In between, the manifest is untagged, and untagged is what a collector reclaims.
 the build's own output is deleted before it can be named; if it was the repository's only content,
 the repository goes too, and the error reads `NAME_UNKNOWN`.
 
-So `gcDelay` is the one value **not** derived from the window — it guards a wall-clock gap. The
-chart never derives it below three times `imageBuild.buildPollInterval` and refuses an override that
-goes under, so the bundled registry is safe by construction. With `keepUntagged` off (below) it is
+So `gcDelay` is `max(refreshInterval, 3 × imageBuild.buildPollInterval)`: it follows the window
+down, but never below the floor that covers that gap, and the chart refuses an override that goes
+under it, so the bundled registry is safe by construction. With `keepUntagged` off (below) it is
 the only cover for that gap. Losing the race costs a rebuild, not data: nothing references a build's
 output before it is named.
 
@@ -273,14 +273,15 @@ spec's tags. That includes digest-only publications and attestations
 
 So `keepUntagged` protects nothing the controllers publish, and it costs every retired image its
 disk space. The chart does not configure it (`registry.retention.keepUntagged: false`). A retired
-manifest is reclaimed `gcDelay` after its last tag expires, layers included.
+manifest is reclaimed at the first sweep after its last tag expires, layers included, provided it
+is older than `gcDelay` -- which retired content is.
 
-**If you run your own zot, turn `keepUntagged` off too**, but only once your objects have been
-backfilled. Content attached by hand (`cosign attest`, `oras attach`) is untagged, and after that
+**If you run your own zot, turn `keepUntagged` off too**, but only once every object carries a
+`digest-` tag on its artifact and every history entry (the CHANGELOG has a check). Content attached by hand (`cosign attest`, `oras attach`) is untagged, and after that
 it is reclaimed by age.
 
 **A repository the policy does not match** never expires tagged content, and collects untagged
-content within `gcDelay`, which is zot's default. Since everything published is tagged, that only
+content at any sweep once it is older than `gcDelay`, zot's default. Since everything published is tagged, that only
 reaches a build's output between its push and its naming. If you narrow `repositories`, narrow it
 to something that still covers every repository the controllers publish to, or nothing outside it
 ever expires.
