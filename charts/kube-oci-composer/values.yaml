@@ -374,7 +374,7 @@ registry:
     #
     # It exists to protect content nothing names. The controllers no longer publish any: every
     # manifest they write -- digest-only publications and attestations included -- is named after
-    # its own digest (sha256-<hex>), so it is governed by the tag rule for as long as it is live
+    # its own digest (digest-<hex>), so it is governed by the tag rule for as long as it is live
     # (ADR 0060).
     #
     # And configuring it has a cost that is not in zot's documentation. Removing a manifest's last
