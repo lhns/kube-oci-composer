@@ -414,7 +414,7 @@
               "type": "object"
             },
             "tags": {
-              "description": "Tags are the tags to push, as described on Publish.Tags. Empty pushes by digest only.",
+              "description": "Tags are the tags to push, as described on Publish.Tags. Empty pushes by digest only.\nEvery publish is also tagged with its own digest, sha256-\u003chex\u003e (ADR 0060).",
               "items": {
                 "maxLength": 128,
                 "pattern": "^[a-zA-Z0-9_][a-zA-Z0-9._-]*$",

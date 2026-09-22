@@ -170,7 +170,9 @@ the repository goes too, and the error reads `NAME_UNKNOWN`.
 
 So `gcDelay` is the one value **not** derived from the window — it guards a wall-clock gap. The
 chart never derives it below three times `imageBuild.buildPollInterval` and refuses an override that
-goes under, so the bundled registry is safe by construction.
+goes under, so the bundled registry is safe by construction. With `keepUntagged` off (below) it is
+the only cover for that gap. Losing the race costs a rebuild, not data: nothing references a build's
+output before it is named.
 
 **If you run your own registry, this is yours to check.** Any registry that reclaims untagged
 manifests can take a build's output before it is named. Either give it a collection delay
@@ -262,24 +264,34 @@ extend retention: zot writes a push timestamp per *digest* and only when that di
 republishing an existing digest does not renew it, and anything the refresher touches has a later
 pull than push. Pull recency remains the mechanism.
 
-**`keepUntagged` is a separate rule from `keepTags`.** Tagged and untagged manifests are governed
-independently, which is why the controllers refresh **both** the digest and every tag. Leaving
-`keepUntagged` out deletes exactly the digest-pinned images
-[ADR 0010](adr/0010-workloads-reference-digests.md) tells your workloads to reference.
+**Everything the controllers publish carries a tag**: its own digest, `sha256-<hex>`, beside the
+spec's tags. That includes digest-only publications and attestations
+([ADR 0060](adr/0060-every-manifest-carries-its-own-name.md)). The reason is two zot behaviours:
 
-**A repository the policy does not match is not therefore safe.** Retention policies govern
-manifests; zot's blob GC is separate and reclaims what nothing references. An **untagged** manifest
-references nothing, so a digest-only artifact in an unmatched repository can be collected within
-`gcDelay` of being published -- the publish succeeds, and the pull that follows says `not found`.
+- **Moving a manifest's last tag drops the manifest from the index**
+  ([zot#4444](https://github.com/project-zot/zot/issues/4444)). With a rolling tag, the next build
+  deleted the previous one out from under anything pinned to it.
+- **Removing a manifest's last tag deletes its retention statistics.** With `keepUntagged`
+  configured, zot then keeps that manifest forever, and every layer it references with it. zot's
+  documentation says the opposite.
 
-That is why the shipped policy is `repositories: ["**"]` with `keepUntagged` carrying both
-`pulledWithin` and `pushedWithin`: the
-refresher's pull is what keeps a digest-only artifact alive, and it only counts where a policy
-applies. If you narrow `repositories`, narrow it to something that still covers every repository
-the controllers publish to.
+So `keepUntagged` protects nothing the controllers publish, and it costs every retired image its
+disk space. `registry.retention.keepUntagged` switches it off. It is on in this release and
+defaults to off from the next, once every object has reconciled and carries its tag. With it off, a
+retired manifest is reclaimed `gcDelay` after its last tag expires, layers included.
 
-This project's own e2e ran into it from the other end -- a composition whose tags were dropped
-became untagged, and the image it had just published was gone before a Pod could pull it.
+**If you run your own zot, turn `keepUntagged` off too**, but only once your objects have been
+backfilled. Content attached by hand (`cosign attest`, `oras attach`) is untagged, and after that
+it is reclaimed by age.
+
+**A repository the policy does not match** never expires tagged content, and collects untagged
+content within `gcDelay`, which is zot's default. Since everything published is tagged, that only
+reaches a build's output between its push and its naming. If you narrow `repositories`, narrow it
+to something that still covers every repository the controllers publish to, or nothing outside it
+ever expires.
+
+**Image-automation policies see the extra tag.** A policy that picks from every tag has to exclude
+`^sha256-`. Cosign's `sha256-<hex>.sig` already requires that filter.
 
 ### TLS
 

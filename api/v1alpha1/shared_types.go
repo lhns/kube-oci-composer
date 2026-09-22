@@ -273,6 +273,7 @@ type Push struct {
 	Repository string `json:"repository,omitempty"`
 
 	// Tags are the tags to push, as described on Publish.Tags. Empty pushes by digest only.
+	// Every publish is also tagged with its own digest, sha256-<hex> (ADR 0060).
 	// +kubebuilder:validation:MaxItems=32
 	// +kubebuilder:validation:items:MaxLength=128
 	// +kubebuilder:validation:items:Pattern=`^[a-zA-Z0-9_][a-zA-Z0-9._-]*$`
