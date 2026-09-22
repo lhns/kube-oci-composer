@@ -19,11 +19,8 @@ func pendingOf(t *testing.T, r *Readiness) []string {
 	return pending
 }
 
-// TestUnobservedObjectsAreReportedPending — the completeness question retention depends on.
-//
-// This used to gate the readiness probe, keeping the pod out of the Service until the served store
-// was warm. There is no store now (ADR 0035); what survives is the same fact serving a different
-// purpose, because refreshing on a partial view under-protects whatever is missing from it.
+// TestUnobservedObjectsAreReportedPending — retention must know whether its view is complete,
+// because refreshing on a partial view under-protects whatever is missing from it (ADR 0035).
 func TestUnobservedObjectsAreReportedPending(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("warming", urlLayer("core", url, digest, "/core"))
@@ -46,11 +43,8 @@ func TestUnobservedObjectsAreReportedPending(t *testing.T) {
 	}
 }
 
-// TestStalledObjectIsNotPending — pending means UNOBSERVED, not unhealthy.
-//
-// An object that reconciled and failed has been seen; the refresher knows what it published and can
-// keep it alive. Treating it as pending would stop refreshing everything else in the cluster because
-// one object has a bad digest.
+// TestStalledObjectIsNotPending — pending means UNOBSERVED, not unhealthy. Otherwise one failing
+// object would stop the refresher for the whole cluster.
 func TestStalledObjectIsNotPending(t *testing.T) {
 	url, _ := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("broken", urlLayer("core", url, "sha256:"+strings.Repeat("0", 64), "/core"))
@@ -66,13 +60,9 @@ func TestStalledObjectIsNotPending(t *testing.T) {
 	}
 }
 
-// TestEveryUnobservedObjectCounts — there is no exemption for objects with spec.push.
-//
-// There used to be: a push-mode object was not served from here, so it could not hold the readiness
-// probe back. Every object publishes to a registry now, so that exemption would match everything and
-// Pending would always return empty -- which the retention refresher reads as "the view is complete"
-// while having observed nothing. It would refresh nothing, report success, and images would start
-// disappearing one retention window later.
+// TestEveryUnobservedObjectCounts — no exemption for objects with spec.push. Every object
+// publishes to a registry, so an exemption would make Pending always empty, and the refresher
+// would take an unobserved view as complete and let images expire.
 func TestEveryUnobservedObjectCounts(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("external", urlLayer("core", url, digest, "/core"))

@@ -13,11 +13,8 @@ import (
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 )
 
-// The export outlives the spec that asked for it, which is the part the first design missed: it
-// knew how to clean up the ConfigMap the spec CURRENTLY names, and a spec that moved or dropped
-// the field stranded the previous one. status.refExport is what makes the difference, so this
-// walks the transitions in sequence rather than testing them one at a time -- the bug was in going
-// from one state to the next, not in any single state.
+// TestAnExportFollowsTheSpecThatAsksForIt walks write -> move -> remove in sequence: a spec that
+// moves or drops writeRefTo must not strand the previous ConfigMap, which status.refExport tracks.
 func TestAnExportFollowsTheSpecThatAsksForIt(t *testing.T) {
 	obj := &ociv1alpha1.ImageComposition{
 		ObjectMeta: metav1.ObjectMeta{Name: "base", Namespace: "team-a"},
@@ -53,8 +50,7 @@ func TestAnExportFollowsTheSpecThatAsksForIt(t *testing.T) {
 		t.Fatalf("status.refExport = %v, want team-a/%s", got, name)
 	}
 
-	// Moved to another namespace: the old one goes, rather than being left for a consumer to keep
-	// substituting from.
+	// Moved to another namespace: the old one goes.
 	refetch(t, c, obj)
 	obj.Spec.Push.WriteRefTo.Namespace = "flux-system"
 	if err := r.exportRef(ctx, obj, art); err != nil {
@@ -74,10 +70,8 @@ func TestAnExportFollowsTheSpecThatAsksForIt(t *testing.T) {
 	}
 }
 
-// TestDeletingAnObjectTakesItsForeignExportWithIt.
-//
-// An own-namespace export is owner-referenced and reclaimed by Kubernetes -- which the fake client
-// does not simulate, so this covers the case that genuinely needs the controller to act.
+// TestDeletingAnObjectTakesItsForeignExportWithIt covers the cross-namespace export, which has no
+// owner reference and so must be deleted by the finalizer.
 func TestDeletingAnObjectTakesItsForeignExportWithIt(t *testing.T) {
 	obj := &ociv1alpha1.ImageComposition{
 		ObjectMeta: metav1.ObjectMeta{
@@ -112,9 +106,8 @@ func TestDeletingAnObjectTakesItsForeignExportWithIt(t *testing.T) {
 
 const testExportDigest = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
 
-// assertExports states the whole world: the ConfigMap named must exist in exactly the namespaces
-// listed and nowhere else. Asserting only that the new one appeared is what let a stranded one go
-// unnoticed.
+// assertExports requires the named ConfigMap in exactly the listed namespaces, so a stranded old
+// export fails the test too.
 func assertExports(t *testing.T, c client.Client, when, name string, namespaces ...string) {
 	t.Helper()
 	want := map[string]bool{}
@@ -143,8 +136,7 @@ func currentRecord(t *testing.T, c client.Client, obj *ociv1alpha1.ImageComposit
 	return latest.Status.RefExport
 }
 
-// refetch carries the status written by the previous step back onto the object under test, the way
-// a fresh reconcile would read it.
+// refetch copies the stored status back onto obj, as a fresh reconcile would read it.
 func refetch(t *testing.T, c client.Client, obj *ociv1alpha1.ImageComposition) {
 	t.Helper()
 	var latest ociv1alpha1.ImageComposition

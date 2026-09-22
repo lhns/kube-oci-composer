@@ -41,9 +41,8 @@ func TestPublishRefDrivesTheTag(t *testing.T) {
 	}
 }
 
-// TestUntemplatedRefPublishesByDigest — the manifest as written, before anything rewrites it.
-// It must not invent a tag; publishing by digest alone is correct and the missing rewrite shows
-// up at the consumer instead.
+// TestUntemplatedRefPublishesByDigest — a bare ref (the manifest before any rewrite) must not
+// invent a tag; publishing by digest alone is correct.
 func TestUntemplatedRefPublishesByDigest(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("untemplated", urlLayer("core", url, digest, "/core"))
