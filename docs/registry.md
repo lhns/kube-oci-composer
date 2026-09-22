@@ -214,11 +214,7 @@ published a retention policy that protected nothing.
               "pulledWithin": "720h",
               "pushedWithin": "720h"
             }
-          ],
-          "keepUntagged": {
-            "pulledWithin": "720h",
-            "pushedWithin": "720h"
-          }
+          ]
         }
       ]
     }
@@ -276,9 +272,8 @@ spec's tags. That includes digest-only publications and attestations
   documentation says the opposite.
 
 So `keepUntagged` protects nothing the controllers publish, and it costs every retired image its
-disk space. `registry.retention.keepUntagged` switches it off. It is on in this release and
-defaults to off from the next, once every object has reconciled and carries its tag. With it off, a
-retired manifest is reclaimed `gcDelay` after its last tag expires, layers included.
+disk space. The chart does not configure it (`registry.retention.keepUntagged: false`). A retired
+manifest is reclaimed `gcDelay` after its last tag expires, layers included.
 
 **If you run your own zot, turn `keepUntagged` off too**, but only once your objects have been
 backfilled. Content attached by hand (`cosign attest`, `oras attach`) is untagged, and after that

@@ -63,24 +63,22 @@ def problems(cfg):
         found.append("the keepTags entry does not key on pushedWithin, so a tag pushed and never "
                      "pulled is protected by nothing")
 
-    # keepUntagged is optional since ADR 0060 -- the controllers name everything they publish after
-    # its own digest, so nothing live is untagged -- and configuring it is what pins every retired
-    # manifest forever. What each shape still has to get right:
-    keep_untagged = policy.get("keepUntagged")
-    if keep_untagged is not None:
-        # Configured: it has to protect what it claims to. Pull recency alone matches nothing for a
-        # manifest that was just pushed and never pulled.
-        if not keep_untagged.get("pulledWithin"):
-            found.append("keepUntagged does not key on pulledWithin, so digest-pinned images are "
-                         "unprotected")
-        if not keep_untagged.get("pushedWithin"):
-            found.append("keepUntagged does not key on pushedWithin, so freshly pushed untagged "
-                         "content matches no rule")
-    elif not cfg["storage"].get("gcDelay"):
-        # Not configured: gcDelay is then the ONLY cover for a build's output between being pushed
-        # and being named (ADR 0054). zot's default is shorter than that gap under load.
-        found.append("keepUntagged is off and gcDelay is not set, so nothing covers a build's "
-                     "output between its push and the controller naming it")
+    # The controllers name everything they publish after its own digest (ADR 0060), so nothing live
+    # is untagged -- and configuring keepUntagged is what made zot keep every retired manifest
+    # forever: the last tag going deletes the digest's statistics, and a statistics-less untagged
+    # manifest is then retained without being evaluated. So the shipped policy must not have it.
+    if "keepUntagged" in policy:
+        found.append("keepUntagged is configured, which keeps every manifest whose last tag expired "
+                     "-- and every layer it references -- forever (ADR 0060)")
+    # Nothing reclaims retired manifests without it.
+    if policy.get("deleteUntagged") is not True:
+        found.append("deleteUntagged is not true, so a manifest whose last tag expired is never "
+                     "reclaimed")
+    # gcDelay is the ONLY cover for a build's output between being pushed and being named
+    # (ADR 0054). zot's default is shorter than that gap under load.
+    if not cfg["storage"].get("gcDelay"):
+        found.append("gcDelay is not set, so nothing covers a build's output between its push and "
+                     "the controller naming it")
 
     return found
 
@@ -133,7 +131,7 @@ def main():
     cfg = config_from(sys.stdin)
     found = problems(cfg)
     if found:
-        print("the bundled retention policy would protect nothing:")
+        print("the bundled retention policy would lose live content or keep dead content forever:")
         for f in found:
             print("  -", f)
         return 1
@@ -154,11 +152,8 @@ def main():
             return 1
         print(f"OK: {sys.argv[1]} agrees with the rendered config.")
 
-    if policy_of(cfg).get("keepUntagged") is None:
-        print("OK: the policy keys on pull recency; live content is tagged, and untagged content is "
-              "reclaimed after gcDelay.")
-    else:
-        print("OK: the policy keys on pull recency and covers both tags and digests.")
+    print("OK: the policy keys on pull recency; live content is tagged, and what nothing names is "
+          "reclaimed after gcDelay.")
     return 0
 
 

@@ -7,6 +7,26 @@ may change between minor versions.
 
 ### Changed
 
+- **BREAKING (for anything attached by hand): `registry.retention.keepUntagged` now defaults to
+  `false`** ([ADR 0060](docs/adr/0060-every-manifest-carries-its-own-name.md)). Retired images are
+  reclaimed, layers included, `gcDelay` after their last tag expires. Before, they stayed on disk
+  forever.
+
+  **What operators see:** a large one-time drop in registry storage over the first few sweeps
+  after upgrading, as everything leaked so far is reclaimed.
+
+  **Upgrading from 0.5.x or earlier, keep `keepUntagged` on until objects have reconciled.** Content published before this release
+  carries no digest tag until its object reconciles, and a digest-only publication or attestation
+  that is still untagged is collected by age while something pulls it:
+
+  1. Upgrade with `registry.retention.keepUntagged: true`.
+  2. Wait until every object has reconciled: `observedGeneration` matches `generation`, and
+     `status.artifact.tags` includes a `digest-` tag. The default interval is 1h.
+  3. Remove the override.
+
+  Content attached by hand (`cosign attest`, `oras attach`) is untagged and is reclaimed by age;
+  `keepUntagged: true` protects it again, at the cost of the leak.
+
 - **Every published manifest is also tagged with its own digest, `digest-<hex>`**
   ([ADR 0060](docs/adr/0060-every-manifest-carries-its-own-name.md)). This applies to both kinds,
   including digest-only publications and attestations. It closes two zot behaviours:
