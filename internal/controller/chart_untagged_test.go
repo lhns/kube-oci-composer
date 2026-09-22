@@ -76,9 +76,9 @@ func TestTheNamingGapFloorTracksThePollInterval(t *testing.T) {
 
 // keepUntagged with pulledWithin alone matches NOTHING for content that was just pushed and never
 // pulled -- which is precisely what a build publishing by digest produces. It read as protection
-// and was none.
+// and was none. Off by default now (ADR 0060); this holds for anyone turning it back on.
 func TestFreshlyPushedUntaggedContentIsKept(t *testing.T) {
-	out := render(t)
+	out := render(t, "--set", "registry.retention.keepUntagged=true")
 	idx := strings.Index(out, `"keepUntagged"`)
 	if idx < 0 {
 		t.Fatal("no keepUntagged policy at all")
@@ -156,19 +156,17 @@ func TestKeepUntaggedOffLeavesNoRuleBehind(t *testing.T) {
 	}
 }
 
-// ON by default in this release, and deliberately. Turning it off before every object has
-// reconciled on a controller that applies the digest tag would expose a digest-only publication or
-// an attestation still untagged from before -- to collection by age, while a workload pulls it. The
-// next release flips it once that has had a release to happen.
-func TestKeepUntaggedStaysOnUntilObjectsHaveBeenBackfilled(t *testing.T) {
+// OFF by default, one release after the digest tag -- which gave every object that release to be
+// backfilled. On, zot keeps every manifest whose last tag expired, and the layers behind it.
+func TestKeepUntaggedIsOffByDefault(t *testing.T) {
 	cfg := registryConfig(t)
 	storage, _ := cfg["storage"].(map[string]any)
 	retention, _ := storage["retention"].(map[string]any)
 	policies, _ := retention["policies"].([]any)
 	policy, _ := policies[0].(map[string]any)
-	if _, present := policy["keepUntagged"]; !present {
-		t.Error("keepUntagged is off by default in the release that introduces the digest tag; " +
-			"objects published before it have not been backfilled yet")
+	if _, present := policy["keepUntagged"]; present {
+		t.Error("keepUntagged is configured by default, which keeps every retired image on disk " +
+			"forever (ADR 0060)")
 	}
 }
 

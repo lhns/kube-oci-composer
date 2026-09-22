@@ -160,7 +160,7 @@ done
 # would switch off reclaiming altogether, and the digest-only retention test would pass while
 # proving nothing.
 #
-# keepUntagged is OFF -- the configuration the chart defaults to from the next release (ADR 0060).
+# keepUntagged is OFF, which is the chart's default (ADR 0060).
 # The controllers name everything they publish after its own digest, so nothing live is untagged,
 # and with keepUntagged configured zot keeps every manifest whose last tag expired, forever: the
 # digest-only test's control could never be reclaimed. requireKeepUntaggedOff refuses to run it then.
@@ -184,7 +184,6 @@ helm upgrade --install kube-oci-composer charts/kube-oci-composer \
   --set "retention.refreshInterval=$E2E_REFRESH" \
   --set "registry.retention.gcFactor=$E2E_GC_FACTOR" \
   --set "registry.retention.gcMaxSchedulerDelay=$E2E_GC_MAX_SCHEDULER_DELAY" \
-  --set registry.retention.keepUntagged=false \
   --set "imageBuild.buildPollInterval=$E2E_BUILD_POLL" \
   --set registry.logLevel=debug \
   --wait --timeout 5m
