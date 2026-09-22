@@ -355,8 +355,15 @@ func (r *Refresher) refreshObject(ctx context.Context, target Target, out *Resul
 		refOpts = append(refOpts, name.Insecure)
 	}
 
-	var failed, gone int
-	var lastErr, lastGone error
+	// Which references are the CURRENT artifact -- what the object reports, and what a workload
+	// pulls. Losing one of those is a different event from history expiring. ADR 0049, amended.
+	current := map[string]bool{}
+	for _, ref := range refsOf(repo, target.Artifact, nil) {
+		current[ref] = true
+	}
+
+	var failed, gone, lostCurrent int
+	var lastErr, lastGone, lastCurrent error
 	for _, ref := range refs {
 		parsed, err := name.ParseReference(ref, refOpts...)
 		if err != nil {
@@ -397,7 +404,15 @@ func (r *Refresher) refreshObject(ctx context.Context, target Target, out *Resul
 			// climbing, on the cluster that reported it. An object stayed Degraded permanently over
 			// history that had expired, which is exactly how a real outage arrives looking like
 			// three days of existing noise. ADR 0049.
+			//
+			// Except for the current artifact, which is not history and not expired: the object is
+			// telling workloads to pull something that is not there. That one is a failure, below.
 			out.NotFound++
+			if current[ref] {
+				lostCurrent++
+				lastCurrent = fmt.Errorf("%s is gone: %w", ref, err)
+				continue
+			}
 			gone++
 			lastGone = fmt.Errorf("%s is gone: %w", ref, err)
 		default:
@@ -415,6 +430,25 @@ func (r *Refresher) refreshObject(ctx context.Context, target Target, out *Resul
 			fmt.Sprintf("%d of %d references this object published are already gone from the "+
 				"registry and cannot be refreshed back into existence (%v).",
 				gone, len(refs), lastGone))
+	}
+
+	// The current artifact gone is NOT quiet, and it does count towards the escalation. It is the
+	// case ADR 0049's silence was never meant to cover: history ages out by design, but the artifact
+	// in status is what every workload referencing this object pulls, and nothing about it has
+	// expired. Its controller repairs it on its next reconcile -- the composer republishes identical
+	// bytes, a build rebuilds -- so a loss that is still here DegradedAfter cycles later is one that
+	// is not being repaired, and that is worth being loud about.
+	//
+	// A moving tag deleted exactly this, under a Ready object, before ADR 0060.
+	if lostCurrent > 0 {
+		recon.Event(r.Recorder, obj, corev1.EventTypeWarning, ociv1alpha1.ReasonArtifactLost,
+			fmt.Sprintf("The artifact this object currently reports -- what a workload referencing "+
+				"it pulls -- is gone from the registry (%v). Its controller republishes or rebuilds "+
+				"it on the next reconcile.", lastCurrent))
+		failed += lostCurrent
+		if lastErr == nil {
+			lastErr = lastCurrent
+		}
 	}
 
 	if failed > 0 {
