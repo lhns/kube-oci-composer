@@ -296,8 +296,7 @@ func TestMultiArchIndexIsRejected(t *testing.T) {
 	if !strings.Contains(err.Error(), "multi-architecture index") {
 		t.Fatalf("the error does not explain the problem: %v", err)
 	}
-	var te *recon.TerminalError
-	if !asTerminalErr(err, &te) {
+	if !recon.IsTerminal(err) {
 		t.Fatal("a multi-architecture index needs a spec change, so it must be terminal")
 	}
 }

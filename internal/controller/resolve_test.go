@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 
@@ -349,9 +348,6 @@ func TestLayerOrderIsPreservedAcrossSourceKinds(t *testing.T) {
 		}
 	}
 }
-
-// asTerminalErr is errors.As, named so the intent reads at each call site.
-func asTerminalErr(err error, target **recon.TerminalError) bool { return errors.As(err, target) }
 
 // TestSourceRefRefusesAnotherNamespace — the controller's RBAC over Flux sources is cluster-wide,
 // so otherwise a tenant could bake any namespace's source into an image they can read. Terminal:
