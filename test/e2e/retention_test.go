@@ -236,8 +236,15 @@ func TestPullingByDigestKeepsAnUntaggedImageAlive(t *testing.T) {
 	// anything satisfies the first half perfectly. requireUntaggedCollection reads the config and
 	// requireCollectionPossible checks gcDelay, but neither proves the collector ever arrived --
 	// and at least once it did not, within a window this test called sufficient.
-	abandonedDigest := pushTinyImage(t, abandoned)
+	// Built from a DIFFERENT Dockerfile, so it has its own digest. Identical content would share
+	// zot's per-digest statistics with the manifest being pulled below, and this control would be
+	// renewed by the very pulls it exists to outlive.
+	abandonedDigest := pushTinyImageFrom(t, abandoned, "Dockerfile.other")
 	deleteTag(t, abandoned, "v1")
+	if abandonedDigest == digest {
+		t.Fatalf("the control shares a digest with its subject (%s); zot keys retention statistics "+
+			"by digest, so pulling one renews the other and this control can never expire", digest)
+	}
 
 	// Remove the tag, leaving the manifest reachable only by digest.
 	deleteTag(t, repo, "v1")
@@ -366,6 +373,21 @@ func tagsList(t *testing.T, repository string) string {
 // failure looks like a finding rather than like a bug.
 func pushTinyImage(t *testing.T, repository string) string {
 	t.Helper()
+	return pushTinyImageFrom(t, repository, "Dockerfile")
+}
+
+// pushTinyImageFrom publishes a fixture built from a NAMED Dockerfile, so a caller can get content
+// whose digest differs from everything else in the suite.
+//
+// That matters for any control on the DIGEST side. zot keys its retention statistics by digest,
+// not by repository, so two repositories holding identical content share one clock: pulling either
+// renews both. A digest-level negative control built from the same Dockerfile as its subject is
+// therefore not a control at all -- it is kept alive by the very pulls it is supposed to outlive,
+// and reports that the registry collects nothing. That is exactly what it did.
+//
+// Tag-level controls are unaffected, which is why this went unnoticed until one was added here.
+func pushTinyImageFrom(t *testing.T, repository, dockerfile string) string {
+	t.Helper()
 
 	// The repository is <host>/<name>; the object is named after the name half.
 	name := repository
@@ -373,7 +395,7 @@ func pushTinyImage(t *testing.T, repository string) string {
 		name = name[i+1:]
 	}
 
-	applyBuildTo(t, name, "Dockerfile", buildRegistry+"/"+repository)
+	applyBuildTo(t, name, dockerfile, buildRegistry+"/"+repository)
 	buildEventually(t, "the retention fixture "+name+" to publish", func() error {
 		st := buildStatus(t, name)
 		if st.Artifact == nil || st.Artifact.Digest == "" {
