@@ -216,6 +216,7 @@ func (r *ImageBuildReconciler) reconcile(ctx context.Context, obj *ociv1alpha1.I
 	// rather than silent, because anything pinned to the old digest is not helped by the new one.
 	if obj.Status.Artifact != nil && obj.Status.InputHash == inputHash {
 		if r.stillPublished(ctx, obj) {
+			r.backfillDigestTags(ctx, obj)
 			// The export runs on the converged path too, which is the only place it CAN run for an
 			// object that is already built. push.writeRefTo is not part of the input hash -- adding
 			// it changes nothing about what to build -- so an object that has converged never
@@ -736,8 +737,10 @@ func (r *ImageBuildReconciler) recordSuccess(obj *ociv1alpha1.ImageBuild, inputs
 	if err != nil {
 		effective = obj.Spec.Push.Tags
 	}
-	tags := make([]string, 0, len(effective))
-	for _, t := range effective {
+	// Plus the digest's own tag, which applyTags adds to every accepted publish (ADR 0060).
+	published := recon.PublishTags(effective, digest)
+	tags := make([]string, 0, len(published))
+	for _, t := range published {
 		tags = append(tags, repo+":"+t)
 	}
 

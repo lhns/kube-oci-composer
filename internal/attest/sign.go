@@ -213,7 +213,14 @@ func (k *Key) signedPayload(repo name.Repository, digest v1.Hash) ([]byte, error
 
 // SignatureTag is cosign's convention for where a signature lives.
 func SignatureTag(digest v1.Hash) string {
-	return strings.Replace(digest.String(), ":", "-", 1) + ".sig"
+	return OwnTag(digest) + ".sig"
+}
+
+// OwnTag names a manifest after its own digest: "sha256-<hex>". The same string as
+// reconciler.DigestTag, repeated rather than imported so this package stays free of the
+// controller's dependencies. ADR 0060.
+func OwnTag(digest v1.Hash) string {
+	return strings.Replace(digest.String(), ":", "-", 1)
 }
 
 // VerifiedSignatureExists reports whether a signature THIS KEY made is already attached.

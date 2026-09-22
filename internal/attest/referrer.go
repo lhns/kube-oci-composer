@@ -120,6 +120,14 @@ func Push(repo name.Repository, subject v1.Descriptor, predicateType string, pay
 	if err := remote.Put(ref, taggable{raw: raw, mediaType: types.OCIManifestSchema1}, opts...); err != nil {
 		return v1.Hash{}, fmt.Errorf("pushing the attestation manifest: %w", err)
 	}
+	// And named after its own digest, like everything else this project publishes (ADR 0060). A
+	// referrer is otherwise untagged, and untagged is what a registry's collector reclaims by AGE
+	// once keepUntagged is off -- however often the refresher pulls it. The refresher already finds
+	// and pulls referrers, so the tag is renewed with no further change.
+	own := repo.Tag(OwnTag(digest))
+	if err := remote.Put(own, taggable{raw: raw, mediaType: types.OCIManifestSchema1}, opts...); err != nil {
+		return v1.Hash{}, fmt.Errorf("naming the attestation manifest: %w", err)
+	}
 	return digest, nil
 }
 

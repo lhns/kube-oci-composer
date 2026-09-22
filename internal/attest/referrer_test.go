@@ -134,3 +134,24 @@ func TestTheAttestationDoesNotTouchTheArtifact(t *testing.T) {
 		t.Fatal("the artifact's manifest bytes changed")
 	}
 }
+
+// An attestation is named after its own digest, because untagged is what a registry's collector
+// reclaims by age -- whoever is pulling it. Once the chart stops configuring keepUntagged, an
+// untagged SBOM on a live image would be deleted a gcDelay after it was written. ADR 0060.
+func TestAnAttestationCarriesItsOwnName(t *testing.T) {
+	repo, subject := pushArtifact(t)
+
+	sbom, err := Push(repo, subject, PredicateSPDX, []byte(`{"spdxVersion":"SPDX-2.3"}`), false, nil)
+	if err != nil {
+		t.Fatalf("pushing the SBOM: %v", err)
+	}
+
+	desc, err := remote.Head(repo.Tag(OwnTag(sbom)))
+	if err != nil {
+		t.Fatalf("the attestation has no tag of its own, so nothing protects it but pull recency "+
+			"on untagged content: %v", err)
+	}
+	if desc.Digest != sbom {
+		t.Fatalf("%s resolves to %s, want the attestation %s", OwnTag(sbom), desc.Digest, sbom)
+	}
+}

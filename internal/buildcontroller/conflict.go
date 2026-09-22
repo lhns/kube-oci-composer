@@ -508,6 +508,12 @@ func (r *ImageBuildReconciler) stillPublished(ctx context.Context, obj *ociv1alp
 			}
 		}
 	}
+	// The digest's own tag only once status says it was applied. An object published before the
+	// tag existed does not have it yet, and reading its absence as a loss would rebuild every
+	// ImageBuild in the cluster on upgrade -- to a different digest. backfillDigestTags adds it.
+	if recon.HasDigestTag(prev.Tags, prev.Digest) {
+		refs = append(refs, repo+":"+recon.DigestTag(prev.Digest))
+	}
 
 	for _, ref := range refs {
 		parsed, err := name.ParseReference(ref, reg.refOpts...)
@@ -520,6 +526,59 @@ func (r *ImageBuildReconciler) stillPublished(ctx context.Context, obj *ociv1alp
 		}
 	}
 	return true
+}
+
+// backfillDigestTags gives content published before ADR 0060 its digest's own tag.
+//
+// Driven by status: a record that does not claim the tag gets it applied once, then claims it, so a
+// converged object costs nothing here afterwards. The current artifact and every retained history
+// entry, because history is what a rollback pulls and what a rolling tag used to delete.
+//
+// Best effort. A failure is logged and retried next pass; it must not make a Ready object unready,
+// and a record whose content has already expired simply stays unclaimed.
+func (r *ImageBuildReconciler) backfillDigestTags(ctx context.Context, obj *ociv1alpha1.ImageBuild) {
+	art := obj.Status.Artifact
+	pending := art != nil && art.Digest != "" && !recon.HasDigestTag(art.Tags, art.Digest)
+	for _, rec := range obj.Status.History {
+		if rec.Digest != "" && !recon.HasDigestTag(rec.Tags, rec.Digest) {
+			pending = true
+		}
+	}
+	if !pending {
+		return
+	}
+
+	reg, err := r.registryFor(ctx, obj)
+	if err != nil || reg.repo == "" {
+		return
+	}
+	public := r.Default.PublicRepository(reg.repo)
+	log := logf.FromContext(ctx)
+
+	// Applied once per digest even when the artifact and a history entry share it.
+	applied := map[string]bool{}
+	apply := func(digest string) bool {
+		if done, seen := applied[digest]; seen {
+			return done
+		}
+		err := recon.ApplyDigestTag(reg.repo, digest, reg.refOpts, reg.opts)
+		if err != nil && !recon.IsNotFound(err) {
+			log.Error(err, "applying the digest's own tag; will retry", "digest", digest)
+		}
+		applied[digest] = err == nil
+		return err == nil
+	}
+	own := func(digest string) string { return public + ":" + recon.DigestTag(digest) }
+
+	if art != nil && art.Digest != "" && !recon.HasDigestTag(art.Tags, art.Digest) && apply(art.Digest) {
+		art.Tags = append(art.Tags, own(art.Digest))
+	}
+	for i := range obj.Status.History {
+		rec := &obj.Status.History[i]
+		if rec.Digest != "" && !recon.HasDigestTag(rec.Tags, rec.Digest) && apply(rec.Digest) {
+			rec.Tags = append(rec.Tags, own(rec.Digest))
+		}
+	}
 }
 
 // registryAccess is everything needed to ask this object's registry a question.
@@ -565,8 +624,11 @@ func (r *ImageBuildReconciler) registryFor(
 // remeaning its own tag was never a conflict. ADR 0054.
 //
 // Returns a conflict record when onConflict: Keep left the tag alone. Refuses terminally under
-// Fail, having tagged nothing -- the pushed manifest is then untagged and the registry's
-// deleteUntagged reclaims it.
+// Fail, having tagged nothing -- not even the digest's own tag -- so the pushed manifest stays
+// untagged and the registry's deleteUntagged reclaims it. Naming refused content would make it
+// permanent.
+//
+// Every accepted publish also gets its digest's own tag, digest-only ones included (ADR 0060).
 func (r *ImageBuildReconciler) applyTags(
 	ctx context.Context, obj *ociv1alpha1.ImageBuild, digest string,
 ) (*ociv1alpha1.TagConflictStatus, error) {
@@ -574,11 +636,6 @@ func (r *ImageBuildReconciler) applyTags(
 	tags, err := recon.EffectiveTags(p.GetTags(), p.GetRef())
 	if err != nil {
 		return nil, err
-	}
-	if len(tags) == 0 {
-		// Digest-only publication. The name IS the content, so nothing can be remeaned and there
-		// is nothing to apply.
-		return nil, nil
 	}
 
 	reg, err := r.registryFor(ctx, obj)
@@ -635,7 +692,7 @@ func (r *ImageBuildReconciler) applyTags(
 	case err != nil:
 		return nil, fmt.Errorf("reading the pushed manifest %s: %w", digest, err)
 	}
-	for _, tag := range tags {
+	for _, tag := range recon.PublishTags(tags, digest) {
 		ref, err := name.NewTag(reg.repo+":"+tag, reg.refOpts...)
 		if err != nil {
 			return nil, recon.Terminal("invalid tag %q: %v", tag, err)

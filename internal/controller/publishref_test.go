@@ -8,6 +8,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
+	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 )
 
 func TestPublishRefDrivesTheTag(t *testing.T) {
@@ -20,7 +21,10 @@ func TestPublishRefDrivesTheTag(t *testing.T) {
 	r, host := registryReconciler(t, obj)
 
 	art := build(t, r, obj, "publish via ref")
-	if want := []string{host + "/default/viaref:s0123456789abcdef"}; !slices.Equal(art.Tags, want) {
+	if want := []string{
+		host + "/default/viaref:s0123456789abcdef",
+		host + "/default/viaref:" + recon.DigestTag(art.Digest),
+	}; !slices.Equal(art.Tags, want) {
 		t.Fatalf("tags %v, want %v", art.Tags, want)
 	}
 
@@ -44,11 +48,12 @@ func TestUntemplatedRefPublishesByDigest(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("untemplated", urlLayer("core", url, digest, "/core"))
 	obj.Spec.Push = &ociv1alpha1.Push{Ref: "untemplated"}
-	r, _ := registryReconciler(t, obj)
+	r, host := registryReconciler(t, obj)
 
 	art := build(t, r, obj, "untemplated ref")
-	if len(art.Tags) != 0 {
-		t.Fatalf("tags %v, want none — a bare ref must not become :latest", art.Tags)
+	// Only the digest's own tag (ADR 0060): a bare ref must not become :latest.
+	if want := []string{host + "/default/untemplated:" + recon.DigestTag(art.Digest)}; !slices.Equal(art.Tags, want) {
+		t.Fatalf("tags %v, want only %v — a bare ref must not become :latest", art.Tags, want)
 	}
 
 	ref, err := name.ParseReference(art.Ref, name.Insecure)
