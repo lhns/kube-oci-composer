@@ -14,11 +14,8 @@ import (
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 )
 
-// Turning an ImageBuild into a Job.
-//
-// One Job per build, rootless, in the object's own namespace. A Job is an API object, so it
-// survives leader failover and is adopted rather than restarted. The rejected alternatives — a
-// shared BuildKit Deployment, in-process building — are in ADR 0025.
+// Turning an ImageBuild into a Job: one rootless Job per build, in the object's own namespace, so
+// it survives leader failover and is adopted rather than restarted. ADR 0025.
 
 const (
 	// contextVolume holds the fetched build context; resultVolume carries the metadata file back.
@@ -30,32 +27,28 @@ const (
 	contextPath = "/workspace"
 	resultPath  = "/result"
 
-	// Where a Dockerfile that does not live in the context is projected, and the name it always
-	// takes there regardless of what the spec called it -- the path only means something inside a
-	// context, and there is no context here.
+	// A Dockerfile from outside the context is projected here under a fixed name.
 	dockerfileVolume = "dockerfile"
 	dockerfilePath   = "/dockerfile"
 	dockerfileName   = "Dockerfile"
 	dockerfileKey    = "Dockerfile"
 	secretPath       = "/secrets"
 
-	// Where the per-build context token is projected. subPath, like the Dockerfile, so it is a
-	// plain regular file rather than a symlink farm.
+	// The per-build context token, projected via subPath as a plain file.
 	contextTokenVolume = "context-token"
 	contextTokenPath   = "/context-token"
 	contextTokenFile   = "token"
-	// Where the copied registry CA is mounted, and where the merged bundle is written. The bundle
-	// is an emptyDir because uid 1000 cannot write to the image's root-owned /etc/ssl/certs.
+	// The copied registry CA, and the merged bundle. The bundle is an emptyDir because uid 1000
+	// cannot write to the image's /etc/ssl/certs.
 	registryCAPath = "/registry-ca"
 	caBundlePath   = "/certs/ca-bundle.crt"
 	dockerPath     = "/docker"
 
-	// metadataFile is where buildctl writes the pushed digest, which is the one thing the
-	// controller needs back out of the build.
+	// metadataFile is where buildctl writes the pushed digest.
 	metadataFile = "metadata.json"
 
-	// InputHashLabel lets the controller find the Job for a given set of inputs without reading
-	// status, which is what makes adoption after a restart work.
+	// InputHashLabel lets the controller find the Job for a set of inputs without reading status,
+	// so it can adopt it after a restart.
 	InputHashLabel = "oci.lhns.de/input-hash"
 	// ManagedByLabel marks Jobs this controller owns.
 	ManagedByLabel = "app.kubernetes.io/managed-by"
@@ -63,49 +56,29 @@ const (
 
 // JobConfig is the operator-level configuration a build needs.
 type JobConfig struct {
-	// BuilderImage is the rootless BuildKit image, pinned by digest.
-	//
-	// Pinning is enforced at startup, not here; the digest is part of the input hash.
+	// BuilderImage is the rootless BuildKit image, pinned by digest (enforced at startup). Part of
+	// the input hash.
 	BuilderImage string
-	// FrontendImage is the Dockerfile frontend, pinned by digest. BuildKit resolves `# syntax=`
-	// over the network unless told otherwise.
+	// FrontendImage is the Dockerfile frontend, pinned by digest, so `# syntax=` is not resolved
+	// over the network.
 	FrontendImage string
-	// FetcherImage runs `oci-builder fetch-context` as the init container -- this operator's own
-	// image, pinned by digest.
-	//
-	// In the input hash, and the argument that it need not be is worth answering: every context is
-	// digest-addressed, so a correct fetcher has exactly one possible output. That holds for the
-	// DOWNLOAD and fails for the UNPACK -- a fixed zip or symlink bug changes the tree under an
-	// unchanged digest. Which is precisely why BuilderDigest is hashed.
+	// FetcherImage runs `oci-builder fetch-context` as the init container. In the input hash: a
+	// fixed unpack bug can change the tree under an unchanged context digest.
 	FetcherImage string
-	// SBOM and Provenance turn on BuildKit's own attestations.
-	//
-	// These DO belong in the input hash, unlike RegistryCA below: they change what is pushed. The
-	// pleasant consequence is that enabling them re-runs every build once, visibly, rather than
-	// leaving existing objects converged at a digest with no attestations and no record of why.
+	// SBOM and Provenance turn on BuildKit's attestations. In the input hash, because they change
+	// what is pushed.
 	SBOM       bool
 	Provenance bool
 
-	// RegistryCA is a PEM bundle the build must trust, copied into the build's namespace and
-	// merged with the image's own roots. Empty when the registry's certificate is already trusted.
-	//
-	// Deliberately NOT part of the input hash. How the bytes are transported does not change what
-	// they are -- the same note InsecureRegistries carries below.
+	// RegistryCA is a PEM bundle the build must trust, merged with the image's own roots. Empty
+	// when the registry is already trusted. Not in the input hash: transport, not content.
 	RegistryCA []byte
 
-	// InsecureRegistries are registry hosts to talk to over plain HTTP.
-	//
-	// Operator-level and opt-in per host, not a global "trust anything": an internal or air-gapped
-	// registry without TLS is a real deployment, and the alternative is telling those clusters to
-	// use a different tool. It is deliberately NOT part of the input hash — how the bytes are
-	// transported does not change what they are, so flipping it must not rebuild anything.
+	// InsecureRegistries are registry hosts to talk to over plain HTTP. Not in the input hash:
+	// transport, not content.
 	InsecureRegistries []string
-	// ContextBaseURL is where a build pod fetches its Flux context from: this controller, not
-	// source-controller. Empty leaves the pod fetching source-controller directly, which is what
-	// happens in tests that render a Job without an operator configuration.
-	//
-	// Not part of the input hash. It is where the bytes come from, not what they are -- the same
-	// note RegistryCA and InsecureRegistries carry.
+	// ContextBaseURL is where a build pod fetches its Flux context: this controller's proxy. Empty
+	// means fetch from source-controller directly (as in tests). Not in the input hash.
 	ContextBaseURL string
 
 	// SourceDateEpoch is the timestamp stamped into the result. Zero by default, matching the
@@ -113,11 +86,8 @@ type JobConfig struct {
 	SourceDateEpoch string
 }
 
-// jobName is deterministic in the object and its inputs.
-//
-// That is what makes a brief two-leader window harmless: the second Create gets AlreadyExists
-// rather than starting a second build, and a controller that restarts mid-build finds the Job it
-// left behind instead of duplicating it.
+// jobName is deterministic in the object and its inputs, so a second leader or a restarted
+// controller gets AlreadyExists or adopts the existing Job instead of starting another build.
 func jobName(obj *ociv1alpha1.ImageBuild, inputHash string) string {
 	name := fmt.Sprintf("%s-%s", obj.Name, shortHash(inputHash))
 	if len(name) > 63 {
@@ -126,8 +96,7 @@ func jobName(obj *ociv1alpha1.ImageBuild, inputHash string) string {
 	return name
 }
 
-// shortHash is the human-sized form of an input hash, used for the Job name and its label so the
-// two cannot drift.
+// shortHash is the human-sized form of an input hash, shared by the Job name and label.
 func shortHash(inputHash string) string {
 	short := strings.TrimPrefix(inputHash, "sha256:")
 	if len(short) > 12 {
@@ -136,35 +105,25 @@ func shortHash(inputHash string) string {
 	return short
 }
 
-// rootlessSecurityContext is the posture every container in a build pod runs under.
+// rootlessSecurityContext is the posture every container in a build pod runs under. Never
+// privileged (ADR 0001).
 //
-// Privileged is not offered at any setting: ADR 0001 named that blast radius as the reason for
-// refusing to build at all, and a flag reinstating it would make every other guarantee here
-// conditional. Nothing below grants host access, device access or host mounts.
-//
-// Rootless BuildKit maps a RANGE of UIDs so a build can create files owned by root and by package
-// users, and the kernel lets an unprivileged process map only ONE by itself; the range needs
-// CAP_SETUID, which is why the image ships setuid-root `newuidmap`. Both `allowPrivilegeEscalation:
-// false` and `drop: ALL` independently stop that working, and buildkitd then never starts. Measured
-// rather than chosen — ADR 0027.
+// Rootless BuildKit maps a UID range, which needs the setuid `newuidmap` and CAP_SETUID/SETGID;
+// either allowPrivilegeEscalation: false or dropping those capabilities stops buildkitd from
+// starting. ADR 0027.
 func rootlessSecurityContext() *corev1.SecurityContext {
 	return &corev1.SecurityContext{
 		RunAsUser:    ptr.To[int64](1000),
 		RunAsGroup:   ptr.To[int64](1000),
 		RunAsNonRoot: ptr.To(true),
 		Privileged:   ptr.To(false),
-		// Required for setuid newuidmap, and it buys only what the two capabilities below allow —
-		// this is not privileged, and the container is still uid 1000.
+		// Required for setuid newuidmap; limited by the capabilities below.
 		AllowPrivilegeEscalation: ptr.To(true),
-		// Seccomp and AppArmor unconfined are what rootless BuildKit documents as required: it
-		// creates user namespaces and mounts inside them, and both defaults block that. This is
-		// loosened for the BUILD pod only — the controller keeps distroless, non-root and a
-		// read-only root filesystem.
+		// Required by rootless BuildKit to create user namespaces and mount inside them. Build pod
+		// only; the controller stays locked down.
 		SeccompProfile:  &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined},
 		AppArmorProfile: &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeUnconfined},
-		// Everything dropped, then exactly the two the UID/GID mapping needs. Upstream's own
-		// Kubernetes example ships no capabilities stanza at all, which leaves the runtime's
-		// default set — around fourteen, including CHOWN, DAC_OVERRIDE and FOWNER.
+		// Everything dropped, then only what UID/GID mapping needs.
 		Capabilities: &corev1.Capabilities{
 			Drop: []corev1.Capability{"ALL"},
 			Add:  []corev1.Capability{"SETUID", "SETGID"},
@@ -172,8 +131,7 @@ func rootlessSecurityContext() *corev1.SecurityContext {
 	}
 }
 
-// fetchContextArgs is what the init container is told to fetch. See internal/fetchcontext for why
-// this is our own binary rather than the shell script it replaced.
+// fetchContextArgs is what the init container is told to fetch. See internal/fetchcontext.
 func fetchContextArgs(obj *ociv1alpha1.ImageBuild, cfg JobConfig, inputHash, contextURL,
 	contextDigest string) []string {
 
@@ -183,20 +141,14 @@ func fetchContextArgs(obj *ociv1alpha1.ImageBuild, cfg JobConfig, inputHash, con
 		"--url=" + contextURL,
 		"--digest=" + contextDigest,
 	}
-	// Re-checked on the extracted tree, which is the bytes actually built. Empty when the
-	// Dockerfile comes from outside the context: there is nothing in the tree to point at.
+	// Re-checks the FROM lines in the extracted tree, when the Dockerfile lives there.
 	if !projectedDockerfile(obj) {
 		args = append(args, "--dockerfile="+obj.Spec.Dockerfile.EffectiveDockerfile())
 	}
 	if ref := obj.Spec.Context.GetSourceRef(); ref != nil {
-		// Through the BUILDER, not source-controller. source-controller serves artifacts with no
-		// authentication, so a pod able to reach it can read any namespace's source; the builder
-		// serves only the artifact this build references, against a per-build token. See
-		// ContextProxy and ADR 0044.
-		//
-		// Unset only when the operator did not configure an endpoint, which the chart always does
-		// and the binary warns about at startup. The pod then fetches source-controller itself, as
-		// it did before -- a working build with the old reach, rather than a broken URL.
+		// Through this controller's context proxy, not source-controller, which serves every
+		// namespace's artifacts unauthenticated. ADR 0044. Without a configured endpoint the pod
+		// falls back to source-controller directly.
 		if cfg.ContextBaseURL != "" {
 			args[2] = fmt.Sprintf("--url=%s/contexts/%s/%s/%s",
 				strings.TrimSuffix(cfg.ContextBaseURL, "/"), obj.Namespace, obj.Name, inputHash)
@@ -205,8 +157,7 @@ func fetchContextArgs(obj *ociv1alpha1.ImageBuild, cfg JobConfig, inputHash, con
 		return append(args, "--kind=sourceRef", "--unpack=tar.gz", "--subpath="+ref.Subpath)
 	}
 	if img := obj.Spec.Context.GetImage(); img != nil {
-		// No unpack mode: an image is layers, not an archive, and it is flattened rather than
-		// extracted. --url carries the pinned reference, which is also its digest.
+		// An image is flattened, not unpacked; --url is the pinned reference.
 		return append(args, "--kind=image", "--subpath="+img.Subpath)
 	}
 	f := obj.Spec.Context.GetFetch()
@@ -214,15 +165,11 @@ func fetchContextArgs(obj *ociv1alpha1.ImageBuild, cfg JobConfig, inputHash, con
 		fmt.Sprintf("--strip-components=%d", f.StripComponents))
 }
 
-// buildctlArgs assembles the buildctl invocation. Split out because it is the part that decides
-// what gets built, and the only part the argv tests read.
+// buildctlArgs assembles the buildctl invocation.
 func buildctlArgs(obj *ociv1alpha1.ImageBuild, cfg JobConfig, repo string, cacheAvailable bool) []string {
 	spec := obj.Spec
-	// `context` and `dockerfile` are two independent BuildKit locals; they only ever coincided
-	// because the Dockerfile happened to live in the context tarball.
-	//
-	// Deliberately NOT unified by copying the projected Dockerfile into the context: that would
-	// silently overwrite one already there.
+	// Separate `context` and `dockerfile` locals. A projected Dockerfile is not copied into the
+	// context, which could overwrite one already there.
 	dockerfileLocal, filename := path.Join(contextPath, path.Dir(spec.Dockerfile.EffectiveDockerfile())),
 		path.Base(spec.Dockerfile.EffectiveDockerfile())
 	if projectedDockerfile(obj) {
@@ -260,41 +207,18 @@ func buildctlArgs(obj *ociv1alpha1.ImageBuild, cfg JobConfig, repo string, cache
 		args = append(args, "--opt", "no-network=true")
 	}
 
-	// rewrite-timestamp needs SOURCE_DATE_EPOCH to mean anything. Together they narrow the "same
-	// inputs, different bytes" gap; ADR 0025 says why they do not close it.
-	// oci-mediatypes=true, because BuildKit otherwise emits DOCKER media types and an OCI-native
-	// registry answers a manifest PUT with 415 Unsupported Media Type. zot does exactly that.
-	//
-	// Not an accommodation for one registry. This project is OCI-oriented throughout, the composer
-	// already writes OCI manifests, and the two kinds emitting different media types into the same
-	// registry is the kind of divergence the rest of this work has been removing. The Docker types
-	// were never chosen here; they were BuildKit's default and nothing had contradicted it.
-	// push-by-digest: the Job uploads the CONTENT and names nothing.
-	//
-	// Naming is the controller's, because only it can decide whether a tag may take on new meaning
-	// -- and it cannot decide that until the digest exists, which is after the build. A Job that
-	// tagged as it pushed made onConflict unenforceable on this kind: the check had to run before
-	// the build, against a digest that was not yet known. ADR 0054.
+	// rewrite-timestamp with SOURCE_DATE_EPOCH narrows, but does not close, the reproducibility
+	// gap (ADR 0025). oci-mediatypes: BuildKit defaults to Docker media types, which OCI-native
+	// registries such as zot reject with 415. push-by-digest: the Job pushes content only; the
+	// controller tags afterwards, which is where onConflict is enforced (ADR 0054).
 	args = append(args, "--output",
 		"type=image,name="+repo+",push=true,push-by-digest=true,rewrite-timestamp=true,oci-mediatypes=true"+
 			insecureAttr(repo, cfg.InsecureRegistries))
 	args = append(args, "--opt", "build-arg:SOURCE_DATE_EPOCH="+cfg.SourceDateEpoch)
 
-	// BuildKit's own attestations, for the kind that cannot have exact ones.
-	//
-	// ADR 0008 states the asymmetry: a composition knows every input by digest and can state them,
-	// while a build that runs `apt-get install` can only be scanned. So the composer derives its
-	// SBOM and the builder takes BuildKit's word, in BuildKit's format -- which is SPDX, and is why
-	// the composer emits SPDX too rather than making consumers carry two readers.
-	//
-	// TWO CONSEQUENCES WORTH KNOWING. Attestations attach as extra manifests in an image INDEX, so
-	// a single-platform build's status.artifact.digest becomes an index digest rather than a
-	// manifest digest -- existing pins keep resolving, but anything that assumed the digest named
-	// a manifest now finds an index. And BuildKit's provenance predicate carries wall-clock
-	// timestamps, so the index digest differs on every run of identical inputs: `rewrite-timestamp`
-	// and SOURCE_DATE_EPOCH, whose whole purpose is narrowing the "same inputs, different bytes"
-	// gap, are partly undone at the index level by this feature. No invariant breaks -- ADR 0025
-	// already says a build's output is an observation -- but it is a real trade and it is recorded.
+	// BuildKit's own attestations (ADR 0008). They turn the output into an image index, so
+	// status.artifact.digest names an index, and provenance carries wall-clock timestamps, so the
+	// index digest differs on every run of identical inputs.
 	if cfg.SBOM {
 		args = append(args, "--opt", "attest:sbom=")
 	}
@@ -304,24 +228,13 @@ func buildctlArgs(obj *ociv1alpha1.ImageBuild, cfg JobConfig, repo string, cache
 
 	if cacheRef := cacheRefFor(obj, repo); cacheRef != "" {
 		insecure := insecureAttr(repo, cfg.InsecureRegistries)
-		// Import ONLY when the cache reference actually resolves. BuildKit configures the registry
-		// cache importer eagerly, and a reference it cannot resolve is a fatal error rather than a
-		// warning -- so passing this unconditionally fails every build whose cache does not exist
-		// yet, which is every FIRST build.
-		//
-		// That went unnoticed for as long as the e2e ran against registry:2, whose answer for a
-		// missing manifest BuildKit happened to tolerate. zot's is not, and the difference is not
-		// something to depend on either way: a missing build cache must never fail a build, whatever
-		// the registry replies.
+		// Import only when the cache exists: BuildKit treats an unresolvable cache ref as fatal,
+		// which would fail every first build on some registries (e.g. zot).
 		if cacheAvailable {
 			args = append(args, "--import-cache", "type=registry,ref="+cacheRef+insecure)
 		}
-		// Export unconditionally: this is what creates the cache the next build imports.
-		//
-		// image-manifest=true with oci-mediatypes=true for the same reason as the image above, and
-		// then some: BuildKit's default cache format is a manifest LIST carrying a config a
-		// spec-conformant registry has no obligation to accept. The pair renders the cache as an
-		// ordinary OCI image manifest, which any registry can store.
+		// Export always, to create the cache. image-manifest=true with oci-mediatypes=true stores
+		// it as a plain OCI image manifest any registry accepts.
 		args = append(args, "--export-cache",
 			"type=registry,ref="+cacheRef+",mode=max,oci-mediatypes=true,image-manifest=true"+insecure)
 	}
@@ -329,11 +242,8 @@ func buildctlArgs(obj *ociv1alpha1.ImageBuild, cfg JobConfig, repo string, cache
 	return args
 }
 
-// insecureAttr returns the exporter attribute that allows plain HTTP, when the push target's host
-// is one the operator listed.
-//
-// Matched on host rather than applied globally, so naming one internal registry does not quietly
-// downgrade every other push the same controller makes.
+// insecureAttr returns the exporter attribute that allows plain HTTP, only when the push target's
+// host is one the operator listed.
 func insecureAttr(repository string, insecure []string) string {
 	if repository == "" || !recon.InsecureHost(repository, insecure) {
 		return ""
@@ -341,20 +251,15 @@ func insecureAttr(repository string, insecure []string) string {
 	return ",registry.insecure=true"
 }
 
-// projectedDockerfile reports whether the Dockerfile has to be carried into the pod rather than
-// found inside the context.
-//
-// One predicate for both the volume list and the buildctl argv: a mount without the matching
-// `--local` reads the wrong file, and a `--local` without the mount reads nothing.
+// projectedDockerfile reports whether the Dockerfile is carried into the pod rather than found in
+// the context. The single predicate for both the volume and the buildctl --local, so they agree.
 func projectedDockerfile(obj *ociv1alpha1.ImageBuild) bool {
 	df := obj.Spec.Dockerfile
 	return df != nil && (df.Inline != "" || df.ConfigMapRef != nil)
 }
 
-// buildVolumes returns the pod's volumes and the build container's mounts.
-//
-// Paired through one closure rather than two appends per source: a volume and the mount that names
-// it have to agree, and building them in separate lists is how they stop agreeing.
+// buildVolumes returns the pod's volumes and the build container's mounts, built in pairs so they
+// agree.
 func buildVolumes(obj *ociv1alpha1.ImageBuild, pushSecret, dockerfileSecret string) ([]corev1.Volume, []corev1.VolumeMount) {
 	spec := obj.Spec
 	var volumes []corev1.Volume
@@ -369,13 +274,8 @@ func buildVolumes(obj *ociv1alpha1.ImageBuild, pushSecret, dockerfileSecret stri
 	add(contextVolume, empty, contextPath, false)
 	add(resultVolume, empty, resultPath, false)
 
-	// A Dockerfile from outside the context, projected from the Secret the controller wrote after
-	// checking it.
-	//
-	// subPath, so this is a plain regular file: a Secret volume is otherwise a `..data` symlink farm
-	// and `--local` hands the directory to fsutil, which walks symlinks rather than flattening them.
-	// Losing updates is subPath's usual cost and here a second lock -- the pod builds the bytes the
-	// controller checked, and nothing re-resolves at pod start.
+	// The checked Dockerfile, via subPath: a Secret volume is otherwise a `..data` symlink farm,
+	// which fsutil walks rather than flattens. subPath also means no re-projection mid-build.
 	if projectedDockerfile(obj) {
 		volumes = append(volumes, corev1.Volume{
 			Name: dockerfileVolume,
@@ -394,13 +294,8 @@ func buildVolumes(obj *ociv1alpha1.ImageBuild, pushSecret, dockerfileSecret stri
 		})
 	}
 
-	// Push credentials are projected into the build pod rather than read by the controller, which
-	// keeps registry tokens out of the controller's memory entirely for the push path.
-	//
-	// The NAME is resolved by the controller: either the object's own secretRef, or a short-lived
-	// copy of the operator's credential that lives exactly as long as this Job. A pod can only mount
-	// Secrets from its own namespace, and the build must run in the object's namespace -- it mounts
-	// that namespace's build secrets and runs that namespace's code.
+	// Push credentials go to the pod, never into the controller's memory. The Secret is the
+	// object's own or a per-build copy of the operator's, in the build's namespace.
 	if pushSecret != "" {
 		add(dockerVolume, corev1.VolumeSource{
 			Secret: &corev1.SecretVolumeSource{
@@ -420,10 +315,7 @@ func buildVolumes(obj *ociv1alpha1.ImageBuild, pushSecret, dockerfileSecret stri
 }
 
 // registryCAVolumes mounts the copied CA and a writable place to merge it with the image's roots.
-//
-// Returned together with the env var and rendered alongside the script prelude, all three gated on
-// the same condition, so a test can assert on the rendered container instead of on runtime
-// behaviour. A `[ -f ... ]` check in the shell instead would silently no-op if a mount name drifted.
+// Gated on the same condition as the env var and script prelude in buildJob.
 func registryCAVolumes(caSecret string) ([]corev1.Volume, []corev1.VolumeMount) {
 	if caSecret == "" {
 		return nil, nil
@@ -463,36 +355,21 @@ func buildJob(obj *ociv1alpha1.ImageBuild, inputHash, contextURL, contextDigest 
 		env = append(env, corev1.EnvVar{Name: "DOCKER_CONFIG", Value: dockerPath})
 	}
 	if caSecret != "" {
-		// Both buildctl and the buildkitd it forks are Go binaries, so one variable covers both.
+		// Covers both buildctl and buildkitd (both Go).
 		env = append(env, corev1.EnvVar{Name: "SSL_CERT_FILE", Value: caBundlePath})
 	}
 
-	// The CA prelude, when there is one.
-	//
-	// SSL_CERT_FILE REPLACES Go's system pool rather than adding to it, so pointing it straight at
-	// the registry's CA would leave the build unable to verify docker.io -- and every `FROM
-	// alpine` and every frontend fetch would fail. Hence the merge.
-	//
-	// Written at runtime because a mount cannot be merged at render time, and possible because the
-	// build container does NOT set readOnlyRootFilesystem: rootlessSecurityContext deliberately
-	// omits it, and the comment there says the read-only rootfs is the controller's property.
-	//
-	// Braces and `|| true` because the script runs under `set -e` and a builder image without a
-	// system bundle must not fail the build before it starts.
-	//
-	// Not `/etc/buildkit/certs/<host>/ca.pem`: rootless BuildKit ignores it (moby/buildkit#6406).
+	// SSL_CERT_FILE replaces Go's system pool, so the registry CA is merged with the system bundle
+	// or public registries would stop verifying. `|| true` tolerates an image without a system
+	// bundle under `set -e`. /etc/buildkit/certs/<host>/ca.pem is ignored by rootless BuildKit
+	// (moby/buildkit#6406).
 	caPrelude := ""
 	if caSecret != "" {
 		caPrelude = fmt.Sprintf(`{ cat /etc/ssl/certs/ca-certificates.crt 2>/dev/null || true; cat %s/ca.crt; } > %s
 `, registryCAPath, caBundlePath)
 	}
-	// buildctl writes the pushed digest to a file in an emptyDir, which the controller cannot read.
-	// Copying it to the termination log is what gets it back out: Kubernetes surfaces that in the
-	// pod's container status, which is the supported channel for a small result and needs no exec
-	// and no log scraping.
-	//
-	// The `sh -c "$@"` form passes the buildctl arguments positionally, so nothing here has to
-	// quote them and an argument containing a space cannot break the script.
+	// The metadata file is copied to the termination log, which the controller reads from the pod
+	// status. `sh -c "$@"` passes the buildctl arguments positionally, so nothing needs quoting.
 	script := fmt.Sprintf(`set -e
 %sbuildctl-daemonless.sh "$@"
 cat %s > /dev/termination-log
@@ -507,11 +384,8 @@ cat %s > /dev/termination-log
 		Env:                    env,
 		VolumeMounts:           mounts,
 		TerminationMessagePath: corev1.TerminationMessagePathDefault,
-		// FallbackToLogsOnError, as on the fetcher, but for the opposite reason. On SUCCESS the
-		// wrapper script writes the digest to /dev/termination-log and that is what t.Message
-		// carries -- podBuildDigest reads it. On failure buildctl never reaches the cat, so the
-		// kubelet falls back to the log tail, which is why a cause is available without a
-		// pods/log grant. ADR 0046.
+		// On success the message is the digest (podBuildDigest); on failure the kubelet falls back
+		// to the log tail, giving a cause without a pods/log grant. ADR 0046.
 		TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 		SecurityContext:          rootlessSecurityContext(),
 	}
@@ -519,23 +393,12 @@ cat %s > /dev/termination-log
 		container.Resources = *spec.Resources
 	}
 
-	// The context is fetched by an init container rather than by the controller: the controller
-	// would otherwise have to hold the whole context in memory or on its own read-only filesystem,
-	// and the URL is already a digest-addressed artifact that anything can pull.
-	// No context means nothing to fetch. An empty tree is addressed by construction, and a fetcher
-	// with no URL would be a container whose only job is to succeed at nothing.
-	//
-	// Built inside the branch rather than built and then discarded: fetchContextArgs reads the
-	// context union, so constructing it unconditionally dereferences a nil.
+	// The context is fetched by an init container, never by the controller. No context, no init
+	// container (fetchContextArgs would dereference nil).
 	var initContainers []corev1.Container
 	if obj.Spec.Context != nil {
-		// Our own image and our own binary, not BuildKit and a shell. It fetches, VERIFIES the
-		// digest and only then extracts.
-		//
-		// FallbackToLogsOnError because an init-container failure used to surface as
-		// "BackoffLimitExceeded" and nothing else -- jobFailureDetail read only ContainerStatuses.
-		// With a real fetcher this is the most common way a build fails, so the message has to
-		// survive.
+		// Our own binary: it fetches, verifies the digest, then extracts. FallbackToLogsOnError so
+		// a fetch failure's cause reaches status.
 		fetch := corev1.Container{
 			Name:                     "fetch-context",
 			Image:                    cfg.FetcherImage,
@@ -545,8 +408,7 @@ cat %s > /dev/termination-log
 			TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 		}
 		if spec.Resources != nil {
-			// The same limits as the build container: otherwise the one container downloading
-			// somebody else's tarball is the one that is unbounded.
+			// Bound the container that downloads untrusted content too.
 			fetch.Resources = *spec.Resources
 		}
 		initContainers = append(initContainers, fetch)
@@ -557,9 +419,7 @@ cat %s > /dev/termination-log
 		volumes = append(volumes, vol)
 	}
 
-	// Enforced by Kubernetes rather than by the controller noticing: ActiveDeadlineSeconds kills
-	// the pod and marks the Job Failed with DeadlineExceeded, which observeJob already surfaces.
-	// A controller-side timer would have to survive a leader change to mean anything.
+	// Enforced by Kubernetes, which survives a leader change; observeJob surfaces DeadlineExceeded.
 	var deadline *int64
 	if spec.Timeout != nil && spec.Timeout.Duration > 0 {
 		deadline = ptr.To(int64(spec.Timeout.Seconds()))
@@ -575,23 +435,14 @@ cat %s > /dev/termination-log
 			},
 		},
 		Spec: batchv1.JobSpec{
-			// One attempt. BuildKit retries nothing usefully on its own, and a Job retrying a
-			// failing RUN four times just delays the failure the user needs to see.
+			// One attempt: retrying a failing RUN only delays the failure. The controller retries.
 			BackoffLimit:          ptr.To[int32](0),
 			ActiveDeadlineSeconds: deadline,
-			// Failed Jobs linger a little so `kubectl logs` still works; the controller records
-			// the pod name in status for exactly that.
+			// Linger so `kubectl logs` still works on a failed build.
 			TTLSecondsAfterFinished: ptr.To[int32](3600),
 			Template: corev1.PodTemplateSpec{
-				// Labels on the POD, not only on the Job.
-				//
-				// Kubernetes adds its own `job-name` and `controller-uid`, which is enough to find
-				// a pod and not enough to describe it. Anything selecting build pods as a CLASS --
-				// a NetworkPolicy letting them reach the registry, a quota, an admission rule --
-				// needs a label that says what they are, in a namespace this chart does not own.
-				//
-				// Without this the pods carried nothing at all, so a policy in a tenant namespace
-				// had no way to name them except by matching every pod.
+				// Pod labels too, so NetworkPolicies, quotas and admission rules in tenant
+				// namespaces can select build pods as a class.
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
 						ManagedByLabel: "kube-oci-builder",
@@ -601,10 +452,7 @@ cat %s > /dev/termination-log
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
 					ServiceAccountName: spec.ServiceAccountName,
-					// No API token unless the spec named an identity: a pod running code from a
-					// git repository must not carry the credentials of whatever created it.
-					// Suppressing the mount needs no ServiceAccount to exist, so it works in
-					// whatever namespace a build lands in.
+					// No API token unless the spec names an identity: the pod runs untrusted code.
 					AutomountServiceAccountToken: automount(spec.ServiceAccountName),
 					InitContainers:               initContainers,
 					Containers:                   []corev1.Container{container},
@@ -624,10 +472,8 @@ func automount(serviceAccount string) *bool {
 	return nil
 }
 
-// pushNames renders the comma-separated image names the exporter pushes to.
 // cacheRefFor returns where this object's build cache lives, or "" when caching is disabled.
-//
-// Always per-object; nothing shares one. See the doc on BuildCache.Ref for why.
+// Always per-object; see BuildCache.Ref.
 func cacheRefFor(obj *ociv1alpha1.ImageBuild, repo string) string {
 	cache := obj.Spec.Cache
 	if cache != nil && cache.Mode == "Disabled" {
@@ -642,13 +488,8 @@ func cacheRefFor(obj *ociv1alpha1.ImageBuild, repo string) string {
 	return fmt.Sprintf("%s-buildcache-%s-%s", repo, obj.Namespace, obj.Name)
 }
 
-// contextTokenProjection is the token volume and the mount that names it.
-//
-// Returned as a pair, for the reason buildVolumes gives for doing the same: a volume and the mount
-// that names it have to agree, and defining them apart is how they stop agreeing.
-//
-// subPath, as the Dockerfile uses it: a plain regular file rather than a `..data` symlink farm, and
-// no re-projection under a running pod.
+// contextTokenProjection is the token volume and the mount that names it, via subPath as a plain
+// file.
 func contextTokenProjection(secret string) (corev1.Volume, corev1.VolumeMount) {
 	return corev1.Volume{
 			Name: contextTokenVolume,
@@ -666,11 +507,8 @@ func contextTokenProjection(secret string) (corev1.Volume, corev1.VolumeMount) {
 		}
 }
 
-// fetchMounts is what the context fetcher mounts.
-//
-// The token is mounted HERE and nowhere else: the build container runs the user's Dockerfile, and
-// handing that a credential to the context endpoint would give every RUN line the reach this whole
-// arrangement removes.
+// fetchMounts is what the context fetcher mounts. The token is mounted only here, never in the
+// build container, where every RUN line could read it.
 func fetchMounts(contextSecret string) []corev1.VolumeMount {
 	mounts := []corev1.VolumeMount{{Name: contextVolume, MountPath: contextPath}}
 	if contextSecret == "" {
