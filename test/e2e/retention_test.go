@@ -28,6 +28,16 @@ import (
 // drifting apart.
 const retentionWindow = "30s"
 
+// windowSeconds is retentionWindow as a number, for the tests that scale their wait by it.
+func windowSeconds(t *testing.T) int {
+	t.Helper()
+	d, err := time.ParseDuration(retentionWindow)
+	if err != nil {
+		t.Fatalf("retentionWindow %q is not a duration: %v", retentionWindow, err)
+	}
+	return int(d.Seconds())
+}
+
 // collectionDeadline is how long a negative control waits for something to actually be collected.
 //
 // Far longer than the 30s window, and deliberately so. zot walks repositories on a rotation, so the
@@ -69,8 +79,16 @@ func keepaliveRepo(name string) string { return "keepalive-" + name }
 // It was right only while the two were close.
 func watchFor(t *testing.T) int {
 	t.Helper()
-	d := 2*deployedGCDelay(t) + 2*deployedRotation(t)
-	return int(d.Seconds())
+	// CAPPED, because the rotation estimate is both expensive and wrong. Uncapped it reached 348s
+	// against a flat 90s before -- 33 repositories at a 5s sweep -- and after that full wait the
+	// control repository STILL had its tag, so the term did not buy the visit it exists to
+	// guarantee. Paying linearly per repository for a guarantee that does not hold is the worst of
+	// both.
+	//
+	// What makes the shorter wait safe is not this number: it is that every test using it now ends
+	// in a negative control, which observes a real collection rather than predicting one.
+	rotation := min(deployedRotation(t), 30*time.Second)
+	return int((2*deployedGCDelay(t) + 2*rotation).Seconds())
 }
 
 // The load-bearing measurement: a PULL resets the retention clock.
@@ -184,7 +202,10 @@ func TestExpiryIsNotPrompt(t *testing.T) {
 	repo := keepaliveRepo("cold")
 	digest := pushTinyImage(t, repo)
 
-	waited := watchFor(t)
+	// Three windows, not watchFor. This test asserts NOTHING -- it reports -- so it has no reason
+	// to pay for a margin that exists to make an assertion safe, and it was the critical path of
+	// the parallel group while doing it.
+	waited := 3 * windowSeconds(t)
 	sleepInCluster(t, waited)
 
 	// The duration is read back rather than written in, because it is derived now -- the message
@@ -203,14 +224,20 @@ func TestPullingByDigestKeepsAnUntaggedImageAlive(t *testing.T) {
 	t.Parallel()
 
 	repo := keepaliveRepo("untagged")
+	abandoned := keepaliveRepo("untagged-control")
 
-	// This test has no negative control, so it asserts its own preconditions: untagged collection
-	// must be ON, or nothing here could be collected and the measurement is empty.
 	requireUntaggedCollection(t, repo)
 	seconds := watchFor(t)
 	requireCollectionPossible(t, time.Duration(seconds)*time.Second, "an untagged manifest")
 
 	digest := pushTinyImage(t, repo)
+	// THE NEGATIVE CONTROL, and this test went without one for too long. Asserting that a pulled
+	// manifest survives says nothing unless an unpulled one dies: a registry that never collects
+	// anything satisfies the first half perfectly. requireUntaggedCollection reads the config and
+	// requireCollectionPossible checks gcDelay, but neither proves the collector ever arrived --
+	// and at least once it did not, within a window this test called sufficient.
+	abandonedDigest := pushTinyImage(t, abandoned)
+	deleteTag(t, abandoned, "v1")
 
 	// Remove the tag, leaving the manifest reachable only by digest.
 	deleteTag(t, repo, "v1")
@@ -221,6 +248,27 @@ func TestPullingByDigestKeepsAnUntaggedImageAlive(t *testing.T) {
 			"users to reference digests, so this deletes content a rescheduled pod re-pulls. Set "+
 			"deleteUntagged: false. (%s@%s)", repo, digest)
 	}
+
+	eventuallyGone(t, abandoned, abandonedDigest, collectionDeadline(t))
+}
+
+// eventuallyGone waits for an untagged manifest to actually be collected.
+//
+// The digest-side counterpart of eventuallyUntagged: keepUntagged is a separate rule from keepTags,
+// so a control that only watches tags cannot speak for digest-addressed content.
+func eventuallyGone(t *testing.T, repository, digest string, maxSeconds int) {
+	t.Helper()
+
+	for waited := 0; waited < maxSeconds; waited += 10 {
+		if !manifestExistsByDigest(t, repository, digest) {
+			return
+		}
+		sleepInCluster(t, 10)
+	}
+
+	t.Fatalf("%s@%s survived %ds untagged and unpulled, so this suite cannot observe an untagged "+
+		"manifest being collected at all -- which is the only thing that makes the assertion above "+
+		"evidence of anything.%s", repository, digest, maxSeconds, registryLogs(t))
 }
 
 // refreshBothFor pulls a tag AND a digest every two seconds for the given number of seconds,

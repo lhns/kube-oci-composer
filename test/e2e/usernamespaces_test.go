@@ -25,6 +25,10 @@ import (
 // twice: see the comments below, both of which are there because the probe reported something it
 // had not measured.
 func TestUserNamespacesOnThisCluster(t *testing.T) {
+	// Parallel: it SKIPs on most clusters after ~90s of probing, sequentially, while the
+	// parallel group waits on it. Nothing here shares state.
+	t.Parallel()
+
 	const pod = "userns-probe"
 
 	// Its OWN namespace. The first version borrowed the image-volume test's, which by then had

@@ -20,72 +20,29 @@ package buildcontroller
 
 import (
 	"context"
-	"fmt"
 	"os"
-	"os/signal"
 	"path/filepath"
-	"syscall"
 	"testing"
 	"time"
 
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
 	"github.com/lhns/kube-oci-composer/internal/testenv"
 )
 
-var (
-	testEnv *envtest.Environment
-	cfg     *rest.Config
-)
+var cfg *rest.Config
 
+// TestMain starts one API server for this package. The bootstrap lives in internal/testenv because
+// both controller packages need it; what belongs here is WHY this package needs a real API server,
+// which is the comment above.
 func TestMain(m *testing.M) {
-	testEnv = &envtest.Environment{
+	os.Exit(testenv.Run(m, []string{
 		// Both this project's CRDs and the GitRepository stand-in, because a build resolves its
 		// context from a Flux source and installing Flux to test this controller would test Flux.
-		CRDDirectoryPaths: []string{
-			filepath.Join("..", "..", "config", "crd", "bases"),
-			filepath.Join("..", "..", "test", "crds"),
-		},
-		ErrorIfCRDPathMissing: true,
-	}
-
-	var err error
-	cfg, err = testEnv.Start()
-	if err != nil {
-		fmt.Fprintf(os.Stderr,
-			"failed to start envtest: %v\n\nSet KUBEBUILDER_ASSETS, e.g.\n"+
-				"  export KUBEBUILDER_ASSETS=$(setup-envtest use 1.33.0 -p path)\n"+
-				"or run `make integration-test`, which does it for you.\n", err)
-		os.Exit(1)
-	}
-
-	// Ctrl+C has to reach the same teardown, or an interrupted run leaks the pair.
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-sigCh
-		stopEnv()
-		os.Exit(130)
-	}()
-
-	// Deferred inside a wrapper rather than written after m.Run(): a panic in any test would
-	// otherwise skip the stop entirely, which is how this leaked in the first place.
-	code := func() (rc int) {
-		defer stopEnv()
-		return m.Run()
-	}()
-	os.Exit(code)
-}
-
-// stopEnv tears down the API server, then makes sure it is actually gone. See the twin in
-// internal/controller: Stop() cannot signal its children on Windows, so the reap closes that gap.
-func stopEnv() {
-	if err := testEnv.Stop(); err != nil {
-		fmt.Fprintf(os.Stderr, "stopping envtest: %v\n", err)
-	}
-	testenv.ReapChildren()
+		filepath.Join("..", "..", "config", "crd", "bases"),
+		filepath.Join("..", "..", "test", "crds"),
+	}, &cfg))
 }
 
 func integrationCtx(t *testing.T) (context.Context, client.Client) {
