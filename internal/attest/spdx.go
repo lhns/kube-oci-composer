@@ -5,18 +5,10 @@ import (
 	"strings"
 )
 
-// SPDX 2.3, hand-rolled.
-//
-// Deliberately not spdx/tools-golang. That library's value is parsing and conversion, which this
-// never does — and its struct tags and omitempty choices change between minor versions, which would
-// silently change our payload bytes and therefore our referrer digests. A dependency bump would
-// become a re-attestation of every artifact in the cluster, or (under first-writer-wins) permanent
-// silent staleness. Fifty lines of structs whose stability is ours to guarantee is the better trade.
-//
-// SPDX rather than CycloneDX for one decisive reason: BuildKit's `attest:sbom` emits SPDX, so
-// choosing otherwise would publish two SBOM formats from two kinds into one registry and make every
-// consumer carry two readers. The asymmetry between the kinds is already large enough without
-// adding a format to it.
+// SPDX 2.3, hand-rolled rather than via spdx/tools-golang, whose struct tags change between minor
+// versions: a dependency bump would silently change the payload bytes and so every referrer digest.
+// SPDX rather than CycloneDX because BuildKit's attest:sbom emits SPDX, so both kinds publish one
+// format.
 
 type spdxDocument struct {
 	SPDXID            string             `json:"SPDXID"`
@@ -57,25 +49,21 @@ type spdxRelationship struct {
 
 // SPDXDocument describes what went into an artifact.
 //
-// Be clear about what this is: a manifest of INPUTS, not a package inventory. It says
-// "core-1.1.1.tgz sha256:… unpacked at /core". It does not say "openssl 3.0.11". ADR 0008 is right
-// that this beats a scan — the inputs are known exactly rather than inferred — but it answers a
-// different question, and a compliance reader expecting CPEs will not find them.
+// It is a manifest of INPUTS ("core-1.1.1.tgz sha256:… unpacked at /core"), not a package
+// inventory: there are no CPEs (ADR 0008).
 func SPDXDocument(repository string, digest string, base *Source, sources []Source) spdxDocument {
 	doc := spdxDocument{
 		SPDXID:      "SPDXRef-DOCUMENT",
 		SPDXVersion: "SPDX-2.3",
 		DataLicense: "CC0-1.0",
 		Name:        repository,
-		// Derived from the output digest, NOT a UUID. This single line is what makes the document
-		// a pure function of the artifact: a UUID would change on every render and re-push the
-		// SBOM forever.
+		// Derived from the output digest, NOT a UUID, so the document is a pure function of the
+		// artifact.
 		DocumentNamespace: fmt.Sprintf("https://oci.lhns.de/spdx/%s@%s", repository, digest),
 		CreationInfo: spdxCreationInfo{
-			// The same epoch internal/oci stamps into every artifact, for the same reason.
+			// The same epoch internal/oci stamps into every artifact.
 			Created: "1970-01-01T00:00:00Z",
-			// No version. Including one would make an upgrade of the controller change the SBOM
-			// bytes for an unchanged artifact, which turns idempotence into a re-push per upgrade.
+			// No version: an upgrade must not change the SBOM of an unchanged artifact.
 			Creators: []string{"Tool: kube-oci-composer"},
 		},
 	}
@@ -106,9 +94,8 @@ func SPDXDocument(repository string, digest string, base *Source, sources []Sour
 		})
 	}
 
-	// SPEC ORDER, never sorted. A later layer overwrites an earlier one, so the order is
-	// semantically meaningful and sorting would discard information -- the same rule
-	// internal/oci/provenance.go follows for its annotation.
+	// SPEC ORDER, never sorted: a later layer overwrites an earlier one (as in
+	// internal/oci/provenance.go).
 	for i, s := range sources {
 		id := fmt.Sprintf("SPDXRef-Layer-%d-%s", i, sanitise(s.Name))
 		doc.Packages = append(doc.Packages, spdxPackage{

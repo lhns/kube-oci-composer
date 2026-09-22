@@ -10,8 +10,8 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 )
 
-// Attestor attaches an SBOM, provenance and a signature to an artifact, and — more importantly —
-// declines to do it again.
+// Attestor attaches an SBOM, provenance and a signature to an artifact, and declines to do it
+// again.
 type Attestor struct {
 	SBOM       bool
 	Provenance bool
@@ -24,20 +24,12 @@ func (a *Attestor) Enabled() bool {
 }
 
 // Record is what a controller stores in status so the next reconcile can tell there is nothing to
-// do WITHOUT asking the registry.
+// do WITHOUT asking the registry (ADR 0008). The registry is consulted only when the record cannot
+// answer.
 //
-// This is the whole idempotence design. ADR 0008 says "when the digest matches, the controller
-// verifies the referrers exist and creates only what is missing" — which taken literally costs a
-// registry round trip per object per interval, forever. Instead:
-//
-//	Layer 1: this record. Free. Checked as one more conjunct after the input-hash and
-//	         published-digest checks a converged reconcile already performs.
-//	Layer 2: the registry, consulted only when layer 1 cannot answer.
-//
-// Trusting a status field about the registry is safe here for a specific reason worth writing
-// down: the attestations live in the SAME repository, under the SAME retention policy, as an
-// artifact whose presence was just confirmed by the caller's own HEAD. A registry that lost the
-// referrers lost the artifact too, so the digest check fails first and everything is re-derived.
+// Trusting it is safe because the attestations share the artifact's repository and retention
+// policy, and the caller has just confirmed the artifact exists: a registry that lost the
+// referrers lost the artifact too, and the digest check fails first.
 type Record struct {
 	// Subject is the artifact digest these describe. A mismatch invalidates the whole record.
 	Subject string `json:"subject,omitempty"`
@@ -72,9 +64,8 @@ func (a *Attestor) Complete(rec *Record, subject string) bool {
 type Payloads struct {
 	// BuildType names the producing kind, for SLSA.
 	BuildType string
-	// External and Internal are the SLSA parameter blocks. External should cover the same field
-	// set the input hash covers — provenance narrower than the hash claims less than the artifact
-	// depends on.
+	// External and Internal are the SLSA parameter blocks. External should cover the same fields
+	// the input hash covers, or provenance claims less than the artifact depends on.
 	External any
 	Internal any
 	// Base is the base image, when there is one.
@@ -85,19 +76,11 @@ type Payloads struct {
 
 // Ensure attaches whatever is missing and returns the record to store.
 //
-// Never re-attaches what is already there, and the rule for "already there" is FIRST WRITER WINS,
-// matched on predicate type rather than on digest. If an SBOM already describes this subject, it
-// stays, even if this controller would produce different bytes now.
-//
-// The cost of that rule, stated rather than hidden: an SBOM produced by a buggy version is never
-// corrected in place. The alternative needs `delete` on the registry — a permission this project
-// has deliberately never held, so that no bug in it can destroy an image — and it would rewrite a
-// claim someone may already have recorded. Fixing a bad attestation means deleting the referrer by
-// hand, or changing the spec so a new subject is produced.
-//
-// It is also why nothing in the payload may depend on the controller's version (see slsa.go): if it
-// did, every upgrade would hit first-writer-wins on every object and the rule would turn from
-// correctness into permanent staleness.
+// FIRST WRITER WINS, matched on predicate type: an existing SBOM for this subject stays even if
+// this controller would now produce different bytes. Correcting one in place would need registry
+// delete permission, which this project never holds; fix a bad attestation by deleting the
+// referrer by hand or changing the spec. This is also why no payload may depend on the
+// controller's version.
 func (a *Attestor) Ensure(
 	ctx context.Context,
 	repo name.Repository,
@@ -163,11 +146,8 @@ func (a *Attestor) Ensure(
 	return rec, nil
 }
 
-// push encodes a statement, wraps it in a DSSE envelope when a key is configured, and attaches it.
-//
-// The envelope is why the two switches stay genuinely independent: with a key, the attestation
-// carries its own signature and needs no separate `.sig`; without one, the bare statement is the
-// honest shape for "here are the facts, unsigned".
+// push encodes a statement, wraps it in a signed DSSE envelope when a key is configured (so it needs
+// no separate .sig), and attaches it.
 func (a *Attestor) push(repo name.Repository, subject v1.Descriptor, predicateType string, stmt Statement, opts []remote.Option) (v1.Hash, error) {
 	body, err := json.Marshal(stmt)
 	if err != nil {

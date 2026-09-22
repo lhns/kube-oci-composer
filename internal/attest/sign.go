@@ -23,19 +23,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// Signatures use cosign's sha256-<hex>.sig TAG convention, not the Referrers API, and that amends
-// ADR 0008's "signatures use the same rail".
-//
-// The justification is 0008's own sentence: signing is theatre unless something verifies it. The
-// verifiers that exist -- policy-controller, Kyverno's verifyImages, Connaisseur -- read the .sig
-// tag by default; cosign's referrers mode is still experimental and is not what they look for.
-// Choosing the elegant rail over the one the verifier reads would produce a signature nothing
-// checks, which is precisely the failure ADR 0020 was about.
-//
-// Attestations have no such constraint -- nothing enforces on them -- so they get referrers.
-//
-// A second, unlooked-for benefit: a .sig is a TAG, so it is already covered by the registry's
-// keepTags retention policy. Only the untagged referrers needed the refresher taught about them.
+// Signatures use cosign's sha256-<hex>.sig TAG convention, not the Referrers API (amending ADR
+// 0008): the verifiers that exist (policy-controller, Kyverno, Connaisseur) read the .sig tag by
+// default, and a signature nothing checks is theatre (ADR 0020). As a tag, it is also covered by
+// the registry's keepTags policy. Attestations have no verifier constraint, so they use referrers.
 
 const (
 	// SignatureLayerMediaType is cosign's SimpleSigning payload type.
@@ -49,24 +40,16 @@ const (
 	PublicSecretKey   = "cosign.pub"
 )
 
-// Key signs artifacts. Loaded once at startup, in the CONTROLLER's process.
-//
-// Worth stating because it is the strongest security property of this design: the key is never
-// projected into a build pod. The builder signs the digest its Job reported, after the Job has
-// terminated, so code that came out of a git repository never runs in the same container as the
-// signing key.
+// Key signs artifacts. Loaded once at startup, in the CONTROLLER's process: the key is never
+// projected into a build pod, so built code never runs alongside it.
 type Key struct {
 	signer signature.SignerVerifier
 }
 
 // LoadKey reads a cosign key pair from a Secret.
 //
-// The passphrase lives in the same Secret as the key it protects, and that buys nothing
-// cryptographically -- whoever can read the Secret has both halves. What it buys is compatibility
-// with cosign's on-disk format, so `cosign generate-key-pair k8s://<ns>/<name>` output works
-// unmodified and a signature made elsewhere with the same key is interchangeable; plus protection
-// against the key file leaking WITHOUT the Secret, which is a real if narrower case. The ADR says
-// this plainly rather than letting "encrypted key" read as a guarantee it is not.
+// The passphrase sits in the same Secret as the key, so it adds no protection against a reader of
+// the Secret; it exists for compatibility with `cosign generate-key-pair k8s://<ns>/<name>`.
 func LoadKey(secret *corev1.Secret) (*Key, error) {
 	raw, ok := secret.Data[KeySecretKey]
 	if !ok {
@@ -105,8 +88,7 @@ func LoadKey(secret *corev1.Secret) (*Key, error) {
 	}
 
 	k := &Key{signer: sv}
-	// Self-check at load. A key that cannot sign should fail the process at boot rather than at the
-	// first artifact -- the same reasoning the chart applies to an unpinned builder image.
+	// Fail at boot, not at the first artifact.
 	if err := k.selfCheck(); err != nil {
 		return nil, err
 	}
@@ -137,10 +119,8 @@ func (k *Key) Sign(payload []byte) ([]byte, error) {
 
 // SignArtifact writes a cosign-compatible signature for one digest.
 //
-// The TOP-LEVEL digest is what gets signed -- the index for a multi-platform artifact, the manifest
-// otherwise -- because that is what status.artifact.digest reports and what every consumer pins.
-// Per-child signatures are deliberately not produced: `cosign verify` on an index is the normal
-// case, and N+1 signatures would multiply the idempotence surface for no verifier that asks.
+// Only the TOP-LEVEL digest (the index for a multi-platform artifact) is signed: that is what
+// status.artifact.digest reports and consumers pin, and no verifier asks for per-child signatures.
 func (k *Key) SignArtifact(ctx context.Context, repo name.Repository, digest v1.Hash, opts []remote.Option) (v1.Hash, error) {
 	body, err := k.signedPayload(repo, digest)
 	if err != nil {
@@ -160,7 +140,7 @@ func (k *Key) SignArtifact(ctx context.Context, repo name.Repository, digest v1.
 	if err != nil {
 		return v1.Hash{}, err
 	}
-	configDigest, err := v1.NewHash(emptyConfigDigest)
+	config, err := emptyConfig()
 	if err != nil {
 		return v1.Hash{}, err
 	}
@@ -168,11 +148,7 @@ func (k *Key) SignArtifact(ctx context.Context, repo name.Repository, digest v1.
 	mf := artifactManifest{
 		SchemaVersion: 2,
 		MediaType:     string(types.OCIManifestSchema1),
-		Config: v1.Descriptor{
-			MediaType: types.MediaType(emptyConfigMediaType),
-			Digest:    configDigest,
-			Size:      int64(len(emptyConfigBody)),
-		},
+		Config:        config,
 		Layers: []v1.Descriptor{{
 			MediaType:   SignatureLayerMediaType,
 			Digest:      layerDigest,
@@ -188,7 +164,7 @@ func (k *Key) SignArtifact(ctx context.Context, repo name.Repository, digest v1.
 	if err := remote.WriteLayer(repo, layer, opts...); err != nil {
 		return v1.Hash{}, fmt.Errorf("pushing the signature payload: %w", err)
 	}
-	if err := remote.WriteLayer(repo, static.NewLayer(emptyConfigBody, types.MediaType(emptyConfigMediaType)), opts...); err != nil {
+	if err := writeEmptyConfig(repo, opts); err != nil {
 		return v1.Hash{}, fmt.Errorf("pushing the empty config: %w", err)
 	}
 	if err := remote.Put(repo.Tag(SignatureTag(digest)), taggable{raw: rawManifest, mediaType: types.OCIManifestSchema1}, opts...); err != nil {
@@ -199,10 +175,7 @@ func (k *Key) SignArtifact(ctx context.Context, repo name.Repository, digest v1.
 	return h, err
 }
 
-// signedPayload is the canonical cosign SimpleSigning body.
-//
-// Built with sigstore's own marshaller rather than by hand, which is the difference between
-// "compatible" and "compatible as far as we could tell from the documentation".
+// signedPayload is the canonical cosign SimpleSigning body, built with sigstore's own marshaller.
 func (k *Key) signedPayload(repo name.Repository, digest v1.Hash) ([]byte, error) {
 	ref, err := name.NewDigest(repo.Name() + "@" + digest.String())
 	if err != nil {
@@ -225,14 +198,12 @@ func OwnTag(digest v1.Hash) string {
 
 // VerifiedSignatureExists reports whether a signature THIS KEY made is already attached.
 //
-// Verification rather than comparison, because ECDSA is randomised: signing the same payload twice
-// produces different bytes, so "have we already signed this" cannot be answered by comparing
-// signatures. It also gives the right answer after a key rotation -- a signature from the old key
-// reads as absent, which is what makes the new one get written rather than silently accepted.
+// Verification rather than comparison, because ECDSA signatures are randomised. After a key
+// rotation, the old key's signature reads as absent, so a new one gets written.
 func (k *Key) VerifiedSignatureExists(ctx context.Context, repo name.Repository, digest v1.Hash, opts []remote.Option) (bool, v1.Hash, error) {
 	desc, err := remote.Get(repo.Tag(SignatureTag(digest)), opts...)
 	if err != nil {
-		// Absent is the ordinary case, not an error worth propagating: it means "sign it".
+		// Absent is the ordinary case: it means "sign it".
 		return false, v1.Hash{}, nil
 	}
 

@@ -14,8 +14,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 )
 
-// pushArtifact puts a tiny image in a local registry and returns its repository and descriptor,
-// standing in for a composed artifact.
+// pushArtifact puts a tiny image in a local registry and returns its repository and descriptor.
 func pushArtifact(t *testing.T) (name.Repository, v1.Descriptor) {
 	t.Helper()
 	srv := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))
@@ -44,13 +43,8 @@ func pushArtifact(t *testing.T) (name.Repository, v1.Descriptor) {
 	return repo, v1.Descriptor{MediaType: mt, Digest: digest, Size: size}
 }
 
-// TestAnAttestationIsDiscoverableAsAReferrer is the round trip that matters: push a predicate,
-// then find it the way a consumer would.
-//
-// It is also the test that caught a real defect. The predicate type was originally set only on the
-// attestation's LAYER, and a referrers index lists descriptors carrying the referring manifest's
-// annotations rather than its layers' — so `Existing` found the referrer and could not tell what it
-// was, and the idempotence check would have re-pushed both predicates on every reconcile forever.
+// TestAnAttestationIsDiscoverableAsAReferrer: push predicates, then find each by predicate type the
+// way a consumer would. Existing must tell them apart, or Ensure would re-push them every reconcile.
 func TestAnAttestationIsDiscoverableAsAReferrer(t *testing.T) {
 	repo, subject := pushArtifact(t)
 
@@ -78,9 +72,8 @@ func TestAnAttestationIsDiscoverableAsAReferrer(t *testing.T) {
 	}
 }
 
-// TestPushingTheSamePredicateTwiceIsStable — the payload is deterministic, so re-pushing produces
-// the same manifest digest. That is what lets "does it already exist" be a comparison rather than a
-// diff, and it is the property the whole zero-cost idempotence design rests on.
+// TestPushingTheSamePredicateTwiceIsStable: re-pushing a deterministic payload yields the same
+// manifest digest and no second referrer.
 func TestPushingTheSamePredicateTwiceIsStable(t *testing.T) {
 	repo, subject := pushArtifact(t)
 	payload := []byte(`{"spdxVersion":"SPDX-2.3"}`)
@@ -106,9 +99,8 @@ func TestPushingTheSamePredicateTwiceIsStable(t *testing.T) {
 	}
 }
 
-// TestTheAttestationDoesNotTouchTheArtifact is the determinism guarantee, checked at the level
-// where it could actually break: a referrer's `subject` lives in the REFERRER's manifest, so the
-// artifact's bytes are never read, rewritten, or re-PUT.
+// TestTheAttestationDoesNotTouchTheArtifact: the subject link lives in the referrer's manifest, so
+// the artifact's bytes must not change.
 func TestTheAttestationDoesNotTouchTheArtifact(t *testing.T) {
 	repo, subject := pushArtifact(t)
 
@@ -128,16 +120,14 @@ func TestTheAttestationDoesNotTouchTheArtifact(t *testing.T) {
 	if after.Digest != before.Digest {
 		t.Fatalf("attaching an attestation changed the artifact digest: %v -> %v", before.Digest, after.Digest)
 	}
-	// Bytes, not just the digest: a digest comparison would pass if both sides were rewritten
-	// consistently.
+	// Bytes too, not just the digest.
 	if string(after.Manifest) != string(before.Manifest) {
 		t.Fatal("the artifact's manifest bytes changed")
 	}
 }
 
-// An attestation is named after its own digest, because untagged is what a registry's collector
-// reclaims by age -- whoever is pulling it. Once the chart stops configuring keepUntagged, an
-// untagged SBOM on a live image would be deleted a gcDelay after it was written. ADR 0060.
+// An attestation is tagged after its own digest: without keepUntagged, untagged content is
+// reclaimed by age regardless of pulls (ADR 0060).
 func TestAnAttestationCarriesItsOwnName(t *testing.T) {
 	repo, subject := pushArtifact(t)
 

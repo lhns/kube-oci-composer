@@ -46,9 +46,8 @@ func cosignKeySecret(t *testing.T, password string) *corev1.Secret {
 	}
 }
 
-// TestASignatureLandsWhereAVerifierLooks. The tag convention is the whole reason signatures do not
-// use referrers: policy-controller, Kyverno and Connaisseur read `sha256-<hex>.sig` by default, and
-// a signature on the elegant rail is a signature nothing checks — the exact failure ADR 0020 named.
+// TestASignatureLandsWhereAVerifierLooks: verifiers read cosign's sha256-<hex>.sig tag by default,
+// which is why signatures do not use referrers (ADR 0020).
 func TestASignatureLandsWhereAVerifierLooks(t *testing.T) {
 	repo, subject := pushArtifact(t)
 	key, err := LoadKey(cosignKeySecret(t, "hunter2"))
@@ -74,9 +73,7 @@ func TestASignatureLandsWhereAVerifierLooks(t *testing.T) {
 	}
 }
 
-// TestTheSignedPayloadIsTheCanonicalCosignOne. Built with sigstore's own marshaller rather than by
-// hand, which is the difference between "compatible" and "compatible as far as we could tell from
-// the docs". This asserts the shape a verifier actually parses.
+// TestTheSignedPayloadIsTheCanonicalCosignOne asserts the SimpleSigning shape a verifier parses.
 func TestTheSignedPayloadIsTheCanonicalCosignOne(t *testing.T) {
 	repo, subject := pushArtifact(t)
 	key, err := LoadKey(cosignKeySecret(t, ""))
@@ -115,17 +112,15 @@ func TestTheSignedPayloadIsTheCanonicalCosignOne(t *testing.T) {
 	}
 }
 
-// TestAnEmptyPassphraseWorks — cosign supports one, and refusing it would mean rejecting keys the
-// documented command can produce.
+// TestAnEmptyPassphraseWorks: cosign can produce keys with an empty passphrase.
 func TestAnEmptyPassphraseWorks(t *testing.T) {
 	if _, err := LoadKey(cosignKeySecret(t, "")); err != nil {
 		t.Fatalf("an empty passphrase must be accepted: %v", err)
 	}
 }
 
-// TestAMismatchedKeyPairIsRefusedAtLoad. A Secret holding one key's private half and another's
-// public half would sign happily and produce signatures nothing could verify with the public key
-// the operator handed their admission policy. Caught at startup, not at the first artifact.
+// TestAMismatchedKeyPairIsRefusedAtLoad: a mismatched pair would sign happily, producing signatures
+// the operator's published public key cannot verify.
 func TestAMismatchedKeyPairIsRefusedAtLoad(t *testing.T) {
 	secret := cosignKeySecret(t, "hunter2")
 	other := cosignKeySecret(t, "hunter2")
@@ -138,8 +133,7 @@ func TestAMismatchedKeyPairIsRefusedAtLoad(t *testing.T) {
 	}
 }
 
-// TestTheWrongPassphraseIsRefused — the failure must name the field, because the alternative is an
-// operator staring at a decryption error with no idea which of two Secrets is wrong.
+// TestTheWrongPassphraseIsRefused: the error must name the field at fault.
 func TestTheWrongPassphraseIsRefused(t *testing.T) {
 	secret := cosignKeySecret(t, "hunter2")
 	secret.Data[PasswordSecretKey] = []byte("wrong")
@@ -153,11 +147,8 @@ func TestTheWrongPassphraseIsRefused(t *testing.T) {
 	}
 }
 
-// TestASignatureFromAnotherKeyReadsAsAbsent is what makes key rotation work.
-//
-// Verification rather than comparison, because ECDSA is randomised. The useful consequence: after a
-// rotation, the old key's signature does not satisfy the new key, so a new signature gets written
-// instead of the old one being silently accepted forever.
+// TestASignatureFromAnotherKeyReadsAsAbsent is what makes key rotation work: the old key's
+// signature does not satisfy the new key, so a new one gets written.
 func TestASignatureFromAnotherKeyReadsAsAbsent(t *testing.T) {
 	repo, subject := pushArtifact(t)
 

@@ -21,11 +21,8 @@ func samplePayloads() Payloads {
 	}
 }
 
-// TestTheAttestationPayloadIsAPureFunctionOfItsInputs is the same constraint
-// TestProvenanceIsDeterministic enforces one layer in, and it is worth restating why it outranks
-// the feature: if the payload varied, "does this already exist" would stop being a comparison, the
-// controller would re-push an attestation on every reconcile, and every artifact in the cluster
-// would accumulate them.
+// TestTheAttestationPayloadIsAPureFunctionOfItsInputs: a varying payload would be re-pushed on every
+// reconcile. TestProvenanceIsDeterministic enforces the same one layer in.
 func TestTheAttestationPayloadIsAPureFunctionOfItsInputs(t *testing.T) {
 	p := samplePayloads()
 
@@ -53,7 +50,7 @@ func TestTheAttestationPayloadIsAPureFunctionOfItsInputs(t *testing.T) {
 		t.Fatal("two provenance statements from identical inputs differ")
 	}
 
-	// The specific things that would make it vary, named so a future addition trips here.
+	// Named so a future addition trips here.
 	body := string(first) + string(provA)
 	for _, forbidden := range []string{
 		"invocationId", "startedOn", "finishedOn", // observations of the run, not of the artifact
@@ -63,22 +60,19 @@ func TestTheAttestationPayloadIsAPureFunctionOfItsInputs(t *testing.T) {
 			t.Errorf("%q is an observation of the run; it would make the payload differ every reconcile", forbidden)
 		}
 	}
-	// The SBOM's namespace must be derived from the digest, not a UUID.
 	if !strings.Contains(string(first), "sha256:aaaa") {
 		t.Error("documentNamespace must be derived from the output digest")
 	}
 	if strings.Contains(string(first), "urn:uuid") {
 		t.Error("a UUID namespace would change on every render")
 	}
-	// The epoch, for the same reason internal/oci stamps it.
 	if !strings.Contains(string(first), "1970-01-01T00:00:00Z") {
 		t.Error("creationInfo.created must be the epoch, not now")
 	}
 }
 
-// TestTheSBOMRecordsTheRevisionRatherThanTheTarball — source-controller re-packs on restart, so a
-// Flux tarball's digest moves while the revision it describes does not. The revision answers "what
-// produced this"; the tarball digest does not. Same rule InputHash and the OCI annotations follow.
+// TestTheSBOMRecordsTheRevisionRatherThanTheTarball: a Flux tarball's digest moves when
+// source-controller re-packs, the revision does not. Same rule as InputHash.
 func TestTheSBOMRecordsTheRevisionRatherThanTheTarball(t *testing.T) {
 	doc := SPDXDocument("registry/app", "sha256:aaaa", nil, samplePayloads().Sources)
 
@@ -96,8 +90,7 @@ func TestTheSBOMRecordsTheRevisionRatherThanTheTarball(t *testing.T) {
 	}
 }
 
-// TestTheSBOMKeepsSpecOrder — a later layer overwrites an earlier one, so the order carries
-// meaning and sorting would discard it.
+// TestTheSBOMKeepsSpecOrder: a later layer overwrites an earlier one, so order carries meaning.
 func TestTheSBOMKeepsSpecOrder(t *testing.T) {
 	doc := SPDXDocument("registry/app", "sha256:aaaa", nil, []Source{
 		{Name: "zzz", Digest: "sha256:1111"},
@@ -114,8 +107,7 @@ func TestTheSBOMKeepsSpecOrder(t *testing.T) {
 	}
 }
 
-// TestASecondEnsureWritesNothing is the end-to-end statement of the idempotence design, and it
-// counts REQUESTS rather than trusting that nothing looked different.
+// TestASecondEnsureWritesNothing pins idempotence end to end by counting write REQUESTS.
 func TestASecondEnsureWritesNothing(t *testing.T) {
 	repo, subject := pushArtifact(t)
 	key, err := LoadKey(cosignKeySecret(t, ""))
@@ -152,9 +144,8 @@ func TestASecondEnsureWritesNothing(t *testing.T) {
 	}
 }
 
-// TestCompleteAnswersWithoutTouchingTheRegistry — layer one of the idempotence design. A converged
-// reconcile must cost ZERO extra requests, which is only true if the status record alone can say
-// "nothing to do".
+// TestCompleteAnswersWithoutTouchingTheRegistry: a converged reconcile must cost zero requests, so
+// the status record alone must be able to say "nothing to do".
 func TestCompleteAnswersWithoutTouchingTheRegistry(t *testing.T) {
 	full := &Attestor{SBOM: true, Provenance: true, Key: &Key{}}
 	rec := &Record{Subject: "sha256:aaaa", SBOM: "sha256:1", Provenance: "sha256:2", Signature: "sha256:3"}
@@ -170,15 +161,14 @@ func TestCompleteAnswersWithoutTouchingTheRegistry(t *testing.T) {
 	if full.Complete(&Record{Subject: "sha256:aaaa", SBOM: "sha256:1"}, "sha256:aaaa") {
 		t.Error("a record missing the provenance and signature must not count as complete")
 	}
-	// And a disabled Attestor is trivially complete, so nothing changes for anyone not using this.
+	// A disabled Attestor is trivially complete.
 	if !(&Attestor{}).Complete(nil, "sha256:aaaa") {
 		t.Error("with nothing enabled there is nothing to do")
 	}
 }
 
-// TestSigningTurnsTheAttestationIntoAnEnvelope — the two switches stay independent: with a key the
-// statement carries its own signature, without one it is a bare statement, which is the honest
-// shape for unsigned facts.
+// TestSigningTurnsTheAttestationIntoAnEnvelope: with a key, the statement carries its own DSSE
+// signature.
 func TestSigningTurnsTheAttestationIntoAnEnvelope(t *testing.T) {
 	key, err := LoadKey(cosignKeySecret(t, ""))
 	if err != nil {
