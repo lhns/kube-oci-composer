@@ -20,8 +20,7 @@ func digestOf(body string) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-// countingOrigin writes body to a temp file and counts how many times it was asked to. The count
-// is the whole point: this package exists to make that number stop growing.
+// countingOrigin writes body to a temp file and counts how many times it was asked to.
 func countingOrigin(t *testing.T, body string) (Origin, *atomic.Int64, *atomic.Bool) {
 	t.Helper()
 	calls := &atomic.Int64{}
@@ -97,9 +96,7 @@ func TestSecondLookupDoesNotHitTheOrigin(t *testing.T) {
 	}
 }
 
-// TestRemoteTierSurvivesLocalLoss — this is the restart case. The pod comes back with an empty
-// emptyDir, and without a remote tier every layer would be pulled from upstream again before the
-// endpoint could serve anything.
+// TestRemoteTierSurvivesLocalLoss: after a restart empties the local tier, the remote tier serves.
 func TestRemoteTierSurvivesLocalLoss(t *testing.T) {
 	body := "durable content"
 	origin, calls, fail := countingOrigin(t, body)
@@ -124,8 +121,7 @@ func TestRemoteTierSurvivesLocalLoss(t *testing.T) {
 	}
 }
 
-// TestRemoteWriteFailureDoesNotFailTheBuild — the cache is an optimisation. If object storage is
-// down, builds must still work, just slowly.
+// TestRemoteWriteFailureDoesNotFailTheBuild: the cache is an optimisation.
 func TestRemoteWriteFailureDoesNotFailTheBuild(t *testing.T) {
 	body := "content"
 	origin, _, _ := countingOrigin(t, body)
@@ -137,9 +133,8 @@ func TestRemoteWriteFailureDoesNotFailTheBuild(t *testing.T) {
 	}
 }
 
-// TestCorruptRemoteEntryIsRejectedAndRemoved — the remote tier is shared and durable, so it can
-// hold bytes this process never verified. Serving them would defeat the digest pinning the whole
-// design rests on, and leaving them in place would make every future lookup fail the same way.
+// TestCorruptRemoteEntryIsRejectedAndRemoved: unverified remote bytes must be neither served nor
+// left in place.
 func TestCorruptRemoteEntryIsRejectedAndRemoved(t *testing.T) {
 	body := "the real content"
 	want := digestOf(body)
@@ -161,9 +156,7 @@ func TestCorruptRemoteEntryIsRejectedAndRemoved(t *testing.T) {
 		t.Fatalf("expected a fall-through to the origin, got %d calls", calls.Load())
 	}
 
-	// The corrupt bytes must be gone. What replaces them is the verified content, admitted on
-	// the way back from the origin — leaving the key empty would be correct but wasteful, since
-	// the next lookup would fall through again.
+	// Replaced by the verified content from the origin.
 	rc, err := remote.Open(context.Background(), key)
 	if err != nil {
 		t.Fatalf("remote entry is missing after repair: %v", err)
@@ -181,8 +174,7 @@ func TestCorruptRemoteEntryIsRejectedAndRemoved(t *testing.T) {
 	}
 }
 
-// TestCorruptRemoteEntryIsReplaced — after rejecting the bad copy, the good one must be admitted,
-// so the next lookup is a hit rather than another fall-through.
+// TestCorruptRemoteEntryIsReplaced: after rejecting the bad copy, the next lookup is a hit.
 func TestCorruptRemoteEntryIsReplaced(t *testing.T) {
 	body := "good content"
 	want := digestOf(body)
@@ -209,8 +201,7 @@ func TestCorruptRemoteEntryIsReplaced(t *testing.T) {
 	}
 }
 
-// TestOriginFailureIsReturned — a genuine fetch failure must reach the caller, not be swallowed
-// into an empty file that then gets cached under a digest it does not match.
+// TestOriginFailureIsReturned: a fetch failure must reach the caller, not be cached as empty.
 func TestOriginFailureIsReturned(t *testing.T) {
 	origin, _, fail := countingOrigin(t, "unused")
 	fail.Store(true)
@@ -221,9 +212,7 @@ func TestOriginFailureIsReturned(t *testing.T) {
 	}
 }
 
-// TestSharedLayerIsFetchedOnce — two compositions naming the same layer digest share one entry.
-// That falls out of content addressing rather than needing any special handling, but it is worth
-// pinning because it is a stated property.
+// TestSharedLayerIsFetchedOnce: compositions naming the same layer digest share one entry.
 func TestSharedLayerIsFetchedOnce(t *testing.T) {
 	body := "shared jar"
 	origin, calls, _ := countingOrigin(t, body)
@@ -237,8 +226,7 @@ func TestSharedLayerIsFetchedOnce(t *testing.T) {
 	}
 }
 
-// TestMalformedDigestIsRejected — digests come from a CRD field. A key that escaped the cache
-// directory would be a path traversal with attacker-controlled content.
+// TestMalformedDigestIsRejected: digests are user input and must not escape the cache directory.
 func TestMalformedDigestIsRejected(t *testing.T) {
 	origin, calls, _ := countingOrigin(t, "x")
 	c := newCache(t, nil)
@@ -255,8 +243,7 @@ func TestMalformedDigestIsRejected(t *testing.T) {
 	}
 }
 
-// TestCachedFileLivesUnderTheCacheDir — the returned path must be the managed one, or garbage
-// collection would never see the file it is supposed to account for.
+// TestCachedFileLivesUnderTheCacheDir: the returned path is the one the local tier manages.
 func TestCachedFileLivesUnderTheCacheDir(t *testing.T) {
 	body := "content"
 	origin, _, _ := countingOrigin(t, body)
@@ -267,8 +254,9 @@ func TestCachedFileLivesUnderTheCacheDir(t *testing.T) {
 	if err != nil || strings.HasPrefix(rel, "..") {
 		t.Fatalf("cached file %q is not under the cache dir %q", got, c.Dir)
 	}
-	if !c.Referenced(context.Background(), digestOf(body)) {
-		t.Fatal("cache does not report the entry it just wrote")
+	key := store.MustKey(store.NamespaceInputs, digestOf(body))
+	if _, err := c.Local.Stat(context.Background(), key); err != nil {
+		t.Fatalf("the local tier does not hold the entry just written: %v", err)
 	}
 }
 
@@ -283,6 +271,3 @@ func (brokenStore) Open(context.Context, string) (io.ReadCloser, error) {
 }
 func (brokenStore) Write(context.Context, string, io.Reader) error { return errors.New("unreachable") }
 func (brokenStore) Delete(context.Context, string) error           { return errors.New("unreachable") }
-func (brokenStore) List(context.Context, string) ([]store.Info, error) {
-	return nil, errors.New("unreachable")
-}

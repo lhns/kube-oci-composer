@@ -12,14 +12,31 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/types"
 )
 
-// The empty config every OCI artifact manifest points at. Fixed bytes, fixed digest, defined by the
-// image specification -- so it is a constant rather than something computed.
+// The empty config every OCI artifact manifest points at, as the image specification defines it.
 const (
 	emptyConfigMediaType = "application/vnd.oci.empty.v1+json"
 	emptyConfigDigest    = "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
 )
 
 var emptyConfigBody = []byte("{}")
+
+// emptyConfig is the descriptor of the empty config.
+func emptyConfig() (v1.Descriptor, error) {
+	digest, err := v1.NewHash(emptyConfigDigest)
+	if err != nil {
+		return v1.Descriptor{}, err
+	}
+	return v1.Descriptor{
+		MediaType: types.MediaType(emptyConfigMediaType),
+		Digest:    digest,
+		Size:      int64(len(emptyConfigBody)),
+	}, nil
+}
+
+// writeEmptyConfig uploads the empty config blob.
+func writeEmptyConfig(repo name.Repository, opts []remote.Option) error {
+	return remote.WriteLayer(repo, static.NewLayer(emptyConfigBody, types.MediaType(emptyConfigMediaType)), opts...)
+}
 
 // artifactManifest is what an attestation looks like on the wire: an OCI image manifest whose
 // `subject` names the artifact it describes.
@@ -46,12 +63,9 @@ func (t taggable) MediaType() (types.MediaType, error) {
 
 // Push attaches one predicate to an artifact as an OCI referrer.
 //
-// go-containerregistry does the awkward part: `commitManifest` reads the `subject` out of the raw
-// manifest and maintains the referrers fallback tag itself, so this works against a registry with
-// the Referrers API and one without. zot has it (dist-spec 1.1), which is what the chart declares.
-//
-// Returns the referrer's own digest, which the caller records in status so the next reconcile can
-// tell there is nothing to do without asking the registry.
+// go-containerregistry reads the manifest's subject and maintains the referrers fallback tag
+// itself, so this works with or without the Referrers API. Returns the referrer's own digest, for
+// the caller's status record.
 func Push(repo name.Repository, subject v1.Descriptor, predicateType string, payload []byte, signed bool, opts []remote.Option) (v1.Hash, error) {
 	layerMediaType := MediaTypeInToto
 	if signed {
@@ -68,7 +82,7 @@ func Push(repo name.Repository, subject v1.Descriptor, predicateType string, pay
 		return v1.Hash{}, fmt.Errorf("sizing the attestation: %w", err)
 	}
 
-	configDigest, err := v1.NewHash(emptyConfigDigest)
+	config, err := emptyConfig()
 	if err != nil {
 		return v1.Hash{}, err
 	}
@@ -77,11 +91,7 @@ func Push(repo name.Repository, subject v1.Descriptor, predicateType string, pay
 		SchemaVersion: 2,
 		MediaType:     string(types.OCIManifestSchema1),
 		ArtifactType:  MediaTypeInToto,
-		Config: v1.Descriptor{
-			MediaType: types.MediaType(emptyConfigMediaType),
-			Digest:    configDigest,
-			Size:      int64(len(emptyConfigBody)),
-		},
+		Config:        config,
 		Layers: []v1.Descriptor{{
 			MediaType:   types.MediaType(layerMediaType),
 			Digest:      layerDigest,
@@ -89,11 +99,8 @@ func Push(repo name.Repository, subject v1.Descriptor, predicateType string, pay
 			Annotations: map[string]string{AnnotationPredicateType: predicateType},
 		}},
 		Subject: &subject,
-		// The predicate type appears on the MANIFEST as well as on its layer, and that is not
-		// duplication. A referrers index lists descriptors carrying the referring manifest's
-		// artifactType and annotations -- not its layers -- so a consumer filtering by predicate
-		// (including Existing below) sees only what is here. The layer annotation is for anyone
-		// who has already fetched the manifest.
+		// On the manifest as well as the layer: a referrers index copies the manifest's
+		// annotations, not its layers', so this is what Existing and other consumers filter on.
 		Annotations: map[string]string{AnnotationPredicateType: predicateType},
 	}
 
@@ -102,13 +109,11 @@ func Push(repo name.Repository, subject v1.Descriptor, predicateType string, pay
 		return v1.Hash{}, fmt.Errorf("encoding the attestation manifest: %w", err)
 	}
 
-	// Blobs first: a manifest referencing a layer the registry does not have is rejected, and the
-	// order matters more here than usual because a partial push would leave a referrer that
-	// resolves to nothing.
+	// Blobs first: a registry rejects a manifest whose blobs it lacks.
 	if err := remote.WriteLayer(repo, layer, opts...); err != nil {
 		return v1.Hash{}, fmt.Errorf("pushing the attestation payload: %w", err)
 	}
-	if err := remote.WriteLayer(repo, static.NewLayer(emptyConfigBody, types.MediaType(emptyConfigMediaType)), opts...); err != nil {
+	if err := writeEmptyConfig(repo, opts); err != nil {
 		return v1.Hash{}, fmt.Errorf("pushing the empty config: %w", err)
 	}
 
@@ -120,10 +125,8 @@ func Push(repo name.Repository, subject v1.Descriptor, predicateType string, pay
 	if err := remote.Put(ref, taggable{raw: raw, mediaType: types.OCIManifestSchema1}, opts...); err != nil {
 		return v1.Hash{}, fmt.Errorf("pushing the attestation manifest: %w", err)
 	}
-	// And named after its own digest, like everything else this project publishes (ADR 0060). A
-	// referrer is otherwise untagged, and untagged is what a registry's collector reclaims by AGE
-	// once keepUntagged is off -- however often the refresher pulls it. The refresher already finds
-	// and pulls referrers, so the tag is renewed with no further change.
+	// Also tagged after its own digest (ADR 0060): untagged content is reclaimed by age once
+	// keepUntagged is off, however often the refresher pulls it.
 	own := repo.Tag(OwnTag(digest))
 	if err := remote.Put(own, taggable{raw: raw, mediaType: types.OCIManifestSchema1}, opts...); err != nil {
 		return v1.Hash{}, fmt.Errorf("naming the attestation manifest: %w", err)
@@ -134,9 +137,7 @@ func Push(repo name.Repository, subject v1.Descriptor, predicateType string, pay
 // Existing lists the predicate types already attached to an artifact, and the manifest digest of
 // each.
 //
-// ONE request for every predicate, which is what keeps the reconciliation path cheap when the
-// status record cannot answer. Works whether the registry implements the Referrers API or only the
-// fallback tag -- ggcr decides.
+// One request covers every predicate, with or without the Referrers API.
 func Existing(repo name.Repository, subject v1.Hash, opts []remote.Option) (map[string]v1.Hash, error) {
 	idx, err := remote.Referrers(repo.Digest(subject.String()), opts...)
 	if err != nil {
@@ -153,17 +154,8 @@ func Existing(repo name.Repository, subject v1.Hash, opts []remote.Option) (map[
 			out[pt] = d.Digest
 			continue
 		}
-		// The index descriptor did not carry the annotation, so fetch the manifest and read it
-		// there.
-		//
-		// Not a hypothetical: registries differ about what they copy into a referrers listing.
-		// go-containerregistry's own in-memory registry propagates `artifactType` and DROPS
-		// `annotations`, which is how this was found -- the first version filtered on the
-		// descriptor alone, found nothing, and would have re-pushed both predicates on every
-		// reconcile forever while looking like it was working.
-		//
-		// One extra GET per referrer, on a path that runs only when the status record cannot
-		// answer. See Attestor.Ensure for why that is rare.
+		// Some registries (go-containerregistry's own) drop annotations from the referrers
+		// listing, so read them from the manifest. One extra GET, on a rarely taken path.
 		if d.ArtifactType != MediaTypeInToto {
 			continue
 		}

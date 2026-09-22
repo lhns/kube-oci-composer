@@ -6,16 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 )
 
-// The conformance suite. Every backend runs the same tests, because the whole point of the
-// interface is that a caller cannot tell which backend it has.
-// A backend that passes here is substitutable; one that only passes its own tests is not.
+// The conformance suite: every backend runs the same tests, so they are substitutable.
 
 func eachBackend(t *testing.T, fn func(t *testing.T, s Store)) {
 	t.Helper()
@@ -71,9 +67,7 @@ func TestRoundTrip(t *testing.T) {
 	})
 }
 
-// TestMissIsErrNotFound — callers treat a miss as ordinary control flow: the cache falls through
-// to the origin. A backend-specific error would turn both
-// into failures.
+// TestMissIsErrNotFound: a miss is control flow for callers, so it must be ErrNotFound.
 func TestMissIsErrNotFound(t *testing.T) {
 	eachBackend(t, func(t *testing.T, s Store) {
 		key := MustKey(NamespaceInputs, "sha256:ffff")
@@ -87,8 +81,7 @@ func TestMissIsErrNotFound(t *testing.T) {
 	})
 }
 
-// TestDeleteIsIdempotent — garbage collection is not a transaction. A key vanishing between the
-// listing and the delete must not fail the sweep.
+// TestDeleteIsIdempotent: deleting an absent key succeeds.
 func TestDeleteIsIdempotent(t *testing.T) {
 	eachBackend(t, func(t *testing.T, s Store) {
 		key := MustKey(NamespaceInputs, "sha256:bb22")
@@ -105,8 +98,7 @@ func TestDeleteIsIdempotent(t *testing.T) {
 	})
 }
 
-// TestOverwriteWithIdenticalContentSucceeds — two reconciles racing on the same content-addressed
-// key is the normal case, not an error.
+// TestOverwriteWithIdenticalContentSucceeds: two reconciles racing on one key is normal.
 func TestOverwriteWithIdenticalContentSucceeds(t *testing.T) {
 	eachBackend(t, func(t *testing.T, s Store) {
 		key := MustKey(NamespaceInputs, "sha256:cc33")
@@ -119,8 +111,7 @@ func TestOverwriteWithIdenticalContentSucceeds(t *testing.T) {
 	})
 }
 
-// TestConcurrentWritesDoNotCorrupt — the disk backend writes via temp file and rename precisely
-// so that a reader never observes a half-written object.
+// TestConcurrentWritesDoNotCorrupt: a reader never observes a half-written object.
 func TestConcurrentWritesDoNotCorrupt(t *testing.T) {
 	eachBackend(t, func(t *testing.T, s Store) {
 		key := MustKey(NamespaceInputs, "sha256:dd44")
@@ -142,50 +133,7 @@ func TestConcurrentWritesDoNotCorrupt(t *testing.T) {
 	})
 }
 
-func TestListIsScopedToPrefix(t *testing.T) {
-	// A second namespace, declared here rather than in the package: the store takes any namespace
-	// string, and only `inputs` has a production caller now that the serving endpoint is gone.
-	// Keeping a second constant alive purely so a test could use it would be the tail wagging.
-	const otherNamespace = "other"
-
-	eachBackend(t, func(t *testing.T, s Store) {
-		put(t, s, MustKey(NamespaceInputs, "sha256:1111"), "a")
-		put(t, s, MustKey(NamespaceInputs, "sha256:2222"), "b")
-		put(t, s, MustKey(otherNamespace, "sha256:3333"), "c")
-
-		blobs, err := s.List(context.Background(), NamespaceInputs)
-		if err != nil {
-			t.Fatalf("list: %v", err)
-		}
-		if len(blobs) != 2 {
-			t.Fatalf("listed %d blobs, want 2: %v", len(blobs), blobs)
-		}
-		for _, info := range blobs {
-			if !strings.HasPrefix(info.Key, NamespaceInputs+"/") {
-				t.Fatalf("listing leaked across namespaces: %q", info.Key)
-			}
-			if info.Size == 0 {
-				t.Fatalf("listing reported size 0 for %q", info.Key)
-			}
-		}
-	})
-}
-
-// TestListEmptyNamespaceIsNotAnError — a namespace that has never been written to must list as
-// empty. If it errored, the first garbage-collection cycle on a fresh install would fail.
-func TestListEmptyNamespaceIsNotAnError(t *testing.T) {
-	eachBackend(t, func(t *testing.T, s Store) {
-		got, err := s.List(context.Background(), NamespaceInputs)
-		if err != nil {
-			t.Fatalf("listing an empty namespace failed: %v", err)
-		}
-		if len(got) != 0 {
-			t.Fatalf("listed %d objects in an empty namespace", len(got))
-		}
-	})
-}
-
-// TestLargeObjectRoundTrips — these hold real artifact layers, not test strings.
+// TestLargeObjectRoundTrips: these hold real artifact layers.
 func TestLargeObjectRoundTrips(t *testing.T) {
 	eachBackend(t, func(t *testing.T, s Store) {
 		key := MustKey(NamespaceInputs, "sha256:ee55")
@@ -207,8 +155,7 @@ func TestLargeObjectRoundTrips(t *testing.T) {
 	})
 }
 
-// TestKeyRejectsTraversal — digests come from a CRD field, so they are user input. A key that
-// escapes its namespace would let a crafted digest read or write anywhere the process can.
+// TestKeyRejectsTraversal: digests are user input from a CRD field.
 func TestKeyRejectsTraversal(t *testing.T) {
 	bad := []string{
 		"sha256:../../etc/passwd",
@@ -229,8 +176,8 @@ func TestKeyRejectsTraversal(t *testing.T) {
 	}
 }
 
-// TestDiskRejectsEscapingKeys — the same guard one level down, where it would actually reach the
-// filesystem. A future caller building a key by hand must not get past this.
+// TestDiskRejectsEscapingKeys: the same guard where it reaches the filesystem, for keys built by
+// hand.
 func TestDiskRejectsEscapingKeys(t *testing.T) {
 	root := t.TempDir()
 	s, err := NewDisk(root)
@@ -247,31 +194,5 @@ func TestDiskRejectsEscapingKeys(t *testing.T) {
 				t.Fatalf("open accepted escaping key %q", key)
 			}
 		})
-	}
-}
-
-// TestDiskIgnoresInFlightWrites — a temp file must never appear in a listing. Garbage collection
-// deletes whatever a listing reports as unreferenced, and a blob that is moments from being
-// committed and referenced is exactly the wrong thing to delete.
-func TestDiskIgnoresInFlightWrites(t *testing.T) {
-	root := t.TempDir()
-	s, err := NewDisk(root)
-	if err != nil {
-		t.Fatalf("creating disk store: %v", err)
-	}
-	put(t, s, MustKey(NamespaceInputs, "sha256:aaaa"), "committed")
-
-	// Simulate a write in progress by planting a temp file the way Write does.
-	inflight := filepath.Join(root, NamespaceInputs, "sha256", ".tmp-inflight")
-	if err := os.WriteFile(inflight, []byte("half written"), 0o600); err != nil {
-		t.Fatalf("planting temp file: %v", err)
-	}
-
-	got, err := s.List(context.Background(), NamespaceInputs)
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("listing reported %d objects, want only the committed one: %v", len(got), got)
 	}
 }

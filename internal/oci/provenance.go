@@ -8,38 +8,24 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 )
 
-// Threat-model gap R1: an artifact exists and nobody can say what produced it.
+// Threat-model gap R1: status.history records what produced an artifact, but only on the object.
+// These annotations put it in the artifact itself.
 //
-// `status.history[].sources` already records each layer's name, resolved digest and revision --
-// which is what ADR 0026's incident needed and did not have, since it had to be diagnosed by
-// extracting a layer and reading its payload. What was still missing is that the record lives in
-// the OBJECT, so deleting the ImageComposition takes it with it, while the image it produced is
-// still running somewhere.
-//
-// Annotations put it in the artifact. They are the right carrier rather than config labels for one
-// specific reason: labels are part of the image CONFIG, so writing them changes the config digest
-// and therefore what every consumer's `docker inspect` reports as the image's own labels --
-// provenance masquerading as application metadata. Manifest annotations are metadata about the
-// manifest, which is exactly what this is.
-//
-// Everything written here is a pure function of the resolved inputs, because determinism is the
-// project's core invariant (ADR 0016) and an annotation carrying a timestamp or a hostname would
-// end it. That is also why `org.opencontainers.image.created` is NOT set: the config already
-// carries the epoch, and a real build time would make two identical specs produce two digests.
+// Manifest annotations rather than config labels, which would show up as the image's own
+// application labels. Everything here is a pure function of the resolved inputs (ADR 0016), which
+// is also why org.opencontainers.image.created is NOT set.
 const (
 	// AnnotationSources lists each layer as `name=digest` (or `name=revision` where the revision
-	// is what identifies the content), separated by spaces, in spec order. Spec order rather than
-	// sorted: the order layers are applied is semantically meaningful -- a later layer overwrites
-	// an earlier one -- so re-ordering it would be discarding information.
+	// identifies the content), space-separated, in spec order: a later layer overwrites an earlier
+	// one, so order carries meaning.
 	AnnotationSources = "de.lhns.oci-composer.sources"
 
 	// AnnotationAssemblyVersion records the algorithm that produced these bytes, so an artifact
 	// found in a registry can be matched against the code that made it.
 	AnnotationAssemblyVersion = "de.lhns.oci-composer.assembly-version"
 
-	// AnnotationBase names the base image's digest, or is absent for a scratch artifact. It is not
-	// derivable from the layers: base layers are reused verbatim, so nothing in the output says
-	// which image they came from.
+	// AnnotationBase names the base image's digest, or is absent for a scratch artifact. Nothing
+	// else in the output says which image the base layers came from.
 	AnnotationBase = "de.lhns.oci-composer.base"
 )
 
@@ -51,13 +37,7 @@ func provenanceAnnotations(base v1.Image, inputs []LayerInput) map[string]string
 
 	parts := make([]string, 0, len(inputs))
 	for _, in := range inputs {
-		// Identity when it is set, for the same reason InputHash prefers it: a Flux artifact's
-		// tarball digest changes when source-controller re-packs, while the revision it describes
-		// does not. The revision is the answer to "what produced this"; the tarball digest is not.
-		id := in.Identity
-		if id == "" {
-			id = in.Digest
-		}
+		id := in.identity()
 		if id == "" {
 			continue
 		}
@@ -71,9 +51,7 @@ func provenanceAnnotations(base v1.Image, inputs []LayerInput) map[string]string
 		if d, err := base.Digest(); err == nil {
 			ann[AnnotationBase] = d.String()
 		}
-		// A base whose digest cannot be read is not worth failing an assembly over: the artifact
-		// is correct, and one absent annotation is a smaller loss than a build that does not
-		// happen. It cannot go unnoticed either -- the base digest is in status.
+		// An unreadable base digest only loses the annotation; the digest is in status anyway.
 	}
 	return ann
 }
@@ -84,8 +62,7 @@ func withProvenance(img v1.Image, base v1.Image, inputs []LayerInput) v1.Image {
 	if len(ann) == 0 {
 		return img
 	}
-	// mutate.Annotations returns a v1.Image for a v1.Image input; the assertion is safe and the
-	// alternative is threading an error through every caller for a case that cannot occur.
+	// mutate.Annotations returns a v1.Image for a v1.Image input.
 	out, ok := mutate.Annotations(img, ann).(v1.Image)
 	if !ok {
 		return img

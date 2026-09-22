@@ -5,8 +5,7 @@ import (
 	"testing"
 )
 
-// S3Config.Validate is what stands between a typo in chart values and a controller that starts,
-// reports Ready, and silently cannot store anything. These tests pin the cases that must fail.
+// S3Config.Validate turns a typo in chart values into a startup failure.
 
 func TestS3ConfigRejectsBadInput(t *testing.T) {
 	valid := S3Config{
@@ -33,9 +32,8 @@ func TestS3ConfigRejectsBadInput(t *testing.T) {
 			func(c *S3Config) { c.Bucket = "" },
 			"bucket is required",
 		},
-		// A bare host is the most likely typo, and it is genuinely ambiguous: without a scheme
-		// there is no way to know whether TLS was intended. Guessing would mean silently
-		// shipping credentials in plaintext.
+		// Without a scheme, whether TLS was intended is ambiguous; guessing could ship
+		// credentials in plaintext.
 		"endpoint without a scheme": {
 			func(c *S3Config) { c.Endpoint = "s3.example.com" },
 			"scheme",
@@ -74,8 +72,7 @@ func TestS3ConfigRejectsBadInput(t *testing.T) {
 	}
 }
 
-// TestS3ConfigAllowsAnonymous — a gateway may permit anonymous reads, and credentials may come
-// from the environment. Neither key set is legitimate; exactly one is always a mistake.
+// TestS3ConfigAllowsAnonymous: neither credential set is legitimate.
 func TestS3ConfigAllowsAnonymous(t *testing.T) {
 	cfg := S3Config{Endpoint: "http://minio.test:9000", Bucket: "artifacts"}
 	if err := cfg.Validate(); err != nil {
@@ -83,17 +80,15 @@ func TestS3ConfigAllowsAnonymous(t *testing.T) {
 	}
 }
 
-// TestS3PrefixRoundTrip — keys must survive prefixing and unprefixing unchanged, or a listing
-// would report keys that no other method accepts and garbage collection would compare the live
-// set against names that never match.
+// TestS3PrefixRoundTrip: prefixing a key must not double a separator.
 func TestS3PrefixRoundTrip(t *testing.T) {
 	for _, prefix := range []string{"", "composer", "/composer/", "a/b"} {
 		t.Run("prefix="+prefix, func(t *testing.T) {
 			s := &S3{prefix: strings.Trim(prefix, "/")}
 			key := MustKey(NamespaceInputs, "sha256:abcd")
 
-			if got := s.key(s.object(key)); got != key {
-				t.Fatalf("key round-trip gave %q, want %q", got, key)
+			if !strings.HasSuffix(s.object(key), key) {
+				t.Fatalf("object name %q does not end in the key %q", s.object(key), key)
 			}
 			if strings.Contains(s.object(key), "//") {
 				t.Fatalf("object name has a doubled separator: %q", s.object(key))
@@ -102,7 +97,7 @@ func TestS3PrefixRoundTrip(t *testing.T) {
 	}
 }
 
-// TestNewS3RejectsBadConfig — construction must fail rather than defer the problem to first use.
+// TestNewS3RejectsBadConfig: construction fails rather than deferring to first use.
 func TestNewS3RejectsBadConfig(t *testing.T) {
 	if _, err := NewS3(S3Config{Endpoint: "not a url", Bucket: "b"}); err == nil {
 		t.Fatal("NewS3 accepted an unparseable endpoint")
@@ -112,8 +107,7 @@ func TestNewS3RejectsBadConfig(t *testing.T) {
 	}
 }
 
-// TestNewS3AcceptsCephRGWShape — the configuration this estate actually runs. Path-style, an
-// https endpoint, and region "default" rather than an AWS region name.
+// TestNewS3AcceptsCephRGWShape: path-style, https, and region "default".
 func TestNewS3AcceptsCephRGWShape(t *testing.T) {
 	s, err := NewS3(S3Config{
 		Endpoint:        "https://s3.example.com",

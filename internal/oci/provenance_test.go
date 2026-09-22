@@ -6,11 +6,8 @@ import (
 	"testing"
 )
 
-// TestProvenanceSurvivesTheObject covers threat-model gap R1.
-//
-// `status.history[].sources` already answers "what produced this artifact" -- but only while the
-// object exists. Delete the ImageComposition and the answer goes with it, while the image it
-// produced is still running somewhere. These annotations put the record in the artifact.
+// TestProvenanceSurvivesTheObject covers threat-model gap R1: the record of what produced an
+// artifact is in the artifact, not only in the object's status.
 func TestProvenanceSurvivesTheObject(t *testing.T) {
 	inputs := []LayerInput{{
 		Name:   "bundle",
@@ -34,20 +31,14 @@ func TestProvenanceSurvivesTheObject(t *testing.T) {
 	if got, want := mf.Annotations[AnnotationAssemblyVersion], strconv.Itoa(AssemblyVersion); got != want {
 		t.Errorf("assembly-version annotation is %q, want the current AssemblyVersion %q", got, want)
 	}
-	// Absent, not empty: a scratch artifact has no base, and an empty string would read as one
-	// whose digest could not be determined.
+	// Absent, not empty, for a scratch artifact.
 	if _, ok := mf.Annotations[AnnotationBase]; ok {
 		t.Errorf("a scratch artifact must not claim a base: %v", mf.Annotations)
 	}
 }
 
-// TestProvenanceRecordsTheRevisionRatherThanTheTarball is the detail that makes the annotation
-// useful rather than merely present.
-//
-// source-controller re-packs its artifacts on restart, so a Flux tarball's digest changes while
-// the revision it describes does not. The tarball digest answers "which bytes did we fetch"; the
-// revision answers "what produced this", which is the question R1 asks. InputHash already prefers
-// Identity for the same reason.
+// TestProvenanceRecordsTheRevisionRatherThanTheTarball: a Flux tarball's digest moves when
+// source-controller re-packs; the revision says what produced the artifact.
 func TestProvenanceRecordsTheRevisionRatherThanTheTarball(t *testing.T) {
 	inputs := []LayerInput{{
 		Name:     "config",
@@ -75,8 +66,7 @@ func TestProvenanceRecordsTheRevisionRatherThanTheTarball(t *testing.T) {
 	}
 }
 
-// TestProvenanceKeepsSpecOrder — layer order is semantic, since a later layer overwrites an
-// earlier one. Sorting the annotation would discard that.
+// TestProvenanceKeepsSpecOrder: a later layer overwrites an earlier one, so order is semantic.
 func TestProvenanceKeepsSpecOrder(t *testing.T) {
 	ann := provenanceAnnotations(nil, []LayerInput{
 		{Name: "zzz", Digest: "sha256:1"},
@@ -87,11 +77,8 @@ func TestProvenanceKeepsSpecOrder(t *testing.T) {
 	}
 }
 
-// TestProvenanceIsDeterministic is the constraint that outranks the feature.
-//
-// `output digest = f(spec)` is the core invariant (ADR 0016). An annotation carrying a build time,
-// a hostname or anything else observed at runtime would end it -- which is why
-// org.opencontainers.image.created is deliberately NOT written here.
+// TestProvenanceIsDeterministic: output digest = f(spec) (ADR 0016), so no runtime observation
+// (not even org.opencontainers.image.created) may appear.
 func TestProvenanceIsDeterministic(t *testing.T) {
 	inputs := []LayerInput{{
 		Name:   "bundle",

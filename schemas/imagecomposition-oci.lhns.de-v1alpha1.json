@@ -14,13 +14,13 @@
       "type": "object"
     },
     "spec": {
-      "description": "ImageCompositionSpec assembles an OCI artifact from content-addressed inputs.\n\nIt cannot execute anything, and that is the entire scope line. Everything expressible here is a\npure function of its inputs, which is what makes the output digest predictable, the reconcile\nloop convergent, and the provenance exact rather than scanned. Anything needing a compiler\nbelongs in ordinary CI. See ADR 0001 and ADR 0016.",
+      "description": "ImageCompositionSpec assembles an OCI artifact from content-addressed inputs.\n\nIt cannot execute anything: everything here is a pure function of its inputs, which makes the\noutput digest predictable and the provenance exact. Anything needing a compiler belongs in CI.\nSee ADR 0001 and ADR 0016.",
       "properties": {
         "base": {
           "description": "Base is the image to build on. Omit for a scratch artifact.",
           "properties": {
             "digest": {
-              "description": "Digest pins the exact content. Required alongside Image, like every other input.\n\nWith spec.platforms unset it must name a platform-specific manifest rather than a\nmulti-architecture index, because resolving an index would mean the controller choosing a\nplatform and the output would stop being a function of the spec. With spec.platforms set an\nindex is correct, since the platform list then comes from the spec. See ADR 0015 and 0018.",
+              "description": "Digest pins the exact content. Required alongside Image, like every other input.\n\nWith spec.platforms unset it must name a platform-specific manifest, not a\nmulti-architecture index; with spec.platforms set, an index is correct. See ADR 0015 and 0018.",
               "pattern": "^sha256:[a-f0-9]{64}$",
               "type": "string"
             },
@@ -30,13 +30,13 @@
               "type": "string"
             },
             "ref": {
-              "description": "Ref names the base in one string: \"quay.io/strimzi/kafka:0.43.0@sha256:…\".\n\nThe digest is mandatory and is what gets pulled. The tag is decorative — it is recorded so a\nhuman can see which release a digest corresponds to, and it is ignored when pulling, because\nresolving a tag at reconcile time is exactly what would stop the output being a function of\nthe spec (ADR 0002).",
+              "description": "Ref names the base in one string: \"quay.io/strimzi/kafka:0.43.0@sha256:…\".\n\nThe digest is mandatory and is what gets pulled. The tag is for humans and ignored when\npulling (ADR 0002).",
               "maxLength": 1024,
               "pattern": "^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*(:[a-zA-Z0-9._-]+)?@sha256:[a-f0-9]{64}$",
               "type": "string"
             },
             "secretRef": {
-              "description": "SecretRef names a kubernetes.io/dockerconfigjson Secret for pulling, when the base is\nprivate. The registry host comes from the Secret's auths map, matched against Image — the\nsame arrangement as a Pod's imagePullSecrets, so no separate registry object is needed.\n\nDeliberately not shared with spec.push.secretRef: different registry, different scope, and\nsending a push-scoped token to wherever the base lives is not a reasonable default.",
+              "description": "SecretRef names a kubernetes.io/dockerconfigjson Secret for pulling, when the base is\nprivate, matched by registry host like a Pod's imagePullSecrets. Separate from\nspec.push.secretRef.",
               "properties": {
                 "name": {
                   "description": "Name of the referent.",
@@ -79,7 +79,7 @@
               "type": "array"
             },
             "env": {
-              "description": "Env to set, as \"KEY=value\" entries. Replaces the inherited list rather than merging into\nit: a per-key merge raises questions about ordering and removal with no obvious answers.",
+              "description": "Env to set, as \"KEY=value\" entries. Replaces the inherited list rather than merging into it.",
               "items": {
                 "type": "string"
               },
@@ -94,7 +94,7 @@
             },
             "inherit": {
               "default": false,
-              "description": "Inherit takes the base image's config as the starting point: its entrypoint, env, user,\nworking directory, exposed ports and stop signal. Without it the config starts empty.\n\nOpt-in rather than automatic. An artifact that is only ever mounted should have an empty\nconfig, and silently acquiring a base's entrypoint would be surprising. Fields set below\noverride what is inherited.",
+              "description": "Inherit takes the base image's config as the starting point: its entrypoint, env, user,\nworking directory, exposed ports and stop signal. Without it the config starts empty.\n\nFields set below override what is inherited.",
               "type": "boolean"
             },
             "labels": {
@@ -132,13 +132,13 @@
         },
         "interval": {
           "default": "1h",
-          "description": "Interval at which to reconcile. Reconciling is nearly free when nothing has changed: the\ncontroller compares a hash of the inputs rather than rebuilding.\n\nA POINTER, so that omitting it actually omits it. metav1.Duration is a struct, and\n`omitempty` does not apply to structs — as a value it always serialised as \"0s\", which\nmeant the API server saw an explicit zero and the default below never applied.",
+          "description": "Interval at which to reconcile. Reconciling is nearly free when nothing has changed: the\ncontroller compares a hash of the inputs rather than rebuilding.\n\nA pointer: as a value struct it would serialise as \"0s\" and the default would never apply.",
           "type": "string"
         },
         "layers": {
           "description": "Layers are ordered filesystem operations applied on top of the base. Later entries overlay\nearlier ones, exactly as image layers do.",
           "items": {
-            "description": "Layer is one entry in an ordered list of filesystem operations applied on top of the base.\n\nEach entry produces exactly one layer, which is what makes the name accurate — the base is\nhoisted out precisely because it did not satisfy that.\n\nExactly one verb must be set. Source-specific options live inside their verb rather than being\nsmeared across the entry, so there is no field that is meaningful for one source and silently\nignored by the rest.",
+            "description": "Layer is one entry in an ordered list of filesystem operations applied on top of the base.\n\nEach entry produces exactly one layer. Exactly one verb must be set; source-specific options live\ninside their verb.",
             "properties": {
               "configMap": {
                 "description": "ConfigMap turns a ConfigMap's entries into files.",
@@ -149,7 +149,7 @@
                   },
                   "optional": {
                     "default": false,
-                    "description": "Optional tolerates the ConfigMap not existing, contributing nothing instead of stalling.\nNothing, not an empty layer — an empty layer would still change the output digest.",
+                    "description": "Optional tolerates the ConfigMap not existing, contributing no layer at all instead of\nstalling.",
                     "type": "boolean"
                   }
                 },
@@ -162,18 +162,18 @@
                 "description": "Fetch retrieves content over HTTP(S).",
                 "properties": {
                   "digest": {
-                    "description": "Digest of the fetched bytes. Declared here rather than resolved, because an arbitrary URL\nis not content-addressed by anything else. A mismatch is terminal. See ADR 0002.",
+                    "description": "Digest of the fetched bytes. A mismatch is terminal. See ADR 0002.",
                     "pattern": "^sha256:[a-f0-9]{64}$",
                     "type": "string"
                   },
                   "stripComponents": {
-                    "description": "StripComponents removes this many leading path components from every entry, before Subpath\nis applied.\n\nFor an archive that wraps everything in one directory -- a release tarball is\n\"app-1.2.3/Dockerfile\" -- `stripComponents: 1` drops that level. The alternative is\n`subpath: app-1.2.3`, which carries the version and so has to be edited on every release.\n\nPath components, not a tar flag: it behaves the same for every archive format.\n\nZero, the default, leaves the archive's own paths alone. Nothing infers this from the source\nkind -- doing so is what broke every sourceRef context, since a Flux artifact has no wrapping\ndirectory to remove (ADR 0045). A value that would remove every entry is an error rather than\na silently empty layer.",
+                    "description": "StripComponents removes this many leading path components from every entry, before Subpath\nis applied.\n\nFor \"app-1.2.3/Dockerfile\", `stripComponents: 1` drops the versioned directory, unlike\n`subpath: app-1.2.3`, which must be edited every release. Same for every archive format.\nZero, the default, leaves paths alone. Removing every entry is an error.",
                     "maximum": 16,
                     "minimum": 0,
                     "type": "integer"
                   },
                   "subpath": {
-                    "description": "Subpath selects one directory from inside the archive and strips the prefix. Useful when a\nrelease tarball wraps everything in a version-named directory you do not want in the image.\nA subpath matching nothing is an error rather than a silently empty layer.\n\nApplies to the archive unpack modes only. It is invalid with \"gz\", which unpacks a single\nfile, and ignored with \"none\".",
+                    "description": "Subpath selects one directory from inside the archive and places its contents at the target.\nA subpath matching nothing is an error. Archive unpack modes only: invalid with \"gz\",\nignored with \"none\".",
                     "maxLength": 4096,
                     "type": "string"
                   },
@@ -213,10 +213,10 @@
                 ]
               },
               "image": {
-                "description": "Image takes the filesystem of another image as this entry's content.\n\nFor consuming something your CI already built. A release published as an image could\npreviously only enter a composition as spec.base, which allows exactly one per artifact and\nputs it underneath everything; this places it at a path like any other content.",
+                "description": "Image takes the filesystem of another image as this entry's content, placed at a path like\nany other content.",
                 "properties": {
                   "ref": {
-                    "description": "Ref is the image to read, pinned by digest: \"repo:tag@sha256:…\" or \"repo@sha256:…\".\n\nThe tag is decorative — it is recorded for humans and ignored when pulling, exactly as it\nis for spec.base.ref. What is pulled is the digest, which is what ADR 0002 requires of\nevery input.",
+                    "description": "Ref is the image to read, pinned by digest: \"repo:tag@sha256:…\" or \"repo@sha256:…\".\n\nThe tag is for humans and ignored when pulling, as for spec.base.ref (ADR 0002).",
                     "maxLength": 1024,
                     "pattern": "^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*(:[a-zA-Z0-9._-]+)?@sha256:[a-f0-9]{64}$",
                     "type": "string"
@@ -287,7 +287,7 @@
                 "type": "object"
               },
               "remove": {
-                "description": "Remove deletes paths inherited from the base or from earlier layers.\n\nImplemented as whiteout entries, which is how OCI expresses deletion: the bytes remain in\nthe layer below, so this hides a file rather than reclaiming its space. Paths are absolute\nand refer to the assembled filesystem.",
+                "description": "Remove deletes paths inherited from the base or from earlier layers.\n\nImplemented as OCI whiteout entries: the bytes remain in the layer below, so this hides a\nfile rather than reclaiming its space. Paths are absolute and refer to the assembled\nfilesystem.",
                 "items": {
                   "maxLength": 4096,
                   "type": "string"
@@ -313,11 +313,11 @@
                     "type": "string"
                   },
                   "namespace": {
-                    "description": "Namespace of the referenced source. Must be the consuming object's own namespace, which is\nalso the default — the field remains only so an explicit value is not a schema error.\n\nA source elsewhere is REFUSED. Both controllers read Flux sources cluster-wide, so honouring\nanother namespace would let anyone who can create one of these objects pull that namespace's\ncontent into an image they control and can read.",
+                    "description": "Namespace of the referenced source. Must be the consuming object's own namespace, which is\nalso the default; any other namespace is REFUSED, since it would expose that namespace's\ncontent to anyone who can create this object.",
                     "type": "string"
                   },
                   "revision": {
-                    "description": "Revision the artifact is expected to be at. Optional; unset consumes whatever the source\ncurrently publishes.\n\nThis is the only way to make a sourceRef layer a pure function of the spec. Without it the\nsource can move under a fixed spec — a branch or a semver range does so with no edit to\nanything, so nothing observes it. It is also independent of the source controller's own\nbookkeeping: the staleness check compares generation against observedGeneration, which is the\nsource reporting on itself, whereas this is an assertion from the consuming side.\n\nMatched against Flux's \"\u003cref\u003e@\u003calgo\u003e:\u003chash\u003e\" by whichever half you give:\n\n\trevision: v0.6.8                  matches v0.6.8@sha1:\u003canything\u003e\n\trevision: v0.6.8@sha1:b739efb5    matches only that commit\n\nThe short form exists because a generator usually knows the tag it asked for and not the\ncommit it resolved to, and the useful check should not require the half it cannot supply.",
+                    "description": "Revision the artifact is expected to be at. Optional; unset consumes whatever the source\ncurrently publishes.\n\nThis is the only way to make a sourceRef layer a pure function of the spec: without it, a\nbranch or semver range can move the source under an unchanged spec.\n\nMatched against Flux's \"\u003cref\u003e@\u003calgo\u003e:\u003chash\u003e\" by whichever half you give:\n\n\trevision: v0.6.8                  matches v0.6.8@sha1:\u003canything\u003e\n\trevision: v0.6.8@sha1:b739efb5    matches only that commit\n\nThe short form suits a generator that knows the tag it asked for but not the commit.",
                     "maxLength": 256,
                     "type": "string"
                   },
@@ -360,7 +360,7 @@
           "type": "array"
         },
         "platforms": {
-          "description": "Platforms the artifact is built for, as \"linux/amd64\" or \"linux/arm/v7\".\n\nTwo or more entries publish an OCI image INDEX with one child manifest per platform, and a\nbase may then be a multi-architecture index — its child is selected per platform. With one\nentry, or none, the output is a single image manifest exactly as before.\n\nUnset resolves to one platform: the BASE's if there is a base, otherwise the CONTROLLER's\nown. That second case is the only input to the output digest that does not come from the\nspec (ADR 0002). It is the right default on a single-architecture cluster, where it is\nprecisely the value that used to be hardcoded. On a MIXED-architecture cluster it means the\nsame spec can produce different content depending on where the controller runs, which with\nimmutable tags surfaces as a failed build — name the platforms here, or pin the controller\nto one architecture.\n\nNaming a platform the base index does not contain is an error: the spec asked for something\nthat does not exist, and a silent substitution would be worse.",
+          "description": "Platforms the artifact is built for, as \"linux/amd64\" or \"linux/arm/v7\".\n\nTwo or more entries publish an OCI image INDEX with one child manifest per platform, and a\nbase may then be a multi-architecture index. With one entry, or none, the output is a single\nimage manifest.\n\nUnset resolves to the BASE's platform, or with no base the CONTROLLER's own architecture\n(ADR 0002). On a MIXED-architecture cluster, name the platforms here or pin the controller\nto one architecture, or the output depends on where the controller runs.\n\nNaming a platform the base index does not contain is an error.",
           "items": {
             "maxLength": 64,
             "pattern": "^[a-z0-9]+/[a-z0-9]+(/[a-z0-9]+)?$",
@@ -370,20 +370,20 @@
           "type": "array"
         },
         "push": {
-          "description": "Push is where the artifact goes: tags, retention, and the tag-conflict policy.\n\nOptional in full. Omitted, the artifact publishes to the operator's default registry as\n\u003cnamespace\u003e/\u003cname\u003e, which is what a default install configures -- so an ImageComposition\nusually names nothing here at all. Set `repository` to publish somewhere else, and pair it\nwith `secretRef`: the operator's credential is only ever sent to the operator's own registry\n(ADR 0034).",
+          "description": "Push is where the artifact goes: tags, retention, and the tag-conflict policy.\n\nOptional. Omitted, the artifact publishes to the operator's default registry as\n\u003cnamespace\u003e/\u003cname\u003e. Set `repository` to publish elsewhere, with `secretRef`: the operator's\ncredential is only sent to the operator's own registry (ADR 0034).",
           "properties": {
             "history": {
-              "description": "History is how many past builds to retain, overriding the controller's default. Identical\nto Publish's.\n\nIt matters MORE here than there, not less: a composition can rebuild any artifact from its\nspec, so retention is a convenience. A build cannot (ADR 0025), so retention is how much of\nthe only copy is kept. That this knob existed only on the kind where it matters least was an\noversight rather than a decision.",
+              "description": "History is how many past builds to retain, overriding the controller's default.\n\nA composition can rebuild any artifact from its spec; an ImageBuild cannot (ADR 0025), so\nthere this is how much of the only copy is kept.",
               "format": "int32",
               "minimum": 1,
               "type": "integer"
             },
             "immutable": {
-              "description": "Immutable is DEPRECATED on this side too; use OnConflict. Identical to Publish's in every\nrespect, so the field cannot mean different things depending on where it sits.\n\nIt was also INERT here until the release that added OnConflict: nothing in the build\ncontroller read it, and BuildKit pushed over whatever the tag held. The CRD advertised a\nguarantee that did not exist.",
+              "description": "Immutable is DEPRECATED; use OnConflict. true means onConflict: Fail, false means\nonConflict: Overwrite.",
               "type": "boolean"
             },
             "onConflict": {
-              "description": "OnConflict decides what happens when a tag already resolves to different content: Fail\n(refuse and stall), Overwrite (move the tag), or Keep (leave it, drop this build, stay\nReady). Defaults to Fail.\n\nRepublishing IDENTICAL content is a no-op regardless of this field, so a steady reconcile\nloop never reaches it -- only a real change of meaning does.\n\nEvaluated against the digest actually produced, on both kinds: the build uploads by digest\nand this controller applies the names afterwards (ADR 0054). A tag meant to MOVE therefore\nconflicts under Fail -- that is what Fail asks for -- and wants Overwrite instead.\n\nDeliberately carries NO schema default, unlike the `immutable` field it replaces. Structural\ndefaults are applied when an object is read back from storage, so defaulting this would\nrewrite every existing `immutable: false` object into a refusing one the moment the CRD was\nupgraded -- a silent reversal of a setting its author chose on purpose. The effective default\nlives in ResolveConflictPolicy instead, where it can consult `immutable` first.",
+              "description": "OnConflict decides what happens when a tag already resolves to different content: Fail\n(refuse and stall), Overwrite (move the tag), or Keep (leave it, drop this build, stay\nReady). Defaults to Fail.\n\nRepublishing IDENTICAL content is never a conflict. The check is against the digest actually\nproduced, on both kinds (ADR 0054), so a tag meant to MOVE needs Overwrite.\n\nNo schema default: it would be applied to stored objects on read and silently turn every\n`immutable: false` object into a refusing one. The effective default consults `immutable`.",
               "enum": [
                 "Fail",
                 "Overwrite",
@@ -392,12 +392,12 @@
               "type": "string"
             },
             "ref": {
-              "description": "Ref behaves exactly as on Publish: a reference whose TAG is appended to Tags, so a\nkustomize images transformer or a Helm value can retag without editing this list.\n\nAbsent until now, which meant the spec-hash tag pattern documented for ImageComposition\ncould not be used from ImageBuild at all — the one place a generator most wants it, since a\nbuild's tag is the only thing identifying which inputs produced it.",
+              "description": "Ref is a reference whose TAG is appended to Tags, so a kustomize images transformer or a\nHelm value can retag without editing this list.",
               "maxLength": 512,
               "type": "string"
             },
             "repository": {
-              "description": "Repository is the fully qualified target, e.g. \"ghcr.io/example/artifact\".\n\nOptional. Omitted, the object publishes to the operator's default registry under\n\u003cnamespace\u003e/\u003cname\u003e -- which is what a default chart install configures, so nothing here has\nto name a host at all.\n\nNaming one has a second effect worth knowing: the operator's own registry credential is used\nONLY for the default target. An object that chooses its own repository authenticates with its\nown secretRef, or not at all. Otherwise anyone able to create one of these objects could\npoint it at a host they control and have the controller hand over the operator's password.",
+              "description": "Repository is the fully qualified target, e.g. \"ghcr.io/example/artifact\".\n\nOptional. Omitted, the object publishes to the operator's default registry under\n\u003cnamespace\u003e/\u003cname\u003e, which a default chart install configures.\n\nThe operator's registry credential is used ONLY for the default target. An object that names\nits own repository authenticates with its own secretRef, or not at all.",
               "type": "string"
             },
             "secretRef": {
@@ -441,7 +441,7 @@
                       "type": "string"
                     },
                     "ref": {
-                      "description": "Ref receives the full pullable reference, registry/repository@sha256:...\n\nPrefer this over Digest alone: a consumer substituting a bare digest into an image field\nproduces a trailing \"@\" on an empty string if the key is ever missing, which fails later and\nless legibly than a missing image would.",
+                      "description": "Ref receives the full pullable reference, registry/repository@sha256:...\n\nPrefer this over Digest alone: a substituted bare digest fails less legibly if missing.",
                       "type": "string"
                     }
                   },
@@ -457,11 +457,11 @@
                   "additionalProperties": {
                     "type": "string"
                   },
-                  "description": "Labels are added to the generated ConfigMap.\n\nEach key must be permitted by --ref-export-allowed-labels, which is empty by default: these\nland on an object in a namespace this object may not otherwise touch. An unpermitted key is\nrefused rather than dropped, because a dropped one leaves a ConfigMap that looks right.\n\nThe controller's own watch labels and its managed-by and owner labels are written last, so\nnothing set here can turn them off.",
+                  "description": "Labels are added to the generated ConfigMap.\n\nEach key must be permitted by --ref-export-allowed-labels, which is empty by default; an\nunpermitted key is refused rather than dropped. The controller's own labels are written last\nand cannot be overridden.",
                   "type": "object"
                 },
                 "namespace": {
-                  "description": "Namespace to write the ConfigMap in.\n\nMust be the object's OWN namespace, or one the operator allow-listed with\n--ref-export-namespaces (ADR 0056). Anything else is refused.\n\nNo default, deliberately: a substitution source is read from the CONSUMING Kustomization's\nnamespace, so defaulting this to the object's own would often produce a ConfigMap nothing\nreads, silently.",
+                  "description": "Namespace to write the ConfigMap in.\n\nMust be the object's OWN namespace, or one the operator allow-listed with\n--ref-export-namespaces (ADR 0056). Anything else is refused.\n\nNo default: a substitution source is read from the CONSUMING Kustomization's namespace.",
                   "minLength": 1,
                   "type": "string"
                 }
@@ -514,7 +514,7 @@
               "type": "string"
             },
             "ref": {
-              "description": "Ref is the complete pullable reference, including the serving host in serving mode.\nSurfaced as a printer column so `kubectl get` shows the exact string to use.",
+              "description": "Ref is the complete pullable reference, as a workload should pull it. Shown by\n`kubectl get`.",
               "type": "string"
             },
             "revision": {
@@ -632,12 +632,12 @@
           "type": "object"
         },
         "history": {
-          "description": "History records past builds, newest first, capped at the retention count. It is the live\nset garbage collection marks from. See ADR 0011.",
+          "description": "History records past builds, newest first, capped at the retention count. Their images are\nkept alive while listed. See ADR 0011 and ADR 0031.",
           "items": {
-            "description": "BuildRecord is one past build, retained so garbage collection knows what is still live.\n\nKept in status rather than inferred from what is in storage. Inference would mean deciding an\nobject is garbage because nothing appears to point at it, which is exactly the reasoning that\ndeletes live data when the controller's view is incomplete. An explicit record also makes\nretention visible in `kubectl get -o yaml`.",
+            "description": "BuildRecord is one past build, retained in status so what must stay alive is an explicit record\nrather than inferred from storage (ADR 0031).",
             "properties": {
               "blobs": {
-                "description": "Blobs are the config and layer digests this build is composed of. These are the objects\ngarbage collection must not reclaim while this build is retained. For a multi-platform\nbuild it is the union across every child.",
+                "description": "Blobs are the config and layer digests this build is composed of. For a multi-platform\nbuild it is the union across every child.",
                 "items": {
                   "type": "string"
                 },
@@ -652,14 +652,14 @@
                 "type": "string"
               },
               "manifests": {
-                "description": "Manifests are the CHILD manifest digests when this build is a multi-platform index. Empty\nfor a single-platform build, where Digest is the manifest itself.\n\nGarbage collection reads this, and must: without it the index is retained while its children\nare swept, leaving a manifest that resolves to nothing. That is indistinguishable from\nhaving deleted the artifact, except that it fails at pull time rather than at collection\ntime, long after the change that caused it.",
+                "description": "Manifests are the CHILD manifest digests when this build is a multi-platform index. Empty\nfor a single-platform build, where Digest is the manifest itself.",
                 "items": {
                   "type": "string"
                 },
                 "type": "array"
               },
               "sources": {
-                "description": "Sources records what each layer was resolved FROM, so an artifact can be traced back to the\nrevision that produced it.\n\nWithout this the only way to answer \"which revision is in this image?\" is to pull the\nmanifest, fetch the layer and read its contents — which is how the incident behind ADR 0026\nhad to be diagnosed, and why a wrong artifact sat unnoticed until a tag conflict surfaced it.",
+                "description": "Sources records what each layer was resolved FROM, so an artifact can be traced back to the\nrevision that produced it (ADR 0026).",
                 "items": {
                   "description": "SourceRecord is where one layer's content came from.",
                   "properties": {

@@ -5,8 +5,7 @@ import (
 	"sync"
 )
 
-// countingTransport counts write requests, so a test can assert that a converged pass attaches
-// nothing rather than merely asserting that nothing looked different afterwards.
+// countingTransport counts write requests, so a test can assert that a converged pass writes nothing.
 type countingTransport struct {
 	inner  http.RoundTripper
 	mu     sync.Mutex

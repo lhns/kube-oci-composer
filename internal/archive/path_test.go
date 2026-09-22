@@ -25,8 +25,7 @@ func TestMappingPlacesEveryCase(t *testing.T) {
 	}
 }
 
-// TestAWalkRefusesASelectionThatContributedNothing pins both refusals in the one place they now
-// live. Neither had a test asserting its message while each sink carried its own copy.
+// TestAWalkRefusesASelectionThatContributedNothing pins both refusals and their messages.
 func TestAWalkRefusesASelectionThatContributedNothing(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -40,7 +39,7 @@ func TestAWalkRefusesASelectionThatContributedNothing(t *testing.T) {
 		{"the subpath directory alone is enough", 0, "ui", []string{"ui"}, ""},
 		{"strip that leaves something is fine", 1, "", []string{"app-1.2.3/Dockerfile"}, ""},
 		{"an empty archive with no selection is not an error", 0, "", nil, ""},
-		// The error quotes the subpath AS WRITTEN, not the cleaned form, so it matches the spec.
+		// The error quotes the subpath as written, not the cleaned form.
 		{"the message quotes what was written", 0, "./ui/", []string{"server/main.go"}, `subpath "./ui/" is not present`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

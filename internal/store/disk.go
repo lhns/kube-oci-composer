@@ -13,13 +13,8 @@ import (
 
 // Disk stores objects as files under a root directory.
 //
-// The layout is "<root>/<namespace>/<algorithm>/<hex>", which matches what
-// go-containerregistry's own disk blob handler uses one level down, so an existing blob
-// directory keeps working when it is moved under a namespace.
-//
-// This is the default backend and the one that needs no configuration. Backed by an emptyDir it
-// is a pure cache; backed by a PVC it survives restarts. Neither is required for correctness,
-// because everything here can be rebuilt from the spec.
+// The layout is "<root>/<namespace>/<algorithm>/<hex>". This is the default backend and needs no
+// configuration.
 type Disk struct {
 	root string
 }
@@ -43,18 +38,15 @@ func NewDisk(dir string) (*Disk, error) {
 
 // path maps a key to a filesystem path, refusing anything that escapes the root.
 //
-// Keys are built by Key from CRD-supplied digests. Validating again here is deliberate
-// belt-and-braces: this is the layer where a traversal would actually reach the filesystem, and
-// a future caller that constructs a key by hand must not be able to slip past.
+// Key already validates CRD-supplied digests; this re-checks at the layer that touches the
+// filesystem, in case a caller builds a key by hand.
 func (d *Disk) path(key string) (string, error) {
 	if key == "" {
 		return "", errors.New("empty key")
 	}
 
-	// Validate the LOGICAL key first, before any conversion to an OS path. Doing it the other
-	// way round is platform-dependent in a way that quietly disables the check: filepath.IsAbs
-	// reports false for "/etc/passwd" on Windows because there is no drive letter, so an
-	// absolute-looking key would sail past on one platform and be rejected on the other.
+	// Validate the LOGICAL key before converting it to an OS path: filepath.IsAbs reports false
+	// for "/etc/passwd" on Windows.
 	if strings.HasPrefix(key, "/") || strings.HasPrefix(key, `\`) {
 		return "", fmt.Errorf("key %q must be relative", key)
 	}
@@ -68,7 +60,7 @@ func (d *Disk) path(key string) (string, error) {
 	}
 
 	full := filepath.Join(d.root, filepath.FromSlash(key))
-	// Belt and braces: even with the checks above, confirm the result is genuinely inside root.
+	// Confirm the result is inside root regardless.
 	if !strings.HasPrefix(full, d.root+string(filepath.Separator)) {
 		return "", fmt.Errorf("key %q escapes the store root", key)
 	}
@@ -87,10 +79,7 @@ func (d *Disk) Stat(_ context.Context, key string) (Info, error) {
 		}
 		return Info{}, fmt.Errorf("stat %s: %w", key, err)
 	}
-	// Note what is NOT done here: the content is not re-hashed. go-containerregistry's disk
-	// handler hashes the entire blob on every Stat, and Stat runs on every HEAD and before every
-	// GET, so a large artifact gets read twice per pull. Content is verified when it is written;
-	// verifying again on every read is a per-pull cost for no additional guarantee.
+	// Not re-hashed: content is verified when written.
 	return Info{Key: key, Size: fi.Size(), ModTime: fi.ModTime()}, nil
 }
 
@@ -143,8 +132,8 @@ func (d *Disk) Write(_ context.Context, key string, r io.Reader) error {
 	}
 
 	if err := os.Rename(tmpName, p); err != nil {
-		// On Windows a rename over an existing file fails. The destination is content-addressed,
-		// so if it is already there it already holds these exact bytes and there is nothing to do.
+		// On Windows a rename over an existing file fails. The key is content-addressed, so an
+		// existing destination already holds these bytes.
 		if _, statErr := os.Stat(p); statErr == nil {
 			return nil
 		}
@@ -162,51 +151,4 @@ func (d *Disk) Delete(_ context.Context, key string) error {
 		return fmt.Errorf("delete %s: %w", key, err)
 	}
 	return nil
-}
-
-func (d *Disk) List(_ context.Context, prefix string) ([]Info, error) {
-	base, err := d.path(prefix)
-	if err != nil {
-		return nil, err
-	}
-
-	var out []Info
-	err = filepath.WalkDir(base, func(p string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				return nil // an empty namespace lists as empty, not as an error
-			}
-			return err
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		name := entry.Name()
-		if strings.HasPrefix(name, ".tmp-") {
-			// A write in flight. Reporting it would let garbage collection delete a blob that is
-			// moments away from being committed and referenced.
-			return nil
-		}
-		fi, err := entry.Info()
-		if err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				return nil // committed or removed underneath us
-			}
-			return err
-		}
-		rel, err := filepath.Rel(d.root, p)
-		if err != nil {
-			return err
-		}
-		out = append(out, Info{
-			Key:     filepath.ToSlash(rel),
-			Size:    fi.Size(),
-			ModTime: fi.ModTime(),
-		})
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("listing %s: %w", prefix, err)
-	}
-	return out, nil
 }

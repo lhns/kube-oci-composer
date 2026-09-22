@@ -1,26 +1,15 @@
 // Package retention keeps the images of live objects from being reclaimed by a registry.
 //
-// The guarantee, in full, is ADR 0031: an image named by the retained status.history of any live
-// ImageComposition or ImageBuild is never deleted, by anything. Expiry beyond that is best-effort —
-// leaking bytes is acceptable, losing live content is not.
+// The guarantee (ADR 0031): an image named by the retained status.history of any live
+// ImageComposition or ImageBuild is never deleted. Expiry beyond that is best-effort.
 //
-// The mechanism is a lease rather than a scan. Every live object periodically PULLS the manifests
-// its history names, under both their digests and their tags, and the registry keeps whatever has
-// been pulled recently. "Still referenced" becomes a positive, continuously renewed assertion
-// instead of something inferred from the absence of a reference.
+// The mechanism is a lease: every live object periodically PULLS the manifests its history names,
+// by digest and by tag, and the registry keeps whatever was pulled recently. This package therefore
+// needs no write or delete permission, objects sharing a digest need no coordination, and eviction
+// needs no action (the expiry window doubles as an undo period).
 //
-// Three properties follow, and they are why this shape was chosen over deleting on eviction:
-//
-//   - This package needs no write and no delete permission. There is no call it makes that can
-//     destroy an image, so no bug in it can.
-//   - Two objects publishing the same digest need no coordination. Both refresh it; it survives
-//     while either lives.
-//   - Eviction needs no action. A record falling out of history simply stops being refreshed, and
-//     the expiry window doubles as an undo period.
-//
-// The cost is that it fails UNSAFE: if refreshing stops for longer than the registry's window, live
-// content is deleted. That is what makes the failure reporting here load-bearing rather than
-// courteous, and why the margin between the interval and the window has to be large.
+// It fails UNSAFE: if refreshing stops for longer than the registry's window, live content is
+// deleted. Hence the loud failure reporting and the large interval-to-window margin.
 package retention
 
 import (
@@ -45,43 +34,30 @@ import (
 
 // DefaultInterval is how often every live object's images are refreshed.
 //
-// One hour against a registry window of 30 days is a margin of 720. That ratio is the guarantee: it
-// means refreshing has to fail continuously for weeks, not hours, before anything is at risk, and it
-// leaves room for an outage, a rollout, or a slow registry without consequence.
-//
-// Anyone lowering the registry's window has to lower this with it. The relationship is what holds,
-// not either number.
+// Against a 30-day registry window this is a margin of 720. The ratio is the guarantee: lowering the
+// registry's window means lowering this with it.
 const DefaultInterval = time.Hour
 
-// DegradedAfter is how many consecutive failed cycles for one object raise a condition on it.
-//
-// Not one: a single failed cycle is an unreachable registry or a rolling restart, and reporting that
-// as degraded would train operators to ignore the signal. Three consecutive failures against an
-// hourly interval is three hours of a 30-day window — early enough to be a warning rather than a
-// post-mortem.
+// DegradedAfter is how many consecutive failed cycles for one object raise a warning on it. More
+// than one, so a single unreachable-registry blip does not train operators to ignore the signal.
 const DegradedAfter = 3
 
 // PendingLister reports objects the controller has not yet reconciled.
 //
-// Required, for a reason that inverts the collector's. There, an incomplete view risked SWEEPING
-// something live. Here it risks under-REFRESHING: an object missing from the view is an object
-// whose images stop being kept alive, and the symptom arrives one retention window later with
-// nothing to connect it back. Refusing to run on a partial view is the only safe answer.
+// Required: an object missing from a partial view silently stops being refreshed, and the symptom
+// arrives one retention window later. The refresher refuses to run on a partial view.
 type PendingLister interface {
 	Pending(ctx context.Context) ([]string, error)
 }
 
 // Target is one object whose images must be kept alive.
 //
-// The Refresher takes these rather than listing kinds itself, and that is ADR 0004 showing through:
-// the two kinds are separate COMPONENTS with separate RBAC, so the composer has no access to
-// ImageBuild and the builder none to ImageComposition. A refresher that listed both would need one
-// of them to hold permissions it was deliberately not given.
+// The Refresher takes these rather than listing kinds itself because the composer and builder have
+// separate RBAC (ADR 0004); neither may list the other's kind.
 type Target struct {
 	// Object is what an Event is recorded against.
 	Object client.Object
-	// Push describes where the object publishes. Nil means it named no repository and goes to the
-	// operator's default registry.
+	// Push describes where the object publishes. Nil means the operator's default registry.
 	Push *ociv1alpha1.Push
 	// Artifact is the current publication, which may not be in History yet.
 	Artifact *ociv1alpha1.ArtifactStatus
@@ -128,11 +104,8 @@ func (s BuildSource) Targets(ctx context.Context) ([]Target, error) {
 	return out, nil
 }
 
-// Pending reports builds the controller has not yet observed.
-//
-// The builder has no equivalent of the composer's Readiness — it serves nothing, so it has no store
-// to warm and nothing to gate a Service on. The completeness question still has to be answered
-// though, and generation versus observedGeneration is the whole of it here.
+// Pending reports builds whose observedGeneration lags their generation. The builder has no
+// Readiness like the composer's, so this is its whole completeness check.
 func (s BuildSource) Pending(ctx context.Context) ([]string, error) {
 	var list ociv1alpha1.ImageBuildList
 	if err := s.List(ctx, &list); err != nil {
@@ -161,26 +134,22 @@ type Refresher struct {
 	// Pending gates a cycle. See PendingLister.
 	Pending PendingLister
 
-	// Recorder surfaces sustained failure. The failure mode of this component is silence followed
-	// by deletion, so an Event is not decoration.
+	// Recorder surfaces sustained failure, which otherwise ends silently in deletion.
 	Recorder record.EventRecorder
 
 	// Default is the operator's registry and credential. See recon.DefaultRegistry.
 	Default recon.DefaultRegistry
 
-	// Transport, when set, trusts an additional CA on top of the system roots. Same object the
-	// other controllers use; see recon.Transport.
+	// Transport, when set, trusts an additional CA on top of the system roots. See recon.Transport.
 	Transport http.RoundTripper
 
-	// InsecureRegistries are hosts that may be reached over plain HTTP, matched on host exactly as
-	// the builder matches them, so a host that can be pushed to can also be refreshed.
+	// InsecureRegistries are hosts that may be reached over plain HTTP, matched exactly as the
+	// builder matches them.
 	InsecureRegistries []string
 
+	// mu guards failures: RefreshNow runs from a reconcile while a cycle may be running.
+	mu sync.Mutex
 	// failures counts consecutive failed cycles per object, keyed by namespace/name.
-	//
-	// Guarded, because RefreshNow is called from a reconcile while the cycle goroutine may be
-	// running. Before that it was only ever touched by the ticker.
-	mu       sync.Mutex
 	failures map[string]int
 	// skips counts consecutive cycles that refreshed NOTHING because the view was partial.
 	skips int
@@ -198,11 +167,8 @@ type Result struct {
 	Unsupported int
 }
 
-// NeedLeaderElection keeps refreshing on the leader.
-//
-// Not for safety — concurrent refreshes are harmless, since a pull is idempotent and cannot corrupt
-// anything — but because N replicas would multiply the request volume against the registry for no
-// added protection.
+// NeedLeaderElection keeps refreshing on the leader. Concurrent refreshes are harmless; this only
+// avoids multiplying registry traffic.
 func (r *Refresher) NeedLeaderElection() bool { return true }
 
 // Start refreshes on an interval until ctx is cancelled.
@@ -213,10 +179,8 @@ func (r *Refresher) Start(ctx context.Context) error {
 	}
 	logger := log.FromContext(ctx).WithName("retention")
 
-	// Run once at startup, unlike the collector, and the difference is deliberate. The collector
-	// waits because acting on an unsettled view could DELETE something; refreshing early can only
-	// keep something alive that was going to be kept anyway. After a restart, an early cycle is also
-	// exactly what a long outage needs.
+	// Run once immediately, unlike the collector: refreshing early can only keep things alive, and
+	// after a long outage an early cycle is what is needed.
 	r.cycle(ctx, logger)
 
 	ticker := time.NewTicker(interval)
@@ -240,15 +204,11 @@ func (r *Refresher) cycle(ctx context.Context, logger interface {
 	switch {
 	case err != nil:
 		r.skips = 0
-		// Loud, and not merely logged at info. A failed cycle is a step toward deletion.
 		logger.Error(err, "RETENTION REFRESH FAILED; live images lose their protection if this "+
 			"continues for the registry's retention window")
 	case result.Skipped:
-		// A skipped cycle protects exactly as much as a failed one: nothing. The gate is right --
-		// a partial view would under-refresh silently -- but declining is not a benign outcome, and
-		// it was reported as though it were. One object stuck with observedGeneration behind its
-		// generation stops the refresh for EVERY object in the cluster, and nothing makes that
-		// resolve on its own.
+		// A skipped cycle protects nothing, and one object stuck behind its generation blocks the
+		// refresh for every object in the cluster, so persistent skips escalate like failures.
 		r.skips++
 		if r.skips < DegradedAfter {
 			logger.Info("retention refresh skipped", "reason", result.SkipReason,
@@ -284,8 +244,6 @@ func (r *Refresher) RefreshOnce(ctx context.Context) (Result, error) {
 		return Result{}, fmt.Errorf("checking for unreconciled objects: %w", err)
 	}
 	if len(pending) > 0 {
-		// Under-refreshing is invisible until the window elapses, so a partial view is a reason to
-		// do nothing rather than to do most of it.
 		return Result{Skipped: true, SkipReason: fmt.Sprintf(
 			"%d objects not yet reconciled (%v); a partial view would under-refresh",
 			len(pending), pending)}, nil
@@ -305,17 +263,14 @@ func (r *Refresher) RefreshOnce(ctx context.Context) (Result, error) {
 
 // refreshObject pulls every reference one object still names.
 //
-// Deliberately driven by status alone, and never by whether the object reconciled successfully. An
-// object Stalled on a spec error must keep refreshing what it already published — those images may
-// be running right now, and stalling is precisely when nobody is watching. ADR 0031 names this as
-// the most likely implementation mistake.
+// Driven by status alone, never by whether the object reconciled: a Stalled object must keep its
+// published images alive (ADR 0031).
 func (r *Refresher) refreshObject(ctx context.Context, target Target, out *Result) {
 	obj := target.Object
 	namespace, objName := obj.GetNamespace(), obj.GetName()
 	push := target.Push
-	// Resolved the same way the publish path resolves it, so an object using the default registry
-	// is refreshed rather than silently skipped -- which would look like nothing at all until its
-	// images expired.
+	// Resolved as the publish path resolves it, so an object with no push block (default registry)
+	// is still refreshed.
 	repo := ""
 	switch {
 	case push != nil && push.Repository != "":
@@ -325,14 +280,7 @@ func (r *Refresher) refreshObject(ctx context.Context, target Target, out *Resul
 	}
 
 	if repo == "" {
-		// Nowhere to publish, so nothing to keep alive: no repository named and no default
-		// registry configured.
-		//
-		// Keyed on the resolved REPOSITORY, not on push being nil. An object with no push block
-		// still publishes -- to the operator's default registry -- and skipping those would stop
-		// refreshing exactly the objects a default install creates, silently, with the symptom
-		// arriving one retention window later. That is condition 2's failure wearing a different
-		// hat.
+		// Nowhere it could have published, so nothing to keep alive.
 		out.Unsupported++
 		return
 	}
@@ -355,8 +303,7 @@ func (r *Refresher) refreshObject(ctx context.Context, target Target, out *Resul
 		refOpts = append(refOpts, name.Insecure)
 	}
 
-	// Which references are the CURRENT artifact -- what the object reports, and what a workload
-	// pulls. Losing one of those is a different event from history expiring. ADR 0049, amended.
+	// References of the CURRENT artifact: losing one is not history expiring (ADR 0049, amended).
 	current := map[string]bool{}
 	for _, ref := range refsOf(repo, target.Artifact, nil) {
 		current[ref] = true
@@ -372,10 +319,8 @@ func (r *Refresher) refreshObject(ctx context.Context, target Target, out *Resul
 			continue
 		}
 
-		// A GET, not a HEAD. The registry renews recency for a PULL, and an existence check is not
-		// obliged to count as one — the saving would be a few KB on the one request the whole
-		// guarantee depends on. remote.Image fetches the manifest and nothing else; layers are
-		// lazy, so no blob moves.
+		// A GET, not a HEAD: registries renew recency on a pull, and a HEAD need not count as one.
+		// remote.Image fetches only the manifest; layers are lazy.
 		img, err := remote.Image(parsed, opts...)
 		if err == nil {
 			_, err = img.Manifest()
@@ -383,30 +328,14 @@ func (r *Refresher) refreshObject(ctx context.Context, target Target, out *Resul
 		switch {
 		case err == nil:
 			out.Refreshed++
-			// And whatever describes it.
-			//
-			// A referrer manifest is UNTAGGED, and the shipped registry policy is
-			// deleteUntagged with keepUntagged.pulledWithin -- so an SBOM, a provenance
-			// statement or an attestation child would be reclaimed one window after it was
-			// written, silently, while the image it describes stayed alive. That is threat D6
-			// reappearing on a new object type, in the deleting direction.
-			//
-			// Signatures need nothing here: cosign's .sig is a TAG, so keepTags already covers it.
+			// Referrers (SBOM, provenance, attestations) are untagged and would otherwise be
+			// reclaimed by deleteUntagged while their image lives (threat D6). Cosign's .sig is a
+			// tag, so keepTags covers it.
 			r.refreshReferrers(parsed, opts, out)
 		case recon.IsNotFound(err):
-			// The guarantee has ALREADY been broken by something else, and quietly. A different
-			// alarm from a registry that is merely unreachable: one says the protection failed, the
-			// other says it might.
-			//
-			// Counted apart from failed, not just apart in Result. A deleted manifest cannot come
-			// back on its own, so folding it into failed re-armed noteFailure every cycle,
-			// clearFailure was unreachable, and consecutiveFailures grew without bound -- 72 and
-			// climbing, on the cluster that reported it. An object stayed Degraded permanently over
-			// history that had expired, which is exactly how a real outage arrives looking like
-			// three days of existing noise. ADR 0049.
-			//
-			// Except for the current artifact, which is not history and not expired: the object is
-			// telling workloads to pull something that is not there. That one is a failure, below.
+			// Already deleted: permanent, so it is reported but does not count as a failure, or
+			// expired history would keep the object Degraded forever (ADR 0049). The current
+			// artifact is the exception; see lostCurrent below.
 			out.NotFound++
 			if current[ref] {
 				lostCurrent++
@@ -422,9 +351,7 @@ func (r *Refresher) refreshObject(ctx context.Context, target Target, out *Resul
 		}
 	}
 
-	// Reported every cycle rather than once, and as a summary rather than per reference: it holds
-	// no state, and a loss that is still true an hour later is still worth seeing. It does NOT
-	// touch the failure count, so an object whose only problem is expired history is not Degraded.
+	// Reported every cycle as a summary; it does not touch the failure count.
 	if gone > 0 {
 		recon.Event(r.Recorder, obj, corev1.EventTypeWarning, ociv1alpha1.ReasonRetentionLost,
 			fmt.Sprintf("%d of %d references this object published are already gone from the "+
@@ -432,14 +359,9 @@ func (r *Refresher) refreshObject(ctx context.Context, target Target, out *Resul
 				gone, len(refs), lastGone))
 	}
 
-	// The current artifact gone is NOT quiet, and it does count towards the escalation. It is the
-	// case ADR 0049's silence was never meant to cover: history ages out by design, but the artifact
-	// in status is what every workload referencing this object pulls, and nothing about it has
-	// expired. Its controller repairs it on its next reconcile -- the composer republishes identical
-	// bytes, a build rebuilds -- so a loss that is still here DegradedAfter cycles later is one that
-	// is not being repaired, and that is worth being loud about.
-	//
-	// A moving tag deleted exactly this, under a Ready object, before ADR 0060.
+	// A missing current artifact is what workloads pull, so it counts towards escalation. Its
+	// controller repairs it on the next reconcile; one still missing DegradedAfter cycles later is
+	// not being repaired. (A moving tag caused exactly this before ADR 0060.)
 	if lostCurrent > 0 {
 		recon.Event(r.Recorder, obj, corev1.EventTypeWarning, ociv1alpha1.ReasonArtifactLost,
 			fmt.Sprintf("The artifact this object currently reports -- what a workload referencing "+
@@ -456,9 +378,7 @@ func (r *Refresher) refreshObject(ctx context.Context, target Target, out *Resul
 			fmt.Sprintf("%d of %d references: %v", failed, len(refs), lastErr))
 		return
 	}
-	// Reached whenever nothing transient failed, gone references included. Those are permanent, so
-	// leaving them to hold the counter open would mean the escalation never resets and a genuine
-	// registry outage could not be told from an old loss.
+	// Gone history references do not hold the counter open, so an old loss cannot mask an outage.
 	r.clearFailure(namespace, objName)
 }
 
@@ -479,9 +399,7 @@ func (r *Refresher) noteFailure(ctx context.Context, obj client.Object, namespac
 	if n < DegradedAfter {
 		return
 	}
-	// An Event rather than a status condition, deliberately: the reconciler owns this object's
-	// conditions, and a second writer racing it would produce a status that disagrees with itself
-	// depending on which patch landed last. An Event is additive and cannot lose a reconcile's work.
+	// An Event, not a condition: the reconciler owns the conditions, and a second writer would race it.
 	recon.Event(r.Recorder, obj, corev1.EventTypeWarning, ociv1alpha1.ReasonRetentionDegraded,
 		fmt.Sprintf("Retention refresh has failed %d times in a row (%s). Images this object "+
 			"published are protected only while they are refreshed; if this continues for the "+
@@ -498,30 +416,18 @@ func (r *Refresher) clearFailure(namespace, objName string) {
 
 // RefreshNow renews the lease on one object's images without waiting for the next cycle.
 //
-// Called straight after a publish. Until it runs, the artifact has NO lease: a registry that
-// expires on pull recency holds no record that something was pushed, and zot in particular can
-// carry an old timestamp onto a new tag when the digest is one it has seen before. A GC pass in
-// the gap collects content that is minutes old. The scheduled cycle would close that gap only
-// after a full Interval -- an hour, by default.
-//
-// Deliberately NOT gated on Pending. That gate exists so a PARTIAL view does not under-refresh a
-// whole cycle; here the caller has one object it has just published and knows to be current.
+// Called straight after a publish: until then the artifact has no lease (zot can even carry an old
+// pull timestamp onto a new tag for a known digest), and a GC pass in the gap would collect it.
+// Not gated on Pending, which guards against partial views of a whole cycle, not one known object.
 func (r *Refresher) RefreshNow(ctx context.Context, target Target) Result {
 	var out Result
 	r.refreshObject(ctx, target, &out)
 	return out
 }
 
-// refsOf lists every reference an object still needs kept alive.
-//
-// BOTH the digest and each tag, for every retained record. Measured, not assumed: a registry can
-// govern tagged and untagged manifests by different rules, so pulling only the digest keeps the
-// content alive and lets the tag be collected. A refresh keeps alive exactly what it asks for.
-//
-// Sourced from status.history plus status.artifact, because history is the retention record and the
-// current artifact may not be in it yet.
-// refsOf is only reached with a resolved repository -- refreshObject returns before this when there
-// is none -- so it does not re-check for one.
+// refsOf lists every reference an object still needs kept alive: the digest AND each tag of the
+// current artifact and every retained record. A registry can govern tagged and untagged manifests
+// differently, so pulling only the digest would let the tag be collected. repo is never empty.
 func refsOf(repo string, artifact *ociv1alpha1.ArtifactStatus,
 	history []ociv1alpha1.BuildRecord) []string {
 
@@ -560,17 +466,10 @@ func digestRef(repo, digest string) string {
 	return repo + "@" + digest
 }
 
-// qualify rebuilds a stored tag against the repository this refresh resolved, keeping only the tag
-// itself.
+// qualify rebuilds a stored tag against the resolved repository, keeping only the tag itself.
 //
-// The stored value is NOT usable as a reference here. Both controllers write status.Tags as a
-// workload should pull them -- through the PUBLIC host, an Ingress or NodePort name that a pod
-// deliberately cannot resolve -- so trusting it made every tag refresh fail DNS while the digests,
-// built from repo, succeeded. Silently: the images kept their content alive and lost their tags,
-// which is precisely what the shipped deleteUntagged policy reclaims. ADR 0048.
-//
-// Symmetric with digestRef, which has always taken repo as the authority. A hand-edited or older
-// object may hold a bare tag, and those still work.
+// Stored tags use the PUBLIC host (Ingress/NodePort), which a pod may not resolve; using them as-is
+// failed every tag refresh while digests succeeded, so tags got reclaimed (ADR 0048).
 func qualify(repo, tag string) string {
 	t := bareTag(tag)
 	if t == "" {
@@ -581,19 +480,14 @@ func qualify(repo, tag string) string {
 
 // bareTag strips any repository the stored value carries.
 //
-// The tag is what follows the last ":" that comes AFTER the last "/", which is the one rule that
-// survives a host with a port: in "host:30500/ns/app:v1" the first colon belongs to the port and
-// only the second introduces a tag. A value with no such colon is already bare. A value that names
-// a repository and no tag -- "host:30500/ns/app" -- yields nothing, because appending it to repo
-// would fabricate a reference that was never published. Nor does a digest reference, which carries
-// a colon of its own.
+// The tag follows the last ":" AFTER the last "/", which survives a host port
+// ("host:30500/ns/app:v1"). A repository with no tag ("host:30500/ns/app") or a digest reference
+// yields "", since appending it to repo would fabricate a reference that was never published.
 func bareTag(tag string) string {
 	if tag == "" {
 		return ""
 	}
-	// A digest reference first, because a digest CONTAINS a colon -- "app@sha256:abc" would
-	// otherwise parse as the tag "abc". It is not a tag at all, and digests already reach the
-	// refresh set through digestRef.
+	// Checked first: a digest contains a colon. Digests reach the refresh set through digestRef.
 	if strings.Contains(tag, "@") {
 		return ""
 	}
@@ -608,11 +502,8 @@ func bareTag(tag string) string {
 	return tag
 }
 
-// remoteOptions reads the push credential, and nothing else.
-//
-// The same Secret the object already uses to publish. This package never needs more authority than
-// reading, so a credential scoped to pull is enough for it — which is worth knowing when deciding
-// what to put in that Secret.
+// remoteOptions reads the push credential. Only pull access is ever used, so a pull-scoped
+// credential in that Secret suffices.
 func (r *Refresher) remoteOptions(
 	ctx context.Context, namespace, repository string, push *ociv1alpha1.Push,
 ) ([]remote.Option, error) {
@@ -620,8 +511,7 @@ func (r *Refresher) remoteOptions(
 		Reader:    r.Client,
 		Transport: r.Transport,
 		Default:   r.Default,
-		// A plain error, not Pending: there is no object here to make pending, and a refresh
-		// failure is counted and escalated rather than surfaced on a status.
+		// A plain error: a refresh failure is counted and escalated, not surfaced on a status.
 		Soft: fmt.Errorf,
 	}.Options(ctx, namespace, repository, push)
 }
@@ -631,24 +521,19 @@ func (r *Refresher) SetupWithManager(mgr ctrl.Manager) error {
 	return mgr.Add(r)
 }
 
-// insecureHost reports whether a repository's host may be reached over plain HTTP.
-//
-// Matched on host rather than applied globally, exactly as the builder matches it, so naming one
-// internal registry does not quietly downgrade every other request this controller makes.
 // refreshReferrers pulls whatever is attached to a digest, so untagged attestations are kept alive
-// by the same mechanism that keeps the artifact alive.
+// alongside the artifact.
 //
-// Failures here are counted but never fatal: an attestation is metadata about an image that is
-// itself already refreshed, and a registry with no Referrers API at all should not turn a working
-// retention refresh into a reported failure.
+// Failures are counted but never fatal: a registry without a Referrers API must not turn a working
+// refresh into a reported failure.
 func (r *Refresher) refreshReferrers(ref name.Reference, opts []remote.Option, out *Result) {
-	digestRef, ok := ref.(name.Digest)
+	dig, ok := ref.(name.Digest)
 	if !ok {
-		// Tags are refreshed as tags; referrers hang off digests.
+		// Referrers hang off digests; tags are refreshed as tags.
 		return
 	}
 
-	idx, err := remote.Referrers(digestRef, opts...)
+	idx, err := remote.Referrers(dig, opts...)
 	if err != nil {
 		return
 	}
@@ -657,13 +542,11 @@ func (r *Refresher) refreshReferrers(ref name.Reference, opts []remote.Option, o
 		return
 	}
 	for _, d := range mf.Manifests {
-		attached := digestRef.Context().Digest(d.Digest.String())
-		desc, err := remote.Get(attached, opts...)
-		if err != nil {
+		attached := dig.Context().Digest(d.Digest.String())
+		if _, err := remote.Get(attached, opts...); err != nil {
 			out.Failed++
 			continue
 		}
-		_ = desc
 		out.Refreshed++
 	}
 }

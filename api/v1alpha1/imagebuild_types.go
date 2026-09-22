@@ -7,41 +7,30 @@ import (
 
 // BuildContext is the tree the Dockerfile's COPY and ADD read from.
 //
-// Every member is content-addressed, and THAT is the requirement — not that it comes from Flux.
-// This kind's input hash is its identity (ADR 0025), so a context nothing addresses would leave
-// nothing to hash and every reconcile would be a build. A Flux artifact resolves to a digest; the
-// members added later declare one. All of them satisfy the rule the earlier Flux-only shape was
-// written to enforce, which is why that shape was narrower than its own reason. See ADR 0042.
-//
-// Still no inline or bare-URL form: those are the two that genuinely fail the test.
+// Every member is content-addressed: this kind's input hash is its identity (ADR 0025), so an
+// unaddressed context would make every reconcile a build. Hence no inline or bare-URL form. See
+// ADR 0042.
 //
 // +kubebuilder:validation:XValidation:rule="(has(self.sourceRef)?1:0) + (has(self.fetch)?1:0) + (has(self.image)?1:0) == 1",message="set exactly one of sourceRef, fetch or image"
 // +kubebuilder:validation:XValidation:rule="!has(self.fetch) || self.fetch.unpack == 'tar' || self.fetch.unpack == 'tar.gz'",message="a build context is a directory tree, so fetch.unpack must be tar or tar.gz. unpack defaults to 'none', which places a single file, so this has to be set explicitly"
 type BuildContext struct {
-	// SourceRef takes the context from a Flux source's artifact.
-	//
-	// The one to reach for when the content moves: source-controller tracks the revision. ADR 0042
-	// says which sources are delegated to it and why.
+	// SourceRef takes the context from a Flux source's artifact. The one to reach for when the
+	// content moves: source-controller tracks the revision.
 	// +optional
 	SourceRef *SourceRefSource `json:"sourceRef,omitempty"`
 
 	// Fetch retrieves the context as an archive over HTTP(S), at a declared digest.
 	//
-	// For a release tarball rather than a checkout. The digest is declared, not resolved: a
-	// mismatch means the URL served something other than what this spec names, and is refused.
-	//
-	// Only the archive unpack modes apply, since a context is a tree.
+	// For a release tarball rather than a checkout. A digest mismatch is refused. Only the archive
+	// unpack modes apply, since a context is a tree.
 	// +optional
 	Fetch *FetchSource `json:"fetch,omitempty"`
 
 	// Image takes the flattened filesystem of a digest-pinned image as the context.
 	//
-	// For building on what CI already published. Costs a pull and a flatten in the build pod on
-	// every cache miss, so prefer sourceRef where it would do.
-	//
-	// `FROM <image>@sha256:… AS ctx` plus `COPY --from=ctx` does much the same with no context at
-	// all. Reach for this when the image IS the tree the build reads -- notably an
-	// ImageComposition's output, which is how "compose the workdir, then build it" is spelled.
+	// For building on what CI already published, notably an ImageComposition's output ("compose
+	// the workdir, then build it"). Costs a pull and a flatten per cache miss, so prefer sourceRef
+	// where it would do; `FROM <image>@sha256:… AS ctx` plus `COPY --from=ctx` is an alternative.
 	// +optional
 	Image *ImageSource `json:"image,omitempty"`
 }
@@ -54,9 +43,8 @@ func (c *BuildContext) GetImage() *ImageSource {
 	return c.Image
 }
 
-// GetSourceRef returns the Flux source this context names, or nil when it names none.
-//
-// Nil-safe on the receiver, because no context at all is legal.
+// GetSourceRef returns the Flux source this context names, or nil when it names none. Nil-safe,
+// because no context at all is legal.
 func (c *BuildContext) GetSourceRef() *SourceRefSource {
 	if c == nil {
 		return nil
@@ -67,13 +55,8 @@ func (c *BuildContext) GetSourceRef() *SourceRefSource {
 // DockerfileSource says where the Dockerfile comes from.
 //
 // `path` is the common case: the recipe lives in the thing being built. `inline` puts it in this
-// spec. `configMapRef` puts it in an object a platform team can own separately and share between
-// several ImageBuilds.
-//
-// No field here carries a schema default, deliberately: a structural default is materialised into
-// the stored object, so a defaulted `path` would make has(self.path) true for every object and the
-// exactly-one rule below could never fire. EffectiveDockerfile holds it instead, the same
-// arrangement as Push.OnConflict.
+// spec. `configMapRef` puts it in a ConfigMap that can be owned separately and shared between
+// ImageBuilds. With none set, the path is "Dockerfile".
 //
 // +kubebuilder:validation:XValidation:rule="(has(self.path)?1:0) + (has(self.inline)?1:0) + (has(self.configMapRef)?1:0) == 1",message="set exactly one of path, inline or configMapRef"
 type DockerfileSource struct {
@@ -86,12 +69,8 @@ type DockerfileSource struct {
 
 	// Inline is the Dockerfile itself, verbatim. Plaintext in etcd and in `kubectl get -o yaml`.
 	//
-	// An unpinned FROM here is terminal rather than retried: the fix is an edit to this field, and
-	// the generation change it raises is what wakes the object. A `path` Dockerfile gets no such
-	// event, so the same check is not terminal there.
-	//
-	// Capped well below what etcd would take: every watcher of every ImageBuild pays for the size
-	// on every update.
+	// An unpinned FROM here is terminal (Stalled) rather than retried, since the fix is an edit to
+	// this field.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=65536
 	// +optional
@@ -99,19 +78,16 @@ type DockerfileSource struct {
 
 	// ConfigMapRef reads the Dockerfile from one key of a ConfigMap in this object's namespace.
 	//
-	// The content is hashed, not the resourceVersion, so an edit rebuilds and a no-op write does
-	// not. The ConfigMap is watched, so that happens promptly rather than at the next interval.
-	//
-	// No `optional`, unlike a composition's configMap layer: a missing Dockerfile cannot produce an
-	// empty build, only an object that can never become Ready.
+	// The content is hashed, so an edit rebuilds promptly and a no-op write does not. The
+	// ConfigMap must exist.
 	// +optional
 	ConfigMapRef *ConfigMapKeyReference `json:"configMapRef,omitempty"`
 }
 
 // EffectiveDockerfile returns the path to use when the spec names none.
 //
-// Not a schema default -- see the DockerfileSource comment. The consequence is that
-// spec.dockerfile.path is empty for most objects, so nothing may read it directly.
+// Not a schema default, which would make has(self.path) true for every object and break the
+// exactly-one rule. So spec.dockerfile.path is usually empty and nothing may read it directly.
 func (s *DockerfileSource) EffectiveDockerfile() string {
 	if s == nil || s.Path == "" {
 		return "Dockerfile"
@@ -121,22 +97,18 @@ func (s *DockerfileSource) EffectiveDockerfile() string {
 
 // ImageBuildSpec builds an OCI image by executing a Dockerfile.
 //
-// This kind executes arbitrary code, so its output digest is NOT a function of its spec — it is an
-// observation, recorded in status after the fact. What the API can offer is that the INPUTS are
-// content-addressed, so an unchanged input hash skips the build. Two clusters applying the same
-// commit can still produce two different images.
+// This kind executes arbitrary code, so its output digest is NOT a function of its spec; it is
+// recorded in status after the fact. The INPUTS are content-addressed, so an unchanged input hash
+// skips the build, but two clusters applying the same commit can produce different images.
 //
-// If what you need is "take a released artifact and put it in an image", use ImageComposition — it
-// is a strictly stronger tool, and since ADR 0024 it can take files out of an image your CI already
-// built. See ADR 0025 for what this kind costs.
+// To put released artifacts into an image, use ImageComposition, a strictly stronger tool. See
+// ADR 0025.
 //
 // +kubebuilder:validation:XValidation:rule="has(self.context) || (has(self.dockerfile) && (has(self.dockerfile.inline) || has(self.dockerfile.configMapRef)))",message="with no context there is no tree to find a Dockerfile in: set spec.context, or give the Dockerfile directly with spec.dockerfile.inline or spec.dockerfile.configMapRef"
 type ImageBuildSpec struct {
 	// Interval at which to reconcile. Nearly free when nothing has changed: the controller
-	// compares a hash of the resolved inputs rather than building.
-	//
-	// It never rebuilds on a timer: a new digest under an unchanged spec is what immutable tags
-	// refuse. To pick up upstream fixes, change an input — repin FROM, or move the context.
+	// compares a hash of the resolved inputs rather than building. It never rebuilds on a timer;
+	// to pick up upstream fixes, change an input (repin FROM, or move the context).
 	// +kubebuilder:default="1h"
 	// +optional
 	Interval *metav1.Duration `json:"interval,omitempty"`
@@ -153,8 +125,7 @@ type ImageBuildSpec struct {
 	// +optional
 	Context *BuildContext `json:"context,omitempty"`
 
-	// Dockerfile says where the recipe comes from. Omitted, it is "Dockerfile" at the context root
-	// — see EffectiveDockerfile, and see DockerfileSource for why that default is not in the schema.
+	// Dockerfile says where the recipe comes from. Omitted, it is "Dockerfile" at the context root.
 	// +optional
 	Dockerfile *DockerfileSource `json:"dockerfile,omitempty"`
 
@@ -165,11 +136,9 @@ type ImageBuildSpec struct {
 
 	// Platforms the image is built for, as "linux/amd64".
 	//
-	// Required, unlike ImageComposition's — there is no base in the spec to default from.
-	//
-	// More than one entry produces an image index and needs a builder that can emulate or a
-	// multi-node builder. A platform the builder cannot produce fails the build rather than being
-	// silently dropped.
+	// Required: there is no base to default from. More than one entry produces an image index and
+	// needs a builder that can emulate or a multi-node builder. A platform the builder cannot
+	// produce fails the build.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=16
 	// +kubebuilder:validation:items:MaxLength=64
@@ -194,9 +163,8 @@ type ImageBuildSpec struct {
 
 	// Network controls whether RUN can reach the network.
 	//
-	// "None" is the only mode in which this kind approaches ImageComposition's guarantee, and it is
-	// unusable for any Dockerfile that installs packages — which is most of them. "Sandbox" is the
-	// default precisely because of that, and it is where reproducibility is lost.
+	// "None" comes closest to reproducible, but breaks any Dockerfile that installs packages, hence
+	// the "Sandbox" default.
 	// +kubebuilder:validation:Enum=Sandbox;None
 	// +kubebuilder:default="Sandbox"
 	// +optional
@@ -206,8 +174,7 @@ type ImageBuildSpec struct {
 	// +optional
 	Cache *BuildCache `json:"cache,omitempty"`
 
-	// Resources for the build pod. The namespace's ResourceQuota and LimitRange apply on top,
-	// which is deliberate: a build is a workload, and the cluster already knows how to govern one.
+	// Resources for the build pod. The namespace's ResourceQuota and LimitRange apply on top.
 	// +optional
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
 
@@ -219,19 +186,14 @@ type ImageBuildSpec struct {
 	// ServiceAccountName the build pod runs as. Empty uses the namespace's default account with
 	// NO API token mounted, which is what a pod running code from a git repository should have.
 	//
-	// Set this only when a build genuinely needs an identity — pulling from a registry that
-	// authenticates by workload identity, say. Naming an account mounts its token, so whatever it
-	// can do, a Dockerfile in the referenced repository can do.
+	// Set this only when a build needs an identity: naming an account mounts its token, so the
+	// Dockerfile can do whatever that account can.
 	// +kubebuilder:validation:MaxLength=253
 	// +optional
 	ServiceAccountName string `json:"serviceAccountName,omitempty"`
 
-	// Push publishes the built image to an external registry.
-	//
-	// Optional. A build always publishes to a registry -- the Job runs in another pod and cannot
-	// reach the controller's loopback-only serving endpoint (ADR 0025) -- but WHICH registry can
-	// come from the operator's default rather than from here. Omit it entirely and the build
-	// publishes to <default registry>/<namespace>/<name>.
+	// Push is where the built image is published. Optional: omitted, the build publishes to
+	// <default registry>/<namespace>/<name>.
 	// +optional
 	Push *Push `json:"push,omitempty"`
 }
@@ -258,10 +220,7 @@ type BuildSecret struct {
 	// +required
 	ID string `json:"id"`
 
-	// SecretRef names a Secret in this object's namespace.
-	//
-	// Cross-namespace is not offered: it would let anyone who can create an ImageBuild read any
-	// Secret in the cluster.
+	// SecretRef names a Secret in this object's namespace. Other namespaces are not allowed.
 	// +required
 	SecretRef *LocalObjectReference `json:"secretRef"`
 
@@ -273,8 +232,8 @@ type BuildSecret struct {
 
 // BuildCache controls the build cache.
 type BuildCache struct {
-	// Mode selects whether a cache is used at all. "Disabled" is how you demonstrate that a
-	// rebuild reproduces the previous digest; it is not how you should run day to day.
+	// Mode selects whether a cache is used at all. "Disabled" is for checking that a rebuild
+	// reproduces the previous digest, not for daily use.
 	// +kubebuilder:validation:Enum=Auto;Disabled
 	// +kubebuilder:default="Auto"
 	// +optional
@@ -283,8 +242,7 @@ type BuildCache struct {
 	// Ref is where the cache is exported to and imported from. Defaults to a per-object ref
 	// derived from push.repository.
 	//
-	// A cache shared between objects is a channel between whoever can write their Dockerfiles, so
-	// this is never defaulted to anything shared.
+	// Never defaulted to anything shared: a shared cache is a channel between Dockerfile authors.
 	// +kubebuilder:validation:MaxLength=512
 	// +optional
 	Ref string `json:"ref,omitempty"`
@@ -296,10 +254,8 @@ type BuildAttempt struct {
 	// +optional
 	InputHash string `json:"inputHash,omitempty"`
 
-	// PodName of the build pod, for the FULL log.
-	//
-	// Not the record of why a build failed -- Message is, since ADR 0046. This pod is deleted when
-	// the next retry falls due, so a pointer to it outlives neither the pod nor the failure.
+	// PodName of the build pod, for the full log while it exists. Message records why a build
+	// failed (ADR 0046).
 	// +optional
 	PodName string `json:"podName,omitempty"`
 
@@ -327,8 +283,7 @@ type ImageBuildStatus struct {
 
 	// InputHash summarises everything that determines the build.
 	//
-	// Unlike ImageComposition's field of the same name, this hash is the IDENTITY rather than a
-	// short-circuit: there is nothing to check it against until a build has run. See ADR 0025.
+	// Unlike ImageComposition's, this hash is the build's IDENTITY (ADR 0025).
 	// +optional
 	InputHash string `json:"inputHash,omitempty"`
 
@@ -336,7 +291,7 @@ type ImageBuildStatus struct {
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// Artifact is what was produced. Deliberately the same shape every kind in this group uses.
+	// Artifact is what was produced.
 	// +optional
 	Artifact *ArtifactStatus `json:"artifact,omitempty"`
 
@@ -368,8 +323,7 @@ type ImageBuildStatus struct {
 	// +optional
 	LastAttempt *BuildAttempt `json:"lastAttempt,omitempty"`
 
-	// Failures counts consecutive failed attempts, so backoff can be capped and the object can stop
-	// hammering without being Stalled — the fix for a failing RUN lives in another object.
+	// Failures counts consecutive failed attempts, for capped backoff without Stalling.
 	// +optional
 	Failures int32 `json:"failures,omitempty"`
 
@@ -378,11 +332,7 @@ type ImageBuildStatus struct {
 	LastHandledReconcileAt string `json:"lastHandledReconcileAt,omitempty"`
 }
 
-// ImageBuild builds an OCI image from a Dockerfile and a content-addressed context.
-//
-// The keep annotation is emitted into the CRD itself so the chart can install it verbatim.
-// Deleting a CRD deletes every object of that kind, and Helm removing one on an uninstall or a
-// toggle flip is not a risk worth taking for a resource that costs nothing when unused.
+// The keep annotation stops Helm deleting the CRD, and so every object of this kind, on uninstall.
 // +kubebuilder:metadata:annotations="helm.sh/resource-policy=keep"
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
@@ -392,6 +342,8 @@ type ImageBuildStatus struct {
 // +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].reason`
 // +kubebuilder:printcolumn:name="Status",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].message`,priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+
+// ImageBuild builds an OCI image from a Dockerfile and a content-addressed context.
 type ImageBuild struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
