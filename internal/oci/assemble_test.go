@@ -179,8 +179,8 @@ func TestAssemblePlacesContentAtTarget(t *testing.T) {
 // itself. Fixed to linux/amd64 so it asserts the algorithm, not the host (ADR 0002).
 func TestAssembleMatchesItsGoldenDigest(t *testing.T) {
 	const (
-		goldenDigest      = "sha256:2ecb3fd3521d9ac10e3ea9b1d749dcf15d24b76fb0088feaadc158bf931edacb"
-		goldenAssemblyVer = 3
+		goldenDigest      = "sha256:90489bc3bf1be95719d0ebf2b8c03e974b5c8a002acba8d39348091e0665775d"
+		goldenAssemblyVer = 2
 	)
 	if AssemblyVersion != goldenAssemblyVer {
 		t.Fatalf("AssemblyVersion is %d but this golden digest was recorded at %d; re-record the "+

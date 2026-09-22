@@ -32,8 +32,9 @@ var epoch = time.Unix(0, 0).UTC()
 // keep the old artifact under an unchanged input hash.
 //
 // THE TOOLCHAIN COUNTS TOO: a Go upgrade that changes compress/flate's output moves every digest
-// under an unchanged spec-hash tag. v3 is the Go 1.27 migration (ADR 0057).
-const AssemblyVersion = 3
+// under an unchanged spec-hash tag. It is the Go the RELEASE IMAGE is built with that matters --
+// the Dockerfile's, which CI keeps in step with go.mod (ADR 0057).
+const AssemblyVersion = 2
 
 // identity returns what the hash should treat as this entry's content.
 func (in LayerInput) identity() string {
