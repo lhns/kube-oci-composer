@@ -1,15 +1,8 @@
 // Package cache provides a digest-keyed cache for fetched layer sources.
 //
-// The controller needs its inputs as local files, because assembly reads them lazily from disk.
-// It also wants them to survive a restart, a reschedule onto another node, and to be shared
-// between compositions that happen to use the same layer. Those pull in opposite directions:
-// object storage gives durability but not a path, a local directory gives a path but not
-// durability.
-//
-// Hence two tiers. A local directory is always present and is what assembly reads from; an
-// optional remote Store sits behind it and is what makes a cold start cheap. Neither is required
-// for correctness — everything here can be re-fetched from the origin — which is why a failure
-// to write to either tier is logged and ignored rather than failing the build.
+// Two tiers: a local directory, which assembly reads lazily from, and an optional remote Store
+// that makes a cold start (restart, reschedule) cheap. Neither is required for correctness, since
+// everything can be re-fetched from the origin, so a failure to write either tier is only logged.
 package cache
 
 import (
@@ -36,8 +29,7 @@ type Cache struct {
 	// Local is the tier assembly reads from. Required.
 	Local *store.Disk
 
-	// Remote is the durable tier. Optional; without it the cache is process-local and a restart
-	// means re-fetching from the origin.
+	// Remote is the durable tier. Optional.
 	Remote store.Store
 
 	// Dir is where materialised files are written for the caller to read.
@@ -46,21 +38,18 @@ type Cache struct {
 
 // New creates a Cache backed by a local directory, optionally fronting a remote Store.
 func New(localDir string, remote store.Store) (*Cache, error) {
+	// NewDisk creates localDir.
 	local, err := store.NewDisk(localDir)
 	if err != nil {
 		return nil, fmt.Errorf("cache: %w", err)
-	}
-	if err := os.MkdirAll(localDir, 0o750); err != nil {
-		return nil, fmt.Errorf("cache: creating %q: %w", localDir, err)
 	}
 	return &Cache{Local: local, Remote: remote, Dir: localDir}, nil
 }
 
 // Path returns a local file containing the content for digest, fetching it if necessary.
 //
-// The lookup order is by cost: the local tier, then the remote tier, then the origin. The
-// returned path is owned by the cache and must not be removed by the caller — that is the point,
-// since removing it would defeat the next lookup.
+// Lookup order is local tier, remote tier, origin. The returned path is owned by the cache and
+// must not be removed by the caller.
 func (c *Cache) Path(ctx context.Context, digest string, origin Origin) (string, error) {
 	logger := log.FromContext(ctx).WithValues("digest", digest)
 
@@ -70,20 +59,17 @@ func (c *Cache) Path(ctx context.Context, digest string, origin Origin) (string,
 	}
 	local := c.localPath(key)
 
-	// Local hit. Trusted without re-hashing: content is verified on the way in, and re-verifying
-	// on every reconcile would reintroduce a per-build cost over the whole artifact — a smaller
-	// version of exactly the problem this cache exists to remove.
+	// Local hit, trusted without re-hashing: content is verified on the way in.
 	if _, err := c.Local.Stat(ctx, key); err == nil {
 		logger.V(1).Info("cache hit (local)")
 		return local, nil
 	} else if !errors.Is(err, store.ErrNotFound) {
-		// A broken local tier is worth reporting, but it is not fatal: the remote tier and the
-		// origin are both still available.
+		// Not fatal: the remote tier and the origin remain.
 		logger.Error(err, "local cache tier is unreadable; falling through")
 	}
 
-	// Remote hit. Verified on the way down, because the remote tier is shared and durable: it
-	// may have been written by a different version of this controller, or corrupted in transit.
+	// Remote hit, verified on the way down: the tier is shared and may hold bytes this process
+	// never verified.
 	if c.Remote != nil {
 		if err := c.pullFromRemote(ctx, key, digest); err == nil {
 			logger.V(1).Info("cache hit (remote)")
@@ -100,10 +86,7 @@ func (c *Cache) Path(ctx context.Context, digest string, origin Origin) (string,
 		return "", err
 	}
 
-	// The local tier is what the caller reads from, so its failure is the only one that changes
-	// what is returned. A remote failure means the object store is unreachable; this build and
-	// every other build on this node still get their content, and only durability across a
-	// restart is lost. Treating that as fatal would turn an optimisation into a dependency.
+	// Only a local-tier failure changes what is returned; a remote failure just loses durability.
 	if err := writeFile(ctx, c.Local, key, fetched); err != nil {
 		logger.Error(err, "could not write to the local cache; using the fetched copy directly")
 		return fetched, nil
@@ -114,16 +97,14 @@ func (c *Cache) Path(ctx context.Context, digest string, origin Origin) (string,
 		}
 	}
 
-	// Only now is the origin's temp file redundant. Removing it before this point would hand the
-	// caller a path to a file that no longer exists.
+	// Only now is the origin's temp file redundant.
 	if err := os.Remove(fetched); err != nil && !os.IsNotExist(err) {
 		logger.V(1).Info("could not remove the fetched temp file", "path", fetched, "err", err)
 	}
 	return local, nil
 }
 
-// localPath is where a key materialises on disk. It mirrors the disk store's own layout so the
-// file the caller reads is the same file the store manages.
+// localPath is where the local disk store keeps a key, so the caller reads the managed file.
 func (c *Cache) localPath(key string) string {
 	return filepath.Join(c.Dir, filepath.FromSlash(key))
 }
@@ -136,9 +117,7 @@ func (c *Cache) pullFromRemote(ctx context.Context, key, digest string) error {
 	}
 	defer rc.Close()
 
-	// Verified into a temporary file first. Writing straight into the local tier would publish
-	// unverified bytes under a content-addressed key, which every later local hit then trusts
-	// without checking.
+	// Verified in a temp file first: local hits are trusted without checking.
 	tmp, err := os.CreateTemp(c.Dir, ".pull-*")
 	if err != nil {
 		return fmt.Errorf("creating temp file: %w", err)
@@ -154,8 +133,7 @@ func (c *Cache) pullFromRemote(ctx context.Context, key, digest string) error {
 		return fmt.Errorf("reading from remote cache: %w", err)
 	}
 	if got := "sha256:" + hex.EncodeToString(hasher.Sum(nil)); got != digest {
-		// The remote tier is content-addressed, so this means it is corrupt or was written by
-		// something that did not verify. Drop the object rather than serving it or looping on it.
+		// Corrupt: drop it rather than serve it or fail on it every lookup.
 		if delErr := c.Remote.Delete(ctx, key); delErr != nil {
 			return fmt.Errorf("remote cache holds %s under key for %s, and removing it failed: %w",
 				got, digest, delErr)
@@ -180,9 +158,7 @@ func (c *Cache) pullFromRemote(ctx context.Context, key, digest string) error {
 
 // writeFile copies a local file into a Store under key.
 //
-// The handle is opened and closed here rather than by the caller. Handing Store.Write a reader
-// the caller forgot to close leaks a descriptor on every cache miss, and on Windows it also
-// prevents the file from being deleted afterwards — which is how this was found.
+// It owns the file handle so it is always closed (an open handle also blocks deletion on Windows).
 func writeFile(ctx context.Context, s store.Store, key, path string) error {
 	f, err := os.Open(path)
 	if err != nil {
@@ -194,15 +170,4 @@ func writeFile(ctx context.Context, s store.Store, key, path string) error {
 		return fmt.Errorf("writing %s: %w", key, err)
 	}
 	return nil
-}
-
-// Referenced reports whether digest is present in the local tier. Used by tests and by garbage
-// collection reporting.
-func (c *Cache) Referenced(ctx context.Context, digest string) bool {
-	key, err := store.Key(store.NamespaceInputs, digest)
-	if err != nil {
-		return false
-	}
-	_, err = c.Local.Stat(ctx, key)
-	return err == nil
 }

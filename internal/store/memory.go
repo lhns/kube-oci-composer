@@ -4,23 +4,15 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"strings"
 	"sync"
 	"time"
 )
 
-// Memory is an in-memory Store for tests.
-//
-// It lives in the package rather than in a _test.go file so that the controller and garbage
-// collector tests can use it too, without either of them needing a real disk or an S3 endpoint
-// to exercise logic that has nothing to do with storage.
+// Memory is an in-memory Store for tests. It is a non-test file so other packages' tests can use
+// it too.
 type Memory struct {
 	mu      sync.RWMutex
 	objects map[string]memObject
-
-	// Now, if set, supplies ModTime. Garbage collection has a grace period keyed on age, and
-	// testing that honestly requires objects that can be made to look old.
-	Now func() time.Time
 }
 
 type memObject struct {
@@ -33,13 +25,6 @@ var _ Store = (*Memory)(nil)
 // NewMemory returns an empty in-memory store.
 func NewMemory() *Memory {
 	return &Memory{objects: make(map[string]memObject)}
-}
-
-func (m *Memory) now() time.Time {
-	if m.Now != nil {
-		return m.Now()
-	}
-	return time.Now()
 }
 
 func (m *Memory) Stat(_ context.Context, key string) (Info, error) {
@@ -63,15 +48,14 @@ func (m *Memory) Open(_ context.Context, key string) (io.ReadCloser, error) {
 }
 
 func (m *Memory) Write(_ context.Context, key string, r io.Reader) error {
-	// Read outside the lock: callers stream real content through here and holding the lock for
-	// the duration would serialise every write in the process.
+	// Read outside the lock, so a slow reader does not serialise every write.
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.objects[key] = memObject{data: data, modTime: m.now()}
+	m.objects[key] = memObject{data: data, modTime: time.Now()}
 	return nil
 }
 
@@ -81,17 +65,3 @@ func (m *Memory) Delete(_ context.Context, key string) error {
 	delete(m.objects, key)
 	return nil
 }
-
-func (m *Memory) List(_ context.Context, prefix string) ([]Info, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	var out []Info
-	for k, o := range m.objects {
-		if prefix != "" && !strings.HasPrefix(k, prefix) {
-			continue
-		}
-		out = append(out, Info{Key: k, Size: int64(len(o.data)), ModTime: o.modTime})
-	}
-	return out, nil
-}
-
