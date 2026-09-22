@@ -1,6 +1,9 @@
 # Build stage. Dependencies are downloaded in their own layer so a source-only change does not
 # re-resolve the module graph.
-FROM golang:1.27 AS builder
+# Pinned by digest, and CI fails if its Go minor differs from go.mod's: the Go that builds the RELEASE
+# is an input to every composed artifact's bytes (ADR 0057), and a floating tag once moved it
+# without CI, which used go.mod's, noticing. Dependabot proposes patch and digest bumps.
+FROM golang:1.27.1@sha256:3680233e3204827fbdc66088528ae6d4b3d034f51d03a99d454f6de034888244 AS builder
 
 # CMD selects which binary this image carries. The two are built from one Dockerfile because they
 # share every layer up to the compile step; ADR 0004 wants two DEPLOYMENTS, which is about RBAC and

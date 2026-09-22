@@ -27,6 +27,19 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: The release image is built with the Go that CI tests
+        # A composed artifact's bytes depend on the Go that built the release image, which is the
+        # Dockerfile's, not go.mod's. They once differed by a minor version unnoticed (ADR 0057).
+        # A minor move is a migration: decide about AssemblyVersion, then move both together.
+        run: |
+          mod=$(awk '/^go /{split($2, v, "."); print v[1] "." v[2]}' go.mod)
+          img=$(grep -m1 -oE '^FROM golang:[0-9]+[.][0-9]+' Dockerfile | cut -d: -f2)
+          if [ -z "$img" ] || [ "$mod" != "$img" ]; then
+            echo "go.mod says Go $mod but the Dockerfile builds with golang:${img:-?}"
+            exit 1
+          fi
+          echo "OK: both on Go $mod"
+
       - name: Verify generated output is committed
         # Generated CRDs, RBAC and deepcopy must match the source and the pinned controller-gen.
         run: make verify
