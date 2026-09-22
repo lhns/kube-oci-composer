@@ -187,9 +187,10 @@ collection. The symptom is a build that publishes and then reports, every interv
 yourself, and because five details in it are easy to get silently wrong. Verified against zot
 `v2.1.21` by `test/e2e/`.
 
-Abridged: `readTimeout`, TLS and auth are omitted here and covered in their own sections. Note that
-nothing checks this page against the chart -- `hack/check-bundled-registry.py` reads `helm template`
-output, not this file -- so it has drifted before. `helm template` is the source of truth.
+Abridged: `readTimeout` and TLS are covered in their own sections. Every key shown here IS checked
+against `helm template` in CI (`hack/check-bundled-registry.py`), which is what stops this page
+drifting again -- it may omit a setting, but it may not contradict one. It drifted before, and
+published a retention policy that protected nothing.
 
 ```json
 {
@@ -223,13 +224,13 @@ output, not this file -- so it has drifted before. `helm template` is the source
   "http": {
     "address": "0.0.0.0",
     "port": "5000",
-    "auth": { "htpasswd": { "path": "/etc/zot/htpasswd" } },
+    "auth": { "htpasswd": { "path": "/etc/zot/auth/htpasswd" } },
     "accessControl": {
       "repositories": {
         "**": {
           "anonymousPolicy": ["read"],
           "policies": [
-            { "users": ["kube-oci-composer"], "actions": ["read", "create", "update"] }
+            { "users": ["composer"], "actions": ["read", "create", "update"] }
           ]
         }
       }

@@ -161,19 +161,20 @@ e2e-up: ## Create the kind cluster used by the e2e tests.
 	./test/e2e/up.sh
 
 .PHONY: e2e-test
-e2e-test: ## Run the e2e tests against the current cluster.
-# 50m. The retention tests have to WAIT -- for a registry to collect something, and then for it not
-# to collect something else -- and a wait cannot be made faster without shrinking the margin that
-# makes the assertion meaningful.
+e2e-test: ## Run the e2e tests against the current cluster. RUN=<regex> limits which.
+# The retention tests WAIT -- for a registry to collect something, and then for it not to collect
+# something else -- and those waits cannot be shortened without shrinking the margin that makes the
+# assertion mean anything.
 #
-# The negative controls dominate: zot walks repositories on a rotation, so how long one takes to be
-# collected grows with how many repositories the registry holds, and it now holds everything the
-# suite produces. See collectionDeadline in test/e2e/retention_test.go.
+# What CAN be shortened is how long the registry takes to get round to collecting at all: zot holds
+# each repository's task back by a random delay of up to gcMaxSchedulerDelay, 30s by default, so a
+# pass costs roughly (repositories x delay / 2). up.sh sets it to 1s. See
+# E2E_GC_MAX_SCHEDULER_DELAY there and collectionDeadline in test/e2e/retention_test.go.
 #
-# Raised with collectionDeadline: three negative controls that each wait the full deadline is the
-# worst case, and a go-test timeout produces no useful output at all -- strictly worse than the
-# assertion failure it would mask.
-	go test ./test/e2e/... -tags=e2e -timeout 50m -count=1 -v
+# 30m, against a suite that should now run in a third of that. A cap far above the expected runtime
+# turns a hang into a half-hour hang, and a go-test timeout produces no useful output at all --
+# strictly worse than the assertion failure it would mask.
+	go test ./test/e2e/... -tags=e2e -timeout 30m -count=1 -v $(if $(RUN),-run '$(RUN)')
 
 .PHONY: e2e-down
 e2e-down: ## Delete the kind cluster.

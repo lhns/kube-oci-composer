@@ -8,6 +8,7 @@ matched nothing. A rendered config that looks plausible is not evidence. See ADR
 Reads `helm template` output on stdin.
 """
 
+import io
 import json
 import sys
 
@@ -66,13 +67,75 @@ def problems(cfg):
     return found
 
 
+DOC_FENCE = "```json"
+
+
+def documented_config(path):
+    """The first ```json block in a Markdown file, or None if there is none."""
+    text = io.open(path, encoding="utf-8").read()
+    start = text.find(DOC_FENCE)
+    if start < 0:
+        return None
+    start = text.index("\n", start) + 1
+    end = text.index("\n```", start)
+    return json.loads(text[start:end])
+
+
+def documented_drift(doc, rendered, path=""):
+    """Every key the doc shows must equal what the chart renders.
+
+    A SUBSET match, deliberately: the page is abridged -- readTimeout, TLS and auth have sections of
+    their own -- so omitting a key is fine and contradicting one is not. It published the dead
+    two-entry keepTags shape for a while under the words "This is what the chart renders", which an
+    operator running their own zot would have copied.
+    """
+    found = []
+    if isinstance(doc, dict):
+        if not isinstance(rendered, dict):
+            return [f"{path or 'config'}: documented as an object, rendered as {type(rendered).__name__}"]
+        for key, value in doc.items():
+            where = f"{path}.{key}" if path else key
+            if key not in rendered:
+                found.append(f"{where}: documented, not rendered")
+                continue
+            found += documented_drift(value, rendered[key], where)
+    elif isinstance(doc, list):
+        if not isinstance(rendered, list):
+            return [f"{path}: documented as a list, rendered as {type(rendered).__name__}"]
+        if len(doc) != len(rendered):
+            found.append(f"{path}: {len(doc)} documented, {len(rendered)} rendered")
+        for i, (d, r) in enumerate(zip(doc, rendered)):
+            found += documented_drift(d, r, f"{path}[{i}]")
+    elif doc != rendered:
+        found.append(f"{path}: documented {doc!r}, renders {rendered!r}")
+    return found
+
+
 def main():
-    found = problems(config_from(sys.stdin))
+    cfg = config_from(sys.stdin)
+    found = problems(cfg)
     if found:
         print("the bundled retention policy would protect nothing:")
         for f in found:
             print("  -", f)
         return 1
+
+    # Optional second argument: a Markdown file claiming to show what the chart renders.
+    if len(sys.argv) > 1:
+        doc = documented_config(sys.argv[1])
+        if doc is None:
+            print(f"no ```json block in {sys.argv[1]}")
+            return 1
+        drift = documented_drift(doc, cfg)
+        if drift:
+            print(f"{sys.argv[1]} no longer matches what the chart renders:")
+            for d in drift:
+                print("  -", d)
+            print('It says "This is what the chart renders", so anyone running their own '
+                  "registry copies it.")
+            return 1
+        print(f"OK: {sys.argv[1]} agrees with the rendered config.")
+
     print("OK: the policy keys on pull recency and covers both tags and digests.")
     return 0
 

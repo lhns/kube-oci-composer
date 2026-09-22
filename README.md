@@ -503,6 +503,19 @@ that were built, measured, and removed. Start with the index.
 - [`docs/exporting-a-reference.md`](docs/exporting-a-reference.md) — `push.writeRefTo`, for when the
   reference cannot be computed in advance, and what it costs to stop computing it.
 
+### Working on it
+
+**Changes go on a branch and through a pull request**, including small ones. Not for ceremony: CI
+runs the e2e suite on a PR, and this project's worst defects have all been the kind that every unit
+test passes through — a retention rule that was configured and never evaluated, a flag parsed and
+never read, a status field silently cleared. None of them would have been caught by reading the
+diff, and all of them were caught by something running.
+
+Every decision worth arguing about gets an ADR in [`docs/adr/`](docs/adr/), including the ones that
+were tried and abandoned; a record of what was believed at the time is more useful than a tidy
+history. And a guard is only a guard once it has been seen to fail — new checks are falsified
+against the bug they exist to catch, in the commit that adds them.
+
 ## Licence
 
 Apache 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

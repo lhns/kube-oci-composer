@@ -43,15 +43,23 @@ E2E_REFRESH_FACTOR="${E2E_REFRESH_FACTOR:-30}"
 
 # gcInterval = window / this. 6 gives a five-second sweep.
 #
-# MEASURED, not reasoned. A one-second sweep was tried on the theory that a repository is reached
-# every (repositories x gcInterval), so a shorter sweep would find things faster. Collection got
-# SLOWER: two negative controls that had passed in 159s and 83s failed after 213s and 187s.
-#
-# The likely reason is that zot's generator walks repositories from the start each round and only
-# resets once it has processed them all, so a shorter interval can reset it before a pass completes
-# and starve whatever sits late in the walk. That is a hypothesis; the measurement is not. Five
-# seconds is the value this suite is known to pass on.
+# A one-second sweep was tried, on the theory that a repository is reached every
+# (repositories x gcInterval). Two negative controls failed on that run -- but control latency is
+# bimodal here with a spread of several minutes, so one run is not evidence of causation and that
+# reading has been withdrawn. What IS established is that gcInterval was never the term that
+# mattered: see E2E_GC_MAX_SCHEDULER_DELAY below. Five seconds is the value this suite passes on.
 E2E_GC_FACTOR="${E2E_GC_FACTOR:-6}"
+
+# What the retention tests were actually waiting for.
+#
+# zot holds each repository's collection task back by a fresh random delay of up to this, so a full
+# pass takes roughly (repositories x delay / 2). At zot's 30s default, against the ~33 repositories
+# this suite accumulates, that is ~500s before anything expired is collected -- which is where the
+# five-minute waits in the retention tests came from, not from the 30s window.
+#
+# One second here takes a pass to ~20s. Nothing is checked less strictly: the content still has to
+# expire on its own terms first, and the negative controls still have to watch it happen.
+E2E_GC_MAX_SCHEDULER_DELAY="${E2E_GC_MAX_SCHEDULER_DELAY:-1s}"
 
 # What lets everything else be small. A build's image is untagged from the push until the controller
 # names it (ADR 0054), so the chart never derives gcDelay below three times this -- 45s at the
@@ -143,6 +151,7 @@ helm upgrade --install kube-oci-composer charts/kube-oci-composer \
   --set "retention.refreshFactor=$E2E_REFRESH_FACTOR" \
   --set "retention.refreshInterval=$E2E_REFRESH" \
   --set "registry.retention.gcFactor=$E2E_GC_FACTOR" \
+  --set "registry.retention.gcMaxSchedulerDelay=$E2E_GC_MAX_SCHEDULER_DELAY" \
   --set "imageBuild.buildPollInterval=$E2E_BUILD_POLL" \
   --set registry.logLevel=debug \
   --wait --timeout 5m

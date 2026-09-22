@@ -374,6 +374,19 @@ registry:
     # gcDelay otherwise guards -- so the chart accepts any gcDelay once it is false.
     deleteUntagged: true
 
+    # How long a collection task may be held back before it runs, at most. Empty leaves zot's
+    # default of 30 seconds.
+    #
+    # Worth knowing even if you never set it: zot draws a fresh random delay up to this for EVERY
+    # repository, so a full pass takes roughly (repositories x this / 2). That, not gcInterval, is
+    # what decides how soon something expired is actually collected.
+    #
+    # Leave it empty in production. The jitter is there so a registry holding thousands of
+    # repositories does not collect them in one burst. A test holding thirty wants the opposite,
+    # and that is the only reason this is exposed -- see the note in templates/registry-config.yaml
+    # about how it is reachable at all.
+    gcMaxSchedulerDelay: ""
+
     # gcInterval = window / gcFactor. Promptness only: collecting late is safe, collecting early
     # is not, so this is the one value here with no failure mode worse than "later than you
     # expected". Refused if it ever exceeds the window, which would make the window describe
