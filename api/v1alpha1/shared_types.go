@@ -6,28 +6,24 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// Condition types and reasons, following the kstatus conventions Flux uses so that
-// `kubectl wait --for=condition=Ready`, `flux get` and notification-controller all behave the
-// way users of a Flux-ecosystem controller expect.
+// Condition types and reasons, following the kstatus conventions Flux uses, so `kubectl wait`,
+// `flux get` and notification-controller behave as expected.
 const (
 	// ReadyCondition is the top-level summary condition.
 	ReadyCondition = "Ready"
 	// ReconcilingCondition signals work in progress; a transient failure keeps this set so the
 	// object is retried with backoff.
 	ReconcilingCondition = "Reconciling"
-	// StalledCondition signals a TERMINAL error that retrying cannot fix — an invalid spec, a
+	// StalledCondition signals a TERMINAL error that retrying cannot fix: an invalid spec, a
 	// digest mismatch, a refusal to overwrite immutable content.
 	//
-	// The test for belonging here is narrow: editing THIS object's spec must be what fixes it.
-	// That is what makes stalling safe, because the resulting generation change is the event
-	// that wakes the controller back up. A failure fixed by changing anything else — a Secret,
-	// a Flux source, the operator's own configuration — must not stall, because no such event
-	// will ever arrive. See ReasonDependencyNotReady.
+	// Only for failures fixed by editing THIS object's spec, whose generation change wakes the
+	// controller. A failure fixed elsewhere (a Secret, a Flux source, operator configuration)
+	// must not stall, since no such event would arrive. See ReasonDependencyNotReady.
 	StalledCondition = "Stalled"
 )
 
-// Reasons attached to the conditions above. Kept as constants so tests can assert on them
-// rather than on message text.
+// Reasons attached to the conditions above.
 const (
 	ReasonSucceeded         = "Succeeded"
 	ReasonProgressing       = "Progressing"
@@ -38,49 +34,38 @@ const (
 	ReasonAttestationFailed = "AttestationFailed"
 	ReasonSuspended         = "Suspended"
 	// ReasonRetentionDegraded reports that the refresh keeping this object's images from being
-	// reclaimed has been failing. See ADR 0031: the refresh fails UNSAFE, so sustained failure
-	// ends in deletion rather than in a stuck object, and this is the warning before that.
+	// reclaimed keeps failing. It fails UNSAFE (ADR 0031): sustained failure ends in deletion.
 	ReasonRetentionDegraded = "RetentionDegraded"
 
 	// ReasonRetentionLost reports that a reference this object published is already gone from the
-	// registry. A different alarm from RetentionDegraded, and deliberately so: Degraded says the
-	// protection MIGHT be failing and can clear, while this says it already did and cannot. Merging
-	// the two kept an object Degraded forever over history that had expired, which is how a real
-	// outage would have arrived looking like the noise of the previous three days.
+	// registry. Unlike RetentionDegraded (might be failing, can clear), this already happened and
+	// cannot clear (ADR 0049).
 	ReasonRetentionLost = "RetentionLost"
 
-	// ReasonArtifactLost reports that an ImageBuild's published image is gone from the registry and
-	// a rebuild has been started to replace it. Replace, not restore: this kind is not
-	// reproducible, so the new image has a different digest and anything pinned to the old one is
-	// not helped. ADR 0051.
+	// ReasonArtifactLost reports that an object's current artifact is gone from the registry. For an
+	// ImageBuild a rebuild REPLACES it with a new digest, which does not help anything pinned to the
+	// old one (ADR 0051).
 	ReasonArtifactLost = "ArtifactLost"
 
-	// ReasonUnpinnedSource reports a sourceRef with no revision feeding tags that cannot move.
-	//
-	// The combination promises fixed content from an input that is free to change under it, and
-	// the tag can be built before the source holds what it was named for. ADR 0052.
+	// ReasonUnpinnedSource reports a sourceRef with no revision feeding tags that cannot move: fixed
+	// content promised from an input free to change under it (ADR 0052).
 	ReasonUnpinnedSource = "UnpinnedSource"
 
-	// ReasonBuildFailed covers an ImageBuild whose Job did not succeed. Never sets Stalled: the fix
-	// lives in another object, so no generation change would arrive to wake it up.
+	// ReasonBuildFailed covers an ImageBuild whose Job did not succeed. Never Stalled: the fix
+	// lives in another object.
 	ReasonBuildFailed = "BuildFailed"
 
-	// ReasonDependencyNotReady covers something the composition refers to that does not exist
-	// yet, or exists but cannot be used: a Flux source, a Secret, a non-optional ConfigMap, or
-	// a serving endpoint the operator was never given.
-	//
-	// Kept off Stalled deliberately — see StalledCondition. Applying a composition together
-	// with its GitRepository in one commit is enough to hit this: whichever loses the race
-	// would otherwise stay wedged forever while the thing it needs sits there Ready.
+	// ReasonDependencyNotReady covers something the object refers to that does not exist yet, or
+	// cannot be used: a Flux source, a Secret, a non-optional ConfigMap. Never Stalled (see
+	// StalledCondition): applying an object and its GitRepository together must not wedge it.
 	ReasonDependencyNotReady = "DependencyNotReady"
 )
 
-// Finalizer is set on objects so published artifacts can be cleaned up on delete.
-// ReconcileRequestAnnotation is Flux's key, not one of ours, because the key IS the contract:
-// `flux reconcile` writes this one and asks nobody. Controllers echo it into
-// status.lastHandledReconcileAt once acted on, which is how a client knows the request landed.
+// ReconcileRequestAnnotation is Flux's key, which `flux reconcile` writes. Controllers echo it into
+// status.lastHandledReconcileAt once acted on.
 const ReconcileRequestAnnotation = "reconcile.fluxcd.io/requestedAt"
 
+// Finalizer is set on objects so published artifacts can be cleaned up on delete.
 const Finalizer = "finalizers.oci.lhns.de"
 
 // LocalObjectReference refers to an object in the same namespace. Credentials are always
@@ -91,17 +76,11 @@ type LocalObjectReference struct {
 	Name string `json:"name"`
 }
 
-// ConfigMapKeyReference selects ONE entry of a ConfigMap in the same namespace.
+// ConfigMapKeyReference selects ONE entry of a ConfigMap in the same namespace. (ConfigMapSource,
+// by contrast, turns every entry into a file.)
 //
-// Distinct from ConfigMapSource, which turns EVERY entry into a file and therefore has no key.
-// Adding an optional `key` to that type instead was considered and rejected: it would put a field on
-// a composition type that silently changes how many files a layer contributes, to serve a caller
-// that wants exactly one file.
-//
-// No namespace field, for the reason on LocalObjectReference. A reference that could name another
-// namespace would let anyone with create on the consuming object read that namespace's ConfigMaps
-// (threat-model I4), and unlike sourceRef there is not even a cluster-wide read already happening
-// to reconcile it against.
+// There is no namespace field: naming another namespace would let anyone who can create the
+// consuming object read that namespace's ConfigMaps (threat-model I4).
 type ConfigMapKeyReference struct {
 	// Name of the ConfigMap.
 	// +kubebuilder:validation:MaxLength=253
@@ -109,10 +88,6 @@ type ConfigMapKeyReference struct {
 	Name string `json:"name"`
 
 	// Key within it. Data is read first and BinaryData second.
-	//
-	// This default IS in the schema, unlike the ones on DockerfileSource, and the difference is the
-	// point: no CEL rule tests has(self.key), so materialising it costs nothing and buys a value
-	// visible in `kubectl get -o yaml`.
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:default="Dockerfile"
 	// +optional
@@ -122,13 +97,9 @@ type ConfigMapKeyReference struct {
 // ResolveConflictPolicy returns the effective policy for a tag that already resolves to something
 // else, reconciling the three-valued field with the deprecated two-valued one.
 //
-// Precedence is onConflict, then immutable, then Fail. That order is what makes the upgrade
-// non-breaking in both directions: an object written before onConflict existed still has its
-// `immutable` honoured, and one that sets onConflict is not second-guessed by an `immutable` the
-// API server materialised under it. Contradictions are refused by CEL before they are stored.
-//
-// Nil is Fail rather than Overwrite: a struct built in a test, or a spec with no push block at all,
-// must not end up with unprotected tags by omission.
+// Precedence is onConflict, then immutable, then Fail, so objects written before onConflict keep
+// their `immutable`, and an explicit onConflict wins. CEL refuses contradictions. A nil Push is
+// Fail, so tags are never unprotected by omission.
 func (p *Push) ResolveConflictPolicy() TagConflictPolicy {
 	if p == nil {
 		return ConflictFail
@@ -149,10 +120,7 @@ func resolveConflict(explicit TagConflictPolicy, deprecated *bool) TagConflictPo
 // HistoryLimit resolves how many past builds to retain: this object's own, else the operator's,
 // else the built-in default.
 //
-// One function for both kinds, because there were two and they had already drifted -- one treated
-// history: 0 as "keep nothing" and the other fell through to the operator's value. The CRD's
-// Minimum=1 makes that unreachable through the API server, which is precisely why it went
-// unnoticed: same name, same job, different answer, and nothing able to fail.
+// Shared by both kinds so they cannot drift. A non-positive value falls through.
 func (p *Push) HistoryLimit(operator int) int {
 	if p != nil && p.History != nil && *p.History > 0 {
 		return int(*p.History)
@@ -196,20 +164,13 @@ type SourceRecord struct {
 	Digest string `json:"digest,omitempty"`
 }
 
-// DefaultHistoryLimit is how many past builds are retained when nothing says otherwise.
-//
-// Not 1, and not unbounded. Layers are shared between builds so the marginal cost of retaining one
-// is small, while the cost of having reclaimed one too eagerly is a workload that cannot pull the
-// digest it is pinned to. See ADR 0011. Shared by both kinds, so the number and its reasoning stay
-// in one place.
+// DefaultHistoryLimit is how many past builds are retained when nothing says otherwise. Retaining
+// one is cheap (layers are shared); reclaiming too eagerly breaks workloads pinned to a digest
+// (ADR 0011).
 const DefaultHistoryLimit = 10
 
-// BuildRecord is one past build, retained so garbage collection knows what is still live.
-//
-// Kept in status rather than inferred from what is in storage. Inference would mean deciding an
-// object is garbage because nothing appears to point at it, which is exactly the reasoning that
-// deletes live data when the controller's view is incomplete. An explicit record also makes
-// retention visible in `kubectl get -o yaml`.
+// BuildRecord is one past build, retained in status so what must stay alive is an explicit record
+// rather than inferred from storage (ADR 0031).
 type BuildRecord struct {
 	// Tags this build was published under, if any. Replayed after a restart so the references a
 	// workload names keep resolving; a build with no tags is still replayed by digest.
@@ -220,18 +181,13 @@ type BuildRecord struct {
 	// +optional
 	Digest string `json:"digest,omitempty"`
 
-	// Blobs are the config and layer digests this build is composed of. These are the objects
-	// garbage collection must not reclaim while this build is retained. For a multi-platform
+	// Blobs are the config and layer digests this build is composed of. For a multi-platform
 	// build it is the union across every child.
 	// +optional
 	Blobs []string `json:"blobs,omitempty"`
 
 	// Sources records what each layer was resolved FROM, so an artifact can be traced back to the
-	// revision that produced it.
-	//
-	// Without this the only way to answer "which revision is in this image?" is to pull the
-	// manifest, fetch the layer and read its contents — which is how the incident behind ADR 0026
-	// had to be diagnosed, and why a wrong artifact sat unnoticed until a tag conflict surfaced it.
+	// revision that produced it (ADR 0026).
 	// +optional
 	Sources []SourceRecord `json:"sources,omitempty"`
 
@@ -242,11 +198,6 @@ type BuildRecord struct {
 
 	// Manifests are the CHILD manifest digests when this build is a multi-platform index. Empty
 	// for a single-platform build, where Digest is the manifest itself.
-	//
-	// Garbage collection reads this, and must: without it the index is retained while its children
-	// are swept, leaving a manifest that resolves to nothing. That is indistinguishable from
-	// having deleted the artifact, except that it fails at pull time rather than at collection
-	// time, long after the change that caused it.
 	// +optional
 	Manifests []string `json:"manifests,omitempty"`
 
@@ -256,19 +207,16 @@ type BuildRecord struct {
 }
 
 // +kubebuilder:validation:XValidation:rule="!(has(self.immutable) && has(self.onConflict)) || (self.immutable && self.onConflict == 'Fail') || (!self.immutable && self.onConflict == 'Overwrite')",message="immutable and onConflict contradict each other: immutable true means onConflict Fail, immutable false means onConflict Overwrite. immutable is deprecated; prefer setting onConflict alone."
-// Push describes an external registry to publish to. Optional: omit it to use the built-in
-// serving endpoint instead.
+// Push describes where to publish. Optional: omitted, the object publishes to the operator's
+// default registry.
 type Push struct {
 	// Repository is the fully qualified target, e.g. "ghcr.io/example/artifact".
 	//
 	// Optional. Omitted, the object publishes to the operator's default registry under
-	// <namespace>/<name> -- which is what a default chart install configures, so nothing here has
-	// to name a host at all.
+	// <namespace>/<name>, which a default chart install configures.
 	//
-	// Naming one has a second effect worth knowing: the operator's own registry credential is used
-	// ONLY for the default target. An object that chooses its own repository authenticates with its
-	// own secretRef, or not at all. Otherwise anyone able to create one of these objects could
-	// point it at a host they control and have the controller hand over the operator's password.
+	// The operator's registry credential is used ONLY for the default target. An object that names
+	// its own repository authenticates with its own secretRef, or not at all.
 	// +optional
 	Repository string `json:"repository,omitempty"`
 
@@ -284,33 +232,22 @@ type Push struct {
 	// +optional
 	SecretRef *LocalObjectReference `json:"secretRef,omitempty"`
 
-	// Ref behaves exactly as on Publish: a reference whose TAG is appended to Tags, so a
-	// kustomize images transformer or a Helm value can retag without editing this list.
-	//
-	// Absent until now, which meant the spec-hash tag pattern documented for ImageComposition
-	// could not be used from ImageBuild at all — the one place a generator most wants it, since a
-	// build's tag is the only thing identifying which inputs produced it.
+	// Ref is a reference whose TAG is appended to Tags, so a kustomize images transformer or a
+	// Helm value can retag without editing this list.
 	// +kubebuilder:validation:MaxLength=512
 	// +optional
 	Ref string `json:"ref,omitempty"`
 
-	// History is how many past builds to retain, overriding the controller's default. Identical
-	// to Publish's.
+	// History is how many past builds to retain, overriding the controller's default.
 	//
-	// It matters MORE here than there, not less: a composition can rebuild any artifact from its
-	// spec, so retention is a convenience. A build cannot (ADR 0025), so retention is how much of
-	// the only copy is kept. That this knob existed only on the kind where it matters least was an
-	// oversight rather than a decision.
+	// A composition can rebuild any artifact from its spec; an ImageBuild cannot (ADR 0025), so
+	// there this is how much of the only copy is kept.
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	History *int32 `json:"history,omitempty"`
 
-	// Immutable is DEPRECATED on this side too; use OnConflict. Identical to Publish's in every
-	// respect, so the field cannot mean different things depending on where it sits.
-	//
-	// It was also INERT here until the release that added OnConflict: nothing in the build
-	// controller read it, and BuildKit pushed over whatever the tag held. The CRD advertised a
-	// guarantee that did not exist.
+	// Immutable is DEPRECATED; use OnConflict. true means onConflict: Fail, false means
+	// onConflict: Overwrite.
 	// +optional
 	Immutable *bool `json:"immutable,omitempty"`
 
@@ -318,18 +255,11 @@ type Push struct {
 	// (refuse and stall), Overwrite (move the tag), or Keep (leave it, drop this build, stay
 	// Ready). Defaults to Fail.
 	//
-	// Republishing IDENTICAL content is a no-op regardless of this field, so a steady reconcile
-	// loop never reaches it -- only a real change of meaning does.
+	// Republishing IDENTICAL content is never a conflict. The check is against the digest actually
+	// produced, on both kinds (ADR 0054), so a tag meant to MOVE needs Overwrite.
 	//
-	// Evaluated against the digest actually produced, on both kinds: the build uploads by digest
-	// and this controller applies the names afterwards (ADR 0054). A tag meant to MOVE therefore
-	// conflicts under Fail -- that is what Fail asks for -- and wants Overwrite instead.
-	//
-	// Deliberately carries NO schema default, unlike the `immutable` field it replaces. Structural
-	// defaults are applied when an object is read back from storage, so defaulting this would
-	// rewrite every existing `immutable: false` object into a refusing one the moment the CRD was
-	// upgraded -- a silent reversal of a setting its author chose on purpose. The effective default
-	// lives in ResolveConflictPolicy instead, where it can consult `immutable` first.
+	// No schema default: it would be applied to stored objects on read and silently turn every
+	// `immutable: false` object into a refusing one. The effective default consults `immutable`.
 	// +optional
 	OnConflict TagConflictPolicy `json:"onConflict,omitempty"`
 
@@ -342,39 +272,28 @@ type Push struct {
 // TagConflictPolicy decides what happens when a tag already resolves to content other than what
 // this spec produces.
 //
-// The two-valued `immutable` it replaces could only refuse or overwrite. Neither is right for the
-// pattern this project actually recommends -- a tag derived from a hash of the spec -- where a tag
-// that already exists means the content is ALREADY PUBLISHED and correct. Refusing stalls the
-// object over a non-problem; overwriting rewrites bytes that were already right, and on the build
-// side, where the output is not a function of the spec, replaces good content with a different
-// build of the same inputs.
+// Keep exists for tags derived from a hash of the spec, where an existing tag means the content is
+// already published and correct: refusing would stall over a non-problem, and overwriting would
+// (for an ImageBuild) replace good content with a different build of the same inputs.
 // +kubebuilder:validation:Enum=Fail;Overwrite;Keep
 type TagConflictPolicy string
 
 const (
-	// ConflictFail refuses to change what a tag means, and stalls. The default, because silently
-	// remeaning a tag is what leaves nodes running different bytes under one name.
+	// ConflictFail refuses to change what a tag means, and stalls. The default: a silently moved
+	// tag leaves nodes running different bytes under one name.
 	ConflictFail TagConflictPolicy = "Fail"
 	// ConflictOverwrite moves the tag. For a deliberately moving pointer, e.g. tags: [main].
 	ConflictOverwrite TagConflictPolicy = "Overwrite"
 	// ConflictKeep leaves the existing tag alone, drops what this reconcile produced, and reports
-	// Ready. The digest that was dropped is recorded in status, because otherwise status.artifact
-	// stops describing what the spec produces while the object reads healthy -- which is the exact
-	// shape of the incident behind ADR 0026.
+	// Ready. The dropped digest is recorded in status.conflict (see TagConflictStatus).
 	ConflictKeep TagConflictPolicy = "Keep"
 )
 
 // TagConflictStatus records content this object produced and did NOT publish, because
 // onConflict: Keep left an existing tag in place.
 //
-// This exists so that Keep cannot become a silent divergence. Without it, status.artifact would go
-// on describing content that is not what the current spec produces, while the object reads Ready
-// and nothing anywhere says the two disagree. That is exactly the shape of the incident behind
-// ADR 0026, where a served layer and the version it claimed to be had drifted apart and no field
-// could adjudicate.
-//
-// Cleared as soon as a reconcile publishes without conflict, so it always describes the CURRENT
-// divergence rather than accumulating history.
+// It keeps Keep from becoming a silent divergence between what the spec produces and what the tag
+// serves (ADR 0026). Cleared as soon as a reconcile publishes without conflict.
 type TagConflictStatus struct {
 	// Tag that was left alone.
 	// +optional
@@ -397,18 +316,7 @@ type TagConflictStatus struct {
 
 // AttestationStatus records what was attached to an artifact, and to which artifact.
 //
-// It exists to make a converged reconcile cost NOTHING. ADR 0008 says the controller should verify
-// the referrers exist and create only what is missing, which taken literally means a registry
-// round trip per object per interval forever. This record answers the same question from etcd,
-// checked as one more conjunct after the input-hash and published-digest checks a converged
-// reconcile already performs.
-//
-// Trusting a status field about the registry is safe here for a specific reason: the attestations
-// live in the SAME repository, under the SAME retention policy, as an artifact whose presence was
-// just confirmed. A registry that lost the referrers lost the artifact too, so the digest check
-// fails first and everything is re-derived from the registry.
-//
-// Subject is what invalidates it: a new artifact digest means these describe something else.
+// It lets a converged reconcile skip asking the registry (ADR 0008). A new Subject invalidates it.
 type AttestationStatus struct {
 	// Subject is the artifact digest these attestations describe.
 	Subject string `json:"subject,omitempty"`
@@ -420,8 +328,7 @@ type AttestationStatus struct {
 	Signature string `json:"signature,omitempty"`
 }
 
-// ArtifactStatus records what was produced. Deliberately identical in shape across every kind
-// in this API group so consumers need not care which controller produced it.
+// ArtifactStatus records what was produced. The same shape for every kind in this API group.
 type ArtifactStatus struct {
 	// Digest of the published manifest, e.g. "sha256:...". This is the value to pin.
 	// +optional
@@ -432,8 +339,8 @@ type ArtifactStatus struct {
 	// +optional
 	Revision string `json:"revision,omitempty"`
 
-	// Ref is the complete pullable reference, including the serving host in serving mode.
-	// Surfaced as a printer column so `kubectl get` shows the exact string to use.
+	// Ref is the complete pullable reference, as a workload should pull it. Shown by
+	// `kubectl get`.
 	// +optional
 	Ref string `json:"ref,omitempty"`
 
@@ -448,8 +355,7 @@ type ArtifactStatus struct {
 	LastUpdateTime *metav1.Time `json:"lastUpdateTime,omitempty"`
 }
 
-// Conditions accessors, so the shared reconcile helpers can write conditions on either kind
-// without knowing which it holds. The shape follows Flux's own ObjectWithConditions.
+// Conditions accessors for the shared reconcile helpers, shaped like Flux's ObjectWithConditions.
 
 func (o *ImageComposition) GetConditions() []metav1.Condition  { return o.Status.Conditions }
 func (o *ImageComposition) SetConditions(c []metav1.Condition) { o.Status.Conditions = c }
@@ -459,9 +365,7 @@ func (o *ImageBuild) SetConditions(c []metav1.Condition) { o.Status.Conditions =
 
 // SourceRefSource takes content from a Flux source's artifact.
 //
-// source-controller already clones, tracks revisions and publishes a digest-addressed tarball, so
-// this consumes that rather than forming a second opinion about what the repository contains. The
-// digest is resolved from status.artifact. See ADR 0002.
+// The digest is resolved from the source's status.artifact. See ADR 0002.
 type SourceRefSource struct {
 	// Kind of the referenced source.
 	// +kubebuilder:validation:Enum=GitRepository;OCIRepository;Bucket
@@ -473,30 +377,23 @@ type SourceRefSource struct {
 	Name string `json:"name"`
 
 	// Namespace of the referenced source. Must be the consuming object's own namespace, which is
-	// also the default — the field remains only so an explicit value is not a schema error.
-	//
-	// A source elsewhere is REFUSED. Both controllers read Flux sources cluster-wide, so honouring
-	// another namespace would let anyone who can create one of these objects pull that namespace's
-	// content into an image they control and can read.
+	// also the default; any other namespace is REFUSED, since it would expose that namespace's
+	// content to anyone who can create this object.
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
 
 	// Revision the artifact is expected to be at. Optional; unset consumes whatever the source
 	// currently publishes.
 	//
-	// This is the only way to make a sourceRef layer a pure function of the spec. Without it the
-	// source can move under a fixed spec — a branch or a semver range does so with no edit to
-	// anything, so nothing observes it. It is also independent of the source controller's own
-	// bookkeeping: the staleness check compares generation against observedGeneration, which is the
-	// source reporting on itself, whereas this is an assertion from the consuming side.
+	// This is the only way to make a sourceRef layer a pure function of the spec: without it, a
+	// branch or semver range can move the source under an unchanged spec.
 	//
 	// Matched against Flux's "<ref>@<algo>:<hash>" by whichever half you give:
 	//
 	//	revision: v0.6.8                  matches v0.6.8@sha1:<anything>
 	//	revision: v0.6.8@sha1:b739efb5    matches only that commit
 	//
-	// The short form exists because a generator usually knows the tag it asked for and not the
-	// commit it resolved to, and the useful check should not require the half it cannot supply.
+	// The short form suits a generator that knows the tag it asked for but not the commit.
 	// +kubebuilder:validation:MaxLength=256
 	// +optional
 	Revision string `json:"revision,omitempty"`
@@ -527,25 +424,21 @@ func RevisionMatches(want, got string) bool {
 
 // RefExport writes what was published into a ConfigMap, for a consumer that substitutes it.
 //
-// On `ImageBuild` the reference cannot be known in advance at all: the digest is an observation
-// rather than a function of the spec (ADR 0025). On `ImageComposition` it is computable from the
-// spec hash (ADR 0017) -- but only by reproducing that hash on the consuming side, which is not
-// trivial, so both kinds export.
+// An ImageBuild's digest cannot be known in advance (ADR 0025), and an ImageComposition's is only
+// computable by reproducing its spec hash (ADR 0017), so both kinds can export.
 //
 // THE CONFIGMAP'S NAME IS DERIVED, not chosen: <kind>-<namespace>-<object name>, e.g.
-// imagebuild-team-a-app. A consuming Kustomization spells that in substituteFrom, so it is API.
+// imagebuild-team-a-app.
 //
-// Strictly opt-in, and the cost is stated in ADR 0055: the digest becomes state outside git, so a
-// revert no longer reverts the running image.
+// Opt-in, and with a cost (ADR 0055): the digest becomes state outside git, so a revert no longer
+// reverts the running image.
 type RefExport struct {
 	// Namespace to write the ConfigMap in.
 	//
 	// Must be the object's OWN namespace, or one the operator allow-listed with
 	// --ref-export-namespaces (ADR 0056). Anything else is refused.
 	//
-	// No default, deliberately: a substitution source is read from the CONSUMING Kustomization's
-	// namespace, so defaulting this to the object's own would often produce a ConfigMap nothing
-	// reads, silently.
+	// No default: a substitution source is read from the CONSUMING Kustomization's namespace.
 	// +kubebuilder:validation:MinLength=1
 	Namespace string `json:"namespace"`
 
@@ -554,12 +447,9 @@ type RefExport struct {
 
 	// Labels are added to the generated ConfigMap.
 	//
-	// Each key must be permitted by --ref-export-allowed-labels, which is empty by default: these
-	// land on an object in a namespace this object may not otherwise touch. An unpermitted key is
-	// refused rather than dropped, because a dropped one leaves a ConfigMap that looks right.
-	//
-	// The controller's own watch labels and its managed-by and owner labels are written last, so
-	// nothing set here can turn them off.
+	// Each key must be permitted by --ref-export-allowed-labels, which is empty by default; an
+	// unpermitted key is refused rather than dropped. The controller's own labels are written last
+	// and cannot be overridden.
 	// +optional
 	Labels map[string]string `json:"labels,omitempty"`
 
@@ -575,9 +465,7 @@ type RefExport struct {
 type RefExportKeys struct {
 	// Ref receives the full pullable reference, registry/repository@sha256:...
 	//
-	// Prefer this over Digest alone: a consumer substituting a bare digest into an image field
-	// produces a trailing "@" on an empty string if the key is ever missing, which fails later and
-	// less legibly than a missing image would.
+	// Prefer this over Digest alone: a substituted bare digest fails less legibly if missing.
 	// +optional
 	Ref string `json:"ref,omitempty"`
 
@@ -588,10 +476,8 @@ type RefExportKeys struct {
 
 // RefExportStatus records the ConfigMap this object last wrote.
 //
-// Needed because an export outlives the spec that asked for it. The name is derivable from the
-// object, but the NAMESPACE it was last written to is not -- so moving writeRefTo.namespace, or
-// removing the field, would otherwise strand a ConfigMap nobody maintains and a consumer may still
-// be substituting from (ADR 0056).
+// The namespace it was last written to is not derivable, so without this, moving or removing
+// writeRefTo would strand the old ConfigMap (ADR 0056).
 type RefExportStatus struct {
 	// Name of the ConfigMap that was written.
 	Name string `json:"name"`

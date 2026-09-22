@@ -2,9 +2,7 @@ package v1alpha1
 
 import "testing"
 
-// TestRevisionMatches — the short form exists because a generator knows the tag it asked for and
-// not the commit it resolved to. If pinning required the full revision, the thing best placed to
-// set this field could not.
+// TestRevisionMatches: the short form lets a generator pin the tag without knowing the commit.
 func TestRevisionMatches(t *testing.T) {
 	const got = "v0.6.8@sha1:b739efb5"
 
