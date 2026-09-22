@@ -21,33 +21,20 @@ import (
 // contextTokenKey is the key inside a build's context Secret.
 const contextTokenKey = "token"
 
-// contextSecretName is the Secret holding one build's context token.
-//
-// A helper where the push, CA and Dockerfile secrets spell their names inline, because this is the
-// only one computed in two independent places: the controller mints it, and the endpoint below
-// looks it up. A name that must agree across a trust boundary gets one definition.
+// contextSecretName is the Secret holding one build's context token. A helper because both the
+// controller (which mints it) and ContextProxy (which checks it) must agree on it.
 func contextSecretName(job string) string { return job + "-context" }
 
-// ContextProxy streams a build's Flux artifact to its own build pod.
+// ContextProxy streams a build's Flux artifact to its own build pod, so build pods never reach
+// source-controller, which serves every namespace's artifacts without authentication. It also
+// keeps the needed NetworkPolicy inside this chart's namespace. ADR 0044.
 //
-// It exists so the build pod never talks to source-controller. source-controller serves artifacts
-// over plain HTTP with NO authentication, at /gitrepository/<ns>/<name>/<sha>.tar.gz -- so a build
-// pod able to reach it can fetch ANY namespace's source, not merely its own. Every build pod having
-// that reach is a cross-tenant read primitive, and the NetworkPolicy people write to make builds
-// work on a default-deny cluster is what grants it.
-//
-// Pointing the pod here instead also makes the connectivity problem solvable. The registry's policy
-// works because the registry is in the release namespace; an equivalent for the fetch leg would
-// need an ingress rule in flux-system, which this chart does not own. The builder it does.
-//
-// A pipe, not a cache: nothing is stored, and the pod still verifies the digest it was given, so a
-// wrong or compromised answer from here is caught rather than built.
+// A pipe, not a cache; the pod still verifies the digest it was given.
 type ContextProxy struct {
-	// Client reads the ImageBuild, its Secret and the Flux source. Secret reads bypass the cache
-	// (the manager disables it for Secrets), so a freshly created token is visible immediately.
+	// Client reads the ImageBuild, its Secret and the Flux source. Secrets are uncached, so a
+	// freshly minted token is visible immediately.
 	Client client.Client
-	// HTTP fetches from source-controller. Carries the same guarded dialer as the controller's
-	// other fetches, so this cannot be turned into a proxy to somewhere it should not reach.
+	// HTTP fetches from source-controller, through the same guarded dialer as other fetches.
 	HTTP *http.Client
 }
 
@@ -65,8 +52,7 @@ func (p *ContextProxy) serve(w http.ResponseWriter, r *http.Request) {
 
 	var obj ociv1alpha1.ImageBuild
 	if err := p.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &obj); err != nil {
-		// Not found and forbidden answer the same way. Telling an unauthenticated caller which
-		// ImageBuilds exist is itself a small leak, and it is free not to.
+		// Not found and forbidden look the same, so callers cannot enumerate ImageBuilds.
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -76,9 +62,8 @@ func (p *ContextProxy) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolved from the object, never from the request or the Secret. The only URL this will ever
-	// fetch is one source-controller published for a source THIS build references -- so a tenant
-	// cannot use the endpoint to make the controller fetch something else.
+	// The URL comes from the object's own sourceRef, never from the request, so the endpoint cannot
+	// be pointed elsewhere.
 	ref := obj.Spec.Context.GetSourceRef()
 	if ref == nil {
 		http.Error(w, "this build has no sourceRef context", http.StatusBadRequest)
@@ -110,8 +95,7 @@ func (p *ContextProxy) authorised(ctx context.Context, obj *ociv1alpha1.ImageBui
 	}
 	presented := header[len(prefix):]
 
-	// The Secret's name carries the input hash, so a token only opens the build it was minted for.
-	// A stale token from a previous build of the same object names a Secret that no longer exists.
+	// The Secret's name carries the input hash, so a token opens only the build it was minted for.
 	var secret corev1.Secret
 	key := types.NamespacedName{
 		Namespace: obj.Namespace,
@@ -127,15 +111,12 @@ func (p *ContextProxy) authorised(ctx context.Context, obj *ociv1alpha1.ImageBui
 	if len(want) == 0 {
 		return false
 	}
-	// Constant time: the comparison is against a secret, and a timing oracle here would let a
-	// caller recover a token byte by byte.
+	// Constant time, so the token cannot be recovered through timing.
 	return subtle.ConstantTimeCompare([]byte(presented), want) == 1
 }
 
-// stream copies source-controller's response to the caller.
-//
-// Streamed rather than buffered. A build context is routinely hundreds of megabytes, and buffering
-// would make one build's size the controller's memory ceiling for every other build at once.
+// stream copies source-controller's response to the caller without buffering: contexts can be
+// hundreds of megabytes.
 func (p *ContextProxy) stream(ctx context.Context, w http.ResponseWriter, url string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -162,17 +143,13 @@ func (p *ContextProxy) stream(ctx context.Context, w http.ResponseWriter, url st
 	return err
 }
 
-// ContextServer is the listener the build pods reach.
-//
-// Its own listener rather than a route on the metrics server: metrics are scraped from the release
-// namespace, this is reached from every namespace that owns an ImageBuild, and the NetworkPolicy
-// that admits the second must not admit the first.
+// ContextServer is the listener the build pods reach. Separate from the metrics server so a
+// NetworkPolicy can admit build namespaces here without admitting them to metrics.
 func ContextServer(addr string, proxy *ContextProxy) *http.Server {
 	return &http.Server{
 		Addr:    addr,
 		Handler: proxy.Handler(),
-		// A build context can be large and a build namespace can be far away; the read side is a
-		// header and nothing more, so it stays short.
+		// Bounds only the header read; bodies may be large.
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 }

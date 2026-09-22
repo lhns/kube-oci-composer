@@ -14,11 +14,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 )
 
-// startRegistry runs a real OCI registry for the duration of a test.
-//
-// The controller now applies tags itself, so a test of the publish path has to have somewhere to
-// apply them. Previously buildctl did the naming and the controller never spoke to a registry on
-// the success path, which is why a made-up digest used to be enough.
+// startRegistry runs a real OCI registry for the duration of a test, for the controller to tag in.
 func startRegistry(t *testing.T) string {
 	t.Helper()
 	srv := httptest.NewServer(registry.New(registry.Logger(log.New(io.Discard, "", 0))))

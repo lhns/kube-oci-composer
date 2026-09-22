@@ -7,12 +7,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// TestTheBuildContainerCopiesItsLogTail is the whole of this change in one assertion.
-//
-// ReadFile takes the termination message only from /dev/termination-log, which buildctl never
-// writes -- so status carried boilerplate and a pointer to a pod the next retry deletes. The
-// fetcher has had FallbackToLogsOnError all along, which is exactly why ITS failures explained
-// themselves and the build container's did not.
+// TestTheBuildContainerCopiesItsLogTail pins FallbackToLogsOnError on every container: buildctl
+// never writes /dev/termination-log on failure, so without it status carries no cause.
 func TestTheBuildContainerCopiesItsLogTail(t *testing.T) {
 	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(),
 		sampleRepo, "", "", "", "", true)
@@ -40,8 +36,7 @@ func terminated(name, message string, exit int32) corev1.Pod {
 	}
 }
 
-// TestTheCauseLeads — it used to come last, so every truncation ate the one part worth reading and
-// left the mechanism behind.
+// TestTheCauseLeads: the cause comes first, so truncation cannot eat it.
 func TestTheCauseLeads(t *testing.T) {
 	const cause = "/bin/sh: go: not found"
 	got := failureDetailFor("BackoffLimitExceeded", terminated("build", cause, 127))
@@ -54,11 +49,8 @@ func TestTheCauseLeads(t *testing.T) {
 	}
 }
 
-// TestALongCauseKeepsItsEndAndFits is the assertion that matters in a cluster.
-//
-// BuildAttempt.Message caps at 4096 and an over-long value does not truncate -- the API server
-// REJECTS the status write, so the failure is lost rather than shortened. A test that only checked
-// "contains the cause" would pass while that happened.
+// TestALongCauseKeepsItsEndAndFits: over 4096 bytes the API server rejects the whole status write,
+// so the message must fit while keeping the log's end, where the error is.
 func TestALongCauseKeepsItsEndAndFits(t *testing.T) {
 	const ending = "ERROR: failed to solve: process did not complete successfully"
 	cause := strings.Repeat("pulling layer abcdef0123456789\n", 200) + ending

@@ -15,15 +15,8 @@ import (
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 )
 
-// Suspending one object must not stop the whole cluster being refreshed.
-//
-// Suspending bumps the generation. The suspend branch used to return without advancing
-// observedGeneration, so the object stayed permanently "not yet reconciled" -- and the retention
-// refresher skips an entire cycle when ANY object is pending, for every object in the cluster.
-// Nothing resolves that on its own while the retention window counts down.
-//
-// ImageComposition never had this: its suspend path goes through patchStatus, which sets the field.
-// The asymmetry was the bug, so this asserts the field rather than the refresher.
+// TestSuspendingStillAdvancesObservedGeneration: suspending bumps the generation, and an object
+// left "not yet reconciled" makes the retention refresher skip its whole cycle for every object.
 func TestSuspendingStillAdvancesObservedGeneration(t *testing.T) {
 	obj := &ociv1alpha1.ImageBuild{
 		ObjectMeta: metav1.ObjectMeta{
@@ -63,11 +56,8 @@ func TestSuspendingStillAdvancesObservedGeneration(t *testing.T) {
 	}
 }
 
-// A suspended object must still finish deleting.
-//
-// The finalizer exists for a cross-namespace export, and the only code that removes it runs below
-// the suspend branch. Returning early there left the object Terminating with nothing able to
-// clear it -- the composer checks DeletionTimestamp before Suspend, which is the right order.
+// TestASuspendedObjectStillFinishesDeleting: the finalizer is removed only past the suspend branch,
+// so suspend must not short-circuit deletion.
 func TestASuspendedObjectStillFinishesDeleting(t *testing.T) {
 	now := metav1.Now()
 	obj := &ociv1alpha1.ImageBuild{
