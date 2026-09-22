@@ -7,26 +7,15 @@ import (
 	"strings"
 )
 
-// Dockerfile inspection, for the one rule this controller enforces on a build's content.
+// Dockerfile inspection, for the one content rule this controller enforces: every FROM is pinned
+// by digest (ADR 0002). The Dockerfile is not in the spec, so CEL cannot check it.
 //
-// A floating FROM is the single largest source of "same commit, different image": the context
-// digest is unchanged, the spec is unchanged, the input hash is unchanged, and the base moved
-// underneath all of it. Refusing it is the direct analogue of ADR 0002's "every input is
-// content-addressed, there are no exceptions anywhere in the API", applied at the one place it
-// can be applied — the Dockerfile is not in the spec, so CEL cannot see it and the check has to
-// live here.
-//
-// This is a scanner, not a parser. It understands enough to find FROM instructions and nothing
-// else, because everything else is BuildKit's job and a second opinion about Dockerfile semantics
-// is a source of disagreement rather than safety.
+// A scanner, not a parser: it finds FROM instructions and leaves Dockerfile semantics to BuildKit.
 
-// CheckPinnedBases refuses a Dockerfile whose external base images are not pinned by digest.
-//
-// Returns every offending reference rather than the first, so a Dockerfile with three floating
-// FROMs takes one edit to fix rather than three round trips.
+// CheckPinnedBases refuses a Dockerfile whose external base images are not pinned by digest,
+// listing every offending reference at once.
 func CheckPinnedBases(r io.Reader) error {
-	// Aliases this Dockerfile defines, so a later FROM naming an earlier stage is not mistaken
-	// for an unpinned registry reference.
+	// Stage aliases, so FROM naming an earlier stage is not taken for a registry reference.
 	stages := map[string]bool{}
 	var unpinned []string
 
@@ -37,8 +26,7 @@ func CheckPinnedBases(r io.Reader) error {
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 
-		// Join continuations before looking at the instruction, so a FROM split across lines is
-		// still seen as one.
+		// Join continuations, so a FROM split across lines is seen whole.
 		if continued != "" {
 			line = continued + " " + line
 			continued = ""
@@ -66,13 +54,12 @@ func CheckPinnedBases(r io.Reader) error {
 
 		switch {
 		case stages[strings.ToLower(ref)]:
-			// A reference to an earlier stage in this same Dockerfile. Nothing to pin.
+			// An earlier stage.
 		case strings.EqualFold(ref, "scratch"):
-			// The empty base. Not a registry reference at all.
+			// The empty base.
 		case strings.Contains(ref, "$"):
-			// An ARG-substituted base. Refused rather than resolved: substituting it here would
-			// mean reimplementing Dockerfile variable semantics, and guessing wrong would let an
-			// unpinned base through while claiming otherwise.
+			// ARG-substituted: refused, since resolving it would mean reimplementing Dockerfile
+			// variable semantics.
 			unpinned = append(unpinned, ref)
 		case strings.Contains(ref, "@sha256:"):
 			// Pinned.

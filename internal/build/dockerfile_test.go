@@ -5,8 +5,7 @@ import (
 	"testing"
 )
 
-// TestCheckPinnedBasesAccepts — the shapes a correct Dockerfile takes. A stage alias and `scratch`
-// are not registry references, so demanding a digest of them would refuse valid input.
+// TestCheckPinnedBasesAccepts: stage aliases and `scratch` are not registry references.
 func TestCheckPinnedBasesAccepts(t *testing.T) {
 	const digest = "@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
@@ -34,8 +33,7 @@ func TestCheckPinnedBasesAccepts(t *testing.T) {
 	}
 }
 
-// TestCheckPinnedBasesRefuses — the point of the check. An unchanged spec must not be able to
-// build on a different base.
+// TestCheckPinnedBasesRefuses: an unchanged spec must not build on a different base.
 func TestCheckPinnedBasesRefuses(t *testing.T) {
 	const digest = "@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
@@ -61,8 +59,7 @@ func TestCheckPinnedBasesRefuses(t *testing.T) {
 	}
 }
 
-// TestCheckPinnedBasesReportsEveryOffender — three floating bases should take one edit to fix, not
-// three round trips through a failing build.
+// TestCheckPinnedBasesReportsEveryOffender, so one edit fixes them all.
 func TestCheckPinnedBasesReportsEveryOffender(t *testing.T) {
 	err := CheckPinnedBases(strings.NewReader("FROM a:1\nFROM b:2\nFROM c:3\n"))
 	if err == nil {
@@ -75,8 +72,7 @@ func TestCheckPinnedBasesReportsEveryOffender(t *testing.T) {
 	}
 }
 
-// TestCheckPinnedBasesIgnoresNonFrom — a scanner that tripped on COPY or RUN would refuse valid
-// Dockerfiles, and "FROM" appearing inside another instruction is not an instruction.
+// TestCheckPinnedBasesIgnoresNonFrom: "FROM" inside another instruction is not an instruction.
 func TestCheckPinnedBasesIgnoresNonFrom(t *testing.T) {
 	const digest = "@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	df := "FROM busybox" + digest + "\n" +

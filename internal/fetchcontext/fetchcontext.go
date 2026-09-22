@@ -1,12 +1,8 @@
 // Package fetchcontext materialises an ImageBuild's context inside the build pod.
 //
-// It replaces a shell script that verified nothing -- not even the Flux artifact digest the
-// controller already held -- and that carried a second copy of build.MatchesContextPath which once
-// disagreed with the original.
-//
-// Deliberately no SSRF dial guard, unlike the controller's fetcher. That guard stops the CONTROLLER
-// being used as a proxy into the cluster (ADR 0036, threat I6). This runs in the build pod, which
-// is about to execute arbitrary code and can already reach anything the pod network allows.
+// No SSRF dial guard, unlike the controller's fetcher: that guard stops the controller being used
+// as a proxy (ADR 0036, threat I6), while this runs in a build pod that is about to execute
+// arbitrary code with the pod network's reach anyway.
 package fetchcontext
 
 import (
@@ -30,10 +26,8 @@ import (
 	"github.com/lhns/kube-oci-composer/internal/build"
 )
 
-// ExitDigestMismatch is returned when the fetched bytes are not what the spec declared.
-//
-// A distinct exit code, so the controller reports a mismatch as a spec problem rather than as "the
-// build failed" -- which is what keeps FetchSource.Digest's terminality promise true here.
+// ExitDigestMismatch is the exit code for fetched bytes that do not match the declared digest, so
+// the controller can tell a spec problem from a failed build.
 const ExitDigestMismatch = 3
 
 // Options is one context fetch.
@@ -48,25 +42,21 @@ type Options struct {
 	Unpack string
 	// Subpath selects one directory out of the archive, after Strip has been applied.
 	Subpath string
-	// Strip is how many leading path components to remove from every entry. Zero leaves the
-	// archive's paths alone, which is what a Flux artifact wants.
+	// Strip is how many leading path components to remove from every entry. Zero for a Flux
+	// artifact.
 	Strip int
 	// Dest is where the tree is written.
 	Dest string
 	// Dockerfile is a path inside the context whose FROM lines must all be digest-pinned. Empty
 	// means the Dockerfile came from outside the context and the controller already checked it.
 	Dockerfile string
-	// Token authenticates this build to the controller's context endpoint. Empty for a URL that
-	// needs no credential -- a fetch context, an image, or a source-controller URL under an
-	// operator who configured no endpoint.
+	// Token authenticates this build to the controller's context endpoint. Empty when the URL
+	// needs no credential.
 	Token string
 }
 
-// Run fetches, verifies and extracts.
-//
-// VERIFY BEFORE UNPACK, always: checking afterwards would leave files a build might read already
-// written, which makes the digest decorative. The body streams to a temporary file while being
-// hashed, and nothing is extracted until the hash matches.
+// Run fetches, verifies and extracts. Always verify before unpack, or a build could read files the
+// digest never vouched for: the body is hashed into a staged file and extracted only on a match.
 func Run(ctx context.Context, opts Options) error {
 	// An image is addressed by its own digest: no separate blob to verify, no archive to unpack.
 	if opts.Kind == "image" {
@@ -93,9 +83,8 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	defer f.Close()
 
-	// How deep to strip comes from the SPEC, never from the kind. Deciding it from the kind is what
-	// broke every sourceRef build: source-controller does not wrap its tree, so removing a level
-	// dropped every root-level file. See ADR 0045.
+	// Strip depth comes from the spec, never from the kind: source-controller does not wrap its
+	// tree. ADR 0045.
 	if err := archive.Extract(f, archive.Mode(opts.Unpack), opts.Dest, opts.Subpath,
 		opts.Strip); err != nil {
 		return err
@@ -103,19 +92,10 @@ func Run(ctx context.Context, opts Options) error {
 	return checkDockerfile(opts)
 }
 
-// checkDockerfile refuses an unpinned FROM in a Dockerfile that came out of the context.
-//
-// Here rather than only in the controller because for an IMAGE context the controller cannot read
-// it cheaply -- that would mean registry credentials for arbitrary user-named repositories in a
-// process shared by every namespace. Refusing the combination was the alternative, and it is worse:
-// `path` is the default, and it would silently not work with one context kind.
-//
-// Sound because this is our binary, not user code: it runs before BuildKit, in a container the user
-// cannot alter, and nothing writes to the tree between here and buildctl. The cost is that the
-// failure arrives as a Job failure rather than Stalled, which is why jobFailureDetail reads init
-// containers.
-//
-// Run for every kind, so the check happens on the bytes that are actually built.
+// checkDockerfile refuses an unpinned FROM in a Dockerfile that came out of the context, on the
+// bytes actually built. It is the only check for an image context, which the controller cannot
+// read. Sound because this binary runs before BuildKit in a container the user cannot alter; a
+// failure surfaces as a Job failure (hence jobFailureDetail reads init containers).
 func checkDockerfile(opts Options) error {
 	if opts.Dockerfile == "" {
 		return nil
@@ -149,13 +129,9 @@ func download(ctx context.Context, url, dest, token string) (blob, error) {
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return blob{}, fmt.Errorf("creating %s: %w", dest, err)
 	}
-	// Staged INSIDE dest. filepath.Dir(dest) is the container root, which uid 1000 cannot write --
-	// every build with a context failed on `permission denied` there. dest is the build volume, so
-	// it is writable and, unlike the container's own filesystem, its emptyDir sizeLimit is what
-	// bounds a download.
-	//
-	// Its own directory rather than a loose file, removed with RemoveAll: deleting a bare
-	// `context-*.blob` could delete an archive entry that extracted over the same name.
+	// Staged inside dest: the container root is not writable by uid 1000, and dest's emptyDir
+	// sizeLimit bounds the download. A directory of its own, so removing it cannot delete an
+	// extracted entry of the same name.
 	stage, err := os.MkdirTemp(dest, ".fetch-")
 	if err != nil {
 		return blob{}, fmt.Errorf("staging the download: %w", err)
@@ -196,14 +172,9 @@ func download(ctx context.Context, url, dest, token string) (blob, error) {
 	return blob{stage: stage}, lastErr
 }
 
-// fetchAttempts and fetchBaseDelay bound the retry: six attempts, doubling from half a second, so
-// about fifteen seconds in total (0.5 + 1 + 2 + 4 + 8), measured.
-//
-// A retry exists because the first dial happens at t=0 of a brand-new pod, and every CNI programs
-// NetworkPolicy asynchronously AFTER the pod has its IP -- kube-router takes one to two seconds,
-// and the denial arrives as `connection refused` rather than a timeout. The Job runs with
-// BackoffLimit: 0, so without this a single unlucky dial fails the build permanently. It also
-// covers a source-controller restart and a transient 5xx.
+// fetchAttempts and fetchBaseDelay bound the retry: about fifteen seconds in total. The first dial
+// happens as the pod starts, before the CNI has programmed NetworkPolicy (showing as `connection
+// refused`), and the Job has BackoffLimit: 0. Also covers source-controller restarts and 5xx.
 const (
 	fetchAttempts  = 6
 	fetchBaseDelay = 500 * time.Millisecond
@@ -212,11 +183,8 @@ const (
 // permanentError marks a response not worth repeating.
 type permanentError struct{ error }
 
-// fetchInto makes one attempt, returning the digest of what it wrote.
-//
-// Truncates first: an attempt that failed partway has already written bytes, and appending to them
-// would produce a digest over the concatenation of two attempts -- which fails verification and
-// looks like the server served the wrong content.
+// fetchInto makes one attempt, returning the digest of what it wrote. It truncates first, so a
+// failed partial attempt cannot corrupt the digest.
 func fetchInto(ctx context.Context, client *http.Client, tmp *os.File, url, token string) (string, error) {
 	if err := tmp.Truncate(0); err != nil {
 		return "", &permanentError{fmt.Errorf("resetting the staged download: %w", err)}
@@ -234,7 +202,7 @@ func fetchInto(ctx context.Context, client *http.Client, tmp *os.File, url, toke
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		// Dial, DNS, reset, timeout. All transient by nature, and the one this retry exists for.
+		// Dial, DNS, reset, timeout: transient.
 		return "", fmt.Errorf("fetching %s: %w", url, err)
 	}
 	defer resp.Body.Close()
@@ -244,12 +212,11 @@ func fetchInto(ctx context.Context, client *http.Client, tmp *os.File, url, toke
 	case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500:
 		return "", fmt.Errorf("fetching %s: %s", url, resp.Status)
 	default:
-		// 4xx. The URL, the token or the object is wrong, and asking five more times will not
-		// change any of them.
+		// Other 4xx: retrying will not help.
 		return "", &permanentError{fmt.Errorf("fetching %s: %s", url, resp.Status)}
 	}
 
-	// Hashed as the bytes stream past: nothing is buffered, and the digest covers what was written.
+	// Hashed while streaming, over exactly what was written.
 	h := sha256.New()
 	if _, err := io.Copy(io.MultiWriter(tmp, h), resp.Body); err != nil {
 		return "", fmt.Errorf("downloading %s: %w", url, err)
@@ -259,9 +226,8 @@ func fetchInto(ctx context.Context, client *http.Client, tmp *os.File, url, toke
 
 // image pulls a digest-pinned image and writes its flattened filesystem into dest.
 //
-// mutate.Extract rather than untarring each layer, because Extract APPLIES WHITEOUTS. Per-layer
-// extraction resurrects files an upper layer deleted, which nobody notices until something reads
-// one. Nothing to verify afterwards: the registry cannot serve other bytes under the digest.
+// mutate.Extract applies whiteouts, which per-layer extraction would not. Nothing to verify
+// afterwards: the registry cannot serve other bytes under the digest.
 func image(ctx context.Context, opts Options) error {
 	ref, err := name.NewDigest(opts.URL)
 	if err != nil {
@@ -273,9 +239,8 @@ func image(ctx context.Context, opts Options) error {
 	if err != nil {
 		return fmt.Errorf("pulling %s: %w", opts.URL, err)
 	}
-	// An index names several images and picks none. Refused rather than resolved by this process's
-	// platform, as source.PullImage also does: the choice belongs in the spec, not in where the
-	// build landed.
+	// An index is refused rather than resolved by this process's platform (as source.PullImage
+	// does): the choice belongs in the spec.
 	if desc.MediaType.IsIndex() {
 		return fmt.Errorf("%s is a multi-platform index: name a platform-specific digest, because "+
 			"resolving one here would make the context depend on where the build ran", opts.URL)
@@ -291,8 +256,7 @@ func image(ctx context.Context, opts Options) error {
 	rc := mutate.Extract(img)
 	defer rc.Close()
 
-	// The same extractor as every other kind, so traversal, symlink and subpath rules are one
-	// implementation rather than three.
+	// The same extractor as every other kind, so path rules are one implementation.
 	if err := archive.Extract(rc, archive.ModeTar, opts.Dest, opts.Subpath, opts.Strip); err != nil {
 		return err
 	}

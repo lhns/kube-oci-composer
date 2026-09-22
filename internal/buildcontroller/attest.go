@@ -12,21 +12,16 @@ import (
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 )
 
-// signBuild signs a build's output after the Job has terminated.
+// signBuild signs a build's output after the Job has terminated. SBOM and provenance are already in
+// the pushed index from BuildKit; only the signature is added here, because the key never enters a
+// build pod.
 //
-// The SBOM and provenance are NOT attached here: BuildKit produced them in-band, inside the index
-// it pushed, because only the build could see what it installed. This attaches the one thing the
-// build could not, and the reason it could not is the strongest security property of the design --
-// the signing key lives in this process and is never projected into a pod running code from a git
-// repository.
-//
-// Failure is not fatal, on the same rule the composer follows: the image is pushed and pullable, so
-// reporting a build that succeeded as failed would be the larger error. It surfaces as a Warning.
+// Failure is not fatal: the image is pushed and pullable. It surfaces as a Warning Event.
 func (r *ImageBuildReconciler) signBuild(ctx context.Context, obj *ociv1alpha1.ImageBuild, digest string) *ociv1alpha1.AttestationStatus {
 	if r.Attestor == nil || r.Attestor.Key == nil {
 		return nil
 	}
-	// Already signed for this digest, from the status alone. A converged reconcile costs nothing.
+	// Already signed for this digest, judging by status alone.
 	if prev := obj.Status.Attestations; prev != nil && prev.Subject == digest && prev.Signature != "" {
 		return prev
 	}

@@ -29,8 +29,7 @@ func sampleInputs() Inputs {
 	}
 }
 
-// TestHashIsStable — the whole short-circuit rests on this: if the hash moved between calls, every
-// reconcile would be a build.
+// TestHashIsStable: the short-circuit depends on it.
 func TestHashIsStable(t *testing.T) {
 	want := sampleInputs().Hash()
 	for i := range 5 {
@@ -40,11 +39,10 @@ func TestHashIsStable(t *testing.T) {
 	}
 }
 
-// hashMutations is the one list of "change this, and the hash must move", extracted so
-// TestEveryFieldIsAccountedFor can check it covers every field.
+// hashMutation is one "change this and the hash must move" case; TestEveryFieldIsAccountedFor
+// checks the list covers every field.
 type hashMutation struct {
-	// field names the Inputs field this case exercises. Explicit rather than parsed out of the
-	// description, which would be a guard that silently stops covering things.
+	// field names the Inputs field this case exercises.
 	field  string
 	name   string
 	mutate func(*Inputs)
@@ -70,8 +68,6 @@ func hashMutations() []hashMutation {
 		{"CacheMode", "cache mode", func(in *Inputs) { in.CacheMode = "Disabled" }},
 		{"CacheRef", "cache ref", func(in *Inputs) { in.CacheRef = "elsewhere" }},
 		{"SourceDateEpoch", "epoch", func(in *Inputs) { in.SourceDateEpoch = "1700000000" }},
-		// Missing until TestEveryFieldIsAccountedFor was written, which is the point of that test:
-		// Attestations reached the hash and nothing proved it.
 		{"Attestations", "attestations", func(in *Inputs) { in.Attestations = "sbom+provenance" }},
 		{"Platforms", "platform added", func(in *Inputs) { in.Platforms = append(in.Platforms, "linux/arm/v7") }},
 		{"Platforms", "platform order", func(in *Inputs) { in.Platforms = []string{"linux/arm64", "linux/amd64"} }},
@@ -85,9 +81,8 @@ func hashMutations() []hashMutation {
 	}
 }
 
-// TestEveryFieldMovesTheHash — a field that does not move the hash is a field that can change the
-// output without triggering a rebuild, which is the failure mode ADR 0002 describes for
-// AssemblyVersion: "keep serving artifacts built by the old algorithm, forever".
+// TestEveryFieldMovesTheHash: a field that does not move the hash can change the output without a
+// rebuild.
 func TestEveryFieldMovesTheHash(t *testing.T) {
 	base := sampleInputs().Hash()
 
@@ -102,8 +97,7 @@ func TestEveryFieldMovesTheHash(t *testing.T) {
 	}
 }
 
-// TestArgOrderDoesNotMatter — the opposite case. ARG order in a spec does not change what the
-// build sees, so reordering the list must not rebuild.
+// TestArgOrderDoesNotMatter: ARG order does not change what the build sees.
 func TestArgOrderDoesNotMatter(t *testing.T) {
 	a, b := sampleInputs(), sampleInputs()
 	b.Args = map[string]string{"COMMIT": "abc", "VERSION": "1.2.3"}
@@ -112,12 +106,10 @@ func TestArgOrderDoesNotMatter(t *testing.T) {
 	}
 }
 
-// TestSecretValuesAreNotHashed is a security property: status.inputHash is readable by anyone with
-// get, so hashing the value would make it an offline oracle against a low-entropy secret. Identity
-// plus resourceVersion rebuilds on rotation without the oracle.
+// TestSecretValuesAreNotHashed: identity plus resourceVersion rebuilds on rotation without making
+// status.inputHash an oracle for the value.
 func TestSecretValuesAreNotHashed(t *testing.T) {
-	// The struct offers nowhere to put a value, which is the real enforcement. What is asserted
-	// here is the behaviour that depends on it.
+	// The struct has nowhere to put a value; this asserts the behaviour that depends on that.
 	rotated := sampleInputs()
 	rotated.SecretIdentities = []string{"npmrc/1235"}
 	if rotated.Hash() == sampleInputs().Hash() {
@@ -125,14 +117,10 @@ func TestSecretValuesAreNotHashed(t *testing.T) {
 	}
 }
 
-// TestEveryFieldIsAccountedFor closes the hole the hand-written list above leaves open: a field
-// added to Inputs and never hashed still passes it. For this kind the input hash IS the identity,
-// so an unhashed input means a changed build quietly reusing an old artifact forever.
-//
-// Reflection over the struct instead, so adding a field fails here until someone decides in writing
-// whether it belongs in the hash.
+// TestEveryFieldIsAccountedFor fails when a field is added to Inputs until it has a hashMutation
+// case or a recorded reason in notHashed. For this kind the input hash is the identity.
 func TestEveryFieldIsAccountedFor(t *testing.T) {
-	// Deliberately not hashed, each with the reason recorded on the field itself.
+	// Deliberately not hashed; the reason is also on the field.
 	notHashed := map[string]string{
 		"ContextRevision": "the digest already identifies the content, so hashing both would " +
 			"rebuild on a repack that changed nothing",

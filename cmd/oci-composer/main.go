@@ -115,9 +115,7 @@ func main() {
 			"pod pinned to an older build both depend on it. Layers are shared between builds, so a "+
 			"generous value costs far less than the count suggests. Same name and meaning on both "+
 			"controllers.")
-	// Deprecated alias. The gc- prefix was misleading: this caps status.history, and collection
-	// merely honours that cap. Kept because silently dropping a flag someone set in a values file
-	// becomes a crash-loop on an unknown flag, which is a worse upgrade than a rename.
+	// Deprecated alias, kept so an old values file does not crash-loop on an unknown flag.
 	flag.IntVar(&gcKeepBuilds, "gc-keep-builds", 0, "Deprecated alias for --keep-builds.")
 
 	flag.BoolVar(&showVersion, "version", false, "Print version information and exit.")
@@ -135,9 +133,8 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
 
-	// Credentials come from the environment, never from a flag: flags show up in `ps`, in the
-	// pod spec, and in every `kubectl describe`. This matches how the rest of this estate injects
-	// S3 credentials, via secretKeyRef into the standard AWS variable names.
+	// Credentials come from the environment, never from a flag, which would show in `ps` and the
+	// pod spec.
 	s3Config := store.S3Config{
 		Endpoint:        s3Endpoint,
 		Bucket:          s3Bucket,
@@ -177,10 +174,7 @@ func main() {
 		LeaderElectionID:       "oci-composer.lhns.de",
 		Client: client.Options{
 			Cache: &client.CacheOptions{
-				// Secrets are read by name and read rarely. Caching them would mean watching
-				// EVERY Secret in the cluster and holding them all in memory — a blast radius
-				// wildly out of proportion to reading one referenced push credential. Reads go
-				// straight to the API server instead.
+				// Read by name only; caching would watch and hold every Secret in the cluster.
 				DisableFor: []client.Object{&corev1.Secret{}},
 			},
 		},
@@ -192,11 +186,8 @@ func main() {
 
 	readiness := &controller.Readiness{Client: mgr.GetClient()}
 
-	// Everything the two controllers share about publishing, trust and supply chain. Built here so
-	// a CA that cannot be read or a key that cannot sign fails the process rather than the first
-	// artifact -- the same reasoning the chart applies to an unpinned builder image.
-	// The CA bytes themselves are discarded: only the builder passes them on, into each build
-	// pod. This controller pushes from its own process.
+	// Built at startup so an unreadable CA or unusable signing key fails the process, not the
+	// first artifact. The CA bytes are only needed by the builder, for its build pods.
 	registryTransport, _, err := registry.Transport()
 	if err != nil {
 		setupLog.Error(err, "unable to trust the registry CA", "caFile", registry.CAFile)
@@ -246,11 +237,8 @@ func main() {
 	if err := (&controller.ImageCompositionReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
-		// Deprecated in favour of GetEventRecorder, which returns the NEW events API. That is a
-		// real migration rather than a rename: events.EventRecorder has no Event method, only
-		// Eventf(regarding, related, eventtype, reason, action, note, ...), so every call site
-		// and the FakeRecorder the tests rely on change with it. Worth doing deliberately rather
-		// than as a drive-by while repairing CI.
+		// GetEventRecorder returns the new events API, which has no Event method; migrating means
+		// changing every call site and the tests' FakeRecorder, so it is deferred.
 		//nolint:staticcheck // SA1019: deliberate; see above.
 		Recorder:             mgr.GetEventRecorderFor("imagecomposition-controller"),
 		Readiness:            readiness,
@@ -269,15 +257,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Liveness stays a bare ping. A replica that has not won the lease is alive and must not be
-	// restarted just because it is not the leader.
+	// Liveness stays a bare ping: a replica without the lease is alive.
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)
 	}
 
-	// A bare ping. Readiness used to gate on the served store being warm so the pod would not join
-	// the Service and 404 pulls while rebuilding; there is no store and no Service to join now.
+	// Readiness is a bare ping too: there is no served store or Service to warm up.
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
@@ -290,12 +276,8 @@ func main() {
 	}
 }
 
-// effectiveKeepBuilds resolves --keep-builds against its deprecated alias --gc-keep-builds.
-//
-// The old name wins only when the new one was left at its default, so a deployment that sets both
-// gets the one it most likely meant, and one that sets only the old name keeps working. Dropping the
-// alias outright would turn a values file written against the previous release into a crash-loop on
-// an unknown flag, which is a worse upgrade than a rename.
+// effectiveKeepBuilds resolves --keep-builds against its deprecated alias --gc-keep-builds. The old
+// name wins only when the new one is at its default.
 func effectiveKeepBuilds(keepBuilds, deprecated int) int {
 	if deprecated > 0 && keepBuilds == ociv1alpha1.DefaultHistoryLimit {
 		return deprecated

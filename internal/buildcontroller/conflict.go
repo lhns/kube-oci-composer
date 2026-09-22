@@ -22,19 +22,9 @@ import (
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 )
 
-// checkTagConflict applies spec.push.onConflict BEFORE a Job is created.
-//
-// Until this existed the field was INERT on this kind: nothing in this package read `immutable`,
-// and BuildKit pushed `type=image,push=true` over whatever the tag held. The CRD advertised a
-// guarantee that was enforced nowhere, which is worse than not offering it — an operator who set
-// `immutable: true` believed a tag could not be remeaned, and it could.
-//
-// The check runs before the Job rather than after, and that ordering is the whole point. BuildKit
-// pushes from inside the Job, so by the time this controller sees a result the tag has already
-// moved; there is no undo. Checking first is what makes Fail actually refuse, and it also saves the
-// build entirely under Keep.
-//
-// Returns whether the caller should stop, and the divergence to record if so.
+// checkTagConflict is a pre-flight for spec.push.onConflict, run before a Job is created so a
+// build is not spent on a tag that already holds foreign content. applyTags enforces the policy
+// exactly after the build. Returns whether the caller should stop, and the divergence to record.
 func (r *ImageBuildReconciler) checkTagConflict(
 	ctx context.Context, obj *ociv1alpha1.ImageBuild,
 ) (stop bool, conflict *ociv1alpha1.TagConflictStatus, err error) {
@@ -45,8 +35,7 @@ func (r *ImageBuildReconciler) checkTagConflict(
 	}
 	policy := p.ResolveConflictPolicy()
 	if policy == ociv1alpha1.ConflictOverwrite {
-		// Nothing to ask the registry. Skipping the round trip also means the permissive policy
-		// keeps working when the registry is unreachable for reads but writable for pushes.
+		// Nothing to ask the registry, so Overwrite also works when registry reads fail.
 		return false, nil, nil
 	}
 
@@ -55,7 +44,7 @@ func (r *ImageBuildReconciler) checkTagConflict(
 		return false, nil, err
 	}
 	if len(tags) == 0 {
-		// Digest-only publication cannot collide: the name IS the content.
+		// Digest-only publication cannot collide.
 		return false, nil, nil
 	}
 
@@ -69,13 +58,8 @@ func (r *ImageBuildReconciler) checkTagConflict(
 		return false, nil, err
 	}
 
-	// A PRE-FLIGHT, not the guarantee. applyTags decides this properly after the build, with the
-	// real digest; this exists only to decline burning a build pod on a tag that already holds
-	// something foreign.
-	//
-	// Necessarily approximate: what the build will produce is unknown here, so the digest recorded
-	// in status stands in for it. That makes a tag holding this object's OWN previous digest look
-	// fine, which is the hole ADR 0054 closes downstream -- harmless now that this is advisory.
+	// Approximate: the output digest is unknown yet, so status's digest stands in for it. That
+	// exempts a tag holding this object's own previous digest; applyTags closes that (ADR 0054).
 	ours := ""
 	if obj.Status.Artifact != nil {
 		ours = obj.Status.Artifact.Digest
@@ -97,24 +81,17 @@ func (r *ImageBuildReconciler) checkTagConflict(
 		return true, &ociv1alpha1.TagConflictStatus{
 			Tag:      tag,
 			Existing: current,
-			// Nothing was built, so nothing was dropped -- and saying otherwise would invent a
-			// digest that never existed. The empty value is the honest one, and it is also the
-			// difference from the composer, which produces its artifact before it can conflict.
+			// Nothing was built, so Dropped stays empty.
 			ObservedAt: &now,
 		}, nil
 	default:
-		// Unreachable: Overwrite returned above and CEL refuses anything outside the enum. Refusing
-		// rather than falling through means a value added to the enum without a branch here fails
-		// loudly instead of silently overwriting a tag.
+		// Unreachable (CEL enforces the enum), but refuse rather than silently overwrite if a new
+		// value is added without a branch here.
 		return false, nil, recon.Terminal("unknown onConflict policy %q", policy)
 	}
 }
 
 // remoteOptions builds registry auth from spec.push.secretRef, the same Secret the Job is given.
-//
-// Credentials are read from a Secret and never from the spec, and the controller only ever GETs the
-// one it was pointed at -- it has no list or watch on secrets, so it cannot enumerate a namespace's
-// credentials even in principle.
 func (r *ImageBuildReconciler) remoteOptions(
 	ctx context.Context, obj *ociv1alpha1.ImageBuild,
 ) ([]remote.Option, error) {
@@ -125,15 +102,9 @@ func (r *ImageBuildReconciler) remoteOptions(
 	}.Options(ctx, obj.Namespace, r.repositoryFor(obj), obj.Spec.Push)
 }
 
-// cacheAvailable reports whether this object's build cache reference resolves.
-//
-// Asked because BuildKit treats a cache reference it cannot resolve as a fatal error rather than a
-// warning, so importing one that does not exist yet fails the build -- see buildctlArgs. Answering
-// it costs one HEAD on a path that is about to run a build anyway.
-//
-// Any failure answers "no". A registry that cannot be reached, a malformed reference, an
-// unreadable secret: none of them are reasons to fail a build over a cache, and the worst outcome
-// of a wrong "no" is that this build repopulates a cache that was already there.
+// cacheAvailable reports whether this object's build cache reference resolves, since BuildKit
+// fails the build on an unresolvable cache import (see buildctlArgs). Any error answers "no": the
+// worst case is repopulating an existing cache.
 func (r *ImageBuildReconciler) cacheAvailable(ctx context.Context, obj *ociv1alpha1.ImageBuild) bool {
 	cacheRef := cacheRefFor(obj, r.repositoryFor(obj))
 	if cacheRef == "" {
@@ -163,12 +134,8 @@ func usesDefaultRepository(obj *ociv1alpha1.ImageBuild) bool {
 	return obj.Spec.Push == nil || obj.Spec.Push.Repository == ""
 }
 
-// repositoryFor is the ONE place that resolves where a build publishes.
-//
-// Everything that needs the repository goes through here -- the push target, the tag-conflict
-// check, the build cache reference, the retention refresh. Resolving the default in some of those
-// and not others would push to one place and then keep a different one alive, which is the kind of
-// mismatch that only shows up a retention window later.
+// repositoryFor is the one place that resolves where a build publishes; the push, conflict check,
+// cache and retention must all agree.
 func (r *ImageBuildReconciler) repositoryFor(obj *ociv1alpha1.ImageBuild) string {
 	if !usesDefaultRepository(obj) {
 		return obj.Spec.Push.Repository
@@ -180,22 +147,12 @@ func (r *ImageBuildReconciler) repositoryFor(obj *ociv1alpha1.ImageBuild) string
 }
 
 // pushSecretFor returns the name of the Secret the build pod mounts as its registry credential,
-// creating a short-lived copy of the operator's when the object has none of its own.
+// creating a per-build copy of the operator's when the object has none of its own (a pod mounts
+// Secrets only from its own namespace).
 //
-// A pod can only mount Secrets from its own namespace, and the build must run in the object's
-// namespace: it mounts that namespace's build secrets and executes that namespace's code. So the
-// operator's credential, which lives in the CONTROLLER's namespace, cannot be mounted directly.
-//
-// The copy is owned by the ImageBuild and named after the Job, so it is garbage-collected when the
-// object goes and is replaced rather than accumulated when the inputs change. That bounds the
-// exposure to roughly the length of a build instead of forever, which is the whole reason it is a
-// copy and not a permanent per-namespace Secret.
-//
-// It does NOT eliminate the exposure, and pretending otherwise would be worse than not doing it:
-// while a build runs, anyone who can read Secrets in that namespace can read the operator's registry
-// credential. What makes that tolerable is that the namespace can already push arbitrary content to
-// that registry through an ImageBuild -- the credential lets it do directly what it could already do
-// indirectly.
+// The copy is named after the Job and dies with it, which bounds, but does not remove, the
+// exposure: while a build runs, anyone who can read Secrets in that namespace can read the
+// operator's credential. Tolerable because the namespace can already push there via an ImageBuild.
 func (r *ImageBuildReconciler) pushSecretFor(
 	ctx context.Context, obj *ociv1alpha1.ImageBuild, jobName string,
 ) (string, error) {
@@ -205,70 +162,34 @@ func (r *ImageBuildReconciler) pushSecretFor(
 
 	repo := r.repositoryFor(obj)
 	if r.Default.SecretName == "" || !r.Default.Owns(repo) {
-		// Either there is no operator credential, or this build publishes somewhere the operator's
-		// credential has no business going. Push anonymously; the registry decides.
+		// No operator credential, or not the operator's registry: push anonymously.
 		return "", nil
 	}
 
-	var source corev1.Secret
+	var operatorSecret corev1.Secret
 	key := types.NamespacedName{Namespace: r.Default.Namespace, Name: r.Default.SecretName}
-	if err := r.Get(ctx, key, &source); err != nil {
+	if err := r.Get(ctx, key, &operatorSecret); err != nil {
 		if apierrors.IsNotFound(err) {
 			return "", recon.Pending("default push secret %s not found yet", key)
 		}
 		return "", fmt.Errorf("reading default push secret %s: %w", key, err)
 	}
 
-	copied := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      jobName + "-push",
-			Namespace: obj.Namespace,
-			Labels:    map[string]string{"app.kubernetes.io/managed-by": "kube-oci-builder"},
-			Annotations: map[string]string{
-				"oci.lhns.de/description": "Short-lived copy of the operator's registry credential, " +
-					"mounted by this build's Job. Owned by this build's Job and deleted with it.",
-			},
-		},
-		Type: source.Type,
-		Data: source.Data,
-	}
-	if err := ctrl.SetControllerReference(obj, copied, r.Scheme()); err != nil {
-		return "", fmt.Errorf("setting owner on the push credential: %w", err)
-	}
-
-	if err := r.Create(ctx, copied); err != nil {
-		if !apierrors.IsAlreadyExists(err) {
-			return "", fmt.Errorf("creating the push credential: %w", err)
-		}
-		// Already there from an earlier attempt at this same build. Update it, so a rotated
-		// operator password reaches the build rather than the build failing on a stale one.
-		existing := &corev1.Secret{}
-		if err := r.Get(ctx, client.ObjectKeyFromObject(copied), existing); err != nil {
-			return "", fmt.Errorf("reading the existing push credential: %w", err)
-		}
-		existing.Data = source.Data
-		if err := r.Update(ctx, existing); err != nil {
-			return "", fmt.Errorf("refreshing the push credential: %w", err)
-		}
+	copied := perBuildSecret(obj, jobName+"-push", "Short-lived copy of the operator's registry credential, "+
+		"mounted by this build's Job. Owned by this build's Job and deleted with it.")
+	copied.Type = operatorSecret.Type
+	copied.Data = operatorSecret.Data
+	// On a retry the copy is refreshed, so a rotated password applies.
+	if err := r.createBuildSecret(ctx, obj, copied, "push credential"); err != nil {
+		return "", err
 	}
 	return copied.Name, nil
 }
 
-// registryCASecretFor puts the operator's registry CA where a build Job can mount it.
-//
-// Same shape and same reasoning as pushSecretFor: the Job runs in the OBJECT's namespace and a pod
-// can only mount Secrets from its own, so the material is copied there. Created owned by the
-// ImageBuild because the Job does not exist yet, then re-owned by the Job -- see adoptBuildSecrets.
-//
-// A SEPARATE object rather than an extra key on the copied push credential, and that is not
-// tidiness. pushSecretFor returns early when the object has its own `spec.push.secretRef` — an
-// object may legitimately use its own credential to push to a path in the operator's registry
-// (recon.DefaultRegistry.CredentialFor permits exactly that). Riding the CA on the copy would give
-// those builds no CA at all and a TLS failure that looks nothing like a credential problem.
-//
-// A Secret rather than a ConfigMap for something that is not secret: the builder already holds
-// get/create/update on secrets cluster-wide (see the RBAC markers above). ConfigMaps would mean a
-// new verb on a new resource in every tenant namespace, which is a real cost for a cosmetic gain.
+// registryCASecretFor copies the operator's registry CA into the build's namespace, like
+// pushSecretFor. A separate Secret rather than a key on the push copy, because a build with its
+// own spec.push.secretRef gets no push copy but still needs the CA. A Secret rather than a
+// ConfigMap only because the builder already has write access to Secrets.
 func (r *ImageBuildReconciler) registryCASecretFor(
 	ctx context.Context, obj *ociv1alpha1.ImageBuild, jobName string,
 ) (string, error) {
@@ -276,59 +197,24 @@ func (r *ImageBuildReconciler) registryCASecretFor(
 		return "", nil
 	}
 
-	ca := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      jobName + "-registry-ca",
-			Namespace: obj.Namespace,
-			Labels:    map[string]string{"app.kubernetes.io/managed-by": "kube-oci-builder"},
-			Annotations: map[string]string{
-				"oci.lhns.de/description": "The registry CA this build's Job trusts. " +
-					"Not secret; a Secret only because the builder already has permission to " +
-					"write Secrets here. Owned by this build's Job and deleted with it.",
-			},
-		},
-		Type: corev1.SecretTypeOpaque,
-		Data: map[string][]byte{"ca.crt": r.JobConfig.RegistryCA},
-	}
-	if err := ctrl.SetControllerReference(obj, ca, r.Scheme()); err != nil {
-		return "", fmt.Errorf("setting owner on the registry CA: %w", err)
-	}
-
-	if err := r.Create(ctx, ca); err != nil {
-		if !apierrors.IsAlreadyExists(err) {
-			return "", fmt.Errorf("creating the registry CA: %w", err)
-		}
-		// Update rather than leave it: a rotated CA has to reach a retried build, or the retry
-		// fails for a reason that was already fixed.
-		existing := &corev1.Secret{}
-		if err := r.Get(ctx, client.ObjectKeyFromObject(ca), existing); err != nil {
-			return "", fmt.Errorf("reading the existing registry CA: %w", err)
-		}
-		existing.Data = ca.Data
-		if err := r.Update(ctx, existing); err != nil {
-			return "", fmt.Errorf("refreshing the registry CA: %w", err)
-		}
+	ca := perBuildSecret(obj, jobName+"-registry-ca", "The registry CA this build's Job trusts. "+
+		"Not secret; a Secret only because the builder already has permission to "+
+		"write Secrets here. Owned by this build's Job and deleted with it.")
+	ca.Data = map[string][]byte{"ca.crt": r.JobConfig.RegistryCA}
+	// On a retry the copy is refreshed, so a rotated CA applies.
+	if err := r.createBuildSecret(ctx, obj, ca, "registry CA"); err != nil {
+		return "", err
 	}
 	return ca.Name, nil
 }
 
-// dockerfileSecretFor puts a Dockerfile that does not live in the build context where the Job can
-// mount it.
+// dockerfileSecretFor copies a Dockerfile that is not in the build context into a Secret the Job
+// mounts.
 //
-// The bytes are the ones the controller has already hashed and run CheckPinnedBases over. That is
-// the point of copying rather than projecting the user's object directly: the kubelet resolves a
-// volume at pod start, reading whatever the source says THEN, not what the controller checked a
-// moment earlier. An edit landing in that window — seconds to minutes of scheduling and image pull
-// — would build a Dockerfile that was never checked, which is a complete bypass of the only content
-// guard this controller has, reachable with `update` on the source object.
-//
-// Immutable, and safely so: jobName derives from the input hash, and the Dockerfile's content is
-// part of that hash, so the content is a function of the name. Different bytes are a different Job.
-// That is also why there is no update path here, unlike registryCASecretFor.
-//
-// A Secret rather than a ConfigMap for a Dockerfile, which is not secret, for the reason given
-// above registryCASecretFor: the builder already holds get/create/update on secrets cluster-wide,
-// and ConfigMaps would mean a new write verb on a new resource in every tenant namespace.
+// It holds the exact bytes CheckPinnedBases approved. Projecting the source object directly would
+// let an edit between the check and pod start build an unchecked Dockerfile. Immutable, with no
+// update path: the content is in the input hash, and so in the name. A Secret only because the
+// builder already has write access to Secrets.
 func (r *ImageBuildReconciler) dockerfileSecretFor(
 	ctx context.Context, obj *ociv1alpha1.ImageBuild, jobName string, content []byte,
 ) (string, error) {
@@ -336,44 +222,20 @@ func (r *ImageBuildReconciler) dockerfileSecretFor(
 		return "", nil
 	}
 
-	df := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      jobName + "-dockerfile",
-			Namespace: obj.Namespace,
-			Labels:    map[string]string{"app.kubernetes.io/managed-by": "kube-oci-builder"},
-			Annotations: map[string]string{
-				"oci.lhns.de/description": "The Dockerfile this build runs, as checked by the " +
-					"controller. Not secret; a Secret only because the builder already has " +
-					"permission to write Secrets here. Owned by this build's Job and deleted with it.",
-			},
-		},
-		Type:      corev1.SecretTypeOpaque,
-		Immutable: ptr.To(true),
-		Data:      map[string][]byte{dockerfileKey: content},
-	}
-	if err := ctrl.SetControllerReference(obj, df, r.Scheme()); err != nil {
-		return "", fmt.Errorf("setting owner on the Dockerfile: %w", err)
-	}
-
-	if err := r.Create(ctx, df); err != nil {
-		if !apierrors.IsAlreadyExists(err) {
-			return "", fmt.Errorf("creating the Dockerfile: %w", err)
-		}
-		// Already there, and because the name carries the input hash it already holds these bytes.
-		// Nothing to refresh, and an Update would be refused by Immutable anyway.
+	df := perBuildSecret(obj, jobName+"-dockerfile", "The Dockerfile this build runs, as checked by the "+
+		"controller. Not secret; a Secret only because the builder already has "+
+		"permission to write Secrets here. Owned by this build's Job and deleted with it.")
+	df.Immutable = ptr.To(true)
+	df.Data = map[string][]byte{dockerfileKey: content}
+	if err := r.createBuildSecret(ctx, obj, df, "Dockerfile"); err != nil {
+		return "", err
 	}
 	return df.Name, nil
 }
 
-// contextTokenFor mints the bearer token the build pod uses to fetch its own context.
-//
-// Random and per-build, in a Secret named for the Job -- so the name carries the input hash, and a
-// token cannot open a build other than the one it was minted for. Owner-referenced, so it is
-// deleted with the object; Immutable, because the pod reads it once at startup and nothing may
-// change what it is under a running build.
-//
-// On AlreadyExists the STORED value is returned rather than the freshly generated one. A retry or a
-// leader change must hand the pod the token the endpoint will actually accept.
+// contextTokenFor mints the per-build bearer token the build pod uses to fetch its own context.
+// The Secret is named for the Job, so a token opens only the build it was minted for. Immutable
+// and never overwritten, so a retry reuses whatever token the endpoint accepts.
 func (r *ImageBuildReconciler) contextTokenFor(
 	ctx context.Context, obj *ociv1alpha1.ImageBuild, jobName string,
 ) (string, error) {
@@ -382,38 +244,61 @@ func (r *ImageBuildReconciler) contextTokenFor(
 		return "", fmt.Errorf("generating a context token: %w", err)
 	}
 
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      contextSecretName(jobName),
-			Namespace: obj.Namespace,
-			Labels:    map[string]string{"app.kubernetes.io/managed-by": "kube-oci-builder"},
-			Annotations: map[string]string{
-				"oci.lhns.de/description": "Lets this build fetch its own source through the " +
-					"builder, so the build pod never reaches source-controller. Owned by this build's Job and deleted with it.",
-			},
-		},
-		Type:      corev1.SecretTypeOpaque,
-		Immutable: ptr.To(true),
-		Data:      map[string][]byte{contextTokenKey: []byte(hex.EncodeToString(raw))},
-	}
-	if err := ctrl.SetControllerReference(obj, secret, r.Scheme()); err != nil {
-		return "", fmt.Errorf("setting owner on the context token: %w", err)
-	}
-
-	if err := r.Create(ctx, secret); err != nil {
-		if !apierrors.IsAlreadyExists(err) {
-			return "", fmt.Errorf("creating the context token: %w", err)
-		}
+	secret := perBuildSecret(obj, contextSecretName(jobName), "Lets this build fetch its own source through the "+
+		"builder, so the build pod never reaches source-controller. Owned by this build's Job and deleted with it.")
+	secret.Immutable = ptr.To(true)
+	secret.Data = map[string][]byte{contextTokenKey: []byte(hex.EncodeToString(raw))}
+	if err := r.createBuildSecret(ctx, obj, secret, "context token"); err != nil {
+		return "", err
 	}
 	return secret.Name, nil
 }
 
-// buildSecretNames are the Secrets this controller creates for one Job, derived rather than
-// collected.
-//
-// Derived on purpose. pushSecretFor returns the OBJECT's own secret when spec.push.secretRef is set
-// -- a Secret this controller neither made nor owns -- so adopting whatever name came back would
-// hand a user's credential to the Job's garbage collection and delete it an hour after the build.
+// perBuildSecret is the skeleton of every Secret this controller creates for one build: in the
+// object's namespace, labelled as the builder's, and described for whoever finds it.
+func perBuildSecret(obj *ociv1alpha1.ImageBuild, name, description string) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name,
+			Namespace:   obj.Namespace,
+			Labels:      map[string]string{ManagedByLabel: builderManager},
+			Annotations: map[string]string{"oci.lhns.de/description": description},
+		},
+		Type: corev1.SecretTypeOpaque,
+	}
+}
+
+// createBuildSecret creates sec owned by obj; adoptBuildSecrets later re-owns it by the Job. If it
+// already exists, a mutable Secret has its data refreshed and an immutable one (whose name carries
+// its content) is left alone. what names the Secret in errors.
+func (r *ImageBuildReconciler) createBuildSecret(
+	ctx context.Context, obj *ociv1alpha1.ImageBuild, sec *corev1.Secret, what string,
+) error {
+	if err := ctrl.SetControllerReference(obj, sec, r.Scheme()); err != nil {
+		return fmt.Errorf("setting owner on the %s: %w", what, err)
+	}
+	err := r.Create(ctx, sec)
+	switch {
+	case err == nil:
+		return nil
+	case !apierrors.IsAlreadyExists(err):
+		return fmt.Errorf("creating the %s: %w", what, err)
+	case ptr.Deref(sec.Immutable, false):
+		return nil
+	}
+	existing := &corev1.Secret{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(sec), existing); err != nil {
+		return fmt.Errorf("reading the existing %s: %w", what, err)
+	}
+	existing.Data = sec.Data
+	if err := r.Update(ctx, existing); err != nil {
+		return fmt.Errorf("refreshing the %s: %w", what, err)
+	}
+	return nil
+}
+
+// buildSecretNames are the Secrets this controller creates for one Job. Derived, not collected
+// from what pushSecretFor returned, which may be the user's own Secret.
 func buildSecretNames(jobName string) []string {
 	return []string{
 		jobName + "-push",
@@ -423,44 +308,32 @@ func buildSecretNames(jobName string) []string {
 	}
 }
 
-// adoptBuildSecrets hands each per-build Secret's lifetime to the Job that mounts it.
+// adoptBuildSecrets re-owns each per-build Secret by the Job that mounts it.
 //
-// They are created owned by the ImageBuild, because the Job does not exist yet and an owner must.
-// Left that way they outlive every build the object ever runs: Kubernetes reclaims a dependent only
-// when its OWNER goes, the ImageBuild is a GitOps object that does not, and their names carry the
-// input hash so each revision adds four more rather than replacing them. A ten-day-old install
-// reported 42 of 63 Secrets in one namespace being garbage.
-//
-// The Job already carries TTLSecondsAfterFinished and is deleted outright on retry, so owning them
-// from it is the whole fix -- no pruning loop, no reconstructing which are dead, and nothing that
-// could delete a running build's credentials. It also makes their annotation true.
-//
-// Deliberately NOT a list-and-prune sweep, which would need `list` on Secrets cluster-wide; this
-// needs only `update`, which the builder already has. ADR 0050.
+// They are created owned by the ImageBuild because the Job does not exist yet; left that way they
+// would accumulate for the object's whole life. The Job's TTL and retry deletion then reclaim
+// them, with no list-and-prune sweep (which would need `list` on Secrets). ADR 0050.
 func (r *ImageBuildReconciler) adoptBuildSecrets(ctx context.Context, obj *ociv1alpha1.ImageBuild, job *batchv1.Job) {
 	log := logf.FromContext(ctx)
 	for _, name := range buildSecretNames(job.Name) {
 		var sec corev1.Secret
 		key := types.NamespacedName{Namespace: job.Namespace, Name: name}
 		if err := r.Get(ctx, key, &sec); err != nil {
-			// Most of these do not exist for any given build -- no TLS, no inline Dockerfile, no
-			// proxied context -- so absence is the ordinary case and not worth a line.
+			// Most builds lack most of these Secrets.
 			if !apierrors.IsNotFound(err) {
 				log.Error(err, "reading a build secret to re-own it", "secret", key)
 			}
 			continue
 		}
-		// Three guards, and the point of all three is that this can never touch a Secret the
-		// controller did not create: the name is one it generates, the label is one it sets, and it
-		// is currently owned by this very object.
-		if sec.Labels["app.kubernetes.io/managed-by"] != "kube-oci-builder" {
+		// Only ever touch a Secret this controller created: generated name, own label, and
+		// currently controlled by this object.
+		if sec.Labels[ManagedByLabel] != builderManager {
 			continue
 		}
 		if !metav1.IsControlledBy(&sec, obj) {
 			continue
 		}
-		// Not fatal at any step. The Job is already running and a build must not fail over its own
-		// housekeeping; the outcome is the previous behaviour, which is a leak and not an outage.
+		// Never fatal: the Job is running, and the worst case is a leak.
 		sec.OwnerReferences = nil
 		err := ctrl.SetControllerReference(job, &sec, r.Scheme())
 		if err == nil {
@@ -472,19 +345,12 @@ func (r *ImageBuildReconciler) adoptBuildSecrets(ctx context.Context, obj *ociv1
 	}
 }
 
-// stillPublished reports whether what this object last published is still in the registry.
+// stillPublished reports whether what this object last published is still in the registry. A
+// rebuild yields a different digest (ADR 0051).
 //
-// The composer has always asked this, with one HEAD, because it can rebuild identical bytes if the
-// answer is no. This kind could not: a rebuild produces a DIFFERENT digest, so for a release the
-// question was not asked at all and a lost image simply stayed lost while the object reported
-// Ready. That is now decided the other way -- see ADR 0051 for what it costs.
-//
-// Only a definite 404 counts as missing. Every other outcome -- unreachable registry, expired
-// credential, timeout -- answers true, because the alternative is that one registry outage starts a
-// build for every ImageBuild in the cluster at once. Fail towards doing nothing.
-//
-// The tags come from the SPEC, never from status.artifact.tags: those are stored through the public
-// host, which is exactly the trap ADR 0048 was written about.
+// Only a definite 404 counts as missing; any other error answers true, so a registry outage does
+// not rebuild every ImageBuild at once. Tags come from the spec, never from status.artifact.tags,
+// which hold the public host (ADR 0048).
 func (r *ImageBuildReconciler) stillPublished(ctx context.Context, obj *ociv1alpha1.ImageBuild) bool {
 	prev := obj.Status.Artifact
 	if prev == nil || prev.Digest == "" {
@@ -496,10 +362,8 @@ func (r *ImageBuildReconciler) stillPublished(ctx context.Context, obj *ociv1alp
 	}
 	repo := reg.repo
 
-	// The digest, then every tag the spec asks for. A tag is checked even though the content it
-	// names may still exist under its digest: an untagged manifest is precisely what the shipped
-	// deleteUntagged policy reclaims next, so a lost tag is a loss in progress rather than a
-	// cosmetic one. It is also the shape the field report took -- tags gone, manifest alive.
+	// The digest, then every spec tag: an untagged manifest is what deleteUntagged reclaims next,
+	// so a lost tag is a loss in progress.
 	refs := []string{repo + "@" + prev.Digest}
 	if p := obj.Spec.Push; p != nil {
 		if tags, err := recon.EffectiveTags(p.GetTags(), p.GetRef()); err == nil {
@@ -508,9 +372,8 @@ func (r *ImageBuildReconciler) stillPublished(ctx context.Context, obj *ociv1alp
 			}
 		}
 	}
-	// The digest's own tag only once status says it was applied. An object published before the
-	// tag existed does not have it yet, and reading its absence as a loss would rebuild every
-	// ImageBuild in the cluster on upgrade -- to a different digest. backfillDigestTags adds it.
+	// The digest's own tag only once status records it, or an upgrade would rebuild every object.
+	// backfillDigestTags adds it.
 	if recon.HasDigestTag(prev.Tags, prev.Digest) {
 		refs = append(refs, repo+":"+recon.DigestTag(prev.Digest))
 	}
@@ -518,7 +381,7 @@ func (r *ImageBuildReconciler) stillPublished(ctx context.Context, obj *ociv1alp
 	for _, ref := range refs {
 		parsed, err := name.ParseReference(ref, reg.refOpts...)
 		if err != nil {
-			// Unparseable is not evidence of absence, and this fails towards doing nothing.
+			// Unparseable is not evidence of absence.
 			continue
 		}
 		if _, err := remote.Head(parsed, reg.opts...); recon.IsNotFound(err) {
@@ -528,14 +391,9 @@ func (r *ImageBuildReconciler) stillPublished(ctx context.Context, obj *ociv1alp
 	return true
 }
 
-// backfillDigestTags gives content published before ADR 0060 its digest's own tag.
-//
-// Driven by status: a record that does not claim the tag gets it applied once, then claims it, so a
-// converged object costs nothing here afterwards. The current artifact and every retained history
-// entry, because history is what a rollback pulls and what a rolling tag used to delete.
-//
-// Best effort. A failure is logged and retried next pass; it must not make a Ready object unready,
-// and a record whose content has already expired simply stays unclaimed.
+// backfillDigestTags gives content published before ADR 0060 its digest's own tag: the current
+// artifact and every history entry (which a rollback pulls). Driven by status, so it costs nothing
+// once converged. Best effort: failures are logged and retried next pass.
 func (r *ImageBuildReconciler) backfillDigestTags(ctx context.Context, obj *ociv1alpha1.ImageBuild) {
 	art := obj.Status.Artifact
 	pending := art != nil && art.Digest != "" && !recon.HasDigestTag(art.Tags, art.Digest)
@@ -583,19 +441,14 @@ func (r *ImageBuildReconciler) backfillDigestTags(ctx context.Context, obj *ociv
 
 // registryAccess is everything needed to ask this object's registry a question.
 type registryAccess struct {
-	// repo is empty when the object names no repository and no default registry is configured, so
-	// there is nowhere to ask about.
+	// repo is empty when there is no repository and no default registry.
 	repo    string
 	refOpts []name.Option
 	opts    []remote.Option
 }
 
-// registryFor resolves that once, for every caller.
-//
-// The tag-conflict check and the published-artifact check ask the SAME registry about the SAME
-// object, so any difference between how they reach it could only be a bug. The insecure-host half
-// is the one that would bite: a mismatch there surfaces as a TLS error that looks nothing like the
-// missing --insecure-registry entry causing it.
+// registryFor resolves how to reach this object's registry, shared by every caller so they cannot
+// disagree (an insecure-host mismatch would surface as a baffling TLS error).
 func (r *ImageBuildReconciler) registryFor(
 	ctx context.Context, obj *ociv1alpha1.ImageBuild,
 ) (registryAccess, error) {
@@ -614,21 +467,12 @@ func (r *ImageBuildReconciler) registryFor(
 	return access, nil
 }
 
-// applyTags names what the build pushed, and is where onConflict is actually enforced on this kind.
+// applyTags names what the build pushed, and is where onConflict is enforced exactly, with the new
+// digest in hand (ADR 0054).
 //
-// The Job uploads by digest and names nothing, so by the time this runs the digest EXISTS. That is
-// the whole point: the question onConflict asks -- "would this change what the tag means?" -- is
-// answerable only with the new digest in hand. Before, the check ran ahead of the build against
-// `status.artifact.digest`, a stand-in for a value that did not yet exist, and the substitution had
-// a one-directional hole: a tag holding this object's OWN previous digest was exempt, so an object
-// remeaning its own tag was never a conflict. ADR 0054.
-//
-// Returns a conflict record when onConflict: Keep left the tag alone. Refuses terminally under
-// Fail, having tagged nothing -- not even the digest's own tag -- so the pushed manifest stays
-// untagged and the registry's deleteUntagged reclaims it. Naming refused content would make it
-// permanent.
-//
-// Every accepted publish also gets its digest's own tag, digest-only ones included (ADR 0060).
+// Returns a conflict record when onConflict: Keep left the tag alone. Under Fail it refuses
+// terminally having tagged nothing, not even the digest's own tag, so deleteUntagged reclaims the
+// manifest. Every accepted publish also gets its digest's own tag (ADR 0060).
 func (r *ImageBuildReconciler) applyTags(
 	ctx context.Context, obj *ociv1alpha1.ImageBuild, digest string,
 ) (*ociv1alpha1.TagConflictStatus, error) {
@@ -652,7 +496,6 @@ func (r *ImageBuildReconciler) applyTags(
 		return nil, err
 	}
 
-	// The real digest, which is what makes this exact rather than a proxy.
 	if tag, current := published.Conflicts(tags, digest); tag != "" {
 		switch p.ResolveConflictPolicy() {
 		case ociv1alpha1.ConflictFail:
@@ -662,9 +505,7 @@ func (r *ImageBuildReconciler) applyTags(
 					"alone", tag, current, digest)
 		case ociv1alpha1.ConflictKeep:
 			now := metav1.Now()
-			// A REAL dropped digest. ADR 0029 recorded its absence here as unavoidable, because
-			// nothing was built before the check; uploading before naming is what makes it
-			// available.
+			// The real dropped digest, available because the Job pushes before naming.
 			return &ociv1alpha1.TagConflictStatus{
 				Tag: tag, Existing: current, Dropped: digest, ObservedAt: &now,
 			}, nil
@@ -674,16 +515,9 @@ func (r *ImageBuildReconciler) applyTags(
 	desc, err := remote.Get(mustDigestRef(reg.repo, digest, reg.refOpts), reg.opts...)
 	switch {
 	case recon.IsNotFound(err):
-		// PENDING, not terminal: nothing about this object's spec would fix it, so stalling would
-		// wait for an event that cannot come. If it never appears the object says so every
-		// interval, rather than failing once and backing off into silence.
-		//
-		// But retrying only helps for one of the two causes, and the message has to say both. The
-		// manifest is UNTAGGED until this function names it, which is exactly what a registry's
-		// collector reclaims -- and if it was the repository's only content, the repository goes
-		// too, which is why this arrives as NAME_UNKNOWN rather than a missing manifest. The chart
-		// refuses a gcDelay short enough for that to be likely; a registry someone else configured
-		// carries no such guarantee.
+		// Pending, not terminal: no spec edit fixes it. The manifest is untagged until named here,
+		// so the registry may be lagging or its collector may have reclaimed it (NAME_UNKNOWN if
+		// the repository went with it). The message names both.
 		return nil, recon.Pending(
 			"the build produced %s but %s does not serve it; the manifest is untagged until this "+
 				"controller names it, so either the registry has not caught up or its collector "+
@@ -705,10 +539,9 @@ func (r *ImageBuildReconciler) applyTags(
 	return nil, nil
 }
 
-// mustDigestRef builds the by-digest reference for content this controller just pushed.
-//
-// The digest comes from buildctl's own metadata file, so a parse failure here is not a user error;
-// the zero value fails the Get with a message naming the reference.
+// mustDigestRef builds the by-digest reference for content this controller just pushed. The
+// digest comes from buildctl, so a parse failure is not a user error; the zero value makes the Get
+// fail with a message naming the reference.
 func mustDigestRef(repo, digest string, opts []name.Option) name.Reference {
 	ref, err := name.NewDigest(repo+"@"+digest, opts...)
 	if err != nil {

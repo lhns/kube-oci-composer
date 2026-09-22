@@ -12,14 +12,9 @@ import (
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 )
 
-// An ImageBuild published before ADR 0060 must gain its digest's own tag on the converged path --
-// and must NOT be rebuilt to get it.
-//
-// The rebuild is the trap. This kind is not reproducible, so a rebuild moves the digest, and every
-// ImageBuild in the cluster would move at once on upgrade if the absent tag read as a loss. So the
-// tag is added to what is already there, and status records it so the next pass asks nothing.
-//
-// History too: a retained record is what a rollback pulls, and what a rolling tag used to delete.
+// TestAConvergedBuildGainsItsDigestsOwnTagWithoutRebuilding: an ImageBuild published before ADR
+// 0060 gains its digest's own tag (artifact and history) on the converged path, without a rebuild,
+// which would move every digest in the cluster on upgrade.
 func TestAConvergedBuildGainsItsDigestsOwnTagWithoutRebuilding(t *testing.T) {
 	host := startRegistry(t)
 	repo := host + "/team/app"
@@ -27,13 +22,12 @@ func TestAConvergedBuildGainsItsDigestsOwnTagWithoutRebuilding(t *testing.T) {
 	_, current := pushByDigest(t, repo)
 	tagAs(t, repo, "v1", current)
 	_, older := pushByDigest(t, repo)
-	// A record whose content is already gone -- expired, or reclaimed. It must neither fail the
-	// pass nor be marked as tagged.
+	// Content already gone: must neither fail the pass nor be marked as tagged.
 	const gone = "sha256:" + "0000000000000000000000000000000000000000000000000000000000000000"
 
 	obj := buildOf(t, func(b *ociv1alpha1.ImageBuild) {
 		b.Spec.Push = &ociv1alpha1.Push{Repository: repo, Tags: []string{"v1"}}
-		// Exactly what an object published before the digest tag existed looks like.
+		// What an object published before the digest tag existed looks like.
 		b.Status.Artifact = &ociv1alpha1.ArtifactStatus{Digest: current, Tags: []string{repo + ":v1"}}
 		b.Status.History = []ociv1alpha1.BuildRecord{
 			{Digest: current, Tags: []string{repo + ":v1"}},
@@ -90,8 +84,7 @@ func TestAConvergedBuildGainsItsDigestsOwnTagWithoutRebuilding(t *testing.T) {
 	if claimed[gone] {
 		t.Error("a record whose content is gone claims a tag that was never applied")
 	}
-	// Once, not once per pass: the second pass found the artifact's tag recorded and asked nothing
-	// about it, so status did not grow a duplicate.
+	// Applied once, not once per pass.
 	var own int
 	for _, tag := range got.Status.Artifact.Tags {
 		if tag == repo+":"+recon.DigestTag(current) {
@@ -103,10 +96,8 @@ func TestAConvergedBuildGainsItsDigestsOwnTagWithoutRebuilding(t *testing.T) {
 	}
 }
 
-// Once status claims the digest's own tag, losing it is a loss like any other tag's.
-//
-// The converse of the test above, and the reason the claim is recorded at all: stillPublished only
-// checks the tag once status says it was applied, so this is the path where it IS checked.
+// TestALostDigestTagIsALoss: once status records the digest's own tag, stillPublished checks it
+// like any other tag.
 func TestALostDigestTagIsALoss(t *testing.T) {
 	srv := registryAnswering(t, 404, digestOfNothing, "v1")
 	host := srv.URL[len("http://"):]

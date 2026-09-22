@@ -8,12 +8,8 @@ import (
 	"github.com/lhns/kube-oci-composer/internal/reconciler"
 )
 
-// TestRequirePinnedSourcesRefusesAnUnpinnedContext covers threat-model gap T1 on the kind where it
-// bites hardest.
-//
-// On a composition, an unpinned source means the content moved. On a build it means the CODE moved:
-// the Job runs whatever the branch is at now, and an ImageBuild's output is an observation rather
-// than a function of its spec (ADR 0025) -- so afterwards there is nothing to check it against.
+// TestRequirePinnedSourcesRefusesAnUnpinnedContext covers threat T1: an unpinned context builds
+// whatever the branch is at now, and a build's output cannot be checked afterwards (ADR 0025).
 func TestRequirePinnedSourcesRefusesAnUnpinnedContext(t *testing.T) {
 	r := harness(t, "FROM scratch@sha256:"+strings.Repeat("c", 64))
 	r.RequirePinnedSources = true
@@ -23,8 +19,7 @@ func TestRequirePinnedSourcesRefusesAnUnpinnedContext(t *testing.T) {
 	if err == nil {
 		t.Fatal("an unpinned build context must be refused under --require-pinned-sources")
 	}
-	// Terminal: editing this spec is what fixes it, and that bumps the generation. A Pending would
-	// wait for an event that never arrives.
+	// Terminal: the fix is a spec edit, which bumps the generation.
 	if !reconciler.IsTerminal(err) {
 		t.Fatalf("must be terminal -- editing the spec is what fixes it; got %v", err)
 	}
@@ -33,8 +28,7 @@ func TestRequirePinnedSourcesRefusesAnUnpinnedContext(t *testing.T) {
 	}
 }
 
-// TestAnUnpinnedContextIsFineByDefault keeps ADR 0026's optionality intact. The flag adds a way to
-// opt out; it must not become the default.
+// TestAnUnpinnedContextIsFineByDefault keeps pinning opt-in (ADR 0026).
 func TestAnUnpinnedContextIsFineByDefault(t *testing.T) {
 	r := harness(t, "FROM scratch@sha256:"+strings.Repeat("c", 64))
 	if _, _, err := r.resolveInputs(context.Background(), buildOf(t, nil)); err != nil {

@@ -8,24 +8,16 @@ import (
 )
 
 const (
-	// pendingRetryInterval matches the composer's, for the same reason: a same-commit apply
-	// converges without anyone noticing, and a genuinely missing reference costs a couple of cheap
-	// GETs a minute rather than a hot loop.
+	// pendingRetryInterval matches the composer's: quick convergence for a dependency that is
+	// about to appear, without a hot loop.
 	pendingRetryInterval = 30 * time.Second
 
-	// defaultBuildPollInterval is how often a running Job is re-observed. A build takes minutes,
-	// so polling faster buys nothing; the Job is also watched, so this is a backstop rather than
-	// the primary signal.
-	//
-	// It is configurable because it bounds something else: the image is pushed UNTAGGED and named
-	// when the controller next looks (ADR 0054), so this is how long a build's own output can be
-	// reclaimed by a registry's collector. The chart derives gcDelay from it, and a test that wants
-	// short retention timings shortens this to shorten that.
+	// defaultBuildPollInterval is how often a running Job is re-observed (the Job is also
+	// watched). It also bounds how long a pushed but untagged image is exposed to the registry's
+	// collector (ADR 0054); the chart derives gcDelay from it.
 	defaultBuildPollInterval = 15 * time.Second
 
-	// maxFailureBackoff caps the retry interval. A ceiling rather than unbounded exponential
-	// backoff: a failing build is usually waiting for a human to push a Dockerfile fix, and the
-	// retry is what notices it, so backing off for hours would not act on the fix promptly.
+	// maxFailureBackoff caps the retry interval, so a pushed fix is noticed promptly.
 	maxFailureBackoff = 10 * time.Minute
 )
 
