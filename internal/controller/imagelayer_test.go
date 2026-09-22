@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
@@ -16,11 +15,8 @@ import (
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 )
 
-// The image layer verb, through the reconcile path a cluster actually uses.
-//
-// internal/oci covers the flattening itself; what these cover is the wiring — that the reference
-// is parsed, the image pulled with the right credentials-free path, the digest fed to the input
-// hash, and the result placed as one layer.
+// The image layer verb through the reconcile path. internal/oci covers the flattening; these cover
+// the wiring: ref parsing, pulling, the digest reaching the input hash, and one resulting layer.
 
 // publishContentImage pushes a multi-layer image whose filesystem is the given files, and returns
 // the "repo:tag@digest" reference for it.
@@ -33,9 +29,6 @@ func publishContentImage(t *testing.T, host, repo string, layerFiles ...map[stri
 		tw := tar.NewWriter(&buf)
 		for name, body := range files {
 			hdr := &tar.Header{Name: name, Mode: 0o644, Size: int64(len(body)), Typeflag: tar.TypeReg}
-			if body == "" && strings.Contains(name, ".wh.") {
-				hdr.Size = 0
-			}
 			if err := tw.WriteHeader(hdr); err != nil {
 				t.Fatalf("writing header %q: %v", name, err)
 			}
@@ -70,7 +63,7 @@ func publishContentImage(t *testing.T, host, repo string, layerFiles ...map[stri
 	return repository + ":v1@" + digest.String()
 }
 
-// entriesOfArtifact reads back every path in the published artifact's last layer.
+// entriesOfArtifact reads back every path in the published artifact's layers, and the layer count.
 func entriesOfArtifact(t *testing.T, host, repo, digest string) (map[string]string, int) {
 	t.Helper()
 	img, err := remote.Image(mustRef(t, host+"/"+repo+"@"+digest))
@@ -220,9 +213,8 @@ func TestImageLayerDigestIsInTheInputHash(t *testing.T) {
 	}
 }
 
-// TestBaseRefIsEquivalentToImageAndDigest — the two spellings must produce the same artifact AND
-// the same input hash. If they differed, rewriting a spec from one to the other would republish
-// every artifact for no change in content.
+// TestBaseRefIsEquivalentToImageAndDigest — the two spellings must produce the same artifact and
+// input hash, so switching between them republishes nothing.
 func TestBaseRefIsEquivalentToImageAndDigest(t *testing.T) {
 	split := composition("base-split")
 	r, host := registryReconciler(t, split)
@@ -261,5 +253,3 @@ func keysOf(m map[string]string) []string {
 	}
 	return out
 }
-
-var _ v1.Image = empty.Image

@@ -49,6 +49,19 @@ func testScheme(t *testing.T) *runtime.Scheme {
 func contentServer(t *testing.T, files map[string]string) (url, digest string) {
 	t.Helper()
 
+	payload := tarGz(t, files)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(payload)
+	}))
+	t.Cleanup(srv.Close)
+
+	return srv.URL + "/content.tar.gz", sha256Digest(payload)
+}
+
+// tarGz builds a gzipped tar of regular files.
+func tarGz(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(zw)
@@ -68,29 +81,17 @@ func contentServer(t *testing.T, files map[string]string) (url, digest string) {
 	if err := zw.Close(); err != nil {
 		t.Fatalf("closing gzip: %v", err)
 	}
-	payload := buf.Bytes()
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(payload)
-	}))
-	t.Cleanup(srv.Close)
-
-	sum := sha256.Sum256(payload)
-	return srv.URL + "/content.tar.gz", "sha256:" + hex.EncodeToString(sum[:])
+	return buf.Bytes()
 }
 
-// servingReconciler wires a reconciler to an in-process OCI endpoint, i.e. exactly the default
-// no-registry mode the design promises.
+func sha256Digest(b []byte) string {
+	sum := sha256.Sum256(b)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
 // registryReconciler stands up an in-memory registry and points the controller's default at it.
-//
-// It was servingReconciler, wiring an internal/serve endpoint the controller pushed to over
-// loopback. That endpoint is gone (ADR 0035), and so is the only reason these tests differed from
-// the path production takes: they now push to a registry, because that is the only thing the
-// controller does.
-//
-// go-containerregistry's own in-memory registry rather than a hand-rolled stub -- it enforces the
-// distribution spec, so a manifest this controller writes and cannot read back is a real defect
-// rather than an artefact of a lenient double.
+// It is go-containerregistry's own registry rather than a stub because it enforces the
+// distribution spec, so an unreadable manifest is a real defect, not a lenient double's artefact.
 func registryReconciler(t *testing.T, objs ...*ociv1alpha1.ImageComposition) (*ImageCompositionReconciler, string) {
 	t.Helper()
 
@@ -122,9 +123,8 @@ func composition(name string, layers ...ociv1alpha1.Layer) *ociv1alpha1.ImageCom
 	}
 }
 
-// build runs one build and writes the result back into obj.Status the way Reconcile does.
-// Threading the status through matters: it is what lets the inputHash short-circuit engage on a
-// second call, so tests exercise the same path production takes rather than a simplified one.
+// build runs one build and writes the result back into obj.Status the way Reconcile does, so the
+// inputHash short-circuit engages on a later call as it would in production.
 func build(t *testing.T, r *ImageCompositionReconciler, obj *ociv1alpha1.ImageComposition, what string) *ociv1alpha1.ArtifactStatus {
 	t.Helper()
 	res, err := r.reconcileArtifact(context.Background(), obj)
@@ -172,8 +172,7 @@ func TestPublishingIsIdempotent(t *testing.T) {
 		t.Fatalf("tags %v, want %v", art.Tags, want)
 	}
 
-	// Both the tag and the digest must resolve, and to the same manifest. The digest reference
-	// is the one a build with no tags would have to rely on entirely.
+	// Both the tag and the digest must resolve, to the same manifest.
 	for _, ref := range []string{
 		fmt.Sprintf("%s/default/plugins:main", host),
 		fmt.Sprintf("%s/default/plugins@%s", host, art.Digest),
@@ -228,8 +227,7 @@ func TestDigestMismatchIsTerminalAndPublishesNothing(t *testing.T) {
 }
 
 // TestConvergenceOnChangedContent — changing an input must produce a new digest, and reverting
-// must return to the original one. That round trip is what makes the design deterministic
-// rather than merely repeatable.
+// must return to the original one: deterministic, not merely repeatable.
 func TestConvergenceOnChangedContent(t *testing.T) {
 	urlA, digestA := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	urlB, digestB := contentServer(t, map[string]string{"lib/a.jar": "bbb"})
@@ -253,8 +251,7 @@ func TestConvergenceOnChangedContent(t *testing.T) {
 }
 
 // TestOldDigestSurvivesRebuild — a workload pinned to a digest must keep resolving after a
-// rebuild has moved the tag on. This is what the dropped content tag used to provide, and the
-// digest reference provides it directly.
+// rebuild has moved the tag on.
 func TestOldDigestSurvivesRebuild(t *testing.T) {
 	urlA, digestA := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	urlB, digestB := contentServer(t, map[string]string{"lib/a.jar": "bbb"})
@@ -291,10 +288,8 @@ func TestOldDigestSurvivesRebuild(t *testing.T) {
 	resolves(host+"/default/dual:main", second.Digest)
 }
 
-// TestSpecHashTagPattern is the pattern from ADR 0017 end to end: a tag derived from the spec,
-// with immutability left at its default. Changing the spec changes the tag, so both keep
-// resolving to their own content and neither is ever remeaned — which is what makes it safe for
-// a workload to reference the tag rather than a digest.
+// TestSpecHashTagPattern is ADR 0017 end to end: a tag derived from the spec, immutability at its
+// default. Each spec gets its own tag and neither is remeaned, so workloads can reference the tag.
 func TestSpecHashTagPattern(t *testing.T) {
 	urlA, digestA := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	urlB, digestB := contentServer(t, map[string]string{"lib/a.jar": "bbb"})
@@ -305,7 +300,6 @@ func TestSpecHashTagPattern(t *testing.T) {
 
 	first := build(t, r, obj, "first")
 
-	// A different spec is a different tag, exactly as the consumer would have computed.
 	obj.Spec.Layers[0] = urlLayer("core", urlB, digestB, "/core")
 	obj.Spec.Push.Tags = []string{"sBBBB"}
 	second := build(t, r, obj, "second")
@@ -359,11 +353,8 @@ func TestImmutableTagRefusesToBeRemeaned(t *testing.T) {
 	}
 }
 
-// TestDigestOnlyPublishing — no tags at all is a supported mode, for anyone pinning digests via
-// image automation. The content must still be pullable.
-//
-// And it is named after its own digest, which is the point of ADR 0060 for this mode: an untagged
-// manifest is what a registry's collector reclaims by age, whoever is pulling it.
+// TestDigestOnlyPublishing — publishing with no tags is supported and must stay pullable. It still
+// gets its digest's own tag (ADR 0060), since registries garbage-collect untagged manifests.
 func TestDigestOnlyPublishing(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("untagged", urlLayer("core", url, digest, "/core"))
@@ -386,7 +377,7 @@ func TestDigestOnlyPublishing(t *testing.T) {
 		t.Fatalf("digest-only artifact is not pullable: %v", err)
 	}
 
-	// And it must still converge rather than rebuilding forever with nothing to HEAD by tag.
+	// It must still converge with no spec tag to HEAD.
 	if second := build(t, r, obj, "second"); second.Digest != art.Digest {
 		t.Fatalf("second reconcile produced %s, want %s", second.Digest, art.Digest)
 	}
@@ -413,9 +404,8 @@ func TestTagListingWorks(t *testing.T) {
 	if art.Digest == "" {
 		t.Fatal("nothing was published, so the listing proves nothing")
 	}
-	// Exactly the tags that were asked for, plus the ONE derived tag ADR 0060 adds, and nothing
-	// else. The listing is what a scanner sees, so anything more would show up as a candidate
-	// release. The derived one does too, and an image policy excludes it by its prefix, digest-.
+	// Exactly the requested tags plus ADR 0060's digest tag: a scanner sees every listed tag as a
+	// candidate release (image policies exclude the digest- prefix).
 	want := []string{"main", recon.DigestTag(art.Digest)}
 	slices.Sort(tags)
 	slices.Sort(want)
@@ -441,9 +431,7 @@ func TestNoRegistryConfiguredIsPending(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error with no default registry and no spec.push")
 	}
-	// Pending, not terminal: configuring a registry means restarting the controller with different
-	// flags, which changes nothing about any ImageComposition. Stalling would leave every
-	// composition in the cluster wedged after the fix landed.
+	// Pending, not terminal: the fix is a controller flag, which bumps no object's generation.
 	var te *recon.TerminalError
 	if errors.As(err, &te) {
 		t.Fatal("operator misconfiguration must not stall the object")
