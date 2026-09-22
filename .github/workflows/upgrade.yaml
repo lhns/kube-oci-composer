@@ -1,0 +1,59 @@
+name: upgrade
+
+# Upgrades the last release to this checkout in kind and checks nothing published is rebuilt, stalled
+# or lost (test/upgrade/run.sh). Fresh installs are what every other test starts from; this is the one
+# that runs what an operator runs.
+on:
+  pull_request:
+    paths:
+      - "api/**"
+      - "internal/**"
+      - "cmd/**"
+      - "charts/**"
+      - "Dockerfile"
+      - "go.mod"
+      - "test/upgrade/**"
+      - ".github/workflows/upgrade.yaml"
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upgrade-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ghcr.io/lhns/kube-oci-composer:upgrade
+          build-args: |
+            CMD=oci-composer
+          cache-from: type=gha
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ghcr.io/lhns/kube-oci-builder:upgrade
+          build-args: |
+            CMD=oci-builder
+          cache-from: type=gha
+      - uses: helm/kind-action@v1
+        with:
+          version: v0.32.0
+          node_image: kindest/node:v1.36.1
+          cluster_name: kube-oci-composer-upgrade
+      - uses: azure/setup-helm@v5
+      - run: bash test/upgrade/run.sh
+        env:
+          CLUSTER: kube-oci-composer-upgrade
