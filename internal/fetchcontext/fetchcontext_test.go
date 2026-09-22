@@ -19,8 +19,7 @@ import (
 // file is one entry for tarGzMany.
 type file struct{ name, body string }
 
-// tarGzMany builds a multi-entry archive, which is what a real artifact looks like: several files,
-// and a bare "." for the root. tarGz writes one entry and cannot express either.
+// tarGzMany builds a multi-entry archive, including directory entries such as "./".
 func tarGzMany(t *testing.T, files ...file) []byte {
 	t.Helper()
 	var buf bytes.Buffer
@@ -101,14 +100,8 @@ func TestAVerifiedArchiveIsExtracted(t *testing.T) {
 	}
 }
 
-// TestAReadOnlyParentStillFetches — the staging bug, which only a cluster found.
-//
-// The download was staged in filepath.Dir(dest). In the build pod dest is /workspace, so that is
-// the container root: not writable by uid 1000. Every build WITH a context died on "permission
-// denied" while the context-less ones passed, because they never fetch.
-//
-// A read-only parent is the only thing that reproduces it -- asserting on what is left behind
-// cannot, since the staging directory is removed before Run returns either way.
+// TestAReadOnlyParentStillFetches: in the build pod dest's parent is the container root, which uid
+// 1000 cannot write, so nothing may be staged there.
 func TestAReadOnlyParentStillFetches(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("chmod does not restrict directory writes on Windows, so this cannot reproduce")
@@ -135,8 +128,7 @@ func TestAReadOnlyParentStillFetches(t *testing.T) {
 	}
 }
 
-// TestTheStagingDirectoryDoesNotSurvive — whatever the fetcher stages must not reach the build,
-// which reads dest as its context.
+// TestTheStagingDirectoryDoesNotSurvive into dest, which the build reads as its context.
 func TestTheStagingDirectoryDoesNotSurvive(t *testing.T) {
 	blob := tarGz(t, "Dockerfile", "FROM scratch\n")
 	dest := filepath.Join(t.TempDir(), "workspace")
@@ -158,11 +150,7 @@ func TestTheStagingDirectoryDoesNotSurvive(t *testing.T) {
 	}
 }
 
-// TestAMismatchLeavesNothingBehind is the assertion that makes "verify before unpack" real.
-//
-// Asserting only that an error came back would pass just as well if the archive had been extracted
-// and THEN checked — at which point a build could already read content nothing vouched for, and the
-// declared digest would be decorative.
+// TestAMismatchLeavesNothingBehind: verify before unpack, or the declared digest is decorative.
 func TestAMismatchLeavesNothingBehind(t *testing.T) {
 	blob := tarGz(t, "Dockerfile", "FROM scratch\n")
 	dest := filepath.Join(t.TempDir(), "workspace")
@@ -192,8 +180,7 @@ func TestAMismatchLeavesNothingBehind(t *testing.T) {
 	}
 }
 
-// TestNoDigestIsRefused. The Flux path fetched with no verification at all before this existed,
-// which is the gap this closes rather than a compatibility case to preserve.
+// TestNoDigestIsRefused, for the Flux path too.
 func TestNoDigestIsRefused(t *testing.T) {
 	err := Run(t.Context(), Options{Kind: "sourceRef", URL: "https://example.invalid/x.tgz",
 		Unpack: "tar.gz", Dest: t.TempDir()})
@@ -205,14 +192,8 @@ func TestNoDigestIsRefused(t *testing.T) {
 	}
 }
 
-// TestAFluxArtifactArrivesUntouched is the regression this file previously asserted backwards.
-//
-// It used to claim source-controller wraps its tree in an unpredictable directory and that the
-// fetcher removes it. It does not wrap: a GitRepository artifact carries a bare "." entry and then
-// files at the ROOT. Removing a level therefore dropped every root-level file -- Dockerfile,
-// package.json -- and moved every nested path up one, so `subpath: ui` matched nothing. ADR 0045.
-//
-// The old fixture agreed with the belief, which is why nothing caught it.
+// TestAFluxArtifactArrivesUntouched: a GitRepository artifact has a bare "." entry and files at the
+// root, not a wrapper directory, so nothing may be stripped. ADR 0045.
 func TestAFluxArtifactArrivesUntouched(t *testing.T) {
 	blob := tarGzMany(t,
 		file{"./", ""},
@@ -235,10 +216,8 @@ func TestAFluxArtifactArrivesUntouched(t *testing.T) {
 	}
 }
 
-// TestAFetchedArchiveKeepsItsLayout is the other half.
-//
-// A fetched tarball is whatever the publisher made it, so stripping a segment would silently
-// discard a real top-level directory. `subpath` is how a version-named wrapper is named there.
+// TestAFetchedArchiveKeepsItsLayout: nothing is stripped unless the spec says so; `subpath` selects
+// a wrapper directory.
 func TestAFetchedArchiveKeepsItsLayout(t *testing.T) {
 	blob := tarGz(t, "app-1.2.3/Dockerfile", "FROM scratch\n")
 	dest := filepath.Join(t.TempDir(), "workspace")

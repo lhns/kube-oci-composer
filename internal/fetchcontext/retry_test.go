@@ -10,10 +10,8 @@ import (
 	"testing"
 )
 
-// flaky serves body, but fails the first `failures` requests with the given status.
-//
-// Returns the URL and a counter of how many requests actually arrived, which is what the
-// not-retried assertions read: an error alone cannot tell "refused once" from "refused six times".
+// flaky serves body, but fails the first `failures` requests with the given status. It returns a
+// request counter, since the error alone cannot tell one attempt from six.
 func flaky(t *testing.T, failures int32, status int, body []byte) (string, *atomic.Int32) {
 	t.Helper()
 	var hits atomic.Int32
@@ -28,13 +26,9 @@ func flaky(t *testing.T, failures int32, status int, body []byte) (string, *atom
 	return srv.URL, &hits
 }
 
-// TestATransientFailureIsRetried is the outage this retry exists for.
-//
-// The first dial happens at t=0 of a brand-new pod, before the CNI has programmed NetworkPolicy,
-// and the Job runs with BackoffLimit: 0 -- so without a retry one unlucky dial fails the build
-// permanently. Asserting the CONTENT as well as the success: each attempt reuses one staged file,
-// so a retry that forgot to truncate would hash the concatenation of two responses and fail
-// verification in a way that reads like the server serving the wrong bytes.
+// TestATransientFailureIsRetried: a fresh pod's first dial can precede NetworkPolicy programming.
+// The content is asserted too: a retry that did not truncate the staged file would hash two
+// responses.
 func TestATransientFailureIsRetried(t *testing.T) {
 	blob := tarGz(t, "Dockerfile", "FROM scratch\n")
 	url, hits := flaky(t, 2, http.StatusServiceUnavailable, blob)
@@ -57,8 +51,7 @@ func TestATransientFailureIsRetried(t *testing.T) {
 	}
 }
 
-// TestA404IsNotRetried — the URL, the token or the object is wrong, and five more requests will not
-// change any of them. Asserted on the REQUEST COUNT, because the error is identical either way.
+// TestA404IsNotRetried, asserted on the request count.
 func TestA404IsNotRetried(t *testing.T) {
 	blob := tarGz(t, "Dockerfile", "FROM scratch\n")
 	url, hits := flaky(t, 99, http.StatusNotFound, blob)
@@ -74,8 +67,7 @@ func TestA404IsNotRetried(t *testing.T) {
 	}
 }
 
-// TestADigestMismatchIsNotRetried — a mismatch is terminal, and retrying it would turn a spec error
-// into a thirty-second stall before the same failure.
+// TestADigestMismatchIsNotRetried: a mismatch is a spec error.
 func TestADigestMismatchIsNotRetried(t *testing.T) {
 	blob := tarGz(t, "Dockerfile", "FROM scratch\n")
 	url, hits := flaky(t, 0, 0, blob)
