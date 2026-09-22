@@ -133,7 +133,6 @@ func build(t *testing.T, r *ImageCompositionReconciler, obj *ociv1alpha1.ImageCo
 	}
 	obj.Status.Artifact = res.Artifact
 	obj.Status.InputHash = res.InputHash
-	markDigestTagged(obj.Status.History, res.DigestTagged)
 	obj.Status.History = recon.RecordHistory(obj.Status.History, res.Record, r.historyLimit(obj))
 	return res.Artifact
 }

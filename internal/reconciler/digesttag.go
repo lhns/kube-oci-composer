@@ -81,3 +81,33 @@ func ApplyDigestTag(repo, digest string, refOpts []name.Option, opts []remote.Op
 	}
 	return nil
 }
+
+// ApplyDigestTagWithReferrers is ApplyDigestTag for digest and then for every referrer of it: the
+// SBOM and provenance the composer attaches (ADR 0008). Before ADR 0060 those were pushed untagged,
+// and without keepUntagged an untagged referrer is collected while its subject lives on.
+//
+// Any failure is returned, so the caller does not record the subject as tagged and the next pass
+// retries the lot. ApplyDigestTag is idempotent, so repeating the subject costs one request.
+func ApplyDigestTagWithReferrers(repo, digest string, refOpts []name.Option, opts []remote.Option) error {
+	if err := ApplyDigestTag(repo, digest, refOpts, opts); err != nil {
+		return err
+	}
+	subject, err := name.NewDigest(repo+"@"+digest, refOpts...)
+	if err != nil {
+		return Terminal("invalid reference %s@%s: %v", repo, digest, err)
+	}
+	idx, err := remote.Referrers(subject, opts...)
+	if err != nil {
+		return fmt.Errorf("listing referrers of %s: %w", digest, err)
+	}
+	mf, err := idx.IndexManifest()
+	if err != nil {
+		return fmt.Errorf("reading referrers of %s: %w", digest, err)
+	}
+	for _, d := range mf.Manifests {
+		if err := ApplyDigestTag(repo, d.Digest.String(), refOpts, opts); err != nil && !IsNotFound(err) {
+			return err
+		}
+	}
+	return nil
+}

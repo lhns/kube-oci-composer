@@ -393,7 +393,10 @@ func (r *ImageBuildReconciler) stillPublished(ctx context.Context, obj *ociv1alp
 
 // backfillDigestTags gives content published before ADR 0060 its digest's own tag: the current
 // artifact and every history entry (which a rollback pulls). Driven by status, so it costs nothing
-// once converged. Best effort: failures are logged and retried next pass.
+// once converged, and it needs only where the object publishes, so Reconcile runs it for suspended
+// objects and ones whose spec is otherwise invalid. Referrers need nothing here: BuildKit's
+// attestations are children of the image index, and a signature is a tag. Best effort: failures are
+// logged and retried next pass.
 func (r *ImageBuildReconciler) backfillDigestTags(ctx context.Context, obj *ociv1alpha1.ImageBuild) {
 	art := obj.Status.Artifact
 	pending := art != nil && art.Digest != "" && !recon.HasDigestTag(art.Tags, art.Digest)

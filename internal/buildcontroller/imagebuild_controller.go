@@ -104,11 +104,20 @@ func (r *ImageBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.Get(ctx, req.NamespacedName, &obj); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	// The patch base, taken before anything below edits status in memory.
+	pristine := obj.DeepCopy()
+
+	// Before suspend and before anything that can stall: it names content status says this object
+	// already published, and that must happen whether or not the spec reconciles (ADR 0060). Its
+	// status changes ride on whichever patch this pass ends with.
+	if obj.DeletionTimestamp.IsZero() {
+		r.backfillDigestTags(ctx, &obj)
+	}
 	// Not while deleting: the finalizer is only removed below, so returning here would leave the
 	// object Terminating forever. observedGeneration must advance too, or the retention refresher
 	// sees this object as pending and skips its whole cycle for every image in the cluster.
 	if obj.Spec.Suspend && obj.DeletionTimestamp.IsZero() {
-		patch := client.MergeFrom(obj.DeepCopy())
+		patch := client.MergeFrom(pristine)
 		recon.SetCondition(&obj, ociv1alpha1.ReadyCondition, metav1.ConditionFalse,
 			ociv1alpha1.ReasonSuspended, "Reconciliation is suspended")
 		recon.RemoveCondition(&obj, ociv1alpha1.ReconcilingCondition)
@@ -116,7 +125,7 @@ func (r *ImageBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, client.IgnoreNotFound(r.Status().Patch(ctx, &obj, patch))
 	}
 
-	patch := client.MergeFrom(obj.DeepCopy())
+	patch := client.MergeFrom(pristine)
 	result, err := r.reconcile(ctx, &obj)
 
 	obj.Status.ObservedGeneration = obj.Generation
@@ -169,7 +178,6 @@ func (r *ImageBuildReconciler) reconcile(ctx context.Context, obj *ociv1alpha1.I
 	// different digest (builds are not reproducible), hence the warning Event. ADR 0051.
 	if obj.Status.Artifact != nil && obj.Status.InputHash == inputHash {
 		if r.stillPublished(ctx, obj) {
-			r.backfillDigestTags(ctx, obj)
 			// writeRefTo is not in the input hash, so a converged object must export here or a
 			// newly added, moved or deleted export would never be (re)written.
 			if err := r.exportRef(ctx, obj); err != nil {
