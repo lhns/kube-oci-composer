@@ -18,24 +18,17 @@ import (
 	recon "github.com/lhns/kube-oci-composer/internal/reconciler"
 )
 
-// TestABuildsSecretsAreOwnedByItsJob is the leak, asserted against a real API server.
-//
-// The four per-build Secrets were owner-referenced to the ImageBuild, which a GitOps layer never
-// deletes, and their names carry the input hash -- so every revision added four more rather than
-// replacing them. A ten-day-old install reported 42 of 63 Secrets in one namespace being garbage,
-// the largest Secret consumer in the cluster.
-//
-// This needs a real API server rather than a fake client: ownership is only meaningful if the
-// reference the apiserver stores is the one we think we wrote, UID included. ADR 0050.
+// TestABuildsSecretsAreOwnedByItsJob: the per-build Secrets are named by input hash, so owned by
+// the ImageBuild they would accumulate forever. Needs a real API server so the stored owner
+// reference, UID included, is the one actually written. ADR 0050.
 func TestABuildsSecretsAreOwnedByItsJob(t *testing.T) {
 	ctx, k8s := integrationCtx(t)
 
 	const ns = "secretlifetime"
 	srv := buildableNamespace(t, ctx, k8s, ns)
 
-	// The operator's credential, so pushSecretFor copies it into the object's namespace. Together
-	// with the CA and an inline Dockerfile below, this makes all four Secrets exist in one build
-	// rather than leaving the TLS and inline paths untested.
+	// The operator's credential, so pushSecretFor copies it. With the CA and inline Dockerfile
+	// below, all four per-build Secrets exist.
 	const opsNS = "default"
 	if err := k8s.Create(ctx, &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "push-cred", Namespace: opsNS},
@@ -48,9 +41,9 @@ func TestABuildsSecretsAreOwnedByItsJob(t *testing.T) {
 	obj := sampleBuild()
 	obj.Namespace = ns
 	obj.Spec.Context.SourceRef.Name = "src"
-	// Inline, so dockerfileSecretFor writes one. Digest-pinned, as every FROM must be.
+	// Inline, so dockerfileSecretFor writes one.
 	obj.Spec.Dockerfile = &ociv1alpha1.DockerfileSource{Inline: pinnedFrom}
-	// Published to the operator's own registry, so the operator's credential applies.
+	// The operator's own registry, so its credential applies.
 	obj.Spec.Push = &ociv1alpha1.Push{Tags: []string{"v1"}}
 	if err := k8s.Create(ctx, obj); err != nil {
 		t.Fatalf("creating ImageBuild: %v", err)
@@ -112,11 +105,8 @@ func TestABuildsSecretsAreOwnedByItsJob(t *testing.T) {
 	}
 }
 
-// TestAUserSuppliedPushSecretIsNeverAdopted is the guard on the dangerous half.
-//
-// pushSecretFor returns the OBJECT's own Secret when spec.push.secretRef is set -- one this
-// controller neither created nor owns. Adopting whatever name came back would hand a user's
-// credential to the Job's garbage collection and delete it an hour after the build finished.
+// TestAUserSuppliedPushSecretIsNeverAdopted: the user's own spec.push.secretRef must never be
+// handed to the Job's garbage collection.
 func TestAUserSuppliedPushSecretIsNeverAdopted(t *testing.T) {
 	ctx, k8s := integrationCtx(t)
 
@@ -136,8 +126,7 @@ func TestAUserSuppliedPushSecretIsNeverAdopted(t *testing.T) {
 		t.Fatalf("creating ImageBuild: %v", err)
 	}
 
-	// The user's own credential. Named nothing like ours, carrying none of our labels, owned by
-	// nobody -- and it must come out of the build exactly as it went in.
+	// The user's own credential, which must come out of the build untouched.
 	mine := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "mine", Namespace: ns},
 		Type:       corev1.SecretTypeDockerConfigJson,
@@ -165,10 +154,8 @@ func TestAUserSuppliedPushSecretIsNeverAdopted(t *testing.T) {
 }
 
 // buildableNamespace creates a namespace with a Flux source an ImageBuild can build from, and
-// returns the server standing in for source-controller.
-//
-// The stand-in CRD declares no status subresource, deliberately, so a test can publish an artifact
-// with a plain update instead of running source-controller.
+// returns the server standing in for source-controller. The stand-in CRD has no status
+// subresource, so a plain update publishes the artifact.
 func buildableNamespace(t *testing.T, ctx context.Context, k8s client.Client, ns string) *httptest.Server {
 	t.Helper()
 	if err := k8s.Create(ctx, &corev1.Namespace{

@@ -13,9 +13,8 @@ import (
 // testHash stands in for an input hash wherever the value itself does not matter.
 var testHash = "sha256:" + strings.Repeat("a", 64)
 
-// sampleRepo is where the test fixtures publish. Passed explicitly now that the repository is
-// RESOLVED -- from the spec, or from the operator's default when the spec names none -- rather than
-// read straight off the object.
+// sampleRepo is where the test fixtures publish, passed explicitly because the repository is
+// resolved (spec or operator default), not read off the object.
 const sampleRepo = "ghcr.io/me/app"
 
 func sampleBuild() *ociv1alpha1.ImageBuild {
@@ -42,8 +41,7 @@ func sampleConfig() JobConfig {
 	}
 }
 
-// TestJobNameIsDeterministic — this is what makes a brief two-leader window harmless and lets a
-// restarted controller adopt the Job it left running instead of starting a second build.
+// TestJobNameIsDeterministic, so a second leader or a restarted controller adopts the existing Job.
 func TestJobNameIsDeterministic(t *testing.T) {
 	obj := sampleBuild()
 	const hash = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -70,11 +68,8 @@ func TestJobNameStaysWithinLimit(t *testing.T) {
 	}
 }
 
-// TestBuildJobRunsRootless is a security assertion, not a configuration one.
-//
-// ADR 0001 named "a privileged or rootless-BuildKit pod" as the blast radius that justified
-// refusing to build at all. Rootless is the half of that this project accepts; privileged is not
-// offered at any setting, so nothing in the spec can reach these fields.
+// TestBuildJobRunsRootless is a security assertion: never privileged (ADR 0001), and exactly the
+// rootless posture ADR 0027 requires.
 func TestBuildJobRunsRootless(t *testing.T) {
 	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo, "", "", "", "", true)
 
@@ -83,8 +78,7 @@ func TestBuildJobRunsRootless(t *testing.T) {
 		t.Fatalf("want one build container, got %d", len(pod.Containers))
 	}
 
-	// Every container, not just the build one — the init container fetches the context and has no
-	// more reason to be privileged than the build does.
+	// Every container, including the context fetcher.
 	for _, c := range append(append([]corev1.Container{}, pod.InitContainers...), pod.Containers...) {
 		sc := c.SecurityContext
 		if sc == nil {
@@ -101,18 +95,14 @@ func TestBuildJobRunsRootless(t *testing.T) {
 			t.Errorf("%s does not pin a non-zero uid", c.Name)
 		}
 
-		// Asserted in the direction that looks wrong: escalation must be PERMITTED. Setuid
-		// newuidmap is how rootless maps a UID range, and NO_NEW_PRIVS makes the kernel ignore
-		// the setuid bit, so tightening this stops buildkitd starting at all (ADR 0027). The
-		// previous version of this test demanded false, passed every run, and was wrong about the
-		// only environment that mattered.
+		// Escalation must be permitted: setuid newuidmap maps the UID range, and NO_NEW_PRIVS
+		// would stop buildkitd from starting (ADR 0027).
 		if sc.AllowPrivilegeEscalation == nil || !*sc.AllowPrivilegeEscalation {
 			t.Errorf("%s forbids privilege escalation; rootless BuildKit cannot map UIDs and will "+
 				"not start", c.Name)
 		}
 
-		// With escalation permitted the bounding set is the only thing left holding the line, so
-		// it has to be exact rather than merely present.
+		// With escalation permitted, the capability set must be exact.
 		caps := sc.Capabilities
 		if caps == nil || len(caps.Drop) != 1 || caps.Drop[0] != "ALL" {
 			t.Errorf("%s does not drop ALL capabilities: %+v", c.Name, caps)
@@ -129,9 +119,7 @@ func TestBuildJobRunsRootless(t *testing.T) {
 			t.Errorf("%s is missing %q; rootless BuildKit cannot map UIDs without it", c.Name, missing)
 		}
 	}
-	// Seccomp and AppArmor must be unconfined, and that is not a loosening to tidy away later:
-	// rootless BuildKit creates user namespaces and mounts inside them, and both defaults block
-	// it. Tightening these makes every build fail, so the assertion is here to say so.
+	// Unconfined is required: rootless BuildKit creates user namespaces and mounts inside them.
 	build := pod.Containers[0].SecurityContext
 	if build.SeccompProfile == nil || build.SeccompProfile.Type != corev1.SeccompProfileTypeUnconfined {
 		t.Errorf("seccomp = %+v, want Unconfined; rootless BuildKit cannot run otherwise",
@@ -159,8 +147,7 @@ func TestBuildJobUsesTheObjectsServiceAccount(t *testing.T) {
 	}
 }
 
-// TestBuildJobArgs — the argv is the contract with BuildKit, and the pieces that matter are the
-// ones that determine the output: platforms, the push target, and the reproducibility levers.
+// TestBuildJobArgs pins the parts of the BuildKit argv that determine the output.
 func TestBuildJobArgs(t *testing.T) {
 	obj := sampleBuild()
 	obj.Spec.Platforms = []string{"linux/amd64", "linux/arm64"}
@@ -174,8 +161,7 @@ func TestBuildJobArgs(t *testing.T) {
 		"platform=linux/amd64,linux/arm64",
 		"target=runtime",
 		"build-arg:VERSION=1.2.3",
-		// Uploaded, not named. The controller applies tags afterwards, once the digest exists and
-		// onConflict can be evaluated against it rather than against a stand-in. ADR 0054.
+			// Pushed by digest; the controller tags afterwards (ADR 0054).
 		"name=ghcr.io/me/app,push=true,push-by-digest=true",
 		"push=true",
 		"rewrite-timestamp=true",
@@ -186,8 +172,7 @@ func TestBuildJobArgs(t *testing.T) {
 			t.Errorf("argv is missing %q\ngot: %s", want, argv)
 		}
 	}
-	// And the Job names no tag. A Job that tagged as it pushed is what made onConflict
-	// unenforceable here: the check then had to run before the digest existed.
+	// The Job names no tag.
 	if strings.Contains(argv, "ghcr.io/me/app:") {
 		t.Errorf("the build Job names a tag; naming belongs to the controller\ngot: %s", argv)
 	}
@@ -205,8 +190,7 @@ func TestNetworkNoneIsPassedThrough(t *testing.T) {
 	}
 }
 
-// TestCacheRefIsPerObject — nothing may share a cache, so the default must be scoped by namespace
-// and name.
+// TestCacheRefIsPerObject: the default cache ref is scoped by namespace and name.
 func TestCacheRefIsPerObject(t *testing.T) {
 	a := sampleBuild()
 	b := sampleBuild()
@@ -227,8 +211,8 @@ func TestCacheRefIsPerObject(t *testing.T) {
 	}
 }
 
-// TestSecretsAreMountedNotInlined — a credential passed as a build arg lands in the image's
-// history; BuildKit's secret mount is the only safe route, and the argv must use it.
+// TestSecretsAreMountedNotInlined: a build arg lands in the image history; only a secret mount is
+// safe.
 func TestSecretsAreMountedNotInlined(t *testing.T) {
 	obj := sampleBuild()
 	obj.Spec.Secrets = []ociv1alpha1.BuildSecret{{
@@ -257,8 +241,7 @@ func TestSecretsAreMountedNotInlined(t *testing.T) {
 	}
 }
 
-// TestFailureBackoffIsCapped — a build waiting on a human pushing a Dockerfile fix must keep
-// checking at a sane interval rather than backing off for hours.
+// TestFailureBackoffIsCapped, so a pushed fix is noticed promptly.
 func TestFailureBackoffIsCapped(t *testing.T) {
 	if got := failureBackoff(0); got != pendingRetryInterval {
 		t.Errorf("first retry is %v, want %v", got, pendingRetryInterval)
@@ -271,8 +254,7 @@ func TestFailureBackoffIsCapped(t *testing.T) {
 	}
 }
 
-// TestInsecureRegistryIsOptInPerHost — naming one internal registry must not downgrade every other
-// push the same controller makes, so the attribute appears only when the push host matches.
+// TestInsecureRegistryIsOptInPerHost: plain HTTP only for a listed push host.
 func TestInsecureRegistryIsOptInPerHost(t *testing.T) {
 	cfg := sampleConfig()
 	cfg.InsecureRegistries = []string{"registry.internal:5000"}
@@ -290,8 +272,7 @@ func TestInsecureRegistryIsOptInPerHost(t *testing.T) {
 	}
 }
 
-// TestInsecureRegistryIsNotInTheInputHash — how the bytes are transported does not change what
-// they are, so flipping this must not rebuild every object in the cluster.
+// TestInsecureRegistryIsNotInTheInputHash: transport, not content, so flipping it must not rebuild.
 func TestInsecureRegistryIsNotInTheInputHash(t *testing.T) {
 	obj := sampleBuild()
 	obj.Spec.Push.Repository = "registry.internal:5000/team/app"
@@ -308,13 +289,8 @@ func TestInsecureRegistryIsNotInTheInputHash(t *testing.T) {
 	}
 }
 
-// TestTheFetcherIsToldWhatToFetch.
-//
-// This replaced a test that ran the init container's shell script for real. The script is gone: it
-// verified nothing, could not grow an unzip or an image pull, and carried a second copy of the
-// wrapper-strip rule that once disagreed with build.MatchesContextPath. What it did is now
-// internal/fetchcontext, tested there against real archives; what remains to assert here is the
-// contract between the two, which is the argv.
+// TestTheFetcherIsToldWhatToFetch pins the argv contract with internal/fetchcontext, which is
+// tested against real archives there.
 func TestTheFetcherIsToldWhatToFetch(t *testing.T) {
 	t.Run("a Flux artifact", func(t *testing.T) {
 		obj := sampleBuild()
@@ -332,8 +308,7 @@ func TestTheFetcherIsToldWhatToFetch(t *testing.T) {
 		args := strings.Join(init[0].Args, " ")
 		for _, want := range []string{
 			"fetch-context", "--kind=sourceRef", "--url=https://example/ctx.tgz",
-			// The digest is passed even for a Flux artifact. The old script verified NOTHING, not
-			// even this, which the controller already had in hand.
+			// The digest is verified for a Flux artifact too.
 			"--digest=sha256:ctx", "--subpath=ui",
 		} {
 			if !strings.Contains(args, want) {
@@ -359,8 +334,7 @@ func TestTheFetcherIsToldWhatToFetch(t *testing.T) {
 		}
 	})
 
-	// A build with no context runs no fetcher: an empty tree is addressed by construction, and a
-	// fetcher with no URL would be a container whose only job is to succeed at nothing.
+	// No context, no fetcher.
 	t.Run("no context", func(t *testing.T) {
 		obj := sampleBuild()
 		obj.Spec.Context = nil
@@ -373,15 +347,8 @@ func TestTheFetcherIsToldWhatToFetch(t *testing.T) {
 	})
 }
 
-// TestBuildPodsAreSelectable covers a gap that only shows up from outside this package.
-//
-// The labels were on the Job and not on its pod template, so build pods carried nothing but the
-// `job-name` and `controller-uid` Kubernetes adds itself. That is enough to find one pod and not
-// enough to describe a class of them — and anything selecting build pods as a class lives in a
-// namespace this chart does not own and was not written by whoever created the build: a
-// NetworkPolicy letting them reach the registry, a quota, an admission rule.
-//
-// Without pod labels the only way to write such a policy was to match every pod in the namespace.
+// TestBuildPodsAreSelectable: pod labels (not only Job labels) let NetworkPolicies, quotas and
+// admission rules in tenant namespaces select build pods as a class.
 func TestBuildPodsAreSelectable(t *testing.T) {
 	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo, "", "", "", "", true)
 
@@ -396,21 +363,14 @@ func TestBuildPodsAreSelectable(t *testing.T) {
 		t.Errorf("%s is empty; a pod cannot be tied back to the build that made it", InputHashLabel)
 	}
 
-	// The Job's own labels must not regress while the pod's are added — the controller finds
-	// existing Jobs by them.
+	// The controller finds Jobs by their own labels, so those must stay.
 	if got := job.Labels[ManagedByLabel]; got != "kube-oci-builder" {
 		t.Errorf("the Job lost its own %s label: %q", ManagedByLabel, got)
 	}
 }
 
-// TestTheBuildTrustsTheRegistryCA covers the half of TLS that does not live in the chart.
-//
-// A build Job runs in the tenant's namespace, so the CA has to be copied there and mounted, and
-// rootless BuildKit has to be persuaded to use it. Four things arrive together or not at all — the
-// volume, the writable bundle, the env var and the merge in the script — and they are gated on one
-// condition in Go precisely so this test can assert on the rendered container rather than on
-// runtime behaviour. A `[ -f ... ]` check in the shell instead would silently no-op if a mount name
-// drifted.
+// TestTheBuildTrustsTheRegistryCA: the volume, writable bundle, env var and script merge are gated
+// on one condition in Go, so they can be asserted on the rendered container.
 func TestTheBuildTrustsTheRegistryCA(t *testing.T) {
 	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo,
 		"", "build-registry-ca", "", "", true)
@@ -427,7 +387,7 @@ func TestTheBuildTrustsTheRegistryCA(t *testing.T) {
 			}
 		case "ca-bundle":
 			haveBundle = true
-			// An emptyDir because uid 1000 cannot write to the image's root-owned /etc/ssl/certs.
+			// uid 1000 cannot write to the image's /etc/ssl/certs.
 			if v.EmptyDir == nil {
 				t.Errorf("the merged bundle needs a writable volume: %+v", v)
 			}
@@ -447,9 +407,7 @@ func TestTheBuildTrustsTheRegistryCA(t *testing.T) {
 		t.Errorf("SSL_CERT_FILE = %q, want the merged bundle %q", sslCertFile, caBundlePath)
 	}
 
-	// The merge itself. SSL_CERT_FILE REPLACES the system pool rather than adding to it, so
-	// pointing it straight at the registry's CA would break every `FROM alpine` and every frontend
-	// fetch from Docker Hub.
+	// SSL_CERT_FILE replaces the system pool, so the bundle must include the image's own roots.
 	script := container.Command[2]
 	if !strings.Contains(script, "ca-certificates.crt") {
 		t.Error("the bundle must include the image's own roots, or public registries stop verifying")
@@ -462,8 +420,7 @@ func TestTheBuildTrustsTheRegistryCA(t *testing.T) {
 	}
 }
 
-// TestNoCAMeansNoCAPlumbing — the ordinary case must stay exactly as it was. An empty SSL_CERT_FILE
-// or a stray empty volume would be a change to every build for the benefit of none.
+// TestNoCAMeansNoCAPlumbing: without a CA the Job is unchanged.
 func TestNoCAMeansNoCAPlumbing(t *testing.T) {
 	job := buildJob(sampleBuild(), testHash, "https://example/ctx.tgz", "sha256:ctx", sampleConfig(), sampleRepo,
 		"", "", "", "", true)
@@ -484,10 +441,7 @@ func TestNoCAMeansNoCAPlumbing(t *testing.T) {
 	}
 }
 
-// TestAContextDockerfileStillComesFromTheContext is the regression guard on the untouched path.
-//
-// The common case did not change and must not: the recipe lives in the thing being built, and
-// `--local dockerfile=` points inside the context exactly as before.
+// TestAContextDockerfileStillComesFromTheContext: `--local dockerfile=` points inside the context.
 func TestAContextDockerfileStillComesFromTheContext(t *testing.T) {
 	obj := sampleBuild()
 	obj.Spec.Dockerfile = &ociv1alpha1.DockerfileSource{Path: "build/Dockerfile.prod"}
@@ -507,10 +461,8 @@ func TestAContextDockerfileStillComesFromTheContext(t *testing.T) {
 	}
 }
 
-// TestAnInlineDockerfileIsProjectedAsItsOwnLocal.
-//
-// `context` and `dockerfile` were always two independent BuildKit locals — they only coincided
-// because the Dockerfile happened to live in the context. This is that separation being used.
+// TestAnInlineDockerfileIsProjectedAsItsOwnLocal: `context` and `dockerfile` are independent
+// BuildKit locals.
 func TestAnInlineDockerfileIsProjectedAsItsOwnLocal(t *testing.T) {
 	obj := sampleBuild()
 	obj.Spec.Dockerfile = &ociv1alpha1.DockerfileSource{Inline: "FROM scratch\n"}
@@ -524,8 +476,7 @@ func TestAnInlineDockerfileIsProjectedAsItsOwnLocal(t *testing.T) {
 	if !strings.Contains(args, "--opt filename=Dockerfile") {
 		t.Errorf("filename must be the fixed projected name:\n%s", args)
 	}
-	// The context local is untouched. Copying the Dockerfile into /workspace instead would silently
-	// overwrite one already present there.
+	// The context local is untouched; copying the Dockerfile in could overwrite one there.
 	if !strings.Contains(args, "--local context=/workspace") {
 		t.Errorf("the context local must be unchanged:\n%s", args)
 	}
@@ -539,8 +490,7 @@ func TestAnInlineDockerfileIsProjectedAsItsOwnLocal(t *testing.T) {
 	if mount == nil {
 		t.Fatal("no dockerfile volume mounted, so the local points at an empty directory")
 	}
-	// subPath, so the file is a plain regular file rather than the ..data symlink farm a Secret
-	// volume normally projects — BuildKit's fsutil walks symlinks rather than flattening them.
+	// subPath gives a plain file, not a Secret volume's ..data symlink farm, which fsutil walks.
 	if mount.SubPath != dockerfileName {
 		t.Errorf("the dockerfile mount must use subPath, got %q", mount.SubPath)
 	}
@@ -549,12 +499,8 @@ func TestAnInlineDockerfileIsProjectedAsItsOwnLocal(t *testing.T) {
 	}
 }
 
-// TestTheProjectedDockerfileComesFromTheControllersOwnSecret.
-//
-// The pod must never name a user-supplied object for the Dockerfile. The kubelet resolves a volume
-// at pod start, reading whatever the source says THEN — not what the controller hashed and
-// FROM-checked a moment earlier — so projecting one directly would be a complete bypass of the
-// unpinned-base guard, reachable by anyone who can update that object.
+// TestTheProjectedDockerfileComesFromTheControllersOwnSecret: projecting the user's object would
+// let an edit before pod start bypass the FROM check.
 func TestTheProjectedDockerfileComesFromTheControllersOwnSecret(t *testing.T) {
 	obj := sampleBuild()
 	obj.Spec.Dockerfile = &ociv1alpha1.DockerfileSource{Inline: "FROM scratch\n"}

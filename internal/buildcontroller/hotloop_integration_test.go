@@ -22,8 +22,7 @@ import (
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 )
 
-// countingReconciler wraps the real one and counts how often the queue delivers work, which is the
-// quantity the hot loop was pathological in.
+// countingReconciler wraps the real one and counts how often the queue delivers work.
 type countingReconciler struct {
 	inner *ImageBuildReconciler
 	calls atomic.Int64
@@ -34,16 +33,9 @@ func (c *countingReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	return c.inner.Reconcile(ctx, req)
 }
 
-// TestAFailingBuildDoesNotSpinTheQueue is the test the unit suite structurally cannot write.
-//
-// The defect: the failure path deleted the failed Job so the next attempt would not adopt it. But
-// deleting an OWNED Job wakes this controller through its own Owns() watch, and that reconcile
-// finds no Job and starts another — so RequeueAfter's backoff never applied and a failing build
-// retried every few seconds indefinitely, destroying each pod's logs on the way. Under a fake
-// client there are no watches, so the loop cannot happen and every unit test passed.
-//
-// Running a real manager makes the watch real. The assertion is a rate: a build that has failed
-// once must not be reconciled tens of times in the seconds that follow.
+// TestAFailingBuildDoesNotSpinTheQueue: deleting a failed owned Job fires the Owns() watch, which
+// starts a new Job at once, so the backoff never applies. Only a real watch can show this; the
+// assertion is a reconcile rate.
 func TestAFailingBuildDoesNotSpinTheQueue(t *testing.T) {
 	ctx, k8s := integrationCtx(t)
 
@@ -57,8 +49,7 @@ func TestAFailingBuildDoesNotSpinTheQueue(t *testing.T) {
 	if err := k8s.Create(ctx, src); err != nil {
 		t.Fatalf("creating source: %v", err)
 	}
-	// The stand-in CRD declares no status subresource, so status is written by a plain update —
-	// deliberately, because it lets a test publish an artifact without running source-controller.
+	// No status subresource on the stand-in CRD, so a plain update writes status.
 	if err := k8s.Update(ctx, src); err != nil {
 		t.Fatalf("writing source status: %v", err)
 	}
@@ -93,19 +84,14 @@ func TestAFailingBuildDoesNotSpinTheQueue(t *testing.T) {
 		t.Fatal("cache did not sync")
 	}
 
-	// Envtest runs no job controller and no kubelet, so a Job never finishes on its own. This
-	// stands in for both, and it has to run CONTINUOUSLY rather than once: the loop only appears
-	// when every attempt fails, which is what a broken Dockerfile does in production. Failing just
-	// the first Job lets the recreated one sit pending forever, and the test then passes with the
-	// bug present — which it did, before this existed.
+	// envtest has no job controller or kubelet. Fail every Job continuously, as a broken Dockerfile
+	// would; failing only the first lets the test pass with the bug present.
 	go failEveryJob(ctx, k8s, "hotloop")
 
 	waitForJob(t, ctx, k8s, "hotloop")
 
-	// Let the loop run. The first backoff is 30s, so a correct controller reconciles a handful of
-	// times in this window — once for the failure, plus watch events for its own status writes.
-	// The hot loop managed a reconcile every few seconds and climbed without bound.
-	// Let it settle first: the initial create-and-fail is legitimately a few reconciles.
+	// The first backoff is 30s, so a correct controller reconciles only a handful of times here.
+	// Let the initial create-and-fail settle first.
 	time.Sleep(3 * time.Second)
 	before := counted.calls.Load()
 	time.Sleep(15 * time.Second)
@@ -118,8 +104,7 @@ func TestAFailingBuildDoesNotSpinTheQueue(t *testing.T) {
 			"never applies", during, tolerated)
 	}
 
-	// And the Job must still be there: it is kept for the whole backoff so its pod's logs survive,
-	// which is the other half of the same fix.
+	// The failed Job is kept for the whole backoff so its pod's logs survive.
 	var jobs batchv1.JobList
 	if err := k8s.List(ctx, &jobs, client.InNamespace("hotloop")); err != nil {
 		t.Fatalf("listing jobs: %v", err)
@@ -130,8 +115,7 @@ func TestAFailingBuildDoesNotSpinTheQueue(t *testing.T) {
 }
 
 // failEveryJob keeps every Job in the namespace failed, standing in for the kubelet and the job
-// controller. It is what makes a retry loop observable: with the failure path deleting the Job on
-// sight, each recreation fails again immediately and the controller never reaches its backoff.
+// controller.
 func failEveryJob(ctx context.Context, k8s client.Client, namespace string) {
 	for {
 		select {
@@ -156,8 +140,7 @@ func failEveryJob(ctx context.Context, k8s client.Client, namespace string) {
 }
 
 // markJobFailed drives a Job to Failed the way the job controller does. The real API server
-// enforces the transition and the fake client does not: startTime is required on a finished Job,
-// and Failed=True is rejected without FailureTarget=True first.
+// requires startTime, and FailureTarget=True before Failed=True.
 func markJobFailed(ctx context.Context, k8s client.Client, job *batchv1.Job) error {
 	now := metav1.Now()
 	job.Status.StartTime = &now

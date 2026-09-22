@@ -27,11 +27,8 @@ import (
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
 )
 
-// The reconcile loop, against a fake client.
-//
-// Not envtest: nothing here needs CEL or a real API server, and what the loop actually does is
-// move between Job states. The CRD's schema rules are covered by the envtest suite in
-// internal/controller, and the pure rendering by job_test.go.
+// The reconcile loop, against a fake client. CRD schema rules are covered by the envtest suite in
+// internal/controller, and pure rendering by job_test.go.
 
 const pinnedFrom = "FROM busybox@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"
 
@@ -47,13 +44,9 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	return s
 }
 
-// contextTarball is a build context holding one Dockerfile.
-//
-// prefix wraps the file in a directory, which is what a RELEASE TARBALL looks like and what
-// `stripComponents` exists for. Empty is what source-controller publishes: files at the root. This
-// comment used to say the opposite -- that the prefix was "the wrapper directory source-controller
-// adds" -- and every caller passed one, so the fixtures agreed with a belief that was never true
-// and the suite passed while every sourceRef build dropped its root-level files. ADR 0045.
+// contextTarball is a build context holding one Dockerfile. prefix wraps it in a directory, as a
+// release tarball does (see stripComponents); source-controller publishes files at the root, so
+// sourceRef fixtures pass "" (ADR 0045).
 func contextTarball(t *testing.T, prefix, dockerfile string) []byte {
 	t.Helper()
 	var buf bytes.Buffer
@@ -113,8 +106,8 @@ func harness(t *testing.T, dockerfile string, objs ...client.Object) *ImageBuild
 	t.Helper()
 	srv := contextServer(t, contextTarball(t, "", dockerfile))
 
-	// A real registry, because the controller applies the tags now. Objects that name the
-	// placeholder repository are pointed at it so the publish path has somewhere to go.
+	// A real registry for the controller to tag in; objects naming the placeholder repository are
+	// pointed at it.
 	host := startRegistry(t)
 	for _, o := range objs {
 		b, ok := o.(*ociv1alpha1.ImageBuild)
@@ -200,8 +193,8 @@ func TestReconcileCreatesAJob(t *testing.T) {
 	}
 }
 
-// TestReconcileIsIdempotentWhileBuilding — a second pass observes the running Job rather than
-// starting another. This is what makes a restart, or a brief two-leader window, harmless.
+// TestReconcileIsIdempotentWhileBuilding: a second pass observes the running Job rather than
+// starting another.
 func TestReconcileIsIdempotentWhileBuilding(t *testing.T) {
 	obj := buildOf(t, nil)
 	r := harness(t, pinnedFrom, obj)
@@ -246,8 +239,8 @@ func TestReconcileShortCircuitsOnUnchangedInputs(t *testing.T) {
 	}
 }
 
-// TestSuccessRecordsTheArtifact — the digest comes back through the termination message, and the
-// history gains a record carrying the input hash.
+// TestSuccessRecordsTheArtifact: the digest comes back through the termination message, and the
+// history record carries the input hash.
 func TestSuccessRecordsTheArtifact(t *testing.T) {
 	obj := buildOf(t, nil)
 	r := harness(t, pinnedFrom, obj)
@@ -278,8 +271,8 @@ func TestSuccessRecordsTheArtifact(t *testing.T) {
 	}
 }
 
-// TestFailureDoesNotStall is the behaviour ADR 0025 turns on: a failing RUN is fixed by editing a
-// Dockerfile in another object, so stalling would wait for an event that never arrives.
+// TestFailureDoesNotStall: a failing RUN is fixed in another object, so stalling would never wake
+// (ADR 0025).
 func TestFailureDoesNotStall(t *testing.T) {
 	obj := buildOf(t, nil)
 	r := harness(t, pinnedFrom, obj)
@@ -310,18 +303,9 @@ func TestFailureDoesNotStall(t *testing.T) {
 	}
 }
 
-// TestFailedBuildDoesNotRetryInAHotLoop is a regression test for a real hot loop.
-//
-// This half asserts the STATE: the Job survives its backoff and the failure is counted once. The
-// RATE — that the controller is not reconciling continuously — needs real watch delivery and lives
-// in TestAFailingBuildDoesNotSpinTheQueue. Neither subsumes the other, and this one passed
-// throughout the period the bug was live.
-//
-// Deleting the failed Job as soon as the failure was seen woke this controller through its own Job
-// watch, which reconciled immediately, found no Job and started another — retrying every few
-// seconds forever while destroying each failed pod before its logs could be read. The failed Job
-// must survive until the backoff is actually up, and the failure must be counted once no matter how
-// many times it is observed.
+// TestFailedBuildDoesNotRetryInAHotLoop pins the state half: the failed Job survives its backoff
+// and the failure is counted once. The rate half needs real watches; see
+// TestAFailingBuildDoesNotSpinTheQueue.
 func TestFailedBuildDoesNotRetryInAHotLoop(t *testing.T) {
 	obj := buildOf(t, nil)
 	r := harness(t, pinnedFrom, obj)
@@ -376,8 +360,7 @@ func TestSuspendSaysSo(t *testing.T) {
 	}
 }
 
-// TestMissingSourceIsPendingNotStalled — creating the GitRepository fixes it, and that is a
-// different object, so this retries rather than stalls.
+// TestMissingSourceIsPendingNotStalled: creating the source is the fix.
 func TestMissingSourceIsPendingNotStalled(t *testing.T) {
 	obj := buildOf(t, func(o *ociv1alpha1.ImageBuild) { o.Spec.Context.SourceRef.Name = "absent" })
 	r := harness(t, pinnedFrom, obj)
@@ -399,8 +382,7 @@ func TestMissingSourceIsPendingNotStalled(t *testing.T) {
 	}
 }
 
-// TestUnpinnedFromIsRefusedBeforeAJobExists — the guarantee ADR 0025 claims. The check runs before
-// anything executes, so no Job may exist afterwards.
+// TestUnpinnedFromIsRefusedBeforeAJobExists (ADR 0025).
 func TestUnpinnedFromIsRefusedBeforeAJobExists(t *testing.T) {
 	obj := buildOf(t, nil)
 	r := harness(t, "FROM golang:1.26\n", obj)
@@ -417,8 +399,7 @@ func TestUnpinnedFromIsRefusedBeforeAJobExists(t *testing.T) {
 	}
 }
 
-// TestMissingPushIsTerminal — spec.push is required in this alpha, and only editing THIS spec fixes
-// it, so it is the one class of failure that legitimately stalls.
+// TestMissingPushIsTerminal: only a spec edit fixes it, so it legitimately stalls.
 func TestMissingPushIsTerminal(t *testing.T) {
 	obj := buildOf(t, func(o *ociv1alpha1.ImageBuild) { o.Spec.Push = nil })
 	r := harness(t, pinnedFrom, obj)
@@ -439,8 +420,7 @@ func TestMissingPushIsTerminal(t *testing.T) {
 // build container's termination message does.
 func succeedJob(t *testing.T, r *ImageBuildReconciler, obj *ociv1alpha1.ImageBuild) string {
 	t.Helper()
-	// The Job uploads by digest and names nothing; this stands in for that half so the controller
-	// has something real to tag.
+	// Stand in for the Job's push by digest, so the controller has something real to tag.
 	_, digest := pushByDigest(t, obj.Spec.Push.Repository)
 	jobs := jobsIn(t, r, obj.Namespace)
 	if len(jobs) != 1 {
@@ -491,9 +471,8 @@ func failJob(t *testing.T, r *ImageBuildReconciler, obj *ociv1alpha1.ImageBuild,
 	}
 }
 
-// TestReconcileRequestIsEchoed — `flux reconcile` decides whether its request landed by watching
-// for status.lastHandledReconcileAt to match, so a kind that never echoes makes the CLI hang.
-// Echoed on failures too, or the hang is worst exactly when someone is debugging.
+// TestReconcileRequestIsEchoed: `flux reconcile` waits for status.lastHandledReconcileAt to match,
+// including after a failure.
 func TestReconcileRequestIsEchoed(t *testing.T) {
 	const requested = "2026-01-01T00:00:00Z"
 	obj := buildOf(t, func(o *ociv1alpha1.ImageBuild) {
@@ -508,7 +487,7 @@ func TestReconcileRequestIsEchoed(t *testing.T) {
 		t.Errorf("lastHandledReconcileAt = %q, want %q", got, requested)
 	}
 
-	// And again once the build has failed, which is when a stuck CLI would hurt most.
+	// And again after the build has failed.
 	failJob(t, r, obj, "the RUN exited 1")
 	if _, err := reconcileOnce(t, r, obj); err != nil {
 		t.Fatalf("reconcile after failure: %v", err)
@@ -518,9 +497,8 @@ func TestReconcileRequestIsEchoed(t *testing.T) {
 	}
 }
 
-// TestContextMustBeInTheSameNamespace — the builder reads Flux sources cluster-wide, so honouring
-// another namespace would let anyone who can create an ImageBuild pull that namespace's content
-// into an image they control and can read.
+// TestContextMustBeInTheSameNamespace: the builder reads Flux sources cluster-wide, so another
+// namespace's source would leak its content.
 func TestContextMustBeInTheSameNamespace(t *testing.T) {
 	obj := buildOf(t, func(o *ociv1alpha1.ImageBuild) {
 		o.Spec.Context.SourceRef.Namespace = "other-team"
@@ -542,8 +520,7 @@ func TestContextMustBeInTheSameNamespace(t *testing.T) {
 	}
 }
 
-// TestContextRevisionIsHonoured — spec.context.revision is the same pin a sourceRef layer gets, and
-// a mismatch must wait rather than build the wrong commit.
+// TestContextRevisionIsHonoured: a revision mismatch waits rather than building the wrong commit.
 func TestContextRevisionIsHonoured(t *testing.T) {
 	obj := buildOf(t, func(o *ociv1alpha1.ImageBuild) {
 		o.Spec.Context.SourceRef.Revision = "v0.6.8"
@@ -561,15 +538,14 @@ func TestContextRevisionIsHonoured(t *testing.T) {
 	if jobs := jobsIn(t, r, obj.Namespace); len(jobs) != 0 {
 		t.Fatalf("built from the wrong revision: %v", jobs)
 	}
-	// Pending, not stalled: the SOURCE catching up is what resolves it, and that raises no
-	// generation bump here, so stalling would wait for an event that cannot come.
+	// Pending, not stalled: the source catching up raises no generation change here.
 	cond := conditionOf(reload(t, r, obj), ociv1alpha1.ReadyCondition)
 	if cond == nil || cond.Reason != ociv1alpha1.ReasonDependencyNotReady {
 		t.Fatalf("Ready = %+v, want reason %s", cond, ociv1alpha1.ReasonDependencyNotReady)
 	}
 }
 
-// And a matching revision builds, so the pin is a check rather than a block.
+// TestContextRevisionMatchingBuilds: a matching revision builds.
 func TestContextRevisionMatchingBuilds(t *testing.T) {
 	obj := buildOf(t, func(o *ociv1alpha1.ImageBuild) {
 		o.Spec.Context.SourceRef.Revision = "v0.6.8"
@@ -589,11 +565,7 @@ func TestContextRevisionMatchingBuilds(t *testing.T) {
 	}
 }
 
-// TestAnInlineDockerfileNeedsNoContext.
-//
-// The friction this whole change exists to remove: a Dockerfile that only declares a pinned FROM
-// and runs commands reads no files, and requiring a context for it meant pointing a Flux source at
-// an empty directory.
+// TestAnInlineDockerfileNeedsNoContext: a Dockerfile that reads no files needs no Flux source.
 func TestAnInlineDockerfileNeedsNoContext(t *testing.T) {
 	obj := buildOf(t, func(o *ociv1alpha1.ImageBuild) {
 		o.Spec.Context = nil
@@ -601,8 +573,7 @@ func TestAnInlineDockerfileNeedsNoContext(t *testing.T) {
 			Inline: "FROM scratch@sha256:" + strings.Repeat("a", 64) + "\n",
 		}
 	})
-	// No Flux source in the harness at all: if the controller still reached for one this would fail
-	// rather than quietly resolving something.
+	// No Flux source for this object: reaching for one would fail.
 	r := harness(t, "", obj)
 
 	if _, err := reconcileOnce(t, r, obj); err != nil {
@@ -616,12 +587,8 @@ func TestAnInlineDockerfileNeedsNoContext(t *testing.T) {
 	}
 }
 
-// TestAnUnpinnedInlineFromStalls is the one place the two Dockerfile forms behave differently.
-//
-// The Dockerfile IS this spec, so editing it is the fix and the generation change that raises is
-// what wakes the object. Stalling something a spec edit resolves is precisely what Stalled is for.
-// A path Dockerfile gets no such event, which is why the same failure is NOT terminal there — that
-// contrast is asserted below.
+// TestAnUnpinnedInlineFromStalls: the Dockerfile is the spec, so the fix raises a generation change.
+// Contrast TestAnUnpinnedContextFromDoesNotStall.
 func TestAnUnpinnedInlineFromStalls(t *testing.T) {
 	obj := buildOf(t, func(o *ociv1alpha1.ImageBuild) {
 		o.Spec.Context = nil
@@ -644,10 +611,8 @@ func TestAnUnpinnedInlineFromStalls(t *testing.T) {
 	}
 }
 
-// TestAnUnpinnedContextFromDoesNotStall is the other half of the contrast above.
-//
-// The fix is a push to the Flux source, which raises no generation change here, so stalling would
-// leave the object asleep exactly when the thing it needs has been fixed.
+// TestAnUnpinnedContextFromDoesNotStall: the fix is a push to the source, which raises no
+// generation change here.
 func TestAnUnpinnedContextFromDoesNotStall(t *testing.T) {
 	obj := buildOf(t, nil)
 	r := harness(t, "FROM golang:1.26\n", obj)
