@@ -181,8 +181,7 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		// converging a commit, so it gets a quiet fixed-interval retry rather than a Warning
 		// event, an error log and exponential backoff. Crucially it never sets Stalled — the
 		// object that would fix it is a different one, and changing it raises no event here.
-		var pe *recon.PendingError
-		if errors.As(err, &pe) {
+		if recon.IsPending(err) {
 			logger.Info("waiting on a dependency; will retry", "reason", err.Error(),
 				"retryIn", pendingRetryInterval)
 			return ctrl.Result{RequeueAfter: pendingRetryInterval},
@@ -195,8 +194,7 @@ func (r *ImageCompositionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				})
 		}
 
-		var te *recon.TerminalError
-		if errors.As(err, &te) {
+		if recon.IsTerminal(err) {
 			logger.Error(err, "terminal error; not retrying until the spec changes")
 			recon.Event(r.Recorder, &obj, corev1.EventTypeWarning, reasonFor(err), err.Error())
 			// No requeue: Stalled means a human must act. The generation change that fixes it
@@ -425,7 +423,7 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 		return buildResult{}, err
 	}
 
-	opts, err := r.remoteOptions(ctx, obj)
+	opts, err := r.remoteOptions(ctx, obj, tgt.writeRepo)
 	if err != nil {
 		return buildResult{}, err
 	}
@@ -467,13 +465,9 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 
 	for i := range inputs {
 		// Content synthesised during resolution (a ConfigMap) is already on disk; only remote
-		// sources need fetching.
-		if inputs[i].Path != "" {
-			continue
-		}
-
-		// A remove entry has no content to fetch; it produces whiteouts from the spec alone.
-		if len(inputs[i].Remove) > 0 {
+		// sources need fetching. A remove entry has no content to fetch; it produces whiteouts
+		// from the spec alone.
+		if inputs[i].Path != "" || len(inputs[i].Remove) > 0 {
 			continue
 		}
 
@@ -666,9 +660,6 @@ type target struct {
 	tags []string
 	// onConflict decides what happens to a tag that already means something else.
 	onConflict ociv1alpha1.TagConflictPolicy
-	// usesDefault marks a target the OBJECT did not choose, which is the only case where the
-	// operator's own credential may be used. See recon.DefaultRegistry.CredentialFor.
-	usesDefault bool
 }
 
 // target is where this object publishes.
@@ -679,7 +670,6 @@ type target struct {
 func (r *ImageCompositionReconciler) target(obj *ociv1alpha1.ImageComposition) (target, error) {
 	p := obj.Spec.Push
 	repo := ""
-	usesDefault := false
 	if p != nil {
 		repo = p.Repository
 	}
@@ -691,8 +681,7 @@ func (r *ImageCompositionReconciler) target(obj *ociv1alpha1.ImageComposition) (
 			return target{}, recon.Pending(
 				"this object names no repository, and no default registry is configured")
 		}
-		repo = r.Default.RepositoryFor(obj.Namespace, publishName(obj))
-		usesDefault = true
+		repo = r.Default.RepositoryFor(obj.Namespace, obj.Name)
 	}
 
 	tags, err := recon.EffectiveTags(p.GetTags(), p.GetRef())
@@ -700,11 +689,10 @@ func (r *ImageCompositionReconciler) target(obj *ociv1alpha1.ImageComposition) (
 		return target{}, err
 	}
 	return target{
-		writeRepo:   repo,
-		pullRepo:    r.Default.PublicRepository(repo),
-		tags:        tags,
-		onConflict:  p.ResolveConflictPolicy(),
-		usesDefault: usesDefault,
+		writeRepo:  repo,
+		pullRepo:   r.Default.PublicRepository(repo),
+		tags:       tags,
+		onConflict: p.ResolveConflictPolicy(),
 	}, nil
 }
 
@@ -808,31 +796,17 @@ func markDigestTagged(history []ociv1alpha1.BuildRecord, digests []string) {
 	}
 }
 
-// publishName is the repository path an object gets inside the default registry.
-//
-// The object's own name. spec.publish.name used to let a composition choose a different one; with
-// publish gone, an object wanting a specific path names the whole repository in spec.push instead,
-// which is one fewer way to express the same thing.
-func publishName(obj *ociv1alpha1.ImageComposition) string {
-	return obj.Name
-}
-
 // remoteOptions builds registry auth. Credentials are always read from a referenced Secret,
-// never taken from the spec.
+// never taken from the spec. writeRepo is target().writeRepo, so the host the credential is
+// matched against is the one actually pushed to.
 func (r *ImageCompositionReconciler) remoteOptions(
-	ctx context.Context, obj *ociv1alpha1.ImageComposition,
+	ctx context.Context, obj *ociv1alpha1.ImageComposition, writeRepo string,
 ) ([]remote.Option, error) {
-	// Resolved through target() so the host the credential is matched against is the one actually
-	// pushed to.
-	tgt, err := r.target(obj)
-	if err != nil {
-		return nil, err
-	}
 	return recon.RemoteAuth{
 		Reader:    r.Client,
 		Transport: r.Transport,
 		Default:   r.Default,
-	}.Options(ctx, obj.Namespace, tgt.writeRepo, obj.Spec.Push)
+	}.Options(ctx, obj.Namespace, writeRepo, obj.Spec.Push)
 }
 
 func configFrom(c *ociv1alpha1.ImageConfig) oci.Config {

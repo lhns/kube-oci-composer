@@ -2,8 +2,6 @@ package controller
 
 import (
 	"context"
-	"errors"
-	"fmt"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 
@@ -107,13 +105,9 @@ func (r *ImageCompositionReconciler) resolveBases(ctx context.Context, obj *ociv
 	repository, digest := base.Repository()
 	byKey, err := source.PullImageIndex(ctx, repository, digest, want, opts...)
 	if err != nil {
-		var badRef *source.ErrBadReference
-		if errors.As(err, &badRef) {
-			// A platform the base does not offer needs a spec change — either a different base or
-			// a shorter platform list — so retrying would repeat the same failure hourly.
-			return nil, recon.Terminal("base image: %v", err)
-		}
-		return nil, fmt.Errorf("base image: %w", err)
+		// A platform the base does not offer needs a spec change — either a different base or
+		// a shorter platform list — so retrying would repeat the same failure hourly.
+		return nil, pullFailure("base image", err)
 	}
 
 	out := make(map[oci.Platform]v1.Image, len(platforms))

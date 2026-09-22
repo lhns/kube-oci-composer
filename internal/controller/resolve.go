@@ -144,15 +144,20 @@ func (r *ImageCompositionReconciler) pullImageLayer(ctx context.Context, obj *oc
 	}
 	img, err := source.PullImage(ctx, in.URL, in.Digest, opts...)
 	if err != nil {
-		var badRef *source.ErrBadReference
-		if errors.As(err, &badRef) {
-			// A malformed reference, or an index where a platform-specific manifest is required.
-			// Editing the layer is what fixes it, so retrying would repeat the same failure.
-			return nil, recon.Terminal("layer %q: %v", in.Name, err)
-		}
-		return nil, fmt.Errorf("layer %q: %w", in.Name, err)
+		return nil, pullFailure(fmt.Sprintf("layer %q", in.Name), err)
 	}
 	return img, nil
+}
+
+// pullFailure classifies an image pull error. A bad reference (malformed, or an index where a
+// platform manifest is required) is Terminal, because only a spec edit fixes it; anything else is
+// transient.
+func pullFailure(what string, err error) error {
+	var badRef *source.ErrBadReference
+	if errors.As(err, &badRef) {
+		return recon.Terminal("%s: %v", what, err)
+	}
+	return fmt.Errorf("%s: %w", what, err)
 }
 
 // parseMode converts an octal string from the spec into a mode.
@@ -187,13 +192,7 @@ func (r *ImageCompositionReconciler) resolveBase(ctx context.Context, obj *ociv1
 	repository, digest := base.Repository()
 	img, err := source.PullImage(ctx, repository, digest, opts...)
 	if err != nil {
-		var badRef *source.ErrBadReference
-		if errors.As(err, &badRef) {
-			// A malformed reference or a multi-architecture index needs a spec change, so
-			// retrying would only repeat the same failure on an interval.
-			return nil, recon.Terminal("base image: %v", err)
-		}
-		return nil, fmt.Errorf("base image: %w", err)
+		return nil, pullFailure("base image", err)
 	}
 	return img, nil
 }

@@ -141,7 +141,7 @@ func hostOf(reference string) string {
 // refreshing -- have to agree. They were three copies of this function, and three copies of a
 // security-relevant comparison is two too many.
 func InsecureHost(repository string, insecure []string) bool {
-	host, _, _ := strings.Cut(repository, "/")
+	host := hostOf(repository)
 	for _, h := range insecure {
 		if h == host {
 			return true

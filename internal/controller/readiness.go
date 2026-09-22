@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sort"
 	"sync"
-	"time"
 
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -27,10 +26,6 @@ type Readiness struct {
 	// correct here: before the cache syncs the list call fails or blocks, and "not synced" is
 	// genuinely not ready.
 	Client client.Client
-
-	// Timeout bounds the list so a wedged cache surfaces as unready rather than as a probe that
-	// never answers.
-	Timeout time.Duration
 
 	mu   sync.Mutex
 	seen map[types.NamespacedName]struct{}
