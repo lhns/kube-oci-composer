@@ -161,7 +161,7 @@ func TestBuildJobArgs(t *testing.T) {
 		"platform=linux/amd64,linux/arm64",
 		"target=runtime",
 		"build-arg:VERSION=1.2.3",
-			// Pushed by digest; the controller tags afterwards (ADR 0054).
+		// Pushed by digest; the controller tags afterwards (ADR 0054).
 		"name=ghcr.io/me/app,push=true,push-by-digest=true",
 		"push=true",
 		"rewrite-timestamp=true",

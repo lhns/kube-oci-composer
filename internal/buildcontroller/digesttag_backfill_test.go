@@ -27,7 +27,7 @@ func TestAConvergedBuildGainsItsDigestsOwnTagWithoutRebuilding(t *testing.T) {
 
 	obj := buildOf(t, func(b *ociv1alpha1.ImageBuild) {
 		b.Spec.Push = &ociv1alpha1.Push{Repository: repo, Tags: []string{"v1"}}
-	// What an object published before the digest tag existed looks like.
+		// What an object published before the digest tag existed looks like.
 		b.Status.Artifact = &ociv1alpha1.ArtifactStatus{Digest: current, Tags: []string{repo + ":v1"}}
 		b.Status.History = []ociv1alpha1.BuildRecord{
 			{Digest: current, Tags: []string{repo + ":v1"}},

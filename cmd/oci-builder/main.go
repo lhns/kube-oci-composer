@@ -177,8 +177,8 @@ func main() {
 		LeaderElectionID:       "oci-builder.lhns.de",
 		Client: client.Options{
 			Cache: &client.CacheOptions{
-					// Read by name only: RBAC grants get, not list/watch, so a Secret cache could
-					// not even start.
+				// Read by name only: RBAC grants get, not list/watch, so a Secret cache could
+				// not even start.
 				DisableFor: []client.Object{&corev1.Secret{}},
 			},
 		},
