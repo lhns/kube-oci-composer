@@ -5,6 +5,8 @@ may change between minor versions.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-23
+
 Upgrading from 0.5.x with the bundled registry: follow the three steps in the first entry.
 
 ### Changed
