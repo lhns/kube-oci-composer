@@ -125,8 +125,9 @@ func Push(repo name.Repository, subject v1.Descriptor, predicateType string, pay
 	if err := remote.Put(ref, taggable{raw: raw, mediaType: types.OCIManifestSchema1}, opts...); err != nil {
 		return v1.Hash{}, fmt.Errorf("pushing the attestation manifest: %w", err)
 	}
-	// Also tagged after its own digest (ADR 0060): untagged content is reclaimed by age once
-	// keepUntagged is off, however often the refresher pulls it.
+	// Also tagged after its own digest (ADR 0060), for registries that expire untagged content by
+	// age. zot does not need it: it keeps a referrer while its subject exists, tagged or not, and
+	// records no pulls of one, so on zot this tag lapses after a window and nothing is lost.
 	own := repo.Tag(OwnTag(digest))
 	if err := remote.Put(own, taggable{raw: raw, mediaType: types.OCIManifestSchema1}, opts...); err != nil {
 		return v1.Hash{}, fmt.Errorf("naming the attestation manifest: %w", err)

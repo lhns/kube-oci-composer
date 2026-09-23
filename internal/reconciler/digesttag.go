@@ -87,8 +87,9 @@ func ApplyDigestTag(repo, digest string, refOpts []name.Option, opts []remote.Op
 }
 
 // ApplyDigestTagWithReferrers is ApplyDigestTag for digest and then for every referrer of it: the
-// SBOM and provenance the composer attaches (ADR 0008). Before ADR 0060 those were pushed untagged,
-// and without keepUntagged an untagged referrer is collected while its subject lives on.
+// SBOM and provenance the composer attaches (ADR 0008), which were pushed untagged before ADR 0060.
+// For registries that expire untagged content by age; zot keeps a referrer while its subject
+// exists regardless.
 //
 // Any failure is returned, so the caller does not record the subject as tagged and the next pass
 // retries the lot. ApplyDigestTag is idempotent, so repeating the subject costs one request.

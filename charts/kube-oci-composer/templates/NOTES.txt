@@ -123,7 +123,7 @@ it says something only when it matters. The config is a Secret when it holds cre
 {{- if and .Release.IsUpgrade .Values.registry.enabled (not .Values.registry.retention.keepUntagged) (contains "keepUntagged" $liveRegistryConfig) }}
 
 WARNING: this upgrade stops the registry keeping untagged content (ADR 0060). Content published
-before it -- digest-only publications and attestations -- carries no tag until its object next
+before it -- digest-only publications above all -- carries no tag until its object next
 reconciles, and until then it can be collected. If you have not done so already:
 
   1. Re-run this upgrade with registry.retention.keepUntagged=true.

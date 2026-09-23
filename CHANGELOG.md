@@ -30,7 +30,8 @@ Upgrading from 0.5.x with the bundled registry: follow the three steps in the fi
 
   **Upgrading from 0.5.x.** Content published by 0.5.x has no `digest-` tag until its object
   reconciles under 0.6.0 (nothing is rebuilt or republished to add it). Until then an untagged
-  digest-only publication or attestation can be collected while something still pulls it. So:
+  digest-only publication can be collected while something still pulls it. (Attestations are safe
+  on the bundled registry, which keeps a referrer while its subject exists.) So:
 
   1. Upgrade with `--set registry.retention.keepUntagged=true`.
   2. Wait until every object has a `digest-` tag on `status.artifact` **and on every

@@ -64,7 +64,7 @@ Rules that make it safe:
   upgrade -- to a different digest -- and reassembled every composition.
 - **Upgrade order.** Both halves ship in one release: the tag, and `registry.retention.keepUntagged`
   off by default. Off before objects are backfilled exposes a still-untagged digest-only
-  publication or attestation to collection while something pulls it. So the upgrade from 0.5.x
+  publication to collection while something pulls it. So the upgrade from 0.5.x
   keeps it on until every object carries the tag, and NOTES says so on exactly that upgrade: it
   looks up the live registry config and warns only when this render is the one removing
   `keepUntagged`. A warning rather than a refusal, by choice.

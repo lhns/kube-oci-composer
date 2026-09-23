@@ -104,10 +104,15 @@ same_digests() { # $1 before, $2 after, $3 when
     || fail "a digest moved $3: an unchanged spec must not be reassembled"
   [ "$(echo "$2" | jq '[.[] | select(.stalled > 0)] | length')" = 0 ] || fail "an object stalled $3"
 }
-check_registry() { # everything live resolves, and carries its own tag
+# Everything live resolves, and carries its own tag. The SBOM's own tag is checked only with
+# $2=backfill: zot keeps a referrer while its subject exists but records no pulls of one, so after a
+# window that tag lapses -- harmlessly, and the SBOM itself must still resolve.
+check_registry() { # $1 state, $2 "backfill" to also require the SBOM's own tag
   echo "$1" | jq -c '.[]' | while read -r o; do
     repo="$(echo "$o" | jq -r .repo)" digest="$(echo "$o" | jq -r .digest)" sbom="$(echo "$o" | jq -r .sbom)"
-    for ref in "$digest" "digest-${digest#sha256:}" "$sbom" "digest-${sbom#sha256:}"; do
+    refs=("$digest" "digest-${digest#sha256:}" "$sbom")
+    [ "${2:-}" = backfill ] && refs+=("digest-${sbom#sha256:}")
+    for ref in "${refs[@]}"; do
       [ "$(resolves "$repo" "$ref")" = 200 ] || fail "$repo does not serve $ref"
     done
   done
@@ -178,7 +183,7 @@ same_digests "$BEFORE" "$AFTER" "on upgrade"
 echo "rolling's history: $(echo "$AFTER" | jq -c '.[] | select(.name == "rolling") | {history, lost}')"
 
 curl_pod
-check_registry "$AFTER"
+check_registry "$AFTER" backfill
 
 step "step 3: stop keeping untagged content, compress the clock, retire one object"
 kubectl -n "$APP" delete imagecomposition retired --wait
