@@ -35,20 +35,24 @@ Upgrading from 0.5.x with the bundled registry: follow the three steps in the fi
   1. Upgrade with `--set registry.retention.keepUntagged=true`.
   2. Wait until every object has a `digest-` tag on `status.artifact` **and on every
      `status.history` entry**, which is what a rollback pulls. Both controllers add them on startup,
-     suspended and stalled objects included, so this usually takes minutes. This lists the objects
-     still missing one; wait until it prints nothing:
+     suspended and stalled objects included, so this usually takes minutes. A history entry whose
+     digest the registry had already lost cannot be tagged; it is marked with
+     `status.history[].lost` and not counted. This lists the objects still missing a tag; wait
+     until it prints nothing:
 
      ```sh
      kubectl get imagecompositions,imagebuilds -A -o json | jq -r '.items[]
        | select([.status.artifact // empty] + (.status.history // [])
-                | any(.digest and ((.tags // []) | any(test(":digest-|^digest-")) | not)))
+                | any(.digest and (.lost | not) and ((.tags // []) | any(test(":digest-|^digest-")) | not)))
        | "\(.kind) \(.metadata.namespace)/\(.metadata.name)"'
      ```
 
   3. Upgrade again without the override.
 
   The chart's NOTES print these steps on any upgrade that turns `keepUntagged` off: on step 3, where
-  they confirm what you already did, and on an upgrade that skipped step 1.
+  they confirm what you already did, and on an upgrade that skipped step 1. They read the live
+  registry config to decide, so under `helm template`, a client-side dry run or Argo CD they never
+  appear: follow the steps above yourself.
 
 - **BREAKING: retention is set by one value, `retention.window`, and the rest is derived.**
   `registry.retention.window` moves to `retention.window`, because the controllers read it too,

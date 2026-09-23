@@ -116,7 +116,9 @@ it says something only when it matters. The config is a Secret when it holds cre
 {{- $liveRegistryConfig = index (.data | default dict) "config.json" | default "" }}
 {{- end }}
 {{- with (lookup "v1" "Secret" .Release.Namespace $registryConfigName) }}
-{{- $liveRegistryConfig = index (.data | default dict) "config.json" | default "" | b64dec }}
+{{- with index (.data | default dict) "config.json" }}
+{{- $liveRegistryConfig = b64dec . }}
+{{- end }}
 {{- end }}
 {{- if and .Release.IsUpgrade .Values.registry.enabled (not .Values.registry.retention.keepUntagged) (contains "keepUntagged" $liveRegistryConfig) }}
 
@@ -125,11 +127,12 @@ before it -- digest-only publications and attestations -- carries no tag until i
 reconciles, and until then it can be collected. If you have not done so already:
 
   1. Re-run this upgrade with registry.retention.keepUntagged=true.
-  2. Wait until this lists nothing (both controllers backfill on startup, usually within minutes):
+  2. Wait until this lists nothing (both controllers backfill on startup, usually within minutes;
+     a history entry the registry had already lost is marked `lost` and not counted):
 
        kubectl get imagecompositions,imagebuilds -A -o json | jq -r '.items[]
          | select([.status.artifact // empty] + (.status.history // [])
-                  | any(.digest and ((.tags // []) | any(test(":digest-|^digest-")) | not)))
+                  | any(.digest and (.lost | not) and ((.tags // []) | any(test(":digest-|^digest-")) | not)))
          | "\(.kind) \(.metadata.namespace)/\(.metadata.name)"'
 
   3. Upgrade again without the override.
