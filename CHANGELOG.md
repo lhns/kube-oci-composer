@@ -5,7 +5,13 @@ may change between minor versions.
 
 ## [Unreleased]
 
-## [0.6.0] - 2026-09-23
+## [0.6.1] - 2026-09-23
+
+The first published release of the 0.6.0 changes below; read those, including the upgrade steps.
+0.6.0 was tagged but never published: a timing race in its upgrade test failed the release gate, so
+no 0.6.0 images or chart exist. 0.6.1 ships the same code, with the test fixed.
+
+## [0.6.0] - 2026-09-23 [not published]
 
 Upgrading from 0.5.x with the bundled registry: follow the three steps in the first entry.
 

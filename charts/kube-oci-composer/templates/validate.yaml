@@ -13,9 +13,9 @@ template, install and upgrade.
 {{- include "kube-oci-composer.checkRegistryReplicas" . -}}
 {{- include "kube-oci-composer.checkRegistryMigration" . -}}
 
-{{- /* Moved in 0.6.0. Refused rather than ignored: ignored, a lengthened window silently fell back to the default and content was collected sooner. */}}
+{{- /* Moved in 0.6.1. Refused rather than ignored: ignored, a lengthened window silently fell back to the default and content was collected sooner. */}}
 {{- if hasKey .Values.registry.retention "window" }}
-{{- fail "registry.retention.window moved to retention.window in 0.6.0, where both controllers and the registry read it. Set retention.window instead and remove registry.retention.window." }}
+{{- fail "registry.retention.window moved to retention.window in 0.6.1, where both controllers and the registry read it. Set retention.window instead and remove registry.retention.window." }}
 {{- end }}
 
 {{- /* An empty readTimeout renders no key and zot injects 60s (ADR 0047). */}}

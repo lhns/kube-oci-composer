@@ -61,12 +61,19 @@ jobs:
           node_image: kindest/node:v1.36.1
           cluster_name: kube-oci-composer-upgrade
       - uses: azure/setup-helm@v5
-      # From the newest release that is not the ref being tested: on a v* tag that is the one before
-      # it, and on a pull request the latest published release.
+      # From the newest published release that is not the ref being tested: on a v* tag the one
+      # before it, on a pull request the latest. A tag whose release gate failed has no chart; skip it.
       - name: Choose the release to upgrade from
         run: |
           previous="${{ inputs.previous }}"
-          [ -n "$previous" ] || previous=$(git tag --list 'v*' --sort=-v:refname | grep -vx "${GITHUB_REF_NAME}" | head -1)
+          if [ -z "$previous" ]; then
+            for tag in $(git tag --list 'v*' --sort=-v:refname | grep -vx "${GITHUB_REF_NAME}"); do
+              if helm show chart oci://ghcr.io/lhns/charts/kube-oci-composer --version "${tag#v}" >/dev/null 2>&1; then
+                previous=$tag; break
+              fi
+              echo "skipping $tag: no published chart"
+            done
+          fi
           [ -n "$previous" ] || { echo "no earlier release tag"; exit 1; }
           echo "PREVIOUS=${previous#v}" >> "$GITHUB_ENV"
           echo "upgrading from ${previous#v}"
