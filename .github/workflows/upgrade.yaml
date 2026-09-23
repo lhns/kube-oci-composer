@@ -15,6 +15,11 @@ on:
       - "test/upgrade/**"
       - ".github/workflows/upgrade.yaml"
   workflow_call:
+  workflow_dispatch:
+    inputs:
+      previous:
+        description: "Release to upgrade from, e.g. v0.5.1 (default: the newest tag other than this ref)"
+        required: false
 
 permissions:
   contents: read
@@ -60,7 +65,8 @@ jobs:
       # it, and on a pull request the latest published release.
       - name: Choose the release to upgrade from
         run: |
-          previous=$(git tag --list 'v*' --sort=-v:refname | grep -vx "${GITHUB_REF_NAME}" | head -1)
+          previous="${{ inputs.previous }}"
+          [ -n "$previous" ] || previous=$(git tag --list 'v*' --sort=-v:refname | grep -vx "${GITHUB_REF_NAME}" | head -1)
           [ -n "$previous" ] || { echo "no earlier release tag"; exit 1; }
           echo "PREVIOUS=${previous#v}" >> "$GITHUB_ENV"
           echo "upgrading from ${previous#v}"

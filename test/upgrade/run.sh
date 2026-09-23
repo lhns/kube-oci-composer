@@ -187,9 +187,17 @@ check_registry "$AFTER" backfill
 
 step "step 3: stop keeping untagged content, compress the clock, retire one object"
 kubectl -n "$APP" delete imagecomposition retired --wait
-helm upgrade "$RELEASE" "$CHART" "${COMMON[@]}" "${NEW_IMAGES[@]}" \
-  --set retention.window=30s --set retention.refreshFactor=30 --set retention.refreshInterval=1s \
-  --set registry.retention.gcFactor=6 --set imageBuild.buildPollInterval=3s \
+# Speed the refresher up while the window is still long, and let it complete a cycle: nothing has
+# pulled the live content since the backfill, so shortening the window first lets the registry
+# collect it before the restarted controller's first refresh -- a clock no real upgrade compresses.
+FAST=(--set retention.refreshFactor=30 --set retention.refreshInterval=1s)
+helm upgrade "$RELEASE" "$CHART" "${COMMON[@]}" "${NEW_IMAGES[@]}" "${FAST[@]}" --wait --timeout 5m
+refreshed() { kubectl -n "$NS" logs deploy/"$RELEASE" | grep -q '"retention refresh complete"'; }
+for _ in $(seq 60); do refreshed && break; sleep 2; done
+refreshed || fail "the refresher never completed a cycle"
+# The window must outlast the controller's restart and first refresh; 2m does, with room to spare.
+helm upgrade "$RELEASE" "$CHART" "${COMMON[@]}" "${NEW_IMAGES[@]}" "${FAST[@]}" \
+  --set retention.window=2m --set registry.retention.gcFactor=6 --set imageBuild.buildPollInterval=3s \
   --set registry.retention.gcMaxSchedulerDelay=1s --wait --timeout 5m
 
 # The control: nothing refreshes the retired object's content, so it must actually go. Otherwise
