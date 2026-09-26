@@ -159,10 +159,12 @@ retired="$(echo "$BEFORE" | jq -c '.[] | select(.name == "retired")')"
 
 # Whether the installed release keeps untagged content, which decides the upgrade procedure (0.6.0's
 # CHANGELOG). Its registry config is a ConfigMap or, with S3 credentials, a Secret.
+# Read into a variable first: under pipefail, the absent one of the two would fail a pipeline into grep.
 keeps_untagged() {
-  { kubectl -n "$NS" get configmap "$RELEASE-registry" -o jsonpath='{.data.config\.json}' 2>/dev/null
-    kubectl -n "$NS" get secret "$RELEASE-registry" -o jsonpath='{.data.config\.json}' 2>/dev/null | base64 -d
-  } | grep -q keepUntagged
+  local config
+  config="$(kubectl -n "$NS" get configmap "$RELEASE-registry" -o jsonpath='{.data.config\.json}' 2>/dev/null || true)"
+  config+="$(kubectl -n "$NS" get secret "$RELEASE-registry" -o jsonpath='{.data.config\.json}' 2>/dev/null | base64 -d || true)"
+  grep -q keepUntagged <<<"$config"
 }
 if keeps_untagged; then MIGRATION=true; else MIGRATION=false; fi
 echo "$PREVIOUS keeps untagged content: $MIGRATION"
