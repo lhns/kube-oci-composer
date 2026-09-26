@@ -694,12 +694,8 @@ func (r *ImageBuildReconciler) historyLimit(obj *ociv1alpha1.ImageBuild) int {
 func (r *ImageBuildReconciler) applyOutcome(obj *ociv1alpha1.ImageBuild, err error) {
 	switch {
 	case err == nil && obj.Status.BuildRef != nil:
-		// A build is running. Ready would name the previous image to anything waiting (ADR 0061).
-		published := ""
-		if obj.Status.Artifact != nil {
-			published = obj.Status.Artifact.Ref
-		}
-		recon.SetProgressing(obj, "building "+obj.Status.BuildRef.Name, published)
+		// A build in flight (ADR 0061).
+		recon.SetProgressing(obj, "building "+obj.Status.BuildRef.Name, obj.Status.Artifact)
 
 	case err == nil:
 		recon.SetCondition(obj, ociv1alpha1.ReadyCondition, metav1.ConditionTrue,

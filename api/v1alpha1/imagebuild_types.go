@@ -310,7 +310,8 @@ type ImageBuildStatus struct {
 	Conflict *TagConflictStatus `json:"conflict,omitempty"`
 
 	// BuildRef is the Job currently executing, so a controller that restarts mid-build adopts it
-	// rather than starting a second one.
+	// rather than starting a second one. Set exactly while a build is in flight, which is what
+	// reports the object Progressing rather than Ready (ADR 0061).
 	// +optional
 	BuildRef *LocalObjectReference `json:"buildRef,omitempty"`
 

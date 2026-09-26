@@ -7,12 +7,10 @@ may change between minor versions.
 
 ### Fixed
 
-- An `ImageBuild` reported `Ready=True` for the **previous** image while its rebuild ran, for as long
-  as the build took. Anything waiting on it (Flux `wait: true`, kstatus, `kubectl wait`) proceeded,
-  and could roll pods onto the old digest. `ImageComposition` did the same while it assembled, which
-  is brief but matters after an edited ConfigMap or a new source revision, where the generation does
-  not change. Work in flight is now `Ready=Unknown` with `Reconciling=True`, reason `Progressing`,
-  and the message names the image still published
+- An `ImageBuild` reported `Ready=True` for the **previous** image for as long as its rebuild ran,
+  and an `ImageComposition` while it assembled. Anything waiting on them (Flux `wait: true`, kstatus,
+  `kubectl wait`) could proceed and roll pods onto the old digest. Work in flight is now
+  `Ready=Unknown` with `Reconciling=True`, reason `Progressing`
   ([ADR 0061](docs/adr/0061-ready-names-the-image-the-spec-asks-for.md)).
 
 ## [0.6.1] - 2026-09-23

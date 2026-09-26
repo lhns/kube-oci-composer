@@ -333,7 +333,8 @@ func tagSuffix(tags []string) string {
 	return " as " + strings.Join(tags, ", ")
 }
 
-// reconcileArtifact does the work and returns what is published.
+// reconcileArtifact does the work and returns what is published. Past the cheap path it reports
+// progress first, since the pass's outcome is only written once it returns.
 //
 // Ordered by cost: the input hash comes from the spec alone, so the common "nothing changed" case
 // costs a few HEADs. Only past that is anything fetched, and only past the digest comparison is
@@ -404,15 +405,9 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 			Attestations: obj.Status.Attestations.DeepCopy()}, nil
 	}
 
-	// Something will be fetched and assembled. Said before it starts, or Ready names the previous
-	// image to anything waiting (ADR 0061). The pass is not over, so observedGeneration and
-	// lastHandledReconcileAt stay as they are.
-	current := ""
-	if prev := obj.Status.Artifact; prev != nil {
-		current = prev.Ref
-	}
+	// Before fetching, so Ready does not name the previous image meanwhile (ADR 0061).
 	if err := r.writeStatus(ctx, obj, func(o *ociv1alpha1.ImageComposition) {
-		recon.SetProgressing(o, "assembling for inputs "+inputHash, current)
+		recon.SetProgressing(o, "assembling for inputs "+inputHash, obj.Status.Artifact)
 	}); err != nil {
 		return buildResult{}, fmt.Errorf("reporting progress: %w", err)
 	}
@@ -825,9 +820,8 @@ func (r *ImageCompositionReconciler) finalize(ctx context.Context, obj *ociv1alp
 func (r *ImageCompositionReconciler) patchStatus(ctx context.Context, obj *ociv1alpha1.ImageComposition, mutate func(*ociv1alpha1.ImageComposition)) error {
 	return r.writeStatus(ctx, obj, func(o *ociv1alpha1.ImageComposition) {
 		mutate(o)
-		// Set on EVERY pass's end, as Flux does: both describe the pass, not its outcome. Echoing
-		// only on success makes `flux reconcile` time out on a failure, and kstatus read it as in
-		// progress.
+		// On EVERY pass's end, as Flux does: both describe the pass, not its outcome. Echoed only on
+		// success, `flux reconcile` would time out on a failure.
 		o.Status.ObservedGeneration = o.Generation
 		o.Status.LastHandledReconcileAt = o.Annotations[ociv1alpha1.ReconcileRequestAnnotation]
 	})

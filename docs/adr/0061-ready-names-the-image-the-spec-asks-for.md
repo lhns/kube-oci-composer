@@ -16,9 +16,9 @@ pass that started a Job and every pass that found it still running. To kstatus, 
 `wait: true` uses, that reads as finished.
 
 `ImageComposition` had the same gap, shorter. It assembles within one reconcile and wrote status only
-at the end, so the previous pass's `Ready=True` stood while it fetched, assembled and pushed. After a
-spec edit kstatus is saved by `observedGeneration` lagging. After an edited ConfigMap or a moved
-source revision it is not: the generation never changes, and only the conditions can say "wait".
+at the end, so the previous pass's `Ready=True` stood while it fetched, assembled and pushed. After an
+edited ConfigMap or a moved source revision the generation does not change, so only the conditions
+can say "wait".
 
 ## Decision
 
@@ -41,8 +41,6 @@ A converged pass writes no Progressing, so an interval reconcile never flickers.
 
 ## Consequences
 
-- `flux` `wait: true`, `kstatus`, and `kubectl wait --for=condition=Ready` once `observedGeneration`
-  has caught up, all hold until the new image is published.
 - A rebuild that turns out to reproduce the published digest still shows Progressing while it
   assembles. The controller did not know until it had assembled.
 - Nothing inside the controllers read `Ready` before or after. Compositions consume
@@ -54,7 +52,6 @@ A converged pass writes no Progressing, so an interval reconcile never flickers.
   for in progress. Dashboards and alerts on `Ready=False` would fire on every rebuild.
 - **Hold the builder's `observedGeneration` back until the build finishes.** kstatus would wait, but
   so would the retention refresher, cluster-wide, for as long as any build runs. That is the stall
-  a suspended `ImageBuild` caused before 0.6.0. It also would not cover an input change, where the
-  generation does not move.
+  a suspended `ImageBuild` caused before 0.6.0. Nor would it cover an input change.
 - **Only document it** ("wait on `status.artifact.digest`"). The consumer rarely knows the digest to
   wait for; that is what it is waiting to learn.

@@ -493,10 +493,10 @@ on Flux. It runs on any cluster. Where Flux is present, the division is the one 
 draws: this controller owns what is **available**, git owns what is **deployed**.
 
 Waiting on an object works as it does for Flux's own kinds: `wait: true`, kstatus, or
-`kubectl wait --for=condition=Ready` once `observedGeneration` has caught up. `Ready=True` means the
-image the current inputs produce is published. While a build or assembly runs, the object is
-`Ready=Unknown` / `Reconciling=True`, reason `Progressing`, and `status.artifact` still names the
-previous image ([ADR 0061](docs/adr/0061-ready-names-the-image-the-spec-asks-for.md)).
+`kubectl wait --for=condition=Ready` once `observedGeneration` has caught up. While a build or
+assembly runs, the object is `Ready=Unknown` / `Reconciling=True`, reason `Progressing`, and
+`status.artifact` still names the previous image
+([ADR 0061](docs/adr/0061-ready-names-the-image-the-spec-asks-for.md)).
 
 ## Documentation
 
