@@ -5,6 +5,10 @@ may change between minor versions.
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-09-26
+
+No upgrade steps: upgrade from 0.6.1 directly. From 0.5.x, follow the steps under 0.6.0.
+
 ### Fixed
 
 - An `ImageBuild` reported `Ready=True` for the **previous** image for as long as its rebuild ran,
