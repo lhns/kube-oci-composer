@@ -9,7 +9,9 @@
 #     controller has fully reconciled each object, which a requestedAt annotation proves;
 #   - every artifact, history entry and SBOM referrer gains its digest- tag, or is marked lost if the
 #     previous release had already lost it (ADR 0060), suspended objects included;
-#   - NOTES warns on the upgrade that stops keeping untagged content;
+#   - NOTES warns on the upgrade that stops keeping untagged content, and only on that one. From a
+#     release that kept it (0.5.x) this runs the documented three-step migration; from one that did
+#     not, a plain upgrade;
 #   - with keepUntagged off and a compressed clock, a deleted object's content IS collected (the
 #     control) and everything live still resolves.
 #
@@ -155,6 +157,16 @@ echo "$BEFORE"
   || fail "the rolling object's history has one entry, so no older digest is being tested"
 retired="$(echo "$BEFORE" | jq -c '.[] | select(.name == "retired")')"
 
+# Whether the installed release keeps untagged content, which decides the upgrade procedure (0.6.0's
+# CHANGELOG). Its registry config is a ConfigMap or, with S3 credentials, a Secret.
+keeps_untagged() {
+  { kubectl -n "$NS" get configmap "$RELEASE-registry" -o jsonpath='{.data.config\.json}' 2>/dev/null
+    kubectl -n "$NS" get secret "$RELEASE-registry" -o jsonpath='{.data.config\.json}' 2>/dev/null | base64 -d
+  } | grep -q keepUntagged
+}
+if keeps_untagged; then MIGRATION=true; else MIGRATION=false; fi
+echo "$PREVIOUS keeps untagged content: $MIGRATION"
+
 step "build this tree's images"
 if ! docker image inspect "$COMPOSER_IMG" >/dev/null 2>&1; then
   docker build -t "$COMPOSER_IMG" --build-arg CMD=oci-composer "$HERE/../.."
@@ -162,13 +174,20 @@ if ! docker image inspect "$COMPOSER_IMG" >/dev/null 2>&1; then
 fi
 kind load docker-image "$COMPOSER_IMG" "$BUILDER_IMG" --name "$CLUSTER"
 
-step "NOTES warns on the upgrade that removes keepUntagged"
-helm upgrade "$RELEASE" "$CHART" "${COMMON[@]}" "${NEW_IMAGES[@]}" --dry-run=server \
-  | grep -q "stops the registry keeping untagged" || fail "no upgrade warning on the upgrade from $PREVIOUS"
+step "NOTES warns exactly when the upgrade removes keepUntagged"
+notes="$(helm upgrade "$RELEASE" "$CHART" "${COMMON[@]}" "${NEW_IMAGES[@]}" --dry-run=server)"
+warned=false
+grep -q "stops the registry keeping untagged" <<<"$notes" && warned=true
+[ "$warned" = "$MIGRATION" ] || fail "NOTES warned=$warned on the upgrade from $PREVIOUS, want $MIGRATION"
 
-step "step 1: upgrade, keeping untagged content until the backfill is done"
-helm upgrade "$RELEASE" "$CHART" "${COMMON[@]}" "${NEW_IMAGES[@]}" \
-  --set registry.retention.keepUntagged=true --wait --timeout 5m
+if $MIGRATION; then
+  step "step 1: upgrade, keeping untagged content until the backfill is done"
+  helm upgrade "$RELEASE" "$CHART" "${COMMON[@]}" "${NEW_IMAGES[@]}" \
+    --set registry.retention.keepUntagged=true --wait --timeout 5m
+else
+  step "step 1: upgrade"
+  helm upgrade "$RELEASE" "$CHART" "${COMMON[@]}" "${NEW_IMAGES[@]}" --wait --timeout 5m
+fi
 kubectl -n "$NS" rollout status deploy/"$RELEASE" --timeout=5m
 
 step "step 2: every object gains its digest- tag, or is marked lost"
