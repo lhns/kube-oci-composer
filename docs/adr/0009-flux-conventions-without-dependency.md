@@ -21,7 +21,9 @@ Implemented, and asserted by tests:
 
 - **kstatus conditions**: `Ready`, `Reconciling`, `Stalled`. `Stalled` means a *terminal* error —
   a digest mismatch, an invalid spec — and is **not retried**; transient failures stay
-  `Reconciling` and are returned so controller-runtime backs off. Getting this split right is most
+  `Reconciling` and are returned so controller-runtime backs off. Work in flight is `Ready=Unknown`
+  with `Reconciling=True`, never `Ready=True` for the image being replaced
+  ([0061](0061-ready-names-the-image-the-spec-asks-for.md)). Getting this split right is most
   of what makes a controller feel Flux-like, and it is easy to get subtly wrong.
 
   **The test for `Stalled` is narrow: editing THIS object's spec must be what fixes it.** That is

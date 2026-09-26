@@ -17,7 +17,7 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0006](0006-push-is-optional.md) | `push` is optional; a built-in endpoint means no registry is required | **Superseded by [0035](0035-a-registry-is-the-only-publication-path.md)** |
 | [0007](0007-packaging.md) | Packaging: OCI chart and image published to ghcr | Accepted |
 | [0008](0008-supply-chain.md) | Supply chain: referrers for SBOM and signatures; key-based signing, not keyless | Accepted, amended by 0040 |
-| [0009](0009-flux-conventions-without-dependency.md) | Flux conventions without a Flux dependency, and the name | Accepted |
+| [0009](0009-flux-conventions-without-dependency.md) | Flux conventions without a Flux dependency, and the name | Accepted, sharpened by 0061 |
 | [0010](0010-workloads-reference-digests.md) | Workloads reference digests, never tags | Accepted, amended by 0060 |
 | [0011](0011-content-tags-expire.md) | Content tags expire: mark-and-sweep garbage collection | Accepted, amends 0010; amended by 0060 |
 | [0012](0012-keep-pkg-registry.md) | Keep `pkg/registry`; own only the blob handler | Moot since [0035](0035-a-registry-is-the-only-publication-path.md) |
@@ -67,6 +67,7 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0057](0057-the-toolchain-is-an-input.md) | The toolchain is an input to the artifact | **Accepted** |
 | [0059](0059-what-causes-a-rebuild.md) | What causes a rebuild | **Accepted** |
 | [0060](0060-every-manifest-carries-its-own-name.md) | Every manifest carries its own name | **Accepted**, supersedes part of 0017 |
+| [0061](0061-ready-names-the-image-the-spec-asks-for.md) | Ready names the image the spec asks for | **Accepted**, sharpens 0009 |
 
 ## Open questions
 

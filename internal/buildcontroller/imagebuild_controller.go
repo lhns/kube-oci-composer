@@ -581,6 +581,8 @@ func (r *ImageBuildReconciler) observeJob(ctx context.Context, obj *ociv1alpha1.
 		return ctrl.Result{}, fmt.Errorf("build failed: %s", msg)
 
 	default:
+		// Still running. Recorded even when adopted, so this object reports it as in flight.
+		obj.Status.BuildRef = &ociv1alpha1.LocalObjectReference{Name: job.Name}
 		return ctrl.Result{RequeueAfter: r.pollInterval()}, nil
 	}
 }
@@ -691,6 +693,14 @@ func (r *ImageBuildReconciler) historyLimit(obj *ociv1alpha1.ImageBuild) int {
 // applyOutcome sets the conditions for whatever just happened.
 func (r *ImageBuildReconciler) applyOutcome(obj *ociv1alpha1.ImageBuild, err error) {
 	switch {
+	case err == nil && obj.Status.BuildRef != nil:
+		// A build is running. Ready would name the previous image to anything waiting (ADR 0061).
+		published := ""
+		if obj.Status.Artifact != nil {
+			published = obj.Status.Artifact.Ref
+		}
+		recon.SetProgressing(obj, "building "+obj.Status.BuildRef.Name, published)
+
 	case err == nil:
 		recon.SetCondition(obj, ociv1alpha1.ReadyCondition, metav1.ConditionTrue,
 			ociv1alpha1.ReasonSucceeded, readyMessage(obj))
@@ -853,6 +863,8 @@ func (r *ImageBuildReconciler) SetupWithManager(mgr ctrl.Manager) error {
 func (r *ImageBuildReconciler) recordKept(obj *ociv1alpha1.ImageBuild, c *ociv1alpha1.TagConflictStatus) {
 	obj.Status.Conflict = c
 	obj.Status.Failures = 0
+	// Nothing is in flight any more, even when the kept tag was found after a Job ran.
+	obj.Status.BuildRef = nil
 	recon.Event(r.Recorder, obj, corev1.EventTypeNormal, ociv1alpha1.ReasonSucceeded,
 		fmt.Sprintf("Kept %s at %s; no build was run (onConflict: Keep)", c.Tag, c.Existing))
 }

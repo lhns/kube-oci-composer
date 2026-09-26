@@ -404,6 +404,19 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 			Attestations: obj.Status.Attestations.DeepCopy()}, nil
 	}
 
+	// Something will be fetched and assembled. Said before it starts, or Ready names the previous
+	// image to anything waiting (ADR 0061). The pass is not over, so observedGeneration and
+	// lastHandledReconcileAt stay as they are.
+	current := ""
+	if prev := obj.Status.Artifact; prev != nil {
+		current = prev.Ref
+	}
+	if err := r.writeStatus(ctx, obj, func(o *ociv1alpha1.ImageComposition) {
+		recon.SetProgressing(o, "assembling for inputs "+inputHash, current)
+	}); err != nil {
+		return buildResult{}, fmt.Errorf("reporting progress: %w", err)
+	}
+
 	for i := range inputs {
 		// Already on disk (a ConfigMap), or a remove entry with nothing to fetch.
 		if inputs[i].Path != "" || len(inputs[i].Remove) > 0 {
@@ -808,18 +821,26 @@ func (r *ImageCompositionReconciler) finalize(ctx context.Context, obj *ociv1alp
 	return ctrl.Result{}, client.IgnoreNotFound(r.Patch(ctx, obj, patch))
 }
 
+// patchStatus ends a pass: it applies mutate to the latest object and stamps the pass as handled.
 func (r *ImageCompositionReconciler) patchStatus(ctx context.Context, obj *ociv1alpha1.ImageComposition, mutate func(*ociv1alpha1.ImageComposition)) error {
-	key := client.ObjectKeyFromObject(obj)
+	return r.writeStatus(ctx, obj, func(o *ociv1alpha1.ImageComposition) {
+		mutate(o)
+		// Set on EVERY pass's end, as Flux does: both describe the pass, not its outcome. Echoing
+		// only on success makes `flux reconcile` time out on a failure, and kstatus read it as in
+		// progress.
+		o.Status.ObservedGeneration = o.Generation
+		o.Status.LastHandledReconcileAt = o.Annotations[ociv1alpha1.ReconcileRequestAnnotation]
+	})
+}
+
+// writeStatus applies mutate to the latest object's status, and nothing else.
+func (r *ImageCompositionReconciler) writeStatus(ctx context.Context, obj *ociv1alpha1.ImageComposition, mutate func(*ociv1alpha1.ImageComposition)) error {
 	var latest ociv1alpha1.ImageComposition
-	if err := r.Get(ctx, key, &latest); err != nil {
+	if err := r.Get(ctx, client.ObjectKeyFromObject(obj), &latest); err != nil {
 		return client.IgnoreNotFound(err)
 	}
 	patch := client.MergeFrom(latest.DeepCopy())
 	mutate(&latest)
-	// Set on EVERY status write, as Flux does: both describe the pass, not its outcome. Echoing only
-	// on success makes `flux reconcile` time out on a failure, and kstatus read it as in progress.
-	latest.Status.ObservedGeneration = latest.Generation
-	latest.Status.LastHandledReconcileAt = latest.Annotations[ociv1alpha1.ReconcileRequestAnnotation]
 	return r.Status().Patch(ctx, &latest, patch)
 }
 

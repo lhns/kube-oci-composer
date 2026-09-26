@@ -88,6 +88,19 @@ func SetCondition(o Object, condType string, status metav1.ConditionStatus, reas
 	o.SetConditions(conds)
 }
 
+// SetProgressing marks work in flight (ADR 0061): Ready is Unknown, not True for the previous
+// image, so nothing waiting on this object proceeds before what it asked for is published.
+// published is the ref still being served, or "" if there is none yet.
+func SetProgressing(o Object, what, published string) {
+	msg := what
+	if published != "" {
+		msg += "; " + published + " is still the published image"
+	}
+	SetCondition(o, ociv1alpha1.ReadyCondition, metav1.ConditionUnknown, ociv1alpha1.ReasonProgressing, msg)
+	SetCondition(o, ociv1alpha1.ReconcilingCondition, metav1.ConditionTrue, ociv1alpha1.ReasonProgressing, msg)
+	RemoveCondition(o, ociv1alpha1.StalledCondition)
+}
+
 func RemoveCondition(o Object, condType string) {
 	conds := o.GetConditions()
 	meta.RemoveStatusCondition(&conds, condType)
