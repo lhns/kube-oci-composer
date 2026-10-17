@@ -110,8 +110,8 @@ needing a compiler is still best served by ordinary CI. See
 # 1. Your existing pipeline builds and pushes, as it already does.
 docker build -t ghcr.io/me/app:v1.2.3 . && docker push ghcr.io/me/app:v1.2.3
 
-# 2. Get the digest. --platform matters: a base must name a platform-specific
-#    manifest unless spec.platforms is set.
+# 2. Get the digest. --platform matters: a base or image layer must
+#    name a platform-specific manifest unless spec.platforms is set.
 crane digest --platform linux/amd64 ghcr.io/me/app:v1.2.3
 ```
 

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
@@ -21,6 +22,22 @@ import (
 // publishContentImage pushes a multi-layer image whose filesystem is the given files, and returns
 // the "repo:tag@digest" reference for it.
 func publishContentImage(t *testing.T, host, repo string, layerFiles ...map[string]string) string {
+	t.Helper()
+
+	img := contentImage(t, layerFiles...)
+	digest, err := img.Digest()
+	if err != nil {
+		t.Fatalf("digest: %v", err)
+	}
+	repository := host + "/" + repo
+	if err := remote.Write(mustRef(t, repository+"@"+digest.String()), img); err != nil {
+		t.Fatalf("publishing: %v", err)
+	}
+	return repository + ":v1@" + digest.String()
+}
+
+// contentImage builds a multi-layer image whose filesystem is the given files.
+func contentImage(t *testing.T, layerFiles ...map[string]string) v1.Image {
 	t.Helper()
 
 	img := empty.Image
@@ -51,16 +68,7 @@ func publishContentImage(t *testing.T, host, repo string, layerFiles ...map[stri
 			t.Fatalf("appending layer: %v", err)
 		}
 	}
-
-	digest, err := img.Digest()
-	if err != nil {
-		t.Fatalf("digest: %v", err)
-	}
-	repository := host + "/" + repo
-	if err := remote.Write(mustRef(t, repository+"@"+digest.String()), img); err != nil {
-		t.Fatalf("publishing: %v", err)
-	}
-	return repository + ":v1@" + digest.String()
+	return img
 }
 
 // entriesOfArtifact reads back every path in the published artifact's layers, and the layer count.

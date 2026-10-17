@@ -422,11 +422,11 @@ func (r *ImageCompositionReconciler) reconcileArtifact(ctx context.Context, obj 
 
 		// An image layer is a manifest, not a blob, so it skips the layer cache.
 		if src, ok := imagePulls[i]; ok {
-			img, err := r.pullImageLayer(ctx, obj, inputs[i], src)
+			in, err := r.pullImageLayer(ctx, obj, declared, inputs[i], src)
 			if err != nil {
 				return buildResult{}, err
 			}
-			inputs[i].Image = img
+			inputs[i] = in
 			continue
 		}
 

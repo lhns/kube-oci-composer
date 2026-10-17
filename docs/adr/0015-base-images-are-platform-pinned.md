@@ -47,6 +47,10 @@ The rule as it now stands:
   terminal: the spec asked for something that does not exist, and substituting a near match is how
   an amd64 binary reaches an arm node.
 
+One declared platform selects too: the amendment covers an index base with a single entry in
+`spec.platforms`, which yields one image, not an index. The same holds for an index `image` layer
+([ADR 0024](0024-images-as-layer-sources.md)).
+
 `TestMultiArchIndexIsRejected` and `TestIndexBaseIsAcceptedWithPlatforms` are the pair that hold
 this line: neither alone says the refusal is conditional.
 

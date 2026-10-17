@@ -117,19 +117,36 @@ func (r *ImageCompositionReconciler) resolveInputs(ctx context.Context, obj *oci
 	return inputs, pulls, nil
 }
 
-// pullImageLayer fetches the manifest for an image layer, once a build is known to be needed.
+// pullImageLayer fetches the manifest for an image layer, once a build is known to be needed, and
+// sets in.Image, or in.Images when the source is an index and spec.platforms selects from it.
 func (r *ImageCompositionReconciler) pullImageLayer(ctx context.Context, obj *ociv1alpha1.ImageComposition,
-	in oci.LayerInput, src *ociv1alpha1.ImageSource) (v1.Image, error) {
+	declared []oci.Platform, in oci.LayerInput, src *ociv1alpha1.ImageSource) (oci.LayerInput, error) {
 
 	opts, err := r.pullOptions(ctx, obj.Namespace, src.SecretRef)
 	if err != nil {
-		return nil, fmt.Errorf("layer %q: %w", in.Name, err)
+		return in, fmt.Errorf("layer %q: %w", in.Name, err)
 	}
-	img, err := source.PullImage(ctx, in.URL, in.Digest, opts...)
+	img, byPlatform, err := source.PullImageFor(ctx, in.URL, in.Digest, toV1Platforms(declared), opts...)
 	if err != nil {
-		return nil, pullFailure(fmt.Sprintf("layer %q", in.Name), err)
+		return in, pullFailure(fmt.Sprintf("layer %q", in.Name), err)
 	}
-	return img, nil
+	in.Image = img
+	if byPlatform != nil {
+		in.Images = make(map[oci.Platform]v1.Image, len(declared))
+		for _, p := range declared {
+			in.Images[p] = byPlatform[p.String()]
+		}
+	}
+	return in, nil
+}
+
+// toV1Platforms converts spec platforms to the registry library's type.
+func toV1Platforms(platforms []oci.Platform) []v1.Platform {
+	out := make([]v1.Platform, 0, len(platforms))
+	for _, p := range platforms {
+		out = append(out, v1.Platform{OS: p.OS, Architecture: p.Architecture, Variant: p.Variant})
+	}
+	return out
 }
 
 // pullFailure classifies an image pull error. A bad reference (malformed, or an index where a
@@ -158,8 +175,11 @@ func parseMode(layer, which, value string) (int64, error) {
 
 // resolveBase pulls the base image, if one is declared.
 //
-// Called after the short-circuit, so an unchanged spec never pulls its base.
-func (r *ImageCompositionReconciler) resolveBase(ctx context.Context, obj *ociv1alpha1.ImageComposition) (v1.Image, error) {
+// Called after the short-circuit, so an unchanged spec never pulls its base. With exactly one
+// declared platform an index base yields that platform's child; several platforms go through
+// resolveBases.
+func (r *ImageCompositionReconciler) resolveBase(ctx context.Context, obj *ociv1alpha1.ImageComposition,
+	declared []oci.Platform) (v1.Image, error) {
 	if obj.Spec.Base == nil {
 		return nil, nil
 	}
@@ -171,9 +191,12 @@ func (r *ImageCompositionReconciler) resolveBase(ctx context.Context, obj *ociv1
 	}
 
 	repository, digest := base.Repository()
-	img, err := source.PullImage(ctx, repository, digest, opts...)
+	img, byPlatform, err := source.PullImageFor(ctx, repository, digest, toV1Platforms(declared), opts...)
 	if err != nil {
 		return nil, pullFailure("base image", err)
+	}
+	if byPlatform != nil {
+		return byPlatform[declared[0].String()], nil
 	}
 	return img, nil
 }

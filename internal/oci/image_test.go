@@ -1,6 +1,7 @@
 package oci
 
 import (
+	"archive/tar"
 	"bytes"
 	"io"
 	"path"
@@ -195,4 +196,92 @@ func mustExtractImage(t *testing.T, img v1.Image, target, subpath string) []tarE
 		t.Fatalf("extractImage: %v", err)
 	}
 	return entries
+}
+
+// layerFiles reads the file names in an image's layer.
+func layerFiles(t *testing.T, l v1.Layer) map[string]bool {
+	t.Helper()
+	rc, err := l.Uncompressed()
+	if err != nil {
+		t.Fatalf("uncompressed: %v", err)
+	}
+	defer rc.Close()
+	out := map[string]bool{}
+	for tr := tar.NewReader(rc); ; {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return out
+		}
+		if err != nil {
+			t.Fatalf("reading layer: %v", err)
+		}
+		out[hdr.Name] = true
+	}
+}
+
+// TestAssembleIndexBuildsImageLayersPerPlatform: an image layer taken from an index differs per
+// platform, so it is built once per platform, while every other layer stays shared.
+func TestAssembleIndexBuildsImageLayersPerPlatform(t *testing.T) {
+	amd64 := Platform{OS: "linux", Architecture: "amd64"}
+	arm64 := Platform{OS: "linux", Architecture: "arm64"}
+	srcs := map[Platform]v1.Image{
+		amd64: imageOf(t, imageLayer(t, []tarFile{{name: "tool-amd64", body: "x"}})),
+		arm64: imageOf(t, imageLayer(t, []tarFile{{name: "tool-arm64", body: "y"}})),
+	}
+
+	inputs, dir := testInputs(t)
+	inputs = append(inputs, LayerInput{
+		Name: "tool", Digest: "sha256:2222", Unpack: UnpackImage, Target: "/opt", Images: srcs,
+	})
+	idx, err := AssembleIndex(nil, inputs, Config{}, []Platform{amd64, arm64}, dir)
+	if err != nil {
+		t.Fatalf("assemble index: %v", err)
+	}
+	im, err := idx.IndexManifest()
+	if err != nil {
+		t.Fatalf("index manifest: %v", err)
+	}
+
+	var shared []v1.Hash
+	for i, want := range []string{"opt/tool-amd64", "opt/tool-arm64"} {
+		child, err := idx.Image(im.Manifests[i].Digest)
+		if err != nil {
+			t.Fatalf("child %d: %v", i, err)
+		}
+		layers, err := child.Layers()
+		if err != nil || len(layers) != 2 {
+			t.Fatalf("child %d: %d layers, err %v; want 2", i, len(layers), err)
+		}
+		if !layerFiles(t, layers[1])[want] {
+			t.Errorf("child %d image layer lacks %q", i, want)
+		}
+		d, _ := layers[0].Digest()
+		shared = append(shared, d)
+	}
+	if shared[0] != shared[1] {
+		t.Errorf("the bundle layer was rebuilt per platform: %s vs %s", shared[0], shared[1])
+	}
+}
+
+// TestAssembleAsUsesThePlatformsImage: one declared platform flattens that platform's child.
+func TestAssembleAsUsesThePlatformsImage(t *testing.T) {
+	amd64 := Platform{OS: "linux", Architecture: "amd64"}
+	arm64 := Platform{OS: "linux", Architecture: "arm64"}
+	srcs := map[Platform]v1.Image{
+		amd64: imageOf(t, imageLayer(t, []tarFile{{name: "tool-amd64", body: "x"}})),
+		arm64: imageOf(t, imageLayer(t, []tarFile{{name: "tool-arm64", body: "y"}})),
+	}
+	img, err := AssembleAs(nil, []LayerInput{{
+		Name: "tool", Digest: "sha256:2222", Unpack: UnpackImage, Target: "/opt", Images: srcs,
+	}}, Config{}, arm64, t.TempDir())
+	if err != nil {
+		t.Fatalf("assemble: %v", err)
+	}
+	layers, err := img.Layers()
+	if err != nil || len(layers) != 1 {
+		t.Fatalf("%d layers, err %v; want 1", len(layers), err)
+	}
+	if got := layerFiles(t, layers[0]); !got["opt/tool-arm64"] || got["opt/tool-amd64"] {
+		t.Errorf("want only the arm64 child's files, got %v", got)
+	}
 }

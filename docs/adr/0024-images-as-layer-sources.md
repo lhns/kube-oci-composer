@@ -99,6 +99,17 @@ separate, which is what makes the verb composable with `remove`.
 ([0015](0015-base-images-are-platform-pinned.md)): selecting a child would mean the controller
 choosing a platform.
 
+#### Amended: the refusal holds only without `spec.platforms`
+
+As for a base ([0015](0015-base-images-are-platform-pinned.md)), the objection was the controller
+choosing, and `spec.platforms` makes the spec choose. With it set, each requested platform's child
+is flattened for that platform, and a platform the index lacks is terminal. The layer is then built
+once per platform instead of shared, since its content differs; every other layer is still built
+once. The input hash is unchanged: the index digest and the platforms are already in it.
+
+A single-manifest image is used as it is under any `spec.platforms`, with no platform check, as
+before.
+
 **`base.image` and `base.digest` are kept.** They are not deprecated and not scheduled for removal.
 Every existing spec keeps working, and CEL enforces that exactly one spelling is used so no object
 can name its base twice.

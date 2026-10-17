@@ -31,7 +31,7 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0021](0021-active-standby-or-shared-storage.md) | Active/standby, or shared storage for the serving endpoint | Moot since [0035](0035-a-registry-is-the-only-publication-path.md) |
 | [0022](0022-distro-packages-as-layer-sources.md) | Distro packages are a layer source: `unpack: deb` | Accepted |
 | [0023](0023-more-archive-formats.md) | More archive formats: `unpack: zip` and the compressed-tar family | Accepted |
-| [0024](0024-images-as-layer-sources.md) | An image can be a layer source, flattened | Accepted |
+| [0024](0024-images-as-layer-sources.md) | An image can be a layer source, flattened | Accepted, amended (index layers) |
 | [0025](0025-dockerfile-builds-as-a-second-kind.md) | Dockerfile builds, as a second kind with a weaker promise | Accepted, for an alpha; renamed by 0028 |
 | [0026](0026-a-source-artifact-can-lag-its-own-spec.md) | A source's artifact can lag its own spec, and the tag moved first | Accepted, sharpens 0009 and 0017 |
 | [0027](0027-what-rootless-buildkit-actually-needs.md) | What rootless BuildKit actually needs | Accepted |
@@ -67,7 +67,7 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0057](0057-the-toolchain-is-an-input.md) | The toolchain is an input to the artifact | **Accepted** |
 | [0059](0059-what-causes-a-rebuild.md) | What causes a rebuild | **Accepted** |
 | [0060](0060-every-manifest-carries-its-own-name.md) | Every manifest carries its own name | **Accepted**, supersedes part of 0017 |
-| [0061](0061-ready-names-the-image-the-spec-asks-for.md) | Ready names the image the spec asks for | **Accepted**, sharpens 0009 |
+| [0061](0061-ready-names-the-image-the-spec-asks-for.md) | Ready names the image the spec asks for | **Accepted**, sharpens 0009; amended (status writes) |
 
 ## Open questions
 

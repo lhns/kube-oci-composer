@@ -227,6 +227,10 @@ type LayerInput struct {
 	// flattened filesystem becomes this entry's content. Nil otherwise. Like Path, it is a handle
 	// on content that Digest (the manifest digest) already identifies for InputHash.
 	Image v1.Image
+	// Images is Image for an image layer whose source is a multi-architecture index: the child
+	// selected for each platform being built (ADR 0024). Mutually exclusive with Image. Digest is
+	// still the index's, so InputHash is unchanged; the platforms are already hashed.
+	Images map[Platform]v1.Image
 	// Digest of the fetched content, already verified.
 	Digest string
 	// Unpack controls how the bytes become layer content.
@@ -293,17 +297,18 @@ func Assemble(base v1.Image, inputs []LayerInput, cfg Config, workDir string) (v
 // AssembleAs is Assemble with the platform stated rather than derived, for a spec that names
 // exactly one. The output is a single image manifest, not an index — one platform is one image.
 func AssembleAs(base v1.Image, inputs []LayerInput, cfg Config, plat Platform, workDir string) (v1.Image, error) {
-	layers, err := buildLayers(inputs, workDir)
+	layers, err := buildLayers(inputs, []Platform{plat}, workDir)
 	if err != nil {
 		return nil, err
 	}
-	return assembleFor(base, layers, inputs, cfg, plat)
+	return assembleFor(base, layers[plat], inputs, cfg, plat)
 }
 
 // AssembleIndex builds one image per platform and returns them as an OCI image index.
 //
 // The layer tarballs are built ONCE and shared by every child, so the children cannot disagree
-// about content that is the same on every platform.
+// about content that is the same on every platform. An image layer taken from an index is the
+// exception: it is built per platform from that platform's child.
 //
 // bases maps each platform to its base image, and is nil for a base-less artifact. A platform
 // missing from a non-nil map is an error rather than a silent scratch image.
@@ -312,7 +317,7 @@ func AssembleIndex(bases map[Platform]v1.Image, inputs []LayerInput, cfg Config,
 	if len(platforms) == 0 {
 		return nil, fmt.Errorf("no platforms given")
 	}
-	layers, err := buildLayers(inputs, workDir)
+	layers, err := buildLayers(inputs, platforms, workDir)
 	if err != nil {
 		return nil, err
 	}
@@ -327,7 +332,7 @@ func AssembleIndex(bases map[Platform]v1.Image, inputs []LayerInput, cfg Config,
 			}
 			base = b
 		}
-		img, err := assembleFor(base, layers, inputs, cfg, plat)
+		img, err := assembleFor(base, layers[plat], inputs, cfg, plat)
 		if err != nil {
 			return nil, fmt.Errorf("platform %s: %w", plat, err)
 		}
@@ -343,23 +348,54 @@ func AssembleIndex(bases map[Platform]v1.Image, inputs []LayerInput, cfg Config,
 	return idx, nil
 }
 
-// buildLayers converts every input into a deterministic layer, once.
+// buildLayers converts every input into a deterministic layer and returns each platform's list.
 //
-// The layer files are read lazily; see Assemble on workDir's lifetime.
-func buildLayers(inputs []LayerInput, workDir string) ([]v1.Layer, error) {
-	layers := make([]v1.Layer, 0, len(inputs))
-	for _, in := range inputs {
-		layerPath, err := buildLayerTarGz(in, workDir)
-		if err != nil {
-			return nil, fmt.Errorf("layer %q: %w", in.Name, err)
-		}
-		layer, err := tarball.LayerFromFile(layerPath, tarball.WithMediaType(types.OCILayer))
-		if err != nil {
-			return nil, fmt.Errorf("layer %q: reading assembled tar: %w", in.Name, err)
-		}
-		layers = append(layers, layer)
+// An input is built once and the same layer goes into every list, except one with Images, which is
+// built per platform from that platform's image. The layer files are read lazily; see Assemble on
+// workDir's lifetime.
+func buildLayers(inputs []LayerInput, platforms []Platform, workDir string) (map[Platform][]v1.Layer, error) {
+	out := make(map[Platform][]v1.Layer, len(platforms))
+	for _, plat := range platforms {
+		out[plat] = make([]v1.Layer, 0, len(inputs))
 	}
-	return layers, nil
+	for _, in := range inputs {
+		if in.Images == nil {
+			layer, err := buildLayer(in, workDir)
+			if err != nil {
+				return nil, err
+			}
+			for _, plat := range platforms {
+				out[plat] = append(out[plat], layer)
+			}
+			continue
+		}
+		for _, plat := range platforms {
+			img, ok := in.Images[plat]
+			if !ok {
+				return nil, fmt.Errorf("layer %q: no image for platform %s", in.Name, plat)
+			}
+			src := in
+			src.Image = img
+			layer, err := buildLayer(src, workDir)
+			if err != nil {
+				return nil, err
+			}
+			out[plat] = append(out[plat], layer)
+		}
+	}
+	return out, nil
+}
+
+func buildLayer(in LayerInput, workDir string) (v1.Layer, error) {
+	layerPath, err := buildLayerTarGz(in, workDir)
+	if err != nil {
+		return nil, fmt.Errorf("layer %q: %w", in.Name, err)
+	}
+	layer, err := tarball.LayerFromFile(layerPath, tarball.WithMediaType(types.OCILayer))
+	if err != nil {
+		return nil, fmt.Errorf("layer %q: reading assembled tar: %w", in.Name, err)
+	}
+	return layer, nil
 }
 
 // assembleFor stacks the layers on the base and stamps the config for one platform.

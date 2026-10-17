@@ -55,7 +55,7 @@ func (r *ImageCompositionReconciler) assemble(ctx context.Context, obj *ociv1alp
 		return indexArtifact(idx), nil
 	}
 
-	base, err := r.resolveBase(ctx, obj)
+	base, err := r.resolveBase(ctx, obj, declared)
 	if err != nil {
 		return builtArtifact{}, err
 	}
@@ -93,13 +93,8 @@ func (r *ImageCompositionReconciler) resolveBases(ctx context.Context, obj *ociv
 		return nil, err
 	}
 
-	want := make([]v1.Platform, 0, len(platforms))
-	for _, p := range platforms {
-		want = append(want, v1.Platform{OS: p.OS, Architecture: p.Architecture, Variant: p.Variant})
-	}
-
 	repository, digest := base.Repository()
-	byKey, err := source.PullImageIndex(ctx, repository, digest, want, opts...)
+	byKey, err := source.PullImageIndex(ctx, repository, digest, toV1Platforms(platforms), opts...)
 	if err != nil {
 		// A platform the base does not offer is a bad reference: only a spec change fixes it.
 		return nil, pullFailure("base image", err)
