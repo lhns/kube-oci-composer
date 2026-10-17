@@ -4,11 +4,11 @@ go 1.27.0
 
 require (
 	github.com/google/go-containerregistry v0.22.1
-	github.com/klauspost/compress v1.20.0
+	github.com/klauspost/compress v1.20.1
 	github.com/minio/minio-go/v7 v7.3.0
 	github.com/secure-systems-lab/go-securesystemslib v0.11.1
 	github.com/sigstore/sigstore v1.11.0
-	github.com/ulikunitz/xz v0.5.16
+	github.com/ulikunitz/xz v0.5.17
 	go.uber.org/zap v1.28.0
 	go.yaml.in/yaml/v3 v3.0.5
 	k8s.io/api v0.37.0
