@@ -5,6 +5,13 @@ may change between minor versions.
 
 ## [Unreleased]
 
+### Fixed
+
+- An `ImageComposition` failing past the cheap path (a digest mismatch, a fetch outage, a pull or
+  push error) re-reconciled in a tight loop, re-pulling from the registry and ignoring the retry
+  backoff. Since 0.6.2 its own `Progressing`/`Stalled` status writes woke the controller again; they
+  no longer do ([ADR 0061](docs/adr/0061-ready-names-the-image-the-spec-asks-for.md)).
+
 ## [0.6.2] - 2026-09-26
 
 No upgrade steps: upgrade from 0.6.1 directly. From 0.5.x, follow the steps under 0.6.0.

@@ -21,10 +21,12 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
@@ -930,11 +932,21 @@ func watchableSourceKinds(mapper meta.RESTMapper) []schema.GroupVersionKind {
 
 // SetupWithManager wires the controller up.
 func (r *ImageCompositionReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return r.setup(mgr, r)
+}
+
+// setup is SetupWithManager with the reconciler passed in, so a test can count what the real
+// watches deliver.
+func (r *ImageCompositionReconciler) setup(mgr ctrl.Manager, rec reconcile.Reconciler) error {
 	if r.Fetcher == nil {
 		r.Fetcher = oci.NewFetcher()
 	}
 	b := ctrl.NewControllerManagedBy(mgr).
-		For(&ociv1alpha1.ImageComposition{}).
+		// A spec edit or a requestedAt annotation wakes the controller; its own status writes do
+		// not. Otherwise each Progressing/Stalled flip re-queues the object, and a failing pass
+		// loops without the backoff (ADR 0061).
+		For(&ociv1alpha1.ImageComposition{}, builder.WithPredicates(predicate.Or(
+			predicate.GenerationChangedPredicate{}, predicate.AnnotationChangedPredicate{}))).
 		// So a ConfigMap edit rebuilds now rather than at the next interval.
 		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.compositionsForConfigMap))
 
@@ -948,7 +960,7 @@ func (r *ImageCompositionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		logger.Info("watching Flux source kind", "gvk", gvk.String())
 	}
 
-	return b.Complete(r)
+	return b.Complete(rec)
 }
 
 // refreshNow renews the lease on what was just published, without waiting for the next cycle.
