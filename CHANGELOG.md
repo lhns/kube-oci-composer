@@ -5,6 +5,10 @@ may change between minor versions.
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-10-18
+
+No upgrade steps: upgrade from 0.6.x directly. From 0.5.x, follow the steps under 0.6.0.
+
 ### Fixed
 
 - An `ImageComposition` failing past the cheap path (a digest mismatch, a fetch outage, a pull or
@@ -15,6 +19,11 @@ may change between minor versions.
   platform. Each requested platform's child is now selected, and an image layer from an index is
   built per platform
   ([ADR 0024](docs/adr/0024-images-as-layer-sources.md), [ADR 0015](docs/adr/0015-base-images-are-platform-pinned.md)).
+
+### Security
+
+- Built with Go 1.27.2 and `golang.org/x/net` v0.60.0, for CVE-2026-78667, CVE-2026-78669 and
+  CVE-2026-97031 (denial of service in `net/http`, HTTP/2 and `crypto/tls`).
 
 ## [0.6.2] - 2026-09-26
 
