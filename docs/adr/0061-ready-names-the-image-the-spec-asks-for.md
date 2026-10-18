@@ -48,15 +48,11 @@ A converged pass writes no Progressing, so an interval reconcile never flickers.
 
 #### Amended: status writes do not wake the controller
 
-Writing `Progressing` and then `Stalled` or a transient `Ready=False` made every pass that fails
-past the cheap path change the object's status. The composer's `For()` had no predicate, so each
-flip re-queued it: an endless loop that re-pulled from the registry and ignored the backoff. Before
-this ADR the second identical write was a no-op, so it stopped.
-
-The composer now watches its own object through `GenerationChangedPredicate` or
-`AnnotationChangedPredicate` (Flux's convention): a spec edit or a `requestedAt` annotation wakes it,
-its status writes do not. Nothing relied on the self-wake: pending and transient results requeue
-explicitly, and the finalizer, backfill and export writes happen inside the pass.
+The composer's `For()` had no predicate, so each `Progressing`/`Stalled` flip requeued it. It now
+watches its own object through `GenerationChangedPredicate` or `AnnotationChangedPredicate` (Flux's
+convention): a spec edit or a `requestedAt` annotation wakes it, its status writes do not. Nothing
+relied on the self-wake: pending and transient results requeue explicitly, and the finalizer,
+backfill and export writes happen inside the pass.
 
 ## Alternatives rejected
 

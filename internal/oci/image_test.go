@@ -219,15 +219,21 @@ func layerFiles(t *testing.T, l v1.Layer) map[string]bool {
 	}
 }
 
-// TestAssembleIndexBuildsImageLayersPerPlatform: an image layer taken from an index differs per
-// platform, so it is built once per platform, while every other layer stays shared.
-func TestAssembleIndexBuildsImageLayersPerPlatform(t *testing.T) {
-	amd64 := Platform{OS: "linux", Architecture: "amd64"}
-	arm64 := Platform{OS: "linux", Architecture: "arm64"}
-	srcs := map[Platform]v1.Image{
+// toolImages returns the two platforms and a source image per platform, each holding its own file.
+func toolImages(t *testing.T) (amd64, arm64 Platform, srcs map[Platform]v1.Image) {
+	t.Helper()
+	amd64 = Platform{OS: "linux", Architecture: "amd64"}
+	arm64 = Platform{OS: "linux", Architecture: "arm64"}
+	return amd64, arm64, map[Platform]v1.Image{
 		amd64: imageOf(t, imageLayer(t, []tarFile{{name: "tool-amd64", body: "x"}})),
 		arm64: imageOf(t, imageLayer(t, []tarFile{{name: "tool-arm64", body: "y"}})),
 	}
+}
+
+// TestAssembleIndexBuildsImageLayersPerPlatform: an image layer taken from an index differs per
+// platform, so it is built once per platform, while every other layer stays shared.
+func TestAssembleIndexBuildsImageLayersPerPlatform(t *testing.T) {
+	amd64, arm64, srcs := toolImages(t)
 
 	inputs, dir := testInputs(t)
 	inputs = append(inputs, LayerInput{
@@ -265,12 +271,7 @@ func TestAssembleIndexBuildsImageLayersPerPlatform(t *testing.T) {
 
 // TestAssembleAsUsesThePlatformsImage: one declared platform flattens that platform's child.
 func TestAssembleAsUsesThePlatformsImage(t *testing.T) {
-	amd64 := Platform{OS: "linux", Architecture: "amd64"}
-	arm64 := Platform{OS: "linux", Architecture: "arm64"}
-	srcs := map[Platform]v1.Image{
-		amd64: imageOf(t, imageLayer(t, []tarFile{{name: "tool-amd64", body: "x"}})),
-		arm64: imageOf(t, imageLayer(t, []tarFile{{name: "tool-arm64", body: "y"}})),
-	}
+	_, arm64, srcs := toolImages(t)
 	img, err := AssembleAs(nil, []LayerInput{{
 		Name: "tool", Digest: "sha256:2222", Unpack: UnpackImage, Target: "/opt", Images: srcs,
 	}}, Config{}, arm64, t.TempDir())

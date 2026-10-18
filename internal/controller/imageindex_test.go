@@ -6,8 +6,6 @@ import (
 	"testing"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
-	"github.com/google/go-containerregistry/pkg/v1/empty"
-	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 
 	ociv1alpha1 "github.com/lhns/kube-oci-composer/api/v1alpha1"
@@ -26,30 +24,10 @@ var (
 // test can see which child was flattened.
 func publishToolIndex(t *testing.T, host, repo string) string {
 	t.Helper()
-	idx := mutate.IndexMediaType(empty.Index, "application/vnd.oci.image.index.v1+json")
-	for _, c := range []struct {
-		plat  v1.Platform
-		files map[string]string
-	}{
-		{linuxAMD64, map[string]string{"tool-amd64": "x"}},
-		{linuxARM64, map[string]string{"tool-arm64": "y"}},
-	} {
-		img := contentImage(t, c.files)
-		cf, err := img.ConfigFile()
-		if err != nil {
-			t.Fatalf("config: %v", err)
-		}
-		cf = cf.DeepCopy()
-		cf.OS, cf.Architecture = c.plat.OS, c.plat.Architecture
-		if img, err = mutate.ConfigFile(img, cf); err != nil {
-			t.Fatalf("mutate config: %v", err)
-		}
-		plat := c.plat
-		idx = mutate.AppendManifests(idx, mutate.IndexAddendum{
-			Add: img, Descriptor: v1.Descriptor{Platform: &plat},
-		})
-	}
-	return publishIndex(t, host, repo, idx)
+	return publishIndex(t, host, repo, indexOf(t, []platformChild{
+		{linuxAMD64, contentImage(t, map[string]string{"tool-amd64": "x"})},
+		{linuxARM64, contentImage(t, map[string]string{"tool-arm64": "y"})},
+	}))
 }
 
 func toolLayer(host, repo, digest string) ociv1alpha1.Layer {

@@ -132,21 +132,11 @@ func (r *ImageCompositionReconciler) pullImageLayer(ctx context.Context, obj *oc
 	}
 	in.Image = img
 	if byPlatform != nil {
-		in.Images = make(map[oci.Platform]v1.Image, len(declared))
-		for _, p := range declared {
-			in.Images[p] = byPlatform[p.String()]
+		if in.Images, err = childrenFor(declared, byPlatform); err != nil {
+			return in, fmt.Errorf("layer %q: %w", in.Name, err)
 		}
 	}
 	return in, nil
-}
-
-// toV1Platforms converts spec platforms to the registry library's type.
-func toV1Platforms(platforms []oci.Platform) []v1.Platform {
-	out := make([]v1.Platform, 0, len(platforms))
-	for _, p := range platforms {
-		out = append(out, v1.Platform{OS: p.OS, Architecture: p.Architecture, Variant: p.Variant})
-	}
-	return out
 }
 
 // pullFailure classifies an image pull error. A bad reference (malformed, or an index where a
@@ -175,9 +165,9 @@ func parseMode(layer, which, value string) (int64, error) {
 
 // resolveBase pulls the base image, if one is declared.
 //
-// Called after the short-circuit, so an unchanged spec never pulls its base. With exactly one
-// declared platform an index base yields that platform's child; several platforms go through
-// resolveBases.
+// Called after the short-circuit, so an unchanged spec never pulls its base. Only called with at
+// most one declared platform, whose child an index base yields; assemble routes several platforms
+// to resolveBases.
 func (r *ImageCompositionReconciler) resolveBase(ctx context.Context, obj *ociv1alpha1.ImageComposition,
 	declared []oci.Platform) (v1.Image, error) {
 	if obj.Spec.Base == nil {
@@ -196,7 +186,11 @@ func (r *ImageCompositionReconciler) resolveBase(ctx context.Context, obj *ociv1
 		return nil, pullFailure("base image", err)
 	}
 	if byPlatform != nil {
-		return byPlatform[declared[0].String()], nil
+		children, err := childrenFor(declared, byPlatform)
+		if err != nil {
+			return nil, fmt.Errorf("base image: %w", err)
+		}
+		return children[declared[0]], nil
 	}
 	return img, nil
 }

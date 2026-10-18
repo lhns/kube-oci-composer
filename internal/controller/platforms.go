@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 
@@ -99,12 +100,30 @@ func (r *ImageCompositionReconciler) resolveBases(ctx context.Context, obj *ociv
 		// A platform the base does not offer is a bad reference: only a spec change fixes it.
 		return nil, pullFailure("base image", err)
 	}
+	out, err := childrenFor(platforms, byKey)
+	if err != nil {
+		return nil, fmt.Errorf("base image: %w", err)
+	}
+	return out, nil
+}
 
-	out := make(map[oci.Platform]v1.Image, len(platforms))
+// toV1Platforms converts spec platforms to the registry library's type.
+func toV1Platforms(platforms []oci.Platform) []v1.Platform {
+	out := make([]v1.Platform, 0, len(platforms))
 	for _, p := range platforms {
+		out = append(out, p.ToV1())
+	}
+	return out
+}
+
+// childrenFor re-keys the children source returns (by its platform key) by declared platform. A
+// missing one is terminal: only a spec change fixes it.
+func childrenFor(declared []oci.Platform, byKey map[string]v1.Image) (map[oci.Platform]v1.Image, error) {
+	out := make(map[oci.Platform]v1.Image, len(declared))
+	for _, p := range declared {
 		img, ok := byKey[p.String()]
 		if !ok {
-			return nil, recon.Terminal("base image: no %s manifest", p)
+			return nil, recon.Terminal("no %s manifest", p)
 		}
 		out[p] = img
 	}

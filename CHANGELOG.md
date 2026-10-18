@@ -8,13 +8,12 @@ may change between minor versions.
 ### Fixed
 
 - An `ImageComposition` failing past the cheap path (a digest mismatch, a fetch outage, a pull or
-  push error) re-reconciled in a tight loop, re-pulling from the registry and ignoring the retry
-  backoff. Since 0.6.2 its own `Progressing`/`Stalled` status writes woke the controller again; they
-  no longer do ([ADR 0061](docs/adr/0061-ready-names-the-image-the-spec-asks-for.md)).
+  push error) re-reconciled in a tight loop. Since 0.6.2 its own `Progressing`/`Stalled` status
+  writes woke the controller again; they no longer do ([ADR 0061](docs/adr/0061-ready-names-the-image-the-spec-asks-for.md)).
 - An `image` layer pointing at a multi-architecture index was refused even with `spec.platforms`
-  set, with an error recommending exactly that, and an index `base` was refused under a single
-  platform. Each requested platform's child is now selected; an image layer from an index is built
-  per platform, so it is not shared between the children
+  set, with an error recommending exactly that. An index `base` was refused under a single
+  platform. Each requested platform's child is now selected, and an image layer from an index is
+  built per platform
   ([ADR 0024](docs/adr/0024-images-as-layer-sources.md), [ADR 0015](docs/adr/0015-base-images-are-platform-pinned.md)).
 
 ## [0.6.2] - 2026-09-26

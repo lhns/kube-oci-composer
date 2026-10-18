@@ -107,9 +107,6 @@ is flattened for that platform, and a platform the index lacks is terminal. The 
 once per platform instead of shared, since its content differs; every other layer is still built
 once. The input hash is unchanged: the index digest and the platforms are already in it.
 
-A single-manifest image is used as it is under any `spec.platforms`, with no platform check, as
-before.
-
 **`base.image` and `base.digest` are kept.** They are not deprecated and not scheduled for removal.
 Every existing spec keeps working, and CEL enforces that exactly one spelling is used so no object
 can name its base twice.

@@ -20,23 +20,39 @@ import (
 // platforms. random.Index leaves descriptors empty, so a child could not be selected from it.
 func platformIndex(t *testing.T, platforms ...v1.Platform) v1.ImageIndex {
 	t.Helper()
-	idx := mutate.IndexMediaType(empty.Index, "application/vnd.oci.image.index.v1+json")
+	children := make([]platformChild, 0, len(platforms))
 	for i, p := range platforms {
 		img, err := random.Image(int64(64+i), 1)
 		if err != nil {
 			t.Fatalf("random image: %v", err)
 		}
-		cf, err := img.ConfigFile()
+		children = append(children, platformChild{p, img})
+	}
+	return indexOf(t, children)
+}
+
+// platformChild is an index child and the platform its descriptor and config declare.
+type platformChild struct {
+	plat v1.Platform
+	img  v1.Image
+}
+
+// indexOf assembles an index from the children, in order.
+func indexOf(t *testing.T, children []platformChild) v1.ImageIndex {
+	t.Helper()
+	idx := mutate.IndexMediaType(empty.Index, "application/vnd.oci.image.index.v1+json")
+	for _, c := range children {
+		cf, err := c.img.ConfigFile()
 		if err != nil {
 			t.Fatalf("config: %v", err)
 		}
 		cf = cf.DeepCopy()
-		cf.OS, cf.Architecture, cf.Variant = p.OS, p.Architecture, p.Variant
-		img, err = mutate.ConfigFile(img, cf)
+		cf.OS, cf.Architecture, cf.Variant = c.plat.OS, c.plat.Architecture, c.plat.Variant
+		img, err := mutate.ConfigFile(c.img, cf)
 		if err != nil {
 			t.Fatalf("mutate config: %v", err)
 		}
-		plat := p
+		plat := c.plat
 		idx = mutate.AppendManifests(idx, mutate.IndexAddendum{
 			Add:        img,
 			Descriptor: v1.Descriptor{Platform: &plat},

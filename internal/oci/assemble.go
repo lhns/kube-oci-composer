@@ -137,7 +137,8 @@ func (p Platform) String() string {
 	return p.OS + "/" + p.Architecture
 }
 
-func (p Platform) toV1() v1.Platform {
+// ToV1 converts to the registry library's type.
+func (p Platform) ToV1() v1.Platform {
 	return v1.Platform{OS: p.OS, Architecture: p.Architecture, Variant: p.Variant}
 }
 
@@ -336,7 +337,7 @@ func AssembleIndex(bases map[Platform]v1.Image, inputs []LayerInput, cfg Config,
 		if err != nil {
 			return nil, fmt.Errorf("platform %s: %w", plat, err)
 		}
-		p := plat.toV1()
+		p := plat.ToV1()
 		idx = mutate.AppendManifests(idx, mutate.IndexAddendum{
 			Add: img,
 			Descriptor: v1.Descriptor{

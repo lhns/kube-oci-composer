@@ -942,9 +942,7 @@ func (r *ImageCompositionReconciler) setup(mgr ctrl.Manager, rec reconcile.Recon
 		r.Fetcher = oci.NewFetcher()
 	}
 	b := ctrl.NewControllerManagedBy(mgr).
-		// A spec edit or a requestedAt annotation wakes the controller; its own status writes do
-		// not. Otherwise each Progressing/Stalled flip re-queues the object, and a failing pass
-		// loops without the backoff (ADR 0061).
+		// Own status writes must not requeue the object (ADR 0061).
 		For(&ociv1alpha1.ImageComposition{}, builder.WithPredicates(predicate.Or(
 			predicate.GenerationChangedPredicate{}, predicate.AnnotationChangedPredicate{}))).
 		// So a ConfigMap edit rebuilds now rather than at the next interval.
