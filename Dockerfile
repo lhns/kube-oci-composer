@@ -3,7 +3,7 @@
 # Pinned by digest, and CI fails if its Go minor differs from go.mod's: the Go that builds the RELEASE
 # is an input to every composed artifact's bytes (ADR 0057), and a floating tag once moved it
 # without CI, which used go.mod's, noticing. Dependabot proposes patch and digest bumps.
-FROM golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c AS builder
+FROM golang:1.27.3@sha256:f20d83a83e18dbd2a4714b8ffd4b30b287b6243962dd75608e86abcc63ba4efc AS builder
 
 # CMD selects which binary this image carries. The two are built from one Dockerfile because they
 # share every layer up to the compile step; ADR 0004 wants two DEPLOYMENTS, which is about RBAC and
@@ -36,7 +36,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
 # supply chain, so the smaller its attack surface the better — and nothing in the binary needs a
 # shell. The blob store and cache directories are the only writable paths it wants, and both are
 # supplied as volumes, so the root filesystem can stay read-only.
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian13:nonroot
 
 WORKDIR /
 COPY --from=builder /workspace/manager .
