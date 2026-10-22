@@ -5,6 +5,10 @@ may change between minor versions.
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-10-22
+
+No upgrade steps.
+
 ### Security
 
 - Built with Go 1.27.3 and run on `gcr.io/distroless/static-debian13`. Eight eMudhra intermediate CA
