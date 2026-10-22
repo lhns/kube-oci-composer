@@ -5,6 +5,12 @@ may change between minor versions.
 
 ## [Unreleased]
 
+### Security
+
+- Built with Go 1.27.3 and run on `gcr.io/distroless/static-debian13`. Eight eMudhra intermediate CA
+  keys were compromised: Go 1.27.3 rejects them in `crypto/x509`, and the Debian 13 trust store drops
+  the emSign roots. The builder verifies registries over TLS, so it needs both.
+
 ## [0.6.3] - 2026-10-18
 
 No upgrade steps: upgrade from 0.6.x directly. From 0.5.x, follow the steps under 0.6.0.
