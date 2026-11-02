@@ -3,7 +3,7 @@
 # Pinned by digest, and CI fails if its Go minor differs from go.mod's: the Go that builds the RELEASE
 # is an input to every composed artifact's bytes (ADR 0057), and a floating tag once moved it
 # without CI, which used go.mod's, noticing. Dependabot proposes patch and digest bumps.
-FROM golang:1.27.3@sha256:f20d83a83e18dbd2a4714b8ffd4b30b287b6243962dd75608e86abcc63ba4efc AS builder
+FROM golang:1.27.3@sha256:2920bb124f1a2e12a1d39f0cab756ae0068441ee1da7655dec7f5e374944095b AS builder
 
 # CMD selects which binary this image carries. The two are built from one Dockerfile because they
 # share every layer up to the compile step; ADR 0004 wants two DEPLOYMENTS, which is about RBAC and
