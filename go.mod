@@ -7,10 +7,10 @@ require (
 	github.com/klauspost/compress v1.20.3
 	github.com/minio/minio-go/v7 v7.4.1
 	github.com/secure-systems-lab/go-securesystemslib v0.11.1
-	github.com/sigstore/sigstore v1.11.1
+	github.com/sigstore/sigstore v1.11.3
 	github.com/ulikunitz/xz v0.5.17
 	go.uber.org/zap v1.28.0
-	go.yaml.in/yaml/v3 v3.0.5
+	go.yaml.in/yaml/v3 v3.0.6
 	k8s.io/api v0.37.1
 	k8s.io/apimachinery v0.37.1
 	k8s.io/client-go v0.37.1
