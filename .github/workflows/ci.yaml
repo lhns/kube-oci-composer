@@ -1,20 +1,27 @@
+# .github/workflows/ci.yaml -- the shared part, copied verbatim into each operator repo (SPEC.md).
+# The repo's own jobs (unit, envtest, chart, e2e lanes) stay alongside these and use the local
+# setup-go action. Only lines marked "# PER-REPO:" differ; SPEC.md has the values.
 name: ci
 
 on:
   push:
     branches: [main]
   pull_request:
-  # Callable, so release gates on this same pipeline rather than a subset of it.
+  # Callable, so the release gates on this same pipeline.
   workflow_call:
 
 permissions:
   contents: read
 
-# A LITERAL group name: under workflow_call ${{ github.workflow }} is the caller's, so ci and e2e
-# would share one group when release calls them, and cancel each other.
+# A LITERAL group name: under workflow_call ${{ github.workflow }} is the caller's, so two called
+# workflows would share one group and cancel each other.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}  # PER-REPO: a distinct literal per workflow file (ci-, e2e-, ...)
   cancel-in-progress: true
+
+env:
+  BINARY: /manager             # PER-REPO: entrypoint binary inside the image
+  PLATFORMS: linux/amd64,linux/arm64
 
 jobs:
   # The cheap gate: every other job `needs: unit`.
@@ -23,19 +30,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-go
-
-      - name: The release image is built with the Go that CI tests
-        # A composed artifact's bytes depend on the Go that built the release image, which is the
-        # Dockerfile's, not go.mod's. They once differed by a minor version unnoticed (ADR 0057).
-        # A minor move is a migration: decide about AssemblyVersion, then move both together.
-        run: |
-          mod=$(awk '/^go /{split($2, v, "."); print v[1] "." v[2]}' go.mod)
-          img=$(grep -m1 -oE '^FROM (--platform=[^ ]+ )?golang:[0-9]+[.][0-9]+' Dockerfile | cut -d: -f2)
-          if [ -z "$img" ] || [ "$mod" != "$img" ]; then
-            echo "go.mod says Go $mod but the Dockerfile builds with golang:${img:-?}"
-            exit 1
-          fi
-          echo "OK: both on Go $mod"
 
       - name: Verify generated output is committed
         # Generated CRDs, RBAC and deepcopy must match the source and the pinned controller-gen.
@@ -55,19 +49,6 @@ jobs:
           path: ~/.local/share/kubebuilder-envtest
           key: envtest-${{ runner.os }}
       - run: make integration-test
-
-  lint:
-    runs-on: ubuntu-latest
-    needs: unit
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: ./.github/actions/setup-go
-      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
-        with:
-          # Built with the installed Go: prebuilt binaries lag Go releases and refuse a newer
-          # go.mod. Settings, including the timeout, are in .golangci.yml.
-          install-mode: goinstall
-          version: v2.15.0
 
   chart:
     runs-on: ubuntu-latest
@@ -151,55 +132,55 @@ jobs:
           fi
           echo "OK: refused, as intended."
 
-  # Both images, from the one Dockerfile; otherwise only release builds them.
-  image:
+  # Go repos only (PER-REPO: absent in pv-reaper).
+  go-version:
     runs-on: ubuntu-latest
-    needs: unit
-    strategy:
-      matrix:
-        cmd: [oci-composer, oci-builder]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - name: Build for amd64 (no push), loaded for the scan
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      - name: The release image is built with the Go that CI tests
+        # The local setup-go action installs the Dockerfile's Go, so CI tests what ships. A minor
+        # move is a migration: move go.mod and the Dockerfile together.
+        run: |
+          mod=$(awk '/^go /{split($2, v, "."); print v[1] "." v[2]}' go.mod)
+          img=$(grep -m1 -oE '^FROM (--platform=[^ ]+ )?golang:[0-9]+[.][0-9]+' Dockerfile | cut -d: -f2)
+          if [ -z "$img" ] || [ "$mod" != "$img" ]; then
+            echo "go.mod says Go $mod but the Dockerfile builds with golang:${img:-?}"
+            exit 1
+          fi
+          echo "OK: both on Go $mod"
+      - name: go.mod's toolchain line names the Dockerfile's Go
+        # Minor must match. A patch difference only warns: Dependabot's golang bump edits the
+        # Dockerfile alone, and its PR should not go red for that.
+        run: |
+          tc=$(awk '/^toolchain go/{sub(/^go/, "", $2); print $2}' go.mod)
+          img=$(sed -n 's/^FROM .*golang:\([0-9.]*\)@.*/\1/p' Dockerfile)
+          [ -n "$tc" ] || { echo "go.mod has no toolchain line"; exit 1; }
+          [ -n "$img" ] || { echo "no digest-pinned golang tag found in Dockerfile"; exit 1; }
+          if [ "${tc%.*}" != "${img%.*}" ]; then
+            echo "go.mod has toolchain go$tc but the Dockerfile builds with golang:$img"
+            exit 1
+          fi
+          [ "$tc" = "$img" ] || echo "::warning::go.mod has toolchain go$tc, the Dockerfile golang:$img; bump the toolchain line"
+          echo "OK: toolchain go$tc, golang:$img"
+
+  # Go repos that adopt golangci-lint (PER-REPO, see SPEC.md), with .golangci.yml from SPEC.md.
+  lint:
+    runs-on: ubuntu-latest
+    needs: go-version
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-go
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          context: .
-          push: false
-          load: true
-          tags: ghcr.io/lhns/kube-${{ matrix.cmd }}:ci
-          build-args: |
-            CMD=${{ matrix.cmd }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-      - name: Build for arm64 (no push)
-        # Cross-compiled; the Dockerfile's ELF architecture check runs inside it, so an arm64 break
-        # fails here and not first at release. Not loaded: the scan needs only one platform.
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          platforms: linux/arm64
-          push: false
-          build-args: |
-            CMD=${{ matrix.cmd }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-      - name: Trivy image scan
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: ghcr.io/lhns/kube-${{ matrix.cmd }}:ci
-          format: table
-          severity: CRITICAL,HIGH
-          exit-code: '1'
-          ignore-unfixed: true
-          vuln-type: 'os,library'
+          # Built with the installed Go: prebuilt binaries lag Go releases and refuse a newer go.mod.
+          install-mode: goinstall
+          version: v2.15.0
 
   trivy-fs:
     runs-on: ubuntu-latest
-    needs: unit
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Trivy filesystem scan (sources + go.sum)
+      - name: Trivy filesystem scan (sources, go.sum)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
@@ -208,4 +189,104 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: '1'
           ignore-unfixed: true
-          skip-dirs: 'docs,test'
+          skip-dirs: 'docs,test' # PER-REPO: oci-composer 'docs,test'
+
+  # Both platforms, pushed by digest to a throwaway registry and checked with the release's own
+  # script, so an arm64 break fails the PR rather than the release.
+  image:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:                 # PER-REPO: one entry per image
+          - image: kube-oci-composer
+            build-args: CMD=oci-composer
+          - image: kube-oci-builder
+            build-args: CMD=oci-builder
+    services:
+      registry:
+        image: registry:3@sha256:82f6ff4a7f982960c8aa51617fea3aabc485df6e55cce80d22deb1de36f1bc3c
+        ports: ['5000:5000']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # PER-REPO: pv-reaper only, its Dockerfile RUNs on the target platform:
+      # - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: network=host   # the builder must reach the registry service on localhost
+      - uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
+        with:
+          version: v0.20.6
+      - name: Build both platforms, push by digest to the local registry
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: ${{ env.PLATFORMS }}
+          outputs: type=image,name=localhost:5000/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
+          build-args: ${{ matrix.build-args }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+      - name: Verify every platform's binary architecture
+        run: bash scripts/check-binary-arch.sh "localhost:5000/${{ matrix.image }}@${{ steps.build.outputs.digest }}" "$BINARY" "$PLATFORMS"
+      - name: Build amd64 for the scan (loaded)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          load: true
+          tags: ci/${{ matrix.image }}:scan
+          build-args: ${{ matrix.build-args }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ci/${{ matrix.image }}:scan
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+
+  # The check must be able to fail: an image whose arm64 platform carries an x86-64 binary, the
+  # shape of the bug it exists for, must be rejected with exit 1 on arm64 and nothing else.
+  arch-check-fails:
+    runs-on: ubuntu-latest
+    services:
+      registry:
+        image: registry:3@sha256:82f6ff4a7f982960c8aa51617fea3aabc485df6e55cce80d22deb1de36f1bc3c
+        ports: ['5000:5000']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: network=host
+      - uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
+        with:
+          version: v0.20.6
+      - name: Build a mislabelled image
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bad"
+          cat > "$RUNNER_TEMP/bad/Dockerfile" <<'EOF'
+          FROM --platform=linux/amd64 busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec AS amd64
+          FROM scratch
+          ARG BINARY
+          COPY --from=amd64 /bin/busybox ${BINARY}
+          EOF
+          docker buildx build --platform "$PLATFORMS" --build-arg "BINARY=$BINARY" \
+            --output type=image,name=localhost:5000/mislabelled,push-by-digest=true,name-canonical=true,push=true \
+            --metadata-file "$RUNNER_TEMP/meta.json" "$RUNNER_TEMP/bad"
+          echo "REF=localhost:5000/mislabelled@$(jq -r '."containerimage.digest"' "$RUNNER_TEMP/meta.json")" >> "$GITHUB_ENV"
+      - name: The check rejects it
+        run: |
+          set +e -uo pipefail
+          out=$(bash scripts/check-binary-arch.sh "$REF" "$BINARY" "$PLATFORMS" 2>&1); rc=$?
+          echo "$out"
+          # Exit 2 (tooling) or a failure on amd64 would prove nothing.
+          if [ "$rc" -eq 1 ] \
+              && grep -q "^ok   linux/amd64:" <<< "$out" \
+              && grep -q "^FAIL linux/arm64: .* has e_machine '3e 00', expected 'b7 00'" <<< "$out"; then
+            echo "OK: the check failed, and for the right reason"
+          else
+            echo "::error::check-binary-arch.sh did not reject an arm64 image holding an x86-64 binary (exit $rc)"
+            exit 1
+          fi
