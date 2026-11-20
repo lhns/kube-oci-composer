@@ -7,6 +7,17 @@
 # stage has no RUN).
 FROM --platform=$BUILDPLATFORM golang:1.27.3@sha256:f20d83a83e18dbd2a4714b8ffd4b30b287b6243962dd75608e86abcc63ba4efc AS builder
 
+WORKDIR /workspace
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY cmd/ cmd/
+COPY api/ api/
+COPY internal/ internal/
+
+# Declared after the shared layers: an ARG is in the cache key of every RUN after it, so declaring
+# these earlier made each arch, binary and version re-download the modules.
 # CMD selects which binary this image carries. The two are built from one Dockerfile because they
 # share every layer up to the compile step; ADR 0004 wants two DEPLOYMENTS, which is about RBAC and
 # blast radius, not about duplicating a build recipe.
@@ -16,15 +27,6 @@ ARG COMMIT=none
 ARG BUILD_DATE=unknown
 ARG TARGETOS
 ARG TARGETARCH
-
-WORKDIR /workspace
-
-COPY go.mod go.sum ./
-RUN go mod download
-
-COPY cmd/ cmd/
-COPY api/ api/
-COPY internal/ internal/
 
 # CGO off so the result is a static binary that runs on a distroless base.
 # No GOOS/GOARCH fallbacks: a silent default once shipped an amd64 binary in an arm64 image. The
