@@ -22,15 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Go version from the Dockerfile
-        run: |
-          v=$(sed -n 's/^FROM .*golang:\([0-9.]*\)@.*/\1/p' Dockerfile)
-          [ -n "$v" ] || { echo "no golang tag found in Dockerfile"; exit 1; }
-          echo "GO_VERSION=$v" >> "$GITHUB_ENV"
-      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
+      - uses: ./.github/actions/setup-go
 
       - name: The release image is built with the Go that CI tests
         # A composed artifact's bytes depend on the Go that built the release image, which is the
@@ -56,15 +48,7 @@ jobs:
     needs: unit
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Go version from the Dockerfile
-        run: |
-          v=$(sed -n 's/^FROM .*golang:\([0-9.]*\)@.*/\1/p' Dockerfile)
-          [ -n "$v" ] || { echo "no golang tag found in Dockerfile"; exit 1; }
-          echo "GO_VERSION=$v" >> "$GITHUB_ENV"
-      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
+      - uses: ./.github/actions/setup-go
       - name: Cache envtest assets
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -77,15 +61,7 @@ jobs:
     needs: unit
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Go version from the Dockerfile
-        run: |
-          v=$(sed -n 's/^FROM .*golang:\([0-9.]*\)@.*/\1/p' Dockerfile)
-          [ -n "$v" ] || { echo "no golang tag found in Dockerfile"; exit 1; }
-          echo "GO_VERSION=$v" >> "$GITHUB_ENV"
-      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
+      - uses: ./.github/actions/setup-go
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           # Built with the installed Go: prebuilt binaries lag Go releases and refuse a newer
@@ -175,73 +151,43 @@ jobs:
           fi
           echo "OK: refused, as intended."
 
+  # Both images, from the one Dockerfile; otherwise only release builds them.
   image:
     runs-on: ubuntu-latest
     needs: unit
+    strategy:
+      matrix:
+        cmd: [oci-composer, oci-builder]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - name: Build the image (no push)
-        # Otherwise only release builds it, after the tag is pushed.
+      - name: Build for amd64 (no push), loaded for the scan
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           push: false
           load: true
-          tags: ghcr.io/lhns/kube-oci-composer:ci
+          tags: ghcr.io/lhns/kube-${{ matrix.cmd }}:ci
           build-args: |
-            CMD=oci-composer
+            CMD=${{ matrix.cmd }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - name: Build the builder image (no push)
-        # Same Dockerfile, other binary, same reason.
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          push: false
-          load: true
-          tags: ghcr.io/lhns/kube-oci-builder:ci
-          build-args: |
-            CMD=oci-builder
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-      - name: Build the image for arm64 (no push)
-        # Cross-compiled; the Dockerfile's ELF architecture check runs inside it, so an arm64
-        # break fails here and not first at release. No load: a multi-platform result cannot be.
+      - name: Build for arm64 (no push)
+        # Cross-compiled; the Dockerfile's ELF architecture check runs inside it, so an arm64 break
+        # fails here and not first at release. Not loaded: the scan needs only one platform.
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/arm64
           push: false
           build-args: |
-            CMD=oci-composer
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-      - name: Build the builder image for arm64 (no push)
-        # Cross-compiled; the Dockerfile's ELF architecture check runs inside it, so an arm64
-        # break fails here and not first at release. No load: a multi-platform result cannot be.
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          platforms: linux/arm64
-          push: false
-          build-args: |
-            CMD=oci-builder
+            CMD=${{ matrix.cmd }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Trivy image scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ghcr.io/lhns/kube-oci-composer:ci
-          format: table
-          severity: CRITICAL,HIGH
-          exit-code: '1'
-          ignore-unfixed: true
-          vuln-type: 'os,library'
-      - name: Trivy builder image scan
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: ghcr.io/lhns/kube-oci-builder:ci
+          image-ref: ghcr.io/lhns/kube-${{ matrix.cmd }}:ci
           format: table
           severity: CRITICAL,HIGH
           exit-code: '1'

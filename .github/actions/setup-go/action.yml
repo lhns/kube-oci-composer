@@ -1,0 +1,17 @@
+name: Set up Go from the Dockerfile
+description: >
+  Installs the Go that builds the release image, read from the Dockerfile's golang tag, so CI tests
+  with the same patch release (ADR 0057). go.mod's `go` line is only a minimum.
+runs:
+  using: composite
+  steps:
+    - name: Go version from the Dockerfile
+      shell: bash
+      run: |
+        v=$(sed -n 's/^FROM .*golang:\([0-9.]*\)@.*/\1/p' Dockerfile)
+        [ -n "$v" ] || { echo "no golang tag found in Dockerfile"; exit 1; }
+        echo "GO_VERSION=$v" >> "$GITHUB_ENV"
+    - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: true
