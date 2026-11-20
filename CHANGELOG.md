@@ -14,6 +14,14 @@ may change between minor versions.
 - The runtime base is pinned by digest. Workflow actions are pinned by commit SHA. CI tests with the
   Go version that builds the release, read from the Dockerfile.
 - Trivy scans the builder image as well as the composer image.
+- One release shape: `scripts/check-binary-arch.sh` checks every platform's binary in the pushed
+  image (CI also proves it can fail), then tags, cosign-signs the images and chart and attests an
+  SPDX SBOM per image. Release assets: chart, SBOMs, checksums, `install.yaml`. Go 1.27.4 with a
+  `toolchain` line in go.mod.
+
+### Security
+
+- `golang.org/x/net` v0.62.0: CVE-2026-78661 (denial of service in `x/net/html`).
 
 ## [0.6.4] - 2026-10-22
 
