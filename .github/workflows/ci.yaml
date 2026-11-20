@@ -271,7 +271,7 @@ jobs:
           echo "REF=localhost:5000/mislabelled@$(jq -r '."containerimage.digest"' "$RUNNER_TEMP/meta.json")" >> "$GITHUB_ENV"
       - name: The check rejects it
         run: |
-          set -uo pipefail
+          set +e -uo pipefail
           out=$(bash scripts/check-binary-arch.sh "$REF" "$BINARY" "$PLATFORMS" 2>&1); rc=$?
           echo "$out"
           # Exit 2 (tooling) or a failure on amd64 would prove nothing.
