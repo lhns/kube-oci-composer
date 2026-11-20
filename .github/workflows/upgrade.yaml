@@ -33,11 +33,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0  # the tags, to find the release to upgrade from
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/build-push-action@v7
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           push: false
@@ -46,7 +46,7 @@ jobs:
           build-args: |
             CMD=oci-composer
           cache-from: type=gha
-      - uses: docker/build-push-action@v7
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           push: false
@@ -55,12 +55,12 @@ jobs:
           build-args: |
             CMD=oci-builder
           cache-from: type=gha
-      - uses: helm/kind-action@v1
+      - uses: helm/kind-action@ea822c7bf1874f08e5a491df991c228edffc3376 # v1.15.2
         with:
           version: v0.32.0
           node_image: kindest/node:v1.36.1
           cluster_name: kube-oci-composer-upgrade
-      - uses: azure/setup-helm@v5
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
       # From the newest published release that is not the ref being tested: on a v* tag the one
       # before it, on a pull request the latest. A tag whose release gate failed has no chart; skip it.
       - name: Choose the release to upgrade from

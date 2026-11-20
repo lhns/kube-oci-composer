@@ -1,11 +1,13 @@
 name: release
 
 # Two modes, same job:
-#   release  - a `v*` tag. Multi-arch, tagged `latest`, gated on the full ci+e2e pipeline,
-#              and it creates the GitHub Release.
-#   dev      - any other branch push, or run by hand. amd64 only (arm64 under QEMU is slow and
-#              unused for dev), published as `sha-<short>` plus a chart `0.0.0-dev.g<short>`, so an
-#              unmerged branch can be installed in a real cluster. No GitHub Release.
+#   release  - a `v*` tag. Tagged `latest`, gated on the full ci+e2e pipeline, and it creates
+#              the GitHub Release.
+#   dev      - any other branch push, or run by hand. Published as `sha-<short>` plus a chart
+#              `0.0.0-dev.g<short>`, so an unmerged branch can be installed in a real cluster. No
+#              GitHub Release.
+# Both modes build linux/amd64 and linux/arm64 (cross-compiled, no QEMU). Images are pushed by
+# digest, each platform's binary architecture is checked, and only then are the tags applied.
 on:
   push:
     tags:     ['v*']
@@ -23,7 +25,6 @@ permissions:
   # write: the last step creates the GitHub Release.
   contents: write
   packages: write
-  id-token: write
 
 jobs:
   # A release is gated on the full ci and e2e pipelines, reused rather than re-declared, so a
@@ -56,15 +57,19 @@ jobs:
     # on a failed or cancelled gate.
     if: always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Go version from the Dockerfile
+        run: |
+          v=$(sed -n 's/^FROM .*golang:\([0-9.]*\)@.*/\1/p' Dockerfile)
+          [ -n "$v" ] || { echo "no golang tag found in Dockerfile"; exit 1; }
+          echo "GO_VERSION=$v" >> "$GITHUB_ENV"
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
-          go-version-file: go.mod
+          go-version: ${{ env.GO_VERSION }}
           cache: true
 
-      - uses: docker/setup-qemu-action@v4
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -80,7 +85,6 @@ jobs:
             {
               echo "mode=release"
               echo "version=${VERSION}"
-              echo "platforms=linux/amd64,linux/arm64"
               echo "extra_tags=ghcr.io/lhns/kube-oci-composer:latest"
               echo "builder_extra_tags=ghcr.io/lhns/kube-oci-builder:latest"
             } >> "$GITHUB_OUTPUT"
@@ -95,21 +99,19 @@ jobs:
               # invalid numeric semver identifier and the chart push rejects it. Image tags keep
               # the bare sha.
               echo "version=0.0.0-dev.g${SHORT}"
-              echo "platforms=linux/amd64"
               echo "extra_tags=ghcr.io/lhns/kube-oci-composer:sha-${SHORT},ghcr.io/lhns/kube-oci-composer:${BRANCH}"
               echo "builder_extra_tags=ghcr.io/lhns/kube-oci-builder:sha-${SHORT},ghcr.io/lhns/kube-oci-builder:${BRANCH}"
             } >> "$GITHUB_OUTPUT"
           fi
           cat "$GITHUB_OUTPUT"
 
-      - uses: docker/build-push-action@v7
+      - id: composer
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          platforms: ${{ steps.version.outputs.platforms }}
-          push: true
-          tags: |
-            ghcr.io/lhns/kube-oci-composer:${{ steps.version.outputs.version }}
-            ${{ steps.version.outputs.extra_tags }}
+          platforms: linux/amd64,linux/arm64
+          # By digest, no tag: nothing is tagged until the architecture check passes.
+          outputs: type=image,name=ghcr.io/lhns/kube-oci-composer,push-by-digest=true,name-canonical=true,push=true
           build-args: |
             CMD=oci-composer
             VERSION=${{ steps.version.outputs.version }}
@@ -119,14 +121,13 @@ jobs:
           cache-to: type=gha,mode=max
 
       # The builder: same Dockerfile, different CMD.
-      - uses: docker/build-push-action@v7
+      - id: builder
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          platforms: ${{ steps.version.outputs.platforms }}
-          push: true
-          tags: |
-            ghcr.io/lhns/kube-oci-builder:${{ steps.version.outputs.version }}
-            ${{ steps.version.outputs.builder_extra_tags }}
+          platforms: linux/amd64,linux/arm64
+          # By digest, no tag: nothing is tagged until the architecture check passes.
+          outputs: type=image,name=ghcr.io/lhns/kube-oci-builder,push-by-digest=true,name-canonical=true,push=true
           build-args: |
             CMD=oci-builder
             VERSION=${{ steps.version.outputs.version }}
@@ -135,7 +136,57 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - uses: azure/setup-helm@v5
+      - uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
+        with:
+          version: v0.20.6
+
+      # The Dockerfile checks the binary it builds; this checks what was pushed, per platform,
+      # so a wrong-architecture binary in a platform image cannot get a tag.
+      - name: Verify each platform image's binary architecture
+        env:
+          COMPOSER: ghcr.io/lhns/kube-oci-composer@${{ steps.composer.outputs.digest }}
+          BUILDER: ghcr.io/lhns/kube-oci-builder@${{ steps.builder.outputs.digest }}
+        run: |
+          set -euo pipefail
+          declare -A want=([amd64]="3e 00" [arm64]="b7 00")
+          for ref in "$COMPOSER" "$BUILDER"; do
+            seen=" "
+            # Attestation manifests are listed as unknown/unknown; skip them.
+            while read -r os arch; do
+              [ "$os" = unknown ] && continue
+              [ "$os" = linux ] && [ -n "${want[$arch]:-}" ] || { echo "FAIL: $ref has unexpected platform $os/$arch"; exit 1; }
+              got=$(crane export --platform "linux/$arch" "$ref" - | tar -xO manager | od -An -tx1 -j18 -N2 | xargs)
+              if [ "$got" != "${want[$arch]}" ]; then
+                echo "FAIL: $ref linux/$arch manager has e_machine '$got', expected '${want[$arch]}'"
+                exit 1
+              fi
+              echo "OK: $ref linux/$arch e_machine $got"
+              seen+="$arch "
+            done < <(crane manifest "$ref" | jq -r '.manifests[] | "\(.platform.os) \(.platform.architecture)"')
+            for arch in "${!want[@]}"; do
+              [[ "$seen" == *" $arch "* ]] || { echo "FAIL: $ref has no linux/$arch image"; exit 1; }
+            done
+          done
+
+      - name: Tag the verified images
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          COMPOSER: ghcr.io/lhns/kube-oci-composer@${{ steps.composer.outputs.digest }}
+          BUILDER: ghcr.io/lhns/kube-oci-builder@${{ steps.builder.outputs.digest }}
+          COMPOSER_EXTRA_TAGS: ${{ steps.version.outputs.extra_tags }}
+          BUILDER_EXTRA_TAGS: ${{ steps.version.outputs.builder_extra_tags }}
+        run: |
+          set -euo pipefail
+          tag() { # <name> <digest ref> <comma-separated extra tags>
+            local args=(-t "$1:$VERSION") t
+            IFS=, read -ra extra <<< "$3"
+            for t in "${extra[@]}"; do [ -z "$t" ] || args+=(-t "$t"); done
+            docker buildx imagetools create "${args[@]}" "$2"
+          }
+          tag ghcr.io/lhns/kube-oci-composer "$COMPOSER" "$COMPOSER_EXTRA_TAGS"
+          tag ghcr.io/lhns/kube-oci-builder "$BUILDER" "$BUILDER_EXTRA_TAGS"
+
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
 
       - name: Publish the chart as an OCI artifact
         run: |
@@ -170,7 +221,7 @@ jobs:
             --set registry.publish.mode=internalOnly >> release/install.yaml
 
       # Release mode only; a dev build's deliverable is its image and chart.
-      - uses: softprops/action-gh-release@v3
+      - uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         if: steps.version.outputs.mode == 'release'
         with:
           files: release/install.yaml

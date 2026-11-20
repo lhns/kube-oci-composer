@@ -21,10 +21,15 @@ jobs:
   unit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Go version from the Dockerfile
+        run: |
+          v=$(sed -n 's/^FROM .*golang:\([0-9.]*\)@.*/\1/p' Dockerfile)
+          [ -n "$v" ] || { echo "no golang tag found in Dockerfile"; exit 1; }
+          echo "GO_VERSION=$v" >> "$GITHUB_ENV"
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
-          go-version-file: go.mod
+          go-version: ${{ env.GO_VERSION }}
           cache: true
 
       - name: The release image is built with the Go that CI tests
@@ -33,7 +38,7 @@ jobs:
         # A minor move is a migration: decide about AssemblyVersion, then move both together.
         run: |
           mod=$(awk '/^go /{split($2, v, "."); print v[1] "." v[2]}' go.mod)
-          img=$(grep -m1 -oE '^FROM golang:[0-9]+[.][0-9]+' Dockerfile | cut -d: -f2)
+          img=$(grep -m1 -oE '^FROM (--platform=[^ ]+ )?golang:[0-9]+[.][0-9]+' Dockerfile | cut -d: -f2)
           if [ -z "$img" ] || [ "$mod" != "$img" ]; then
             echo "go.mod says Go $mod but the Dockerfile builds with golang:${img:-?}"
             exit 1
@@ -50,13 +55,18 @@ jobs:
     runs-on: ubuntu-latest
     needs: unit
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Go version from the Dockerfile
+        run: |
+          v=$(sed -n 's/^FROM .*golang:\([0-9.]*\)@.*/\1/p' Dockerfile)
+          [ -n "$v" ] || { echo "no golang tag found in Dockerfile"; exit 1; }
+          echo "GO_VERSION=$v" >> "$GITHUB_ENV"
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
-          go-version-file: go.mod
+          go-version: ${{ env.GO_VERSION }}
           cache: true
       - name: Cache envtest assets
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.local/share/kubebuilder-envtest
           key: envtest-${{ runner.os }}
@@ -66,24 +76,29 @@ jobs:
     runs-on: ubuntu-latest
     needs: unit
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Go version from the Dockerfile
+        run: |
+          v=$(sed -n 's/^FROM .*golang:\([0-9.]*\)@.*/\1/p' Dockerfile)
+          [ -n "$v" ] || { echo "no golang tag found in Dockerfile"; exit 1; }
+          echo "GO_VERSION=$v" >> "$GITHUB_ENV"
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
-          go-version-file: go.mod
+          go-version: ${{ env.GO_VERSION }}
           cache: true
-      - uses: golangci/golangci-lint-action@v9
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           # Built with the installed Go: prebuilt binaries lag Go releases and refuse a newer
           # go.mod. Settings, including the timeout, are in .golangci.yml.
           install-mode: goinstall
-          version: latest
+          version: v2.15.0
 
   chart:
     runs-on: ubuntu-latest
     needs: unit
     steps:
-      - uses: actions/checkout@v7
-      - uses: azure/setup-helm@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
       - run: make chart-lint
 
       - name: Render the option combinations that have their own code paths
@@ -164,11 +179,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: unit
     steps:
-      - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Build the image (no push)
         # Otherwise only release builds it, after the tag is pushed.
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           push: false
@@ -180,7 +195,7 @@ jobs:
           cache-to: type=gha,mode=max
       - name: Build the builder image (no push)
         # Same Dockerfile, other binary, same reason.
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           push: false
@@ -190,10 +205,43 @@ jobs:
             CMD=oci-builder
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Build the image for arm64 (no push)
+        # Cross-compiled; the Dockerfile's ELF architecture check runs inside it, so an arm64
+        # break fails here and not first at release. No load: a multi-platform result cannot be.
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/arm64
+          push: false
+          build-args: |
+            CMD=oci-composer
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Build the builder image for arm64 (no push)
+        # Cross-compiled; the Dockerfile's ELF architecture check runs inside it, so an arm64
+        # break fails here and not first at release. No load: a multi-platform result cannot be.
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/arm64
+          push: false
+          build-args: |
+            CMD=oci-builder
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
       - name: Trivy image scan
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ghcr.io/lhns/kube-oci-composer:ci
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+      - name: Trivy builder image scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/lhns/kube-oci-builder:ci
           format: table
           severity: CRITICAL,HIGH
           exit-code: '1'
@@ -204,9 +252,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: unit
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Trivy filesystem scan (sources + go.sum)
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: .
