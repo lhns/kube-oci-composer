@@ -554,8 +554,7 @@ livenessProbe:
   initialDelaySeconds: 15
   periodSeconds: 20
 
-# Readiness means the served store is warm, so a restarted pod stays out of the Service until its
-# artifacts are rebuilt. Without a warm layer cache that re-fetches every layer; allow time.
+# Readiness is a bare ping: the registry serves the images, not this pod.
 readinessProbe:
   initialDelaySeconds: 5
   periodSeconds: 10

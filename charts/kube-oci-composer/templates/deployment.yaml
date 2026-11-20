@@ -108,7 +108,7 @@ spec:
               port: probes
             {{- toYaml .Values.livenessProbe | nindent 12 }}
           readinessProbe:
-            # Ready once the served store is warm.
+            # A bare ping, like liveness: nothing is served from this pod, so there is nothing to warm.
             httpGet:
               path: /readyz
               port: probes

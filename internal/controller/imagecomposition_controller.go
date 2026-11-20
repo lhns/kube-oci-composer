@@ -77,8 +77,8 @@ type ImageCompositionReconciler struct {
 	// without it every build fetches from the origin.
 	Cache *cache.Cache
 
-	// Readiness gates the pod's readiness probe until the served store is warm. Optional; when
-	// nil, readiness is not tracked.
+	// Readiness records which objects this process has reconciled, for retention. Optional; when
+	// nil, nothing is tracked.
 	Readiness *Readiness
 
 	// HistoryLimit is how many past builds to retain per object when the object does not say.

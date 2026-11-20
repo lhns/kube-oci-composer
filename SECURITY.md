@@ -13,29 +13,29 @@ What that means concretely:
 mismatch is terminal — the object goes `Stalled` and nothing is published. A compromised upstream
 serving different bytes is detected, not consumed.
 
-**The default mode has no registry credentials.** With `spec.push` unset the controller serves
-artifacts itself and never authenticates anywhere.
+**Only the operator can write to the registry.** Everything is published to a registry
+([ADR 0035](docs/adr/0035-a-registry-is-the-only-publication-path.md)). The bundled zot allows
+anonymous reads and authenticated writes, and only the controllers, plus the build Jobs they
+create, get the write credential. Nothing else can push into it. Without TLS that credential
+crosses the pod network in the clear; see [docs/registry.md](docs/registry.md).
 
-**Push mode grants write access to a registry.** This is the one genuinely new capability. Pull
-credentials already exist wherever a private registry is used; what push adds is the cluster
-being able to *write*, so a compromise means poisoning artifacts other workloads consume rather
-than reading one application's data. Scope the token to a single repository, push-only, no
-delete, and prefer serving mode where nothing outside the cluster needs the artifact.
+**Your own registry means your own credential.** With the bundled registry disabled, the
+controllers push to yours with the Secret you supply
+([ADR 0034](docs/adr/0034-a-default-registry.md)). A compromise of the operator then means
+poisoned images that other workloads run. Scope that token to the repositories it needs: push, no
+delete.
 
-**Secrets are read uncached, by name.** The controller needs `get` on secrets, not `list` or
-`watch`. Caching would require watching every Secret in the cluster to read one push credential.
+**Secrets are read uncached, by name.** The cache is disabled for Secrets, so neither controller
+needs `list` or `watch` on them. The composer only reads them. The builder also creates and updates
+each build's own Secrets ([ADR 0050](docs/adr/0050-a-builds-secrets-belong-to-the-build.md)).
 
-**The serving endpoint is read-only to the network.** Writes arrive over loopback from the
-controller itself. The chart does not expose the write path.
+**Attestations are opt-in and enforce nothing alone.** SBOM, provenance and key-based cosign
+signing exist and are off by default ([ADR 0008](docs/adr/0008-supply-chain.md),
+[ADR 0040](docs/adr/0040-the-supply-chain-work-is-worth-building.md)). A signature protects nothing
+until admission control verifies it, and the chart ships no admission policy.
 
-**The embedded registry is `go-containerregistry`'s `pkg/registry`**, which upstream describes as
-aimed at tests. That is stated plainly in [ADR 0012](docs/adr/0012-keep-pkg-registry.md) rather
-than buried: the exposure is bounded — read-only, reproducible content, loopback writes — but
-anyone uncomfortable with it should set `spec.push` and use a real registry.
-
-**Attestations are not implemented.** SBOM, provenance and signing are designed
-([ADR 0008](docs/adr/0008-supply-chain.md)) and not built. Even once they are, signing enforces
-nothing until admission control verifies it.
+**Release images are checked before they are tagged.** Each platform's binary in the published
+image has its ELF architecture verified before any version tag or `latest` points at it.
 
 ## Supported versions
 

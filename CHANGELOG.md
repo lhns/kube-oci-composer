@@ -5,6 +5,16 @@ may change between minor versions.
 
 ## [Unreleased]
 
+### Build
+
+- Images are cross-compiled instead of built under QEMU. Every build checks that its binary's ELF
+  architecture matches the image platform. A release pushes by digest, verifies each platform's
+  binary in the pushed image, and only then tags it, so `latest` cannot point at a wrong-arch image.
+- arm64 is built on every pull request and main push, not first on a tag.
+- The runtime base is pinned by digest. Workflow actions are pinned by commit SHA. CI tests with the
+  Go version that builds the release, read from the Dockerfile.
+- Trivy scans the builder image as well as the composer image.
+
 ## [0.6.4] - 2026-10-22
 
 No upgrade steps.
