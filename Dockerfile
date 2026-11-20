@@ -5,7 +5,7 @@
 # without CI, which used go.mod's, noticing. Dependabot proposes patch and digest bumps.
 # $BUILDPLATFORM: the compiler runs natively and cross-compiles, so no QEMU is needed (the runtime
 # stage has no RUN).
-FROM --platform=$BUILDPLATFORM golang:1.27.3@sha256:f20d83a83e18dbd2a4714b8ffd4b30b287b6243962dd75608e86abcc63ba4efc AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.4@sha256:205c7636d74e0ffbe3d007162df7d74f859f5a8c8322dfb9f907977686c126cf AS builder
 
 WORKDIR /workspace
 
