@@ -1,7 +1,6 @@
 version: 2
 
 updates:
-  # Go module dependencies (operator code).
   - package-ecosystem: "gomod"
     directory: "/"
     schedule:
@@ -12,20 +11,21 @@ updates:
       - dependencies
       - go
     groups:
-      # Group k8s.io/* and sigs.k8s.io/* together — they move in lockstep
-      # (controller-runtime pins specific k8s.io versions).
+      # k8s.io/* and sigs.k8s.io/* move in lockstep (controller-runtime pins k8s.io versions).
       kubernetes:
         patterns:
           - "k8s.io/*"
           - "sigs.k8s.io/*"
-      # Anything else, lumped into one PR per week.
       go-deps:
         patterns:
           - "*"
 
-  # GitHub Actions used in the workflows.
+  # "/" covers .github/workflows only; the second entry adds the local composite actions
+  # (.github/actions/setup-go pins setup-go).
   - package-ecosystem: "github-actions"
-    directory: "/"
+    directories:
+      - "/"
+      - "/.github/actions/*"
     schedule:
       interval: "weekly"
       day: "monday"
@@ -34,7 +34,7 @@ updates:
       - dependencies
       - github-actions
 
-  # Container base images in the Dockerfile.
+  # Base images in the Dockerfile. A golang bump also needs go.mod's toolchain line moved: CI warns.
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
