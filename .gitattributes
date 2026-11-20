@@ -1,0 +1,3 @@
+# LF in the repo and in every checkout, whatever the local core.autocrlf: the shell scripts,
+# Dockerfile and generated files are read by Linux tools, and a CRLF commit once slipped in.
+* text=auto eol=lf
