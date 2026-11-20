@@ -147,7 +147,10 @@ jobs:
             while read -r os arch; do
               [ "$os" = unknown ] && continue
               [ "$os" = linux ] && [ -n "${want[$arch]:-}" ] || { echo "FAIL: $ref has unexpected platform $os/$arch"; exit 1; }
-              got=$(crane export --platform "linux/$arch" "$ref" - | tar -xO manager | od -An -tx1 -j18 -N2 | xargs)
+              # To a file first: od stops reading after two bytes, and under pipefail the
+              # resulting broken pipe in tar fails the step.
+              crane export --platform "linux/$arch" "$ref" - | tar -xO manager > "$RUNNER_TEMP/manager"
+              got=$(od -An -tx1 -j18 -N2 "$RUNNER_TEMP/manager" | xargs)
               if [ "$got" != "${want[$arch]}" ]; then
                 echo "FAIL: $ref linux/$arch manager has e_machine '$got', expected '${want[$arch]}'"
                 exit 1
