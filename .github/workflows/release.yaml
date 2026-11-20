@@ -229,7 +229,11 @@ jobs:
       # PER-REPO: steps that put further release assets into dist/ go here (SPEC.md, "Deviations").
       - name: Render the release manifests
         # A flat manifest cannot ask for registry.publish.mode (ADR 0037), so it renders
-        # internalOnly and says so at the top.
+        # internalOnly and says so at the top. Rendered from the packaged chart: the source chart's
+        # appVersion is 0.1.0, which pinned both images to :0.1.0 in every release's install.yaml.
+        env:
+          CHART_VERSION: ${{ steps.v.outputs.chart_version }}
+          APP_VERSION: ${{ steps.v.outputs.app_version }}
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -247,9 +251,13 @@ jobs:
           #
           # See docs/registry.md for nodePort and external.
           HEADER
-          helm template kube-oci-composer "$CHART_PATH" \
+          helm template kube-oci-composer "dist/$CHART_NAME-$CHART_VERSION.tgz" \
             --namespace oci-composer --include-crds \
             --set registry.publish.mode=internalOnly >> dist/install.yaml
+          for img in kube-oci-composer kube-oci-builder; do
+            grep -q "image: \"$REGISTRY/$img:$APP_VERSION\"" dist/install.yaml \
+              || { echo "::error::install.yaml does not deploy $img:$APP_VERSION"; exit 1; }
+          done
 
       - name: Checksums of the release assets
         run: |
