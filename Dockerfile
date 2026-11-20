@@ -16,11 +16,12 @@ COPY cmd/ cmd/
 COPY api/ api/
 COPY internal/ internal/
 
-# Declared after the shared layers: an ARG is in the cache key of every RUN after it, so declaring
-# these earlier made each arch, binary and version re-download the modules.
 # CMD selects which binary this image carries. The two are built from one Dockerfile because they
 # share every layer up to the compile step; ADR 0004 wants two DEPLOYMENTS, which is about RBAC and
 # blast radius, not about duplicating a build recipe.
+#
+# Declared here, not at the top: an ARG is in the cache key of every RUN after it, so declared
+# earlier they made each arch, binary and version download the modules again.
 ARG CMD=oci-composer
 ARG VERSION=dev
 ARG COMMIT=none
@@ -29,8 +30,8 @@ ARG TARGETOS
 ARG TARGETARCH
 
 # CGO off so the result is a static binary that runs on a distroless base.
-# No GOOS/GOARCH fallbacks: a silent default once shipped an amd64 binary in an arm64 image. The
-# ELF e_machine check (readable without QEMU) fails the build if the binary is not the target's.
+# No GOOS/GOARCH fallbacks: a silent default can put an amd64 binary in an arm64 image. The ELF
+# e_machine check (readable without QEMU) fails the build if the binary is not the target's.
 RUN set -eu; \
     [ -n "${TARGETOS}" ] && [ -n "${TARGETARCH}" ] || { echo "TARGETOS/TARGETARCH unset: build with BuildKit"; exit 1; }; \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
