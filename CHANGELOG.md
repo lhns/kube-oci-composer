@@ -15,6 +15,10 @@ may change between minor versions.
   Go version that builds the release, read from the Dockerfile.
 - Trivy scans the builder image as well as the composer image.
 
+### Security
+
+- `golang.org/x/net` v0.62.0: CVE-2026-78661 (denial of service in `x/net/html`).
+
 ## [0.6.4] - 2026-10-22
 
 No upgrade steps.
