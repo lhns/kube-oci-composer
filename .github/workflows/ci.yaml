@@ -1,23 +1,26 @@
+# .github/workflows/ci.yaml -- the shared part, copied verbatim into each operator repo (SPEC.md).
+# The repo's own jobs (unit, envtest, chart, e2e lanes) stay alongside these and use the local
+# setup-go action. Only lines marked "# PER-REPO:" differ; SPEC.md has the values.
 name: ci
 
 on:
   push:
     branches: [main]
   pull_request:
-  # Callable, so release gates on this same pipeline rather than a subset of it.
+  # Callable, so the release gates on this same pipeline.
   workflow_call:
 
 permissions:
   contents: read
 
-# A LITERAL group name: under workflow_call ${{ github.workflow }} is the caller's, so ci and e2e
-# would share one group when release calls them, and cancel each other.
+# A LITERAL group name: under workflow_call ${{ github.workflow }} is the caller's, so two called
+# workflows would share one group and cancel each other.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}  # PER-REPO: a distinct literal per workflow file (ci-, e2e-, ...)
   cancel-in-progress: true
 
 env:
-  BINARY: /manager
+  BINARY: /manager             # PER-REPO: entrypoint binary inside the image
   PLATFORMS: linux/amd64,linux/arm64
 
 jobs:
@@ -129,6 +132,7 @@ jobs:
           fi
           echo "OK: refused, as intended."
 
+  # Go repos only (PER-REPO: absent in pv-reaper).
   go-version:
     runs-on: ubuntu-latest
     steps:
@@ -159,6 +163,7 @@ jobs:
           [ "$tc" = "$img" ] || echo "::warning::go.mod has toolchain go$tc, the Dockerfile golang:$img; bump the toolchain line"
           echo "OK: toolchain go$tc, golang:$img"
 
+  # Go repos that adopt golangci-lint (PER-REPO, see SPEC.md), with .golangci.yml from SPEC.md.
   lint:
     runs-on: ubuntu-latest
     needs: go-version
@@ -184,7 +189,7 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: '1'
           ignore-unfixed: true
-          skip-dirs: 'docs,test'
+          skip-dirs: 'docs,test' # PER-REPO: oci-composer 'docs,test'
 
   # Both platforms, pushed by digest to a throwaway registry and checked with the release's own
   # script, so an arm64 break fails the PR rather than the release.
@@ -192,7 +197,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        include:
+        include:                 # PER-REPO: one entry per image
           - image: kube-oci-composer
             build-args: CMD=oci-composer
           - image: kube-oci-builder
@@ -203,6 +208,8 @@ jobs:
         ports: ['5000:5000']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # PER-REPO: pv-reaper only, its Dockerfile RUNs on the target platform:
+      # - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           driver-opts: network=host   # the builder must reach the registry service on localhost

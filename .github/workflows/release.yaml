@@ -1,3 +1,5 @@
+# .github/workflows/release.yaml -- copied verbatim into each operator repo (SPEC.md).
+# Only lines marked "# PER-REPO:" differ between repos; SPEC.md has the values.
 name: release
 
 # Two modes, one code path:
@@ -23,11 +25,11 @@ permissions:
 
 env:
   REGISTRY: ghcr.io/lhns
-  IMAGE: kube-oci-composer
-  BINARY: /manager
-  CHART_NAME: kube-oci-composer
-  CHART_PATH: charts/kube-oci-composer
-  TAG_PREFIX: ""
+  IMAGE: kube-oci-composer         # PER-REPO: image name
+  BINARY: /manager                 # PER-REPO: entrypoint binary inside the image
+  CHART_NAME: kube-oci-composer    # PER-REPO: `name` in Chart.yaml
+  CHART_PATH: charts/kube-oci-composer # PER-REPO: chart directory
+  TAG_PREFIX: ""                   # PER-REPO: "v" or ""; release image tag and appVersion are <TAG_PREFIX>X.Y.Z
   PLATFORMS: linux/amd64,linux/arm64
 
 jobs:
@@ -35,9 +37,10 @@ jobs:
   # Tags only: a dev run would share ci's cancel-in-progress group with the push-triggered ci run.
   ci:
     if: startsWith(github.ref, 'refs/tags/v')
-    uses: ./.github/workflows/ci.yaml
+    uses: ./.github/workflows/ci.yaml   # PER-REPO: the CI workflow file
     permissions:
       contents: read
+  # PER-REPO: further gates go here in the same shape, and into `needs` below.
   e2e:
     if: startsWith(github.ref, 'refs/tags/v')
     uses: ./.github/workflows/e2e.yaml
@@ -51,9 +54,10 @@ jobs:
       contents: read
 
   release:
-    needs: [ci, e2e, upgrade]
-    # always(): skipped gates (dev mode) must not skip this job; failed or cancelled ones still block it.
-    if: always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    needs: [ci, e2e, upgrade]           # PER-REPO: the gate jobs
+    # Skipped gates (dev mode) must not skip this job; failed or cancelled ones still block it.
+    # !cancelled(), not always(): always() is never cancelled, so a superseded dev run would keep tagging.
+    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write   # the GitHub Release
@@ -61,6 +65,8 @@ jobs:
       id-token: write   # cosign keyless signing
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # PER-REPO: pv-reaper only, its Dockerfile RUNs on the target platform:
+      # - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
@@ -124,7 +130,8 @@ jobs:
             BUILD_DATE=${{ steps.v.outputs.date }}
           cache-from: type=gha,scope=${{ env.IMAGE }}
           cache-to: type=gha,mode=max,scope=${{ env.IMAGE }}
-
+      # PER-REPO: one more build step per extra image, same shape with its own id, name and
+      # build-args (oci-composer: id build-builder, kube-oci-builder, CMD=oci-builder).
       - name: Build and push kube-oci-builder by digest
         id: build-builder
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -144,12 +151,14 @@ jobs:
         id: images
         env:
           MAIN: ${{ env.REGISTRY }}/${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          # PER-REPO: one variable per extra image, e.g.
           BUILDER: ${{ env.REGISTRY }}/kube-oci-builder@${{ steps.build-builder.outputs.digest }}
         run: |
           set -euo pipefail
           {
             echo 'refs<<EOF'
             echo "$MAIN"
+            # PER-REPO: echo "$BUILDER"
             echo "$BUILDER"
             echo EOF
           } | tee -a "$GITHUB_OUTPUT"
@@ -217,6 +226,7 @@ jobs:
           echo "digest=$digest" | tee -a "$GITHUB_OUTPUT"
           cosign sign "$REGISTRY/charts/$CHART_NAME@$digest"
 
+      # PER-REPO: steps that put further release assets into dist/ go here (SPEC.md, "Deviations").
       - name: Render the release manifests
         # A flat manifest cannot ask for registry.publish.mode (ADR 0037), so it renders
         # internalOnly and says so at the top.
@@ -232,11 +242,14 @@ jobs:
           #
           # To make images pullable, install the CHART instead and choose a mode:
           #
-          #   helm install kube-oci-composer oci://ghcr.io/lhns/charts/kube-oci-composer           #     --set registry.publish.mode=ingress --set registry.host=oci-composer.example.com
+          #   helm install kube-oci-composer oci://ghcr.io/lhns/charts/kube-oci-composer \
+          #     --set registry.publish.mode=ingress --set registry.host=oci-composer.example.com
           #
           # See docs/registry.md for nodePort and external.
           HEADER
-          helm template kube-oci-composer "$CHART_PATH"             --namespace oci-composer --include-crds             --set registry.publish.mode=internalOnly >> dist/install.yaml
+          helm template kube-oci-composer "$CHART_PATH" \
+            --namespace oci-composer --include-crds \
+            --set registry.publish.mode=internalOnly >> dist/install.yaml
 
       - name: Checksums of the release assets
         run: |

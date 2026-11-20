@@ -2,12 +2,14 @@
 # runtime stage has no RUN). The golang tag is go.mod's toolchain version; CI fails on a minor
 # mismatch, and the local setup-go action makes CI test with this exact Go.
 FROM --platform=$BUILDPLATFORM golang:1.27.4@sha256:205c7636d74e0ffbe3d007162df7d74f859f5a8c8322dfb9f907977686c126cf AS builder
+# PER-REPO: the line above (golang:<go.mod toolchain version>@sha256:<digest>).
 
 WORKDIR /workspace
 
 COPY go.mod go.sum ./
 RUN go mod download
 
+# PER-REPO: the source directories the build needs (traefik-reflector and ha-surge have no api/).
 COPY api/ api/
 COPY cmd/ cmd/
 COPY internal/ internal/
@@ -19,6 +21,7 @@ ARG TARGETARCH
 ARG VERSION=dev
 ARG COMMIT=none
 ARG BUILD_DATE=unknown
+# PER-REPO: oci-composer adds `ARG CMD=oci-composer` and builds ./cmd/${CMD}.
 # CMD selects which binary this image carries: oci-composer or oci-builder, one Dockerfile for both.
 ARG CMD=oci-composer
 

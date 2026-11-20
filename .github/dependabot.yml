@@ -1,6 +1,7 @@
 version: 2
 
 updates:
+  # PER-REPO: absent in pv-reaper (no Go).
   - package-ecosystem: "gomod"
     directory: "/"
     schedule:
@@ -25,7 +26,7 @@ updates:
   - package-ecosystem: "github-actions"
     directories:
       - "/"
-      - "/.github/actions/*"
+      - "/.github/actions/*"   # PER-REPO: absent in pv-reaper (no local actions)
     schedule:
       interval: "weekly"
       day: "monday"
