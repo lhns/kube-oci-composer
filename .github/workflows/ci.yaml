@@ -196,6 +196,8 @@ jobs:
   image:
     runs-on: ubuntu-latest
     strategy:
+      # PER-REPO: one image's failure must not cancel the other's result.
+      fail-fast: false
       matrix:
         include:                 # PER-REPO: one entry per image
           - image: kube-oci-composer
