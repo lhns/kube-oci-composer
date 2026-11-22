@@ -35,7 +35,9 @@ signing exist and are off by default ([ADR 0008](docs/adr/0008-supply-chain.md),
 until admission control verifies it, and the chart ships no admission policy.
 
 **Release images are checked before they are tagged.** Each platform's binary in the published
-image has its ELF architecture verified before any version tag or `latest` points at it.
+image has its ELF architecture verified before any version tag or `latest` points at it. Tagged
+releases sign both images and the chart keyless and attest an SBOM per image; dev builds are not
+signed ([ADR 0062](docs/adr/0062-releases-are-signed-keyless.md) names the identity to verify).
 
 ## Supported versions
 
