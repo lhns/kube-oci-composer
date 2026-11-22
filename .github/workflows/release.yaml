@@ -7,7 +7,8 @@ name: release
 #   dev     - any other branch push, or run by hand: image tags 0.0.0-dev.g<sha7>, sha-<sha7> and
 #             the branch, chart 0.0.0-dev.g<sha7>. No GitHub Release.
 # Both build linux/amd64 and linux/arm64, push by digest, check each platform's binary, and only
-# then tag, sign and publish the chart.
+# then tag and publish the chart. Only release mode signs and attests: nothing verifies dev builds,
+# and each signature is a public Rekor entry plus .sig/.att tags on ghcr.
 on:
   push:
     tags: ['v*']
@@ -62,7 +63,7 @@ jobs:
     permissions:
       contents: write   # the GitHub Release
       packages: write   # images and chart on ghcr.io
-      id-token: write   # cosign keyless signing
+      id-token: write   # cosign keyless signing (release mode only)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # PER-REPO: pv-reaper only, its Dockerfile RUNs on the target platform:
@@ -84,7 +85,7 @@ jobs:
           syft-version: v1.14.0
       - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
         with:
-          version: v3.16.3
+          version: v3.22.1
 
       - name: Derive mode, versions and tags
         id: v
@@ -128,7 +129,10 @@ jobs:
             VERSION=${{ steps.v.outputs.app_version }}
             COMMIT=${{ github.sha }}
             BUILD_DATE=${{ steps.v.outputs.date }}
-          cache-from: type=gha,scope=${{ env.IMAGE }}
+          # PER-REPO: the two images share the module and source layers; read the sibling's scope too.
+          cache-from: |
+            type=gha,scope=${{ env.IMAGE }}
+            type=gha,scope=kube-oci-builder
           cache-to: type=gha,mode=max,scope=${{ env.IMAGE }}
       # PER-REPO: one more build step per extra image, same shape with its own id, name and
       # build-args (oci-composer: id build-builder, kube-oci-builder, CMD=oci-builder).
@@ -144,7 +148,9 @@ jobs:
             VERSION=${{ steps.v.outputs.app_version }}
             COMMIT=${{ github.sha }}
             BUILD_DATE=${{ steps.v.outputs.date }}
-          cache-from: type=gha,scope=kube-oci-builder
+          cache-from: |
+            type=gha,scope=kube-oci-builder
+            type=gha,scope=${{ env.IMAGE }}
           cache-to: type=gha,mode=max,scope=kube-oci-builder
 
       - name: Collect the pushed digests
@@ -193,9 +199,11 @@ jobs:
             done
           done
 
-      - name: Sign the images, attest their SBOMs
+      # syft runs in dev mode too, so the SBOM step stays exercised.
+      - name: Image SBOMs; in release mode, sign the images and attest the SBOMs
         env:
           REFS: ${{ steps.images.outputs.refs }}
+          MODE: ${{ steps.v.outputs.mode }}
           COSIGN_YES: "true"
         run: |
           set -euo pipefail
@@ -204,16 +212,19 @@ jobs:
           for ref in "${refs[@]}"; do
             name=${ref%@*}
             sbom="dist/${name##*/}-image.sbom.spdx.json"
-            cosign sign "$ref"
             syft "$ref" -o "spdx-json=$sbom"
-            cosign attest --predicate "$sbom" --type spdx "$ref"
+            if [ "$MODE" = release ]; then
+              cosign sign "$ref"
+              cosign attest --predicate "$sbom" --type spdx "$ref"
+            fi
           done
 
-      - name: Package, push and sign the chart
+      - name: Package and push the chart; in release mode, sign it
         id: chart
         env:
           CHART_VERSION: ${{ steps.v.outputs.chart_version }}
           APP_VERSION: ${{ steps.v.outputs.app_version }}
+          MODE: ${{ steps.v.outputs.mode }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COSIGN_YES: "true"
         run: |
@@ -224,7 +235,7 @@ jobs:
           helm push "dist/$CHART_NAME-$CHART_VERSION.tgz" "oci://$REGISTRY/charts"
           digest=$(crane digest "$REGISTRY/charts/$CHART_NAME:$CHART_VERSION")
           echo "digest=$digest" | tee -a "$GITHUB_OUTPUT"
-          cosign sign "$REGISTRY/charts/$CHART_NAME@$digest"
+          if [ "$MODE" = release ]; then cosign sign "$REGISTRY/charts/$CHART_NAME@$digest"; fi
 
       # PER-REPO: steps that put further release assets into dist/ go here (SPEC.md, "Deviations").
       - name: Render the release manifests

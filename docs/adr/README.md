@@ -68,6 +68,7 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0059](0059-what-causes-a-rebuild.md) | What causes a rebuild | **Accepted** |
 | [0060](0060-every-manifest-carries-its-own-name.md) | Every manifest carries its own name | **Accepted**, supersedes part of 0017 |
 | [0061](0061-ready-names-the-image-the-spec-asks-for.md) | Ready names the image the spec asks for | **Accepted**, sharpens 0009; amended (status writes) |
+| [0062](0062-releases-are-signed-keyless.md) | This project's own releases are signed keyless | **Accepted**, beside 0008 |
 
 ## Open questions
 

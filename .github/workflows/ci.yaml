@@ -202,8 +202,10 @@ jobs:
         include:                 # PER-REPO: one entry per image
           - image: kube-oci-composer
             build-args: CMD=oci-composer
+            sibling: kube-oci-builder
           - image: kube-oci-builder
             build-args: CMD=oci-builder
+            sibling: kube-oci-composer
     services:
       registry:
         image: registry:3@sha256:82f6ff4a7f982960c8aa51617fea3aabc485df6e55cce80d22deb1de36f1bc3c
@@ -226,7 +228,10 @@ jobs:
           platforms: ${{ env.PLATFORMS }}
           outputs: type=image,name=localhost:5000/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
           build-args: ${{ matrix.build-args }}
-          cache-from: type=gha,scope=${{ matrix.image }}
+          # PER-REPO: the two images share the module and source layers; read the sibling's scope too.
+          cache-from: |
+            type=gha,scope=${{ matrix.image }}
+            type=gha,scope=${{ matrix.sibling }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
       - name: Verify every platform's binary architecture
         run: bash scripts/check-binary-arch.sh "localhost:5000/${{ matrix.image }}@${{ steps.build.outputs.digest }}" "$BINARY" "$PLATFORMS"
@@ -237,7 +242,10 @@ jobs:
           load: true
           tags: ci/${{ matrix.image }}:scan
           build-args: ${{ matrix.build-args }}
-          cache-from: type=gha,scope=${{ matrix.image }}
+          # PER-REPO: the two images share the module and source layers; read the sibling's scope too.
+          cache-from: |
+            type=gha,scope=${{ matrix.image }}
+            type=gha,scope=${{ matrix.sibling }}
       - name: Trivy image scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
