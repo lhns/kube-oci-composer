@@ -80,6 +80,8 @@ jobs:
         # Printed always: the runtime version is the first thing to check when image volumes fail.
         run: kubectl get nodes -o wide
       - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
+        with:
+          version: v3.22.1   # the Helm the release packages with
 
       # After the cluster exists, before e2e-up loads from it.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2

@@ -5,15 +5,29 @@ may change between minor versions.
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-11-22
+
+No upgrade steps.
+
 ### Build
 
-- Images are cross-compiled instead of built under QEMU. Every build checks that its binary's ELF
-  architecture matches the image platform. A release pushes by digest, verifies each platform's
-  binary in the pushed image, and only then tags it, so `latest` cannot point at a wrong-arch image.
-- arm64 is built on every pull request and main push, not first on a tag.
-- The runtime base is pinned by digest. Workflow actions are pinned by commit SHA. CI tests with the
-  Go version that builds the release, read from the Dockerfile.
+- Images are cross-compiled instead of built under QEMU, and arm64 is built on every pull request
+  and main push, not first on a tag.
+- A release pushes both images by digest, checks every platform's binary architecture in the pushed
+  image (`scripts/check-binary-arch.sh`; CI also proves the check can fail), and only then tags, so
+  `latest` cannot point at a wrong-arch image.
+- Tagged releases cosign-sign both images and the chart keyless and attest an SPDX SBOM per image
+  ([ADR 0062](docs/adr/0062-releases-are-signed-keyless.md)). Release assets: the chart, the SBOMs,
+  `checksums.txt` and `install.yaml`. The release notes come from CHANGELOG.md.
+- Built with Go 1.27.4 (go.mod gains a `toolchain` line) and packaged with Helm v3.22.1, which CI
+  also uses. CI tests with the Go that builds the release, read from the Dockerfile. The runtime base
+  is pinned by digest, workflow actions by commit SHA.
 - Trivy scans the builder image as well as the composer image.
+
+### Fixed
+
+- The release's `install.yaml` deploys that release's images. It was rendered from the source chart,
+  so every earlier one (0.6.4 included) pinned both images to `:0.1.0`.
 
 ### Security
 

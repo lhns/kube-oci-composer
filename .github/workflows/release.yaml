@@ -1,49 +1,53 @@
+# .github/workflows/release.yaml -- copied verbatim into each operator repo (SPEC.md).
+# Only lines marked "# PER-REPO:" differ between repos; SPEC.md has the values.
 name: release
 
-# Two modes, same job:
-#   release  - a `v*` tag. Tagged `latest`, gated on the full ci+e2e pipeline, and it creates
-#              the GitHub Release.
-#   dev      - any other branch push, or run by hand. Published as `sha-<short>` plus a chart
-#              `0.0.0-dev.g<short>`, so an unmerged branch can be installed in a real cluster. No
-#              GitHub Release.
-# Both modes build linux/amd64 and linux/arm64 (cross-compiled, no QEMU). Images are pushed by
-# digest, each platform's binary architecture is checked, and only then are the tags applied.
+# Two modes, one code path:
+#   release - a `v*` tag: image tags <TAG_PREFIX>X.Y.Z and latest, chart X.Y.Z, GitHub Release.
+#   dev     - any other branch push, or run by hand: image tags 0.0.0-dev.g<sha7>, sha-<sha7> and
+#             the branch, chart 0.0.0-dev.g<sha7>. No GitHub Release.
+# Both build linux/amd64 and linux/arm64, push by digest, check each platform's binary, and only
+# then tag and publish the chart. Only release mode signs and attests: nothing verifies dev builds,
+# and each signature is a public Rekor entry plus .sig/.att tags on ghcr.
 on:
   push:
-    tags:     ['v*']
-    # Not dependabot's: its runs get a read-only GITHUB_TOKEN and the ghcr push fails with 403.
+    tags: ['v*']
+    # Not Dependabot's: its runs get a read-only GITHUB_TOKEN and the ghcr push fails with 403.
     branches: ['**', '!dependabot/**']
   workflow_dispatch:
 
-# Cancel superseded DEV runs only. A tag release must never be cancelled part-way: the image can
-# already be pushed when the chart has not, which leaves a version that half exists.
+# Cancel superseded dev runs only. A tag release cancelled part-way leaves a version that half exists.
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
 
 permissions:
-  # write: the last step creates the GitHub Release.
-  contents: write
-  packages: write
+  contents: read
+
+env:
+  REGISTRY: ghcr.io/lhns
+  IMAGE: kube-oci-composer         # PER-REPO: image name
+  BINARY: /manager                 # PER-REPO: entrypoint binary inside the image
+  CHART_NAME: kube-oci-composer    # PER-REPO: `name` in Chart.yaml
+  CHART_PATH: charts/kube-oci-composer # PER-REPO: chart directory
+  TAG_PREFIX: ""                   # PER-REPO: "v" or ""; release image tag and appVersion are <TAG_PREFIX>X.Y.Z
+  PLATFORMS: linux/amd64,linux/arm64
 
 jobs:
-  # A release is gated on the full ci and e2e pipelines, reused rather than re-declared, so a
-  # tag on a red commit cannot publish. Tags only: for a dev build, a second ci run for the same ref
-  # would share ci's cancel-in-progress group and the two would cancel each other.
+  # A tag cannot publish from a red commit: the release reuses the CI pipeline, not a subset of it.
+  # Tags only: a dev run would share ci's cancel-in-progress group with the push-triggered ci run.
   ci:
     if: startsWith(github.ref, 'refs/tags/v')
-    uses: ./.github/workflows/ci.yaml
+    uses: ./.github/workflows/ci.yaml   # PER-REPO: the CI workflow file
     permissions:
       contents: read
-
+  # PER-REPO: further gates go here in the same shape, and into `needs` below.
   e2e:
     if: startsWith(github.ref, 'refs/tags/v')
     uses: ./.github/workflows/e2e.yaml
     permissions:
       contents: read
-
-  # Upgrading the previous release to this one must rebuild nothing, stall nothing and lose nothing
-  # (test/upgrade/run.sh). Every other gate starts from a fresh install.
+  # Upgrading the previous release to this one must rebuild nothing, stall nothing and lose nothing.
   upgrade:
     if: startsWith(github.ref, 'refs/tags/v')
     uses: ./.github/workflows/upgrade.yaml
@@ -51,153 +55,200 @@ jobs:
       contents: read
 
   release:
+    needs: [ci, e2e, upgrade]           # PER-REPO: the gate jobs
+    # Skipped gates (dev mode) must not skip this job; failed or cancelled ones still block it.
+    # !cancelled(), not always(): always() is never cancelled, so a superseded dev run would keep tagging.
+    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-latest
-    needs: [ci, e2e, upgrade]
-    # always() so skipped gates (dev mode) do not skip this job; the contains() checks still block
-    # on a failed or cancelled gate.
-    if: always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    permissions:
+      contents: write   # the GitHub Release
+      packages: write   # images and chart on ghcr.io
+      id-token: write   # cosign keyless signing (release mode only)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: ./.github/actions/setup-go
-
+      # PER-REPO: pv-reaper only, its Dockerfile RUNs on the target platform:
+      # - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Derive version and mode
-        id: version
-        run: |
-          set -euo pipefail
-          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            VERSION="${GITHUB_REF_NAME#v}"
-            {
-              echo "mode=release"
-              echo "version=${VERSION}"
-              echo "extra_tags=ghcr.io/lhns/kube-oci-composer:latest"
-              echo "builder_extra_tags=ghcr.io/lhns/kube-oci-builder:latest"
-            } >> "$GITHUB_OUTPUT"
-          else
-            SHORT="${GITHUB_SHA::7}"
-            # Characters an OCI tag may not contain become dashes. The branch tag moves; depend
-            # on the sha tag.
-            BRANCH=$(echo "${GITHUB_REF_NAME}" | tr -c 'a-zA-Z0-9-' '-' | sed 's/-\+/-/g; s/^-//; s/-$//')
-            {
-              echo "mode=dev"
-              # The g prefix is required: an all-digit sha with a leading zero (0054012) is an
-              # invalid numeric semver identifier and the chart push rejects it. Image tags keep
-              # the bare sha.
-              echo "version=0.0.0-dev.g${SHORT}"
-              echo "extra_tags=ghcr.io/lhns/kube-oci-composer:sha-${SHORT},ghcr.io/lhns/kube-oci-composer:${BRANCH}"
-              echo "builder_extra_tags=ghcr.io/lhns/kube-oci-builder:sha-${SHORT},ghcr.io/lhns/kube-oci-builder:${BRANCH}"
-            } >> "$GITHUB_OUTPUT"
-          fi
-          cat "$GITHUB_OUTPUT"
-
-      - id: composer
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          # By digest, no tag: nothing is tagged until the architecture check passes.
-          outputs: type=image,name=ghcr.io/lhns/kube-oci-composer,push-by-digest=true,name-canonical=true,push=true
-          build-args: |
-            CMD=oci-composer
-            VERSION=${{ steps.version.outputs.version }}
-            COMMIT=${{ github.sha }}
-            BUILD_DATE=${{ steps.version.outputs.date }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      # The builder: same Dockerfile, different CMD.
-      - id: builder
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          # By digest, no tag: nothing is tagged until the architecture check passes.
-          outputs: type=image,name=ghcr.io/lhns/kube-oci-builder,push-by-digest=true,name-canonical=true,push=true
-          build-args: |
-            CMD=oci-builder
-            VERSION=${{ steps.version.outputs.version }}
-            COMMIT=${{ github.sha }}
-            BUILD_DATE=${{ steps.version.outputs.date }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
       - uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
         with:
           version: v0.20.6
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: v2.6.5
+      - uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          syft-version: v1.14.0
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
+        with:
+          version: v3.22.1
 
-      # The Dockerfile checks the binary it builds; this checks what was pushed, per platform,
-      # so a wrong-architecture binary in a platform image cannot get a tag.
-      - name: Verify each platform image's binary architecture
-        env:
-          COMPOSER: ghcr.io/lhns/kube-oci-composer@${{ steps.composer.outputs.digest }}
-          BUILDER: ghcr.io/lhns/kube-oci-builder@${{ steps.builder.outputs.digest }}
+      - name: Derive mode, versions and tags
+        id: v
         run: |
           set -euo pipefail
-          declare -A want=([amd64]="3e 00" [arm64]="b7 00")
-          for ref in "$COMPOSER" "$BUILDER"; do
-            seen=" "
-            # Attestation manifests are listed as unknown/unknown; skip them.
-            while read -r os arch; do
-              [ "$os" = unknown ] && continue
-              [ "$os" = linux ] && [ -n "${want[$arch]:-}" ] || { echo "FAIL: $ref has unexpected platform $os/$arch"; exit 1; }
-              # To a file first: od stops reading after two bytes, and under pipefail the
-              # resulting broken pipe in tar fails the step.
-              crane export --platform "linux/$arch" "$ref" - | tar -xO manager > "$RUNNER_TEMP/manager"
-              got=$(od -An -tx1 -j18 -N2 "$RUNNER_TEMP/manager" | xargs)
-              if [ "$got" != "${want[$arch]}" ]; then
-                echo "FAIL: $ref linux/$arch manager has e_machine '$got', expected '${want[$arch]}'"
-                exit 1
-              fi
-              echo "OK: $ref linux/$arch e_machine $got"
-              seen+="$arch "
-            done < <(crane manifest "$ref" | jq -r '.manifests[] | "\(.platform.os) \(.platform.architecture)"')
-            for arch in "${!want[@]}"; do
-              [[ "$seen" == *" $arch "* ]] || { echo "FAIL: $ref has no linux/$arch image"; exit 1; }
+          SHORT="${GITHUB_SHA::7}"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            MODE=release
+            CHART_VERSION="${GITHUB_REF_NAME#v}"
+            APP_VERSION="${TAG_PREFIX}${CHART_VERSION}"
+            EXTRA_TAGS=latest
+          else
+            MODE=dev
+            # The g is required: an all-digit sha with a leading zero (0054012) is an invalid
+            # numeric semver identifier and the chart push rejects it. Image tags keep the bare sha.
+            CHART_VERSION="0.0.0-dev.g${SHORT}"
+            APP_VERSION="$CHART_VERSION"
+            EXTRA_TAGS="sha-${SHORT}"
+            # The branch tag moves; depend on the sha tag. A branch called latest gets no branch tag.
+            BRANCH=$(echo "$GITHUB_REF_NAME" | tr -c 'a-zA-Z0-9-' '-' | sed 's/-\+/-/g; s/^-//; s/-$//' | cut -c1-128)
+            if [ -n "$BRANCH" ] && [ "$BRANCH" != latest ]; then EXTRA_TAGS+=",$BRANCH"; fi
+          fi
+          {
+            echo "mode=$MODE"
+            echo "chart_version=$CHART_VERSION"
+            echo "app_version=$APP_VERSION"
+            echo "extra_tags=$EXTRA_TAGS"
+            echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } | tee -a "$GITHUB_OUTPUT"
+
+      # By digest, no tag: nothing is tagged until the architecture check passes.
+      - name: Build and push ${{ env.IMAGE }} by digest
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: ${{ env.PLATFORMS }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            CMD=oci-composer
+            VERSION=${{ steps.v.outputs.app_version }}
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ steps.v.outputs.date }}
+          # PER-REPO: the two images share the module and source layers; read the sibling's scope too.
+          cache-from: |
+            type=gha,scope=${{ env.IMAGE }}
+            type=gha,scope=kube-oci-builder
+          cache-to: type=gha,mode=max,scope=${{ env.IMAGE }}
+      # PER-REPO: one more build step per extra image, same shape with its own id, name and
+      # build-args (oci-composer: id build-builder, kube-oci-builder, CMD=oci-builder).
+      - name: Build and push kube-oci-builder by digest
+        id: build-builder
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: ${{ env.PLATFORMS }}
+          outputs: type=image,name=${{ env.REGISTRY }}/kube-oci-builder,push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            CMD=oci-builder
+            VERSION=${{ steps.v.outputs.app_version }}
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ steps.v.outputs.date }}
+          cache-from: |
+            type=gha,scope=kube-oci-builder
+            type=gha,scope=${{ env.IMAGE }}
+          cache-to: type=gha,mode=max,scope=kube-oci-builder
+
+      - name: Collect the pushed digests
+        id: images
+        env:
+          MAIN: ${{ env.REGISTRY }}/${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          # PER-REPO: one variable per extra image, e.g.
+          BUILDER: ${{ env.REGISTRY }}/kube-oci-builder@${{ steps.build-builder.outputs.digest }}
+        run: |
+          set -euo pipefail
+          {
+            echo 'refs<<EOF'
+            echo "$MAIN"
+            # PER-REPO: echo "$BUILDER"
+            echo "$BUILDER"
+            echo EOF
+          } | tee -a "$GITHUB_OUTPUT"
+
+      - name: Verify every platform's binary architecture
+        env:
+          REFS: ${{ steps.images.outputs.refs }}
+        run: |
+          set -euo pipefail
+          mapfile -t refs <<< "$REFS"
+          for ref in "${refs[@]}"; do
+            bash scripts/check-binary-arch.sh "$ref" "$BINARY" "$PLATFORMS"
+          done
+
+      - name: Tag the verified digests
+        env:
+          REFS: ${{ steps.images.outputs.refs }}
+          APP_VERSION: ${{ steps.v.outputs.app_version }}
+          EXTRA_TAGS: ${{ steps.v.outputs.extra_tags }}
+        run: |
+          set -euo pipefail
+          mapfile -t refs <<< "$REFS"
+          IFS=, read -ra tags <<< "$APP_VERSION,$EXTRA_TAGS"
+          for ref in "${refs[@]}"; do
+            name=${ref%@*} digest=${ref#*@}
+            for t in "${tags[@]}"; do crane tag "$ref" "$t"; done
+            # Signing and the SBOM use the digest, so every tag must resolve to exactly it.
+            for t in "${tags[@]}"; do
+              got=$(crane digest "$name:$t")
+              [ "$got" = "$digest" ] || { echo "::error::$name:$t is $got, want $digest"; exit 1; }
+              echo "OK: $name:$t = $digest"
             done
           done
 
-      - name: Tag the verified images
+      # syft runs in dev mode too, so the SBOM step stays exercised.
+      - name: Image SBOMs; in release mode, sign the images and attest the SBOMs
         env:
-          VERSION: ${{ steps.version.outputs.version }}
-          COMPOSER: ghcr.io/lhns/kube-oci-composer@${{ steps.composer.outputs.digest }}
-          BUILDER: ghcr.io/lhns/kube-oci-builder@${{ steps.builder.outputs.digest }}
-          COMPOSER_EXTRA_TAGS: ${{ steps.version.outputs.extra_tags }}
-          BUILDER_EXTRA_TAGS: ${{ steps.version.outputs.builder_extra_tags }}
+          REFS: ${{ steps.images.outputs.refs }}
+          MODE: ${{ steps.v.outputs.mode }}
+          COSIGN_YES: "true"
         run: |
           set -euo pipefail
-          tag() { # <name> <digest ref> <comma-separated extra tags>
-            local args=(-t "$1:$VERSION") t
-            IFS=, read -ra extra <<< "$3"
-            for t in "${extra[@]}"; do [ -z "$t" ] || args+=(-t "$t"); done
-            docker buildx imagetools create "${args[@]}" "$2"
-          }
-          tag ghcr.io/lhns/kube-oci-composer "$COMPOSER" "$COMPOSER_EXTRA_TAGS"
-          tag ghcr.io/lhns/kube-oci-builder "$BUILDER" "$BUILDER_EXTRA_TAGS"
+          mkdir -p dist
+          mapfile -t refs <<< "$REFS"
+          for ref in "${refs[@]}"; do
+            name=${ref%@*}
+            sbom="dist/${name##*/}-image.sbom.spdx.json"
+            syft "$ref" -o "spdx-json=$sbom"
+            if [ "$MODE" = release ]; then
+              cosign sign "$ref"
+              cosign attest --predicate "$sbom" --type spdx "$ref"
+            fi
+          done
 
-      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
-
-      - name: Publish the chart as an OCI artifact
+      - name: Package and push the chart; in release mode, sign it
+        id: chart
+        env:
+          CHART_VERSION: ${{ steps.v.outputs.chart_version }}
+          APP_VERSION: ${{ steps.v.outputs.app_version }}
+          MODE: ${{ steps.v.outputs.mode }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COSIGN_YES: "true"
         run: |
-          helm registry login ghcr.io -u ${{ github.actor }} --password ${{ secrets.GITHUB_TOKEN }}
-          helm package charts/kube-oci-composer \
-            --version "${{ steps.version.outputs.version }}" \
-            --app-version "${{ steps.version.outputs.version }}" \
-            --destination bin/
-          helm push bin/kube-oci-composer-*.tgz oci://ghcr.io/lhns/charts
+          set -euo pipefail
+          mkdir -p dist
+          helm package "$CHART_PATH" --version "$CHART_VERSION" --app-version "$APP_VERSION" --destination dist
+          echo "$GH_TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          helm push "dist/$CHART_NAME-$CHART_VERSION.tgz" "oci://$REGISTRY/charts"
+          digest=$(crane digest "$REGISTRY/charts/$CHART_NAME:$CHART_VERSION")
+          echo "digest=$digest" | tee -a "$GITHUB_OUTPUT"
+          if [ "$MODE" = release ]; then cosign sign "$REGISTRY/charts/$CHART_NAME@$digest"; fi
 
-      - name: Publish the release manifests
+      # PER-REPO: steps that put further release assets into dist/ go here (SPEC.md, "Deviations").
+      - name: Render the release manifests
         # A flat manifest cannot ask for registry.publish.mode (ADR 0037), so it renders
-        # internalOnly and says so at the top.
+        # internalOnly and says so at the top. Rendered from the packaged chart: the source chart's
+        # appVersion is 0.1.0, which pinned both images to :0.1.0 in every release's install.yaml.
+        env:
+          CHART_VERSION: ${{ steps.v.outputs.chart_version }}
+          APP_VERSION: ${{ steps.v.outputs.app_version }}
         run: |
-          mkdir -p release
-          cat > release/install.yaml <<'HEADER'
+          set -euo pipefail
+          mkdir -p dist
+          cat > dist/install.yaml <<'HEADER'
           # kube-oci-composer -- rendered with registry.publish.mode=internalOnly.
           #
           # WORKLOADS CANNOT PULL FROM THIS INSTALL AS RENDERED. internalOnly means exactly that:
@@ -211,13 +262,44 @@ jobs:
           #
           # See docs/registry.md for nodePort and external.
           HEADER
-          helm template kube-oci-composer charts/kube-oci-composer \
+          helm template kube-oci-composer "dist/$CHART_NAME-$CHART_VERSION.tgz" \
             --namespace oci-composer --include-crds \
-            --set registry.publish.mode=internalOnly >> release/install.yaml
+            --set registry.publish.mode=internalOnly >> dist/install.yaml
+          for img in kube-oci-composer kube-oci-builder; do
+            grep -q "image: \"$REGISTRY/$img:$APP_VERSION\"" dist/install.yaml \
+              || { echo "::error::install.yaml does not deploy $img:$APP_VERSION"; exit 1; }
+          done
 
-      # Release mode only; a dev build's deliverable is its image and chart.
-      - uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
-        if: steps.version.outputs.mode == 'release'
-        with:
-          files: release/install.yaml
-          generate_release_notes: true
+      - name: Checksums of the release assets
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum -- * > "$RUNNER_TEMP/checksums.txt"
+          mv "$RUNNER_TEMP/checksums.txt" checksums.txt
+          cat checksums.txt
+
+      # Release mode only. A release created by hand first keeps its notes and gets the assets;
+      # otherwise the notes are this version's CHANGELOG section, or generated if it has none.
+      - name: GitHub Release
+        if: steps.v.outputs.mode == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.v.outputs.chart_version }}
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+            exit 0
+          fi
+          # index(), not a regex: the brackets and dots in "## [1.2.3]" are literal.
+          awk -v v="$VERSION" '
+            index($0, "## [" v "]") == 1 { p=1; next }
+            p && index($0, "## [") == 1 { exit }
+            p { print }
+          ' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          if [ -s "$RUNNER_TEMP/notes.md" ]; then
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md" dist/*
+          else
+            echo "::warning::CHANGELOG.md has no section for $VERSION; using generated notes"
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes dist/*
+          fi

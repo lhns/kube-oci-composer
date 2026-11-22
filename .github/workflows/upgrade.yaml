@@ -61,6 +61,8 @@ jobs:
           node_image: kindest/node:v1.36.1
           cluster_name: kube-oci-composer-upgrade
       - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
+        with:
+          version: v3.22.1   # the Helm the release packages with
       # From the newest published release that is not the ref being tested: on a v* tag the one
       # before it, on a pull request the latest. A tag whose release gate failed has no chart; skip it.
       - name: Choose the release to upgrade from

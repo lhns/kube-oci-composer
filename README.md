@@ -262,8 +262,9 @@ refresher that keeps live objects' images from being reclaimed.
 Composed artifacts carry **provenance annotations** naming every source that went into them, which
 survive the object that produced them.
 
-Not implemented: SBOM and signing ([ADR 0008](docs/adr/0008-supply-chain.md) is Proposed, not
-built — and signing is theatre until something verifies it at admission).
+SBOM, provenance and key-based signing of composed artifacts exist and are off by default
+([ADR 0008](docs/adr/0008-supply-chain.md), [ADR 0040](docs/adr/0040-the-supply-chain-work-is-worth-building.md));
+a signature enforces nothing until something verifies it at admission.
 
 **`ImageComposition` will never run a Dockerfile.** That is the scope line, and everything else
 follows from it: the output digest is a pure function of the spec, so reconciling is cheap,
