@@ -60,8 +60,9 @@ BUILDER_IMG="${BUILDER_IMG:-ghcr.io/lhns/kube-oci-builder:e2e}"
 # Everything publishes here (ADR 0035); the drop-in above makes it pullable by pods.
 E2E_REGISTRY="$REGISTRY_HOST"
 
-# Load both images before the install (pullPolicy is Never). CI passes a prebuilt archive; run
-# directly, the images are built here. A set-but-missing archive is an error, not a fallback.
+# Load both images before the install (pullPolicy is Never). Images already in the local Docker
+# daemon (CI builds them in the job) are used as they are; otherwise they are built here. A prebuilt
+# archive may be passed instead; a set-but-missing archive is an error, not a fallback.
 E2E_IMAGE_ARCHIVE="${E2E_IMAGE_ARCHIVE:-}"
 if [ -n "$E2E_IMAGE_ARCHIVE" ]; then
   if [ ! -f "$E2E_IMAGE_ARCHIVE" ]; then
@@ -70,8 +71,8 @@ if [ -n "$E2E_IMAGE_ARCHIVE" ]; then
   fi
   kind load image-archive "$E2E_IMAGE_ARCHIVE" --name "$CLUSTER"
 else
-  make docker-build IMG="$IMG"
-  make docker-build-builder BUILDER_IMG="$BUILDER_IMG"
+  docker image inspect "$IMG" >/dev/null 2>&1 || make docker-build IMG="$IMG"
+  docker image inspect "$BUILDER_IMG" >/dev/null 2>&1 || make docker-build-builder BUILDER_IMG="$BUILDER_IMG"
   kind load docker-image "$IMG" --name "$CLUSTER"
   kind load docker-image "$BUILDER_IMG" --name "$CLUSTER"
 fi

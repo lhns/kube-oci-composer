@@ -156,7 +156,7 @@ e2e-test: ## Run the e2e tests against the current cluster. RUN=<regex> limits w
 # The retention tests wait on the registry's collector; up.sh shortens zot's per-repository
 # scheduling delay (E2E_GC_MAX_SCHEDULER_DELAY) to keep those waits short. The 30m cap is about 3x
 # the expected runtime: a go test timeout yields no useful output, so it should not fire first.
-	go test ./test/e2e/... -tags=e2e -timeout 30m -count=1 -v $(if $(RUN),-run '$(RUN)')
+	go test ./test/e2e/... -tags=e2e -timeout 30m -parallel 8 -count=1 -v $(if $(RUN),-run '$(RUN)')
 
 .PHONY: e2e-down
 e2e-down: ## Delete the kind cluster.

@@ -5,6 +5,11 @@ may change between minor versions.
 
 ## [Unreleased]
 
+### Build
+
+- Faster pipeline: one compile shared by both images, a single layer-cache writer (ci), no cache
+  export on release, the release image build runs parallel to the gates, and e2e runs 8 tests at once.
+
 ## [0.6.5] - 2026-11-22
 
 No upgrade steps.

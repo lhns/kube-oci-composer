@@ -20,27 +20,31 @@ COPY internal/ internal/
 # platform for amd64. The :? guard fails a build that sets none (no BuildKit).
 ARG TARGETOS
 ARG TARGETARCH
+# Compile every command once, with no stamp ARGs in scope: an ARG is in the cache key of every RUN
+# after it, and VERSION/COMMIT/BUILD_DATE change on every build. Both images share this layer.
+# PER-REPO: oci-composer has two commands; both are compiled here and stamped below.
+RUN : "${TARGETOS:?}" "${TARGETARCH:?}" && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" ./cmd/...
+
+# Only package main is relinked here (-X reaches it alone); the compiled dependencies come from the
+# build cache of the RUN above.
 ARG VERSION=dev
 ARG COMMIT=none
 ARG BUILD_DATE=unknown
-# PER-REPO: oci-composer adds `ARG CMD=oci-composer` and builds ./cmd/${CMD}.
-# PER-REPO: CMD selects the binary. One Dockerfile for both, since they share every layer up to the
-# compile step; ADR 0004's two Deployments are about RBAC and blast radius, not the build recipe.
-# Declared after `go mod download`: an ARG is in the cache key of every RUN after it, so declared
-# earlier it made each arch, binary and version download the modules again.
-ARG CMD=oci-composer
-
-RUN : "${TARGETOS:?}" "${TARGETARCH:?}" && \
-    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
       -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${BUILD_DATE}" \
-      -o /workspace/manager ./cmd/${CMD}
+      -o /out/ ./cmd/...
 
 # PER-REPO: distroless nonroot: no shell, package manager or libc. This sits in the supply chain, so
 # the smaller its attack surface the better; its writable paths are volumes, so the root
 # filesystem stays read-only.
 FROM gcr.io/distroless/static-debian13:nonroot@sha256:aafe993665bf6200db38a02c11a9351e782a84b6a45e7f33b6695638c88e3931
 
+# PER-REPO: CMD selects the binary. One Dockerfile for both, since they share every layer up to this
+# point; ADR 0004's two Deployments are about RBAC and blast radius, not the build recipe.
+ARG CMD=oci-composer
+
 WORKDIR /
-COPY --from=builder /workspace/manager /manager
+COPY --from=builder /out/${CMD} /manager
 USER 65532:65532
 ENTRYPOINT ["/manager"]

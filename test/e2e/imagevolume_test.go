@@ -23,7 +23,7 @@ const (
 	// status.artifact.ref reports. The controllers never use it.
 	registryHost = "oci-composer.e2e:5000"
 	timeout      = 5 * time.Minute
-	interval     = 5 * time.Second
+	interval     = time.Second
 )
 
 func kubectl(t *testing.T, args ...string) (string, error) {
