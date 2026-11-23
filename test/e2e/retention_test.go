@@ -416,5 +416,14 @@ func manifestExistsByDigestWithoutPulling(t *testing.T, repository, digest strin
 		"200 OK")
 }
 
+// manifestGoneByDigestWithoutPulling is true only when the registry ANSWERED 404. Not the negation of
+// manifestExistsByDigestWithoutPulling: a failed exec or timeout says nothing about the registry.
+func manifestGoneByDigestWithoutPulling(t *testing.T, repository, digest string) bool {
+	t.Helper()
+	return strings.Contains(
+		registryRequest(t, "HEAD", fmt.Sprintf("/v2/%s/manifests/%s", repository, digest), "", ""),
+		"404 Not Found")
+}
+
 // There is deliberately no deleteTag helper: in zot v2.1.21 removing a manifest's last tag deletes
 // its statistics, after which the collector never evaluates it, so such a fixture is inert.

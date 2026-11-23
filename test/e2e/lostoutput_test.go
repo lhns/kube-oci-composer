@@ -57,7 +57,9 @@ func TestALostBuildOutputIsRebuilt(t *testing.T) {
 	}
 
 	deadline := time.Now().Add(time.Duration(collectionDeadline(t)) * time.Second)
-	for manifestExistsByDigestWithoutPulling(t, repository, digest) {
+	// Until the registry answers 404: a failed exec under load is not a collection, and moving on
+	// early lets the controller name an output that was never lost.
+	for !manifestGoneByDigestWithoutPulling(t, repository, digest) {
 		if time.Now().After(deadline) {
 			t.Fatalf("the registry never collected the untagged %s@%s\ntags: %s%s",
 				repository, digest, tagsList(t, repository), registryLogs(t))
