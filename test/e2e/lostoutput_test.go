@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -37,20 +38,33 @@ func TestALostBuildOutputIsRebuilt(t *testing.T) {
 		"-p", `{"spec":{"suspend":true}}`)
 
 	job := mustKubectl(t, "-n", buildNamespace, "get", "imagebuild", name, "-o", "jsonpath={.status.buildRef.name}")
-	var digest string
+	var digest, firstPod string
+	var started time.Time
 	buildEventually(t, "the Job to finish while the object is suspended", func() error {
 		if mustKubectl(t, "-n", buildNamespace, "get", "job", job, "-o", "jsonpath={.status.succeeded}") != "1" {
 			return fmt.Errorf("job %s not complete", job)
 		}
-		digest = strings.Trim(mustKubectl(t, "-n", buildNamespace, "get", "pods", "-l", "job-name="+job,
-			"-o", `jsonpath={.items[0].status.containerStatuses[?(@.name=="build")].state.terminated.message}`), " \n")
-		if !strings.Contains(digest, "sha256:") {
-			return fmt.Errorf("no digest in the termination message yet: %q", digest)
+		// The push cannot be older than the Job.
+		at := mustKubectl(t, "-n", buildNamespace, "get", "job", job, "-o", "jsonpath={.status.startTime}")
+		var err error
+		if started, err = time.Parse(time.RFC3339, at); err != nil {
+			return fmt.Errorf("job %s startTime %q: %v", job, at, err)
 		}
+		firstPod = mustKubectl(t, "-n", buildNamespace, "get", "pods", "-l", "job-name="+job,
+			"-o", "jsonpath={.items[0].metadata.name}")
+		msg := mustKubectl(t, "-n", buildNamespace, "get", "pods", "-l", "job-name="+job,
+			"-o", `jsonpath={.items[0].status.containerStatuses[?(@.name=="build")].state.terminated.message}`)
+		// The message is buildctl's whole metadata file, which names other digests first: the build
+		// cache's manifest (cache.manifest) and the config blob. Read the key the controller reads.
+		var md struct {
+			Digest string `json:"containerimage.digest"`
+		}
+		if err := json.Unmarshal([]byte(msg), &md); err != nil || md.Digest == "" {
+			return fmt.Errorf("no manifest digest in the termination message yet (%v): %q", err, msg)
+		}
+		digest = md.Digest
 		return nil
 	})
-	// The message is buildctl's metadata JSON.
-	digest = digest[strings.Index(digest, "sha256:"):][:len("sha256:")+64]
 
 	if st := buildStatus(t, name); st.Artifact != nil {
 		t.Skip("the controller named the output before the suspend landed, so there is no loss to observe")
@@ -65,6 +79,15 @@ func TestALostBuildOutputIsRebuilt(t *testing.T) {
 				repository, digest, tagsList(t, repository), registryLogs(t))
 		}
 		time.Sleep(interval)
+	}
+
+	// Nothing younger than gcDelay is collected, and the manifest is no older than its Job. A 404
+	// sooner than that means the digest asked about was never a manifest there, and unsuspending now
+	// would name an output that was not lost.
+	if age, delay := time.Since(started), deployedGCDelay(t); age < delay {
+		t.Fatalf("the registry answered 404 for %s@%s only %s after the Job started, sooner than "+
+			"gcDelay=%s allows a collection; this test asked about something that was never there",
+			repository, digest, age.Round(time.Second), delay)
 	}
 
 	mustKubectl(t, "-n", buildNamespace, "patch", "imagebuild", name, "--type=merge",
@@ -85,8 +108,12 @@ func TestALostBuildOutputIsRebuilt(t *testing.T) {
 		if c := readyCondition(st); c == nil || c.Status != "True" || st.Artifact == nil {
 			return fmt.Errorf("not Ready yet: %+v", readyCondition(st))
 		}
-		if st.Artifact.Digest == digest {
-			return fmt.Errorf("published the digest that was lost")
+		// The fixture is reproducible, so the rebuild publishes the SAME digest. That it was built
+		// again shows in the pod status names.
+		pod := mustKubectl(t, "-n", buildNamespace, "get", "imagebuild", name,
+			"-o", "jsonpath={.status.lastAttempt.podName}")
+		if pod == "" || pod == firstPod {
+			return fmt.Errorf("status still names the first build's pod (%q), so nothing was rebuilt", pod)
 		}
 		if !manifestExists(t, repository, st.Artifact.Digest) {
 			return fmt.Errorf("the registry does not serve %s", st.Artifact.Digest)
