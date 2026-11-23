@@ -33,8 +33,8 @@ E2E_GC_FACTOR="${E2E_GC_FACTOR:-6}"
 # ~20s at 1s. Content still has to expire first, so no assertion is weakened.
 E2E_GC_MAX_SCHEDULER_DELAY="${E2E_GC_MAX_SCHEDULER_DELAY:-1s}"
 
-# The chart refuses a gcDelay below 3x this (ADR 0054); at the default 15s that is 45s, more than
-# E2E_GC_DELAY.
+# The chart refuses a gcDelay below 3x this (ADR 0054). Lowered so E2E_GC_DELAY (the window) clears
+# that floor; at the default 15s the floor would be 45s.
 E2E_BUILD_POLL="${E2E_BUILD_POLL:-3s}"
 
 # Set explicitly, to the window. A build's manifest is untagged from its push until the controller
