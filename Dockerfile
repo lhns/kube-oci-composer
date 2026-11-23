@@ -38,7 +38,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
 # PER-REPO: distroless nonroot: no shell, package manager or libc. This sits in the supply chain, so
 # the smaller its attack surface the better; its writable paths are volumes, so the root
 # filesystem stays read-only.
-FROM gcr.io/distroless/static-debian13:nonroot@sha256:aafe993665bf6200db38a02c11a9351e782a84b6a45e7f33b6695638c88e3931
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:8ce6dd87e9823c5b48dcfb2c8604714ccb351ce59607327bcc4957448da279b5
 
 # PER-REPO: CMD selects the binary. One Dockerfile for both, since they share every layer up to this
 # point; ADR 0004's two Deployments are about RBAC and blast radius, not the build recipe.
