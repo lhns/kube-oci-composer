@@ -62,8 +62,8 @@ func (r *Readiness) Pending(ctx context.Context) ([]string, error) {
 	var pending []string
 	for i := range list.Items {
 		obj := &list.Items[i]
-		// Every object counts, whatever registry it pushes to: exempting any would let retention
-		// read a partial view as complete (ADR 0031).
+		// Every object counts, whatever registry it pushes to: exempting any would hide an
+		// unreconciled object from retention's report (ADR 0063).
 		if !obj.DeletionTimestamp.IsZero() {
 			continue
 		}

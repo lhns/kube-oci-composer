@@ -25,7 +25,7 @@ func wantProgressing(t *testing.T, got *ociv1alpha1.ImageBuild, stillPublished s
 	if stillPublished != "" && !strings.Contains(ready.Message, stillPublished) {
 		t.Errorf("Ready message %q does not say %s is still what is published", ready.Message, stillPublished)
 	}
-	// Advanced regardless: the retention refresher skips its cycle while any object lags.
+	// Advanced regardless: the retention refresher escalates an object that stays unreconciled.
 	if got.Status.ObservedGeneration != got.Generation {
 		t.Errorf("observedGeneration = %d, want %d", got.Status.ObservedGeneration, got.Generation)
 	}

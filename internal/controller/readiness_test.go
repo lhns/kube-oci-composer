@@ -19,8 +19,8 @@ func pendingOf(t *testing.T, r *Readiness) []string {
 	return pending
 }
 
-// TestUnobservedObjectsAreReportedPending — retention must know whether its view is complete,
-// because refreshing on a partial view under-protects whatever is missing from it (ADR 0035).
+// TestUnobservedObjectsAreReportedPending — retention reports, and escalates, objects whose
+// controller has not reconciled them (ADR 0063).
 func TestUnobservedObjectsAreReportedPending(t *testing.T) {
 	url, digest := contentServer(t, map[string]string{"lib/a.jar": "aaa"})
 	obj := composition("warming", urlLayer("core", url, digest, "/core"))
