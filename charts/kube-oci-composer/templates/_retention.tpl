@@ -8,8 +8,8 @@ Retention is ONE decision: `retention.window` is the base and everything else de
                   early is not. It does not simply set how soon a repository is collected (zot walks
                   repositories in rounds); measure before tuning it.
   gcDelay         minimum age before collection. Derived from the refresh interval, but never below
-                  an hour (and the naming-gap floor): a build's manifest is untagged from push until the controller
-                  names it (ADR 0054), and untagged is what a collector reclaims.
+                  an hour or the naming-gap floor: a build's manifest is untagged from push until the
+                  controller names it (ADR 0054), and untagged is what a collector reclaims.
 
 With an external registry the operator DECLARES its window, so the refresh check runs in both cases.
 */}}
