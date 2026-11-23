@@ -117,7 +117,7 @@ func (r *ImageBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 	// Not while deleting: the finalizer is only removed below, so returning here would leave the
 	// object Terminating forever. observedGeneration must advance too, or the retention refresher
-	// sees this object as pending and skips its whole cycle for every image in the cluster.
+	// reports this object as unreconciled every cycle and escalates it (ADR 0063).
 	if obj.Spec.Suspend && obj.DeletionTimestamp.IsZero() {
 		patch := client.MergeFrom(pristine)
 		recon.SetCondition(&obj, ociv1alpha1.ReadyCondition, metav1.ConditionFalse,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -221,9 +222,10 @@ func TestAStalledObjectStillRefreshes(t *testing.T) {
 	}
 }
 
-// A partial view must refresh NOTHING rather than most things, since an object missing from the view
-// would silently stop being kept alive.
-func TestAPartialViewRefreshesNothing(t *testing.T) {
+// A partial view is refreshed for what it holds, and says what it is missing: withholding the
+// refresh protects nothing, and one unreconciled object used to withhold it from every other
+// (ADR 0063).
+func TestAPartialViewStillRefreshesWhatIsKnown(t *testing.T) {
 	reg := newRegistry(t)
 
 	obj := buildWith(reg, "app", []ociv1alpha1.BuildRecord{
@@ -237,11 +239,38 @@ func TestAPartialViewRefreshesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("refreshing: %v", err)
 	}
-	if !res.Skipped {
-		t.Error("a cycle ran against an incomplete view; some objects would silently go unrefreshed")
+	if got := reg.requests(); !containsRef(got, digestA) || !containsRef(got, "v1") {
+		t.Errorf("an unreconciled object elsewhere stopped this one being refreshed, so its images "+
+			"expire one window later\nrequests: %v", got)
 	}
-	if got := reg.requests(); len(got) != 0 {
-		t.Errorf("requests were made despite skipping: %v", got)
+	if len(res.Pending) != 1 || res.Pending[0] != "team-a/not-seen-yet" {
+		t.Errorf("the cycle did not report what it had not seen reconciled: %v", res.Pending)
+	}
+}
+
+// The unreconciled object ITSELF is refreshed, from the status it has: that status is what it
+// published, whatever its spec now asks for (ADR 0031, condition 2).
+func TestAnUnreconciledObjectIsRefreshedFromItsStatus(t *testing.T) {
+	reg := newRegistry(t)
+
+	obj := buildWith(reg, "app", []ociv1alpha1.BuildRecord{
+		{Digest: digestA, Tags: []string{publicTag("v1")}},
+	}, nil)
+	obj.Generation = 2
+	obj.Status.ObservedGeneration = 1
+
+	r, _ := refresherFor(t, reg.host(), obj)
+	r.Pending = BuildSource{Client: r.Client}
+
+	res, err := r.RefreshOnce(context.Background())
+	if err != nil {
+		t.Fatalf("refreshing: %v", err)
+	}
+	if got := reg.requests(); !containsRef(got, digestA) || !containsRef(got, "v1") {
+		t.Errorf("an object behind its generation lost its refresh\nrequests: %v", got)
+	}
+	if len(res.Pending) != 1 || res.Pending[0] != "team-a/app" {
+		t.Errorf("pending = %v, want the object behind its generation", res.Pending)
 	}
 }
 
@@ -409,11 +438,11 @@ func TestAnUnusableSecretIsAFailureNotASkip(t *testing.T) {
 	}
 }
 
-// Refusing to run without a Pending gate, rather than running unguarded.
+// Refusing to run without a Pending lister: unreconciled objects would go unreported.
 func TestNoPendingGateRefusesToRun(t *testing.T) {
 	r := &Refresher{Client: fake.NewClientBuilder().WithScheme(scheme(t)).Build()}
 	if _, err := r.RefreshOnce(context.Background()); err == nil {
-		t.Error("refreshed without a completeness gate; a partial view under-refreshes silently")
+		t.Error("refreshed without a pending lister; unreconciled objects would go unreported")
 	}
 }
 
@@ -639,9 +668,9 @@ type recordingLogger struct {
 func (l *recordingLogger) Info(msg string, _ ...any)           { l.infos = append(l.infos, msg) }
 func (l *recordingLogger) Error(_ error, msg string, _ ...any) { l.errors = append(l.errors, msg) }
 
-// TestASkippedCycleGetsLoud: a skipped cycle protects as little as a failed one, and one stuck
-// object skips every cycle, so persistent skips must escalate like failures.
-func TestASkippedCycleGetsLoud(t *testing.T) {
+// TestAnObjectThatStaysUnreconciledGetsLoud: an unreconciled object no longer costs anyone their
+// refresh, but one that stays that way must not be silent.
+func TestAnObjectThatStaysUnreconciledGetsLoud(t *testing.T) {
 	r := &Refresher{
 		Source:   staticSource{},
 		Pending:  allReconciled{pending: []string{"team-a/stuck"}},
@@ -653,23 +682,35 @@ func TestASkippedCycleGetsLoud(t *testing.T) {
 		r.cycle(context.Background(), log)
 	}
 	if len(log.errors) != 0 {
-		t.Fatalf("escalated after %d skips; a rolling restart must not read as an outage: %v",
+		t.Fatalf("escalated after %d cycles; a rolling restart must not read as an outage: %v",
 			DegradedAfter-1, log.errors)
 	}
 
 	r.cycle(context.Background(), log)
 	if len(log.errors) == 0 {
-		t.Error("a refresh that has protected nothing for several cycles said so only at info, " +
-			"which is how it can be off for days unnoticed")
+		t.Error("an object unreconciled for several cycles was reported only at info")
 	}
 
-	// And it stops being loud once the view is complete again.
+	// And it stops being loud once the object is reconciled.
 	r.Pending = allReconciled{}
 	before := len(log.errors)
 	r.cycle(context.Background(), log)
 	r.cycle(context.Background(), log)
 	if len(log.errors) != before {
-		t.Error("the skip count did not reset once cycles ran again")
+		t.Error("the count did not reset once the object was reconciled")
+	}
+}
+
+// Churn is not a stuck object: a different object pending each cycle never escalates.
+func TestDifferentObjectsPendingEachCycleIsNotAnOutage(t *testing.T) {
+	r := &Refresher{Source: staticSource{}, Recorder: record.NewFakeRecorder(8)}
+	log := &recordingLogger{}
+	for i := 0; i < 3*DegradedAfter; i++ {
+		r.Pending = allReconciled{pending: []string{fmt.Sprintf("team-a/new-%d", i)}}
+		r.cycle(context.Background(), log)
+	}
+	if len(log.errors) != 0 {
+		t.Errorf("objects that were each pending for one cycle escalated: %v", log.errors)
 	}
 }
 

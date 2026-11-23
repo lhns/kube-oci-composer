@@ -5,6 +5,13 @@ may change between minor versions.
 
 ## [Unreleased]
 
+### Changed
+
+- The retention refresh no longer skips its cycle while any object is unreconciled. It refreshes
+  every object from the status it has and reports the unreconciled ones; one that stays so for
+  three cycles is logged at error. Before, one suspended or lagging object stopped the refresh for
+  every image, and the composer's first cycle after each start refreshed nothing (ADR 0063).
+
 ## [0.6.6] - 2026-11-23
 
 No upgrade steps.
