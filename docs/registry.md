@@ -172,12 +172,13 @@ So `gcDelay` is `max(refreshInterval, 3 × imageBuild.buildPollInterval, 1h)`: i
 down, but a derived value is never below an hour (a build can run its 30m timeout), and the chart
 refuses an explicit override under `3 × buildPollInterval`, a heuristic for that gap, and warns in
 its install notes about one under 30m. The hour costs no retention at windows of 1h or more, because
-`gcDelay` only delays collecting *untagged* manifests and a retired one is already older than that. The gap is not bounded by the poll: the controller is watch-driven, and the gap
-is the build's cache export, buildkit teardown, pod status, Job completion and the controller's
-queue (one worker). Measured: 8.6s for a single build, 6-21s under parallel load. The default
-`gcDelay` of `1h` covers that by a wide margin; a short one is a choice to test, not to run. With
-`keepUntagged` off (below) it is the only cover for that gap. Losing the race costs a rebuild, not data: nothing references a build's
-output before it is named.
+`gcDelay` only delays collecting *untagged* manifests and a retired one is already older than that.
+The gap is not bounded by the poll: the controller is watch-driven, and the gap is the build's cache
+export, buildkit teardown, pod status, Job completion and the controller's queue (one worker).
+Measured: 8.6s for a single build, 6-21s under parallel load. The default `gcDelay` of `1h` covers
+that by a wide margin; a short one is a choice to test, not to run. With `keepUntagged` off (below)
+it is the only cover for that gap. Losing the race costs a rebuild, not data: nothing references a
+build's output before it is named.
 
 **If you run your own registry, this is yours to check.** Any registry that reclaims untagged
 manifests can take a build's output before it is named. Either give it an untagged-manifest
