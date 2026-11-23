@@ -205,9 +205,10 @@ imageBuild:
     # Empty uses the shared interval; see operator.retention.
     refreshInterval: ""
 
-  # How often a running build Job is re-observed. Also bounds how long a build's image sits
-  # UNTAGGED before the controller names it (ADR 0054), so registry.retention.gcDelay is never
-  # derived below 3x this. The e2e lowers it to compress retention timings.
+  # How often a running build Job is re-observed. It does NOT bound how long a build's image sits
+  # UNTAGGED before the controller names it (ADR 0054; that is the whole Job completion path), but
+  # registry.retention.gcDelay is never derived below 3x this. The e2e lowers it to compress
+  # retention timings.
   buildPollInterval: 15s
 
   resources:

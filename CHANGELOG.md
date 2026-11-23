@@ -5,6 +5,17 @@ may change between minor versions.
 
 ## [Unreleased]
 
+### Fixed
+
+- e2e: the keepalive retention test no longer expires its own fixture during a second fixture's
+  build (false "a pull does NOT renew recency"), and the e2e sets `gcDelay` to the window instead of
+  a value derived from the 3s build poll, which a build's push-to-named gap exceeded.
+
+### Docs
+
+- The gap between a build pushing its untagged manifest and the controller naming it is not bounded
+  by `buildPollInterval`; guidance for user-supplied registries now says minutes to an hour.
+
 ### Build
 
 - Faster pipeline: both images share one compile, ci is the only layer-cache writer, the release

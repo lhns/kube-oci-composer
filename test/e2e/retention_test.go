@@ -74,14 +74,17 @@ func TestPullingAnImageKeepsItFromExpiring(t *testing.T) {
 	refreshed := keepaliveRepo("refreshed")
 	abandoned := keepaliveRepo("abandoned")
 
-	keptDigest := pushTinyImage(t, refreshed)
+	// The control first, so the subject is pulled as soon as it is published: nothing refreshes a
+	// fixture once its object is deleted, and a second build in between can outlast the window.
 	pushTinyImage(t, abandoned)
+	keptDigest := pushTinyImage(t, refreshed)
 
 	// Refreshed in one in-cluster shell loop: a test-side loop of kubectl execs can leave gaps
 	// longer than the window. Both the tag and the digest are pulled -- cheap, and safe whichever
 	// way zot tracks recency.
 	seconds := watchFor(t)
 	requireCollectionPossible(t, time.Duration(seconds)*time.Second, "a refreshed image")
+	requireNotYetExpired(t, refreshed, keptDigest)
 	refreshBothFor(t, refreshed, "v1", keptDigest, seconds)
 
 	// THE GUARANTEE: pulled content is still there.
@@ -99,6 +102,19 @@ func TestPullingAnImageKeepsItFromExpiring(t *testing.T) {
 	// THE NEGATIVE CONTROL: the unrefreshed TAG goes. Waited for rather than checked once, since
 	// collection timing is not prompt (TestExpiryIsNotPrompt).
 	eventuallyUntagged(t, abandoned, "v1", collectionDeadline(t))
+}
+
+// requireNotYetExpired fails when a fixture is already gone before its first pull. Setup that
+// outlasts the window loses it to ordinary expiry, and the survival assertion would then blame
+// pulling for something no pull was given the chance to prevent. Listing tags is not a pull.
+func requireNotYetExpired(t *testing.T, repository, digest string) {
+	t.Helper()
+	if tags := tagsList(t, repository); !strings.Contains(tags, `"`+ownTag(digest)+`"`) {
+		t.Fatalf("%s@%s expired before this test pulled it once: publishing it and reaching the "+
+			"first pull took longer than the %s window. That is the harness being slow, not a pull "+
+			"failing to renew anything.\ntags now: %s%s",
+			repository, digest, retentionWindow, tags, registryLogs(t))
+	}
 }
 
 // eventuallyUntagged waits for a tag to be collected, and fails if it never is.
@@ -181,6 +197,7 @@ func TestADigestOnlyPublicationIsKeptWhilePulledAndReclaimedOnceRetired(t *testi
 	}
 
 	// Pulled BY DIGEST only, as the refresher does.
+	requireNotYetExpired(t, repo, digest)
 	refreshFor(t, repo, digest, seconds)
 
 	if !manifestExists(t, repo, digest) {

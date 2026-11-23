@@ -33,9 +33,15 @@ E2E_GC_FACTOR="${E2E_GC_FACTOR:-6}"
 # ~20s at 1s. Content still has to expire first, so no assertion is weakened.
 E2E_GC_MAX_SCHEDULER_DELAY="${E2E_GC_MAX_SCHEDULER_DELAY:-1s}"
 
-# gcDelay is never derived below 3x this (a build is untagged until named, ADR 0054); at the
-# default 15s that is 45s, more than the 30s window allows.
+# The chart refuses a gcDelay below 3x this (ADR 0054). Lowered so E2E_GC_DELAY (the window) clears
+# that floor; at the default 15s the floor would be 45s.
 E2E_BUILD_POLL="${E2E_BUILD_POLL:-3s}"
+
+# Set explicitly, to the window. A build's manifest is untagged from its push until the controller
+# names it, and gcDelay is its only cover. That gap is NOT bounded by the build poll: it is the
+# Job's cache export, the pod's teardown, the Job completing and the controller's queue. Measured
+# 5-21s for these fixtures on a slow machine, against the 9s the chart derives from a 3s poll.
+E2E_GC_DELAY="${E2E_GC_DELAY:-$E2E_WINDOW}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -113,6 +119,7 @@ helm upgrade --install kube-oci-composer charts/kube-oci-composer \
   --set "registry.retention.gcFactor=$E2E_GC_FACTOR" \
   --set "registry.retention.gcMaxSchedulerDelay=$E2E_GC_MAX_SCHEDULER_DELAY" \
   --set "imageBuild.buildPollInterval=$E2E_BUILD_POLL" \
+  --set "registry.retention.gcDelay=$E2E_GC_DELAY" \
   --set registry.logLevel=debug \
   --wait --timeout 5m
 

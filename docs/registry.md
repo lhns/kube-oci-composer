@@ -169,14 +169,18 @@ the build's own output is deleted before it can be named; if it was the reposito
 the repository goes too, and the error reads `NAME_UNKNOWN`.
 
 So `gcDelay` is `max(refreshInterval, 3 × imageBuild.buildPollInterval)`: it follows the window
-down, but never below the floor that covers that gap, and the chart refuses an override that goes
-under it, so the bundled registry is safe by construction. With `keepUntagged` off (below) it is
-the only cover for that gap. Losing the race costs a rebuild, not data: nothing references a build's
+down, but never below a floor that is a heuristic for that gap, and the chart refuses an override
+that goes under it. The gap is not bounded by the poll: the controller is watch-driven, and the gap
+is the build's cache export, buildkit teardown, pod status, Job completion and the controller's
+queue (one worker). Measured: 8.6s for a single build, 6-21s under parallel load. The default
+`gcDelay` of `1h` covers that by a wide margin; a short one is a choice to test, not to run. With
+`keepUntagged` off (below) it is the only cover for that gap. Losing the race costs a rebuild, not data: nothing references a build's
 output before it is named.
 
 **If you run your own registry, this is yours to check.** Any registry that reclaims untagged
-manifests can take a build's output before it is named. Either give it a collection delay
-comfortably longer than `imageBuild.buildPollInterval` (default `15s`), or disable untagged
+manifests can take a build's output before it is named. Either give it an untagged-manifest
+grace comfortably longer than a build's full completion time, queueing behind other builds
+included (minutes to an hour, like the bundled default `gcDelay` of `1h`), or disable untagged
 collection. The symptom is a build that publishes and then reports, every interval:
 
 > the build produced `sha256:…` but `…` does not serve it; the manifest is untagged until this
