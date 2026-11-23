@@ -11,6 +11,11 @@ may change between minor versions.
   every object from the status it has and reports the unreconciled ones; one that stays so for
   three cycles is logged at error. Before, one lagging object stopped the refresh for
   every image, and the composer's first cycle after each start refreshed nothing (ADR 0063).
+- The derived `registry.retention.gcDelay` is never below 1h (`max(refreshInterval,
+  3 × imageBuild.buildPollInterval, 1h)`); a shortened `retention.window` no longer shortens the
+  cover for a build's untagged output (ADR 0054). Explicit values are unchanged, and the install
+  notes warn when the effective delay is under 30m. Upgrade note: if you shortened the window, the
+  bundled registry now keeps untagged manifests at least 1h.
 
 ## [0.6.6] - 2026-11-23
 

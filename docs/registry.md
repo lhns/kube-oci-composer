@@ -168,9 +168,11 @@ In between, the manifest is untagged, and untagged is what a collector reclaims.
 the build's own output is deleted before it can be named; if it was the repository's only content,
 the repository goes too, and the error reads `NAME_UNKNOWN`.
 
-So `gcDelay` is `max(refreshInterval, 3 × imageBuild.buildPollInterval)`: it follows the window
-down, but never below a floor that is a heuristic for that gap, and the chart refuses an override
-that goes under it. The gap is not bounded by the poll: the controller is watch-driven, and the gap
+So `gcDelay` is `max(refreshInterval, 3 × imageBuild.buildPollInterval, 1h)`: it follows the window
+down, but a derived value is never below an hour (a build can run its 30m timeout), and the chart
+refuses an explicit override under `3 × buildPollInterval`, a heuristic for that gap, and warns in
+its install notes about one under 30m. The hour costs no retention at windows of 1h or more, because
+`gcDelay` only delays collecting *untagged* manifests and a retired one is already older than that. The gap is not bounded by the poll: the controller is watch-driven, and the gap
 is the build's cache export, buildkit teardown, pod status, Job completion and the controller's
 queue (one worker). Measured: 8.6s for a single build, 6-21s under parallel load. The default
 `gcDelay` of `1h` covers that by a wide margin; a short one is a choice to test, not to run. With

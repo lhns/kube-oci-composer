@@ -113,6 +113,13 @@ poll, 6.6-21s under parallel load. The `3x buildPollInterval` floor is therefore
 the 240x margin above is overstated; the decision stands, and `gcDelay` of minutes or more is the
 real cover.
 
+**Amended (2026-11-23):** the derived `gcDelay` is never below 1h: `max(refreshInterval,
+3x buildPollInterval, 1h)`. It followed the window down (24h gave 2m), but a build's output is
+untagged from push until named and a build can take its 30m timeout, so a shortened window gave
+less cover than one build needs. Costs no retention at windows of 1h or more: `gcDelay` only delays
+untagged manifests. An explicit value is still accepted down to the `3x` refusal, and the chart
+warns under 30m. The decision stands.
+
 **A read-back that fails is PENDING, not a failure.** Nothing about this object's spec would fix
 it, so ADR 0009's third path applies: a short fixed requeue rather than exponential backoff. But
 retrying only helps if the registry is catching up; if a collector took the manifest, the content
