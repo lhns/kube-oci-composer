@@ -67,8 +67,10 @@ func watchFor(t *testing.T) int {
 // TestPullingAnImageKeepsItFromExpiring -- a PULL resets the retention clock. The design depends on
 // it: a pull needs no write credential and cannot corrupt what it protects.
 func TestPullingAnImageKeepsItFromExpiring(t *testing.T) {
-	// Not parallel: it ends waiting for a real deletion, and concurrent tests add repositories that
-	// slow the collector's rotation.
+	// Parallel: contention only slows the collector's rotation (gcMaxSchedulerDelay is 1s and the
+	// deletion deadline has a 600s floor), which makes the wait longer, not red.
+	t.Parallel()
+
 	refreshed := keepaliveRepo("refreshed")
 	abandoned := keepaliveRepo("abandoned")
 
