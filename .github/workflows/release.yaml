@@ -54,16 +54,21 @@ jobs:
     permissions:
       contents: read
 
-  release:
-    needs: [ci, e2e, upgrade]           # PER-REPO: the gate jobs
-    # Skipped gates (dev mode) must not skip this job; failed or cancelled ones still block it.
-    # !cancelled(), not always(): always() is never cancelled, so a superseded dev run would keep tagging.
-    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+  # Builds and pushes both images by digest with no gate and no write permission beyond ghcr, so it
+  # runs in parallel with the gates and their queueing. Nothing is tagged here.
+  build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write   # the GitHub Release
-      packages: write   # images and chart on ghcr.io
-      id-token: write   # cosign keyless signing (release mode only)
+      contents: read
+      packages: write   # images on ghcr.io
+    outputs:
+      mode: ${{ steps.v.outputs.mode }}
+      chart_version: ${{ steps.v.outputs.chart_version }}
+      app_version: ${{ steps.v.outputs.app_version }}
+      extra_tags: ${{ steps.v.outputs.extra_tags }}
+      date: ${{ steps.v.outputs.date }}
+      digest: ${{ steps.build.outputs.digest }}
+      digest_builder: ${{ steps.build-builder.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # PER-REPO: pv-reaper only, its Dockerfile RUNs on the target platform:
@@ -74,18 +79,6 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
-        with:
-          version: v0.20.6
-      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
-        with:
-          cosign-release: v2.6.5
-      - uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
-        with:
-          syft-version: v1.14.0
-      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
-        with:
-          version: v3.22.1
 
       - name: Derive mode, versions and tags
         id: v
@@ -129,11 +122,8 @@ jobs:
             VERSION=${{ steps.v.outputs.app_version }}
             COMMIT=${{ github.sha }}
             BUILD_DATE=${{ steps.v.outputs.date }}
-          # PER-REPO: the two images share the module and source layers; read the sibling's scope too.
-          cache-from: |
-            type=gha,scope=${{ env.IMAGE }}
-            type=gha,scope=kube-oci-builder
-          cache-to: type=gha,mode=max,scope=${{ env.IMAGE }}
+          # Read-only: ci's image job is the one writer of scope=image (an export here is never read).
+          cache-from: type=gha,scope=image
       # PER-REPO: one more build step per extra image, same shape with its own id, name and
       # build-args (oci-composer: id build-builder, kube-oci-builder, CMD=oci-builder).
       - name: Build and push kube-oci-builder by digest
@@ -148,17 +138,44 @@ jobs:
             VERSION=${{ steps.v.outputs.app_version }}
             COMMIT=${{ github.sha }}
             BUILD_DATE=${{ steps.v.outputs.date }}
-          cache-from: |
-            type=gha,scope=kube-oci-builder
-            type=gha,scope=${{ env.IMAGE }}
-          cache-to: type=gha,mode=max,scope=kube-oci-builder
+          cache-from: type=gha,scope=image
+
+  release:
+    needs: [build, ci, e2e, upgrade]    # PER-REPO: build plus the gate jobs
+    # Skipped gates (dev mode) must not skip this job; failed or cancelled ones still block it.
+    # !cancelled(), not always(): always() is never cancelled, so a superseded dev run would keep tagging.
+    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # the GitHub Release
+      packages: write   # images and chart on ghcr.io
+      id-token: write   # cosign keyless signing (release mode only)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
+        with:
+          version: v0.20.6
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: v2.6.5
+      - uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          syft-version: v1.14.0
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
+        with:
+          version: v3.22.1
 
       - name: Collect the pushed digests
         id: images
         env:
-          MAIN: ${{ env.REGISTRY }}/${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          MAIN: ${{ env.REGISTRY }}/${{ env.IMAGE }}@${{ needs.build.outputs.digest }}
           # PER-REPO: one variable per extra image, e.g.
-          BUILDER: ${{ env.REGISTRY }}/kube-oci-builder@${{ steps.build-builder.outputs.digest }}
+          BUILDER: ${{ env.REGISTRY }}/kube-oci-builder@${{ needs.build.outputs.digest_builder }}
         run: |
           set -euo pipefail
           {
@@ -182,8 +199,8 @@ jobs:
       - name: Tag the verified digests
         env:
           REFS: ${{ steps.images.outputs.refs }}
-          APP_VERSION: ${{ steps.v.outputs.app_version }}
-          EXTRA_TAGS: ${{ steps.v.outputs.extra_tags }}
+          APP_VERSION: ${{ needs.build.outputs.app_version }}
+          EXTRA_TAGS: ${{ needs.build.outputs.extra_tags }}
         run: |
           set -euo pipefail
           mapfile -t refs <<< "$REFS"
@@ -203,7 +220,7 @@ jobs:
       - name: Image SBOMs; in release mode, sign the images and attest the SBOMs
         env:
           REFS: ${{ steps.images.outputs.refs }}
-          MODE: ${{ steps.v.outputs.mode }}
+          MODE: ${{ needs.build.outputs.mode }}
           COSIGN_YES: "true"
         run: |
           set -euo pipefail
@@ -222,9 +239,9 @@ jobs:
       - name: Package and push the chart; in release mode, sign it
         id: chart
         env:
-          CHART_VERSION: ${{ steps.v.outputs.chart_version }}
-          APP_VERSION: ${{ steps.v.outputs.app_version }}
-          MODE: ${{ steps.v.outputs.mode }}
+          CHART_VERSION: ${{ needs.build.outputs.chart_version }}
+          APP_VERSION: ${{ needs.build.outputs.app_version }}
+          MODE: ${{ needs.build.outputs.mode }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COSIGN_YES: "true"
         run: |
@@ -243,8 +260,8 @@ jobs:
         # internalOnly and says so at the top. Rendered from the packaged chart: the source chart's
         # appVersion is 0.1.0, which pinned both images to :0.1.0 in every release's install.yaml.
         env:
-          CHART_VERSION: ${{ steps.v.outputs.chart_version }}
-          APP_VERSION: ${{ steps.v.outputs.app_version }}
+          CHART_VERSION: ${{ needs.build.outputs.chart_version }}
+          APP_VERSION: ${{ needs.build.outputs.app_version }}
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -281,10 +298,10 @@ jobs:
       # Release mode only. A release created by hand first keeps its notes and gets the assets;
       # otherwise the notes are this version's CHANGELOG section, or generated if it has none.
       - name: GitHub Release
-        if: steps.v.outputs.mode == 'release'
+        if: needs.build.outputs.mode == 'release'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ steps.v.outputs.chart_version }}
+          VERSION: ${{ needs.build.outputs.chart_version }}
         run: |
           set -euo pipefail
           if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
