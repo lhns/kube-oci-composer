@@ -10,8 +10,9 @@ import (
 
 const (
 	// defaultBuildPollInterval is how often a running Job is re-observed (the Job is also
-	// watched). It is how long a pushed but untagged image waits to be named (ADR 0054); the chart
-	// derives gcDelay from it. A collector that is faster anyway costs a rebuild (outputGone).
+	// watched). It does not bound how long a pushed but untagged image waits to be named: that is
+	// the Job's whole completion path (ADR 0054). The chart's gcDelay floor is 3x this; a collector
+	// faster than naming costs a rebuild (outputGone).
 	defaultBuildPollInterval = 15 * time.Second
 
 	// maxFailureBackoff caps the retry interval, so a pushed fix is noticed promptly.
