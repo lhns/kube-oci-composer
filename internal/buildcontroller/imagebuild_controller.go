@@ -58,7 +58,8 @@ type ImageBuildReconciler struct {
 	Export recon.ExportOptions
 
 	// BuildPollInterval is how often a running Job is re-observed, and so how long a pushed but
-	// untagged manifest is exposed to collection. Zero means defaultBuildPollInterval.
+	// untagged manifest waits to be named. Zero means defaultBuildPollInterval. A manifest the
+	// registry collected before it was named is a lost build output, not bounded by this (outputGone).
 	BuildPollInterval time.Duration
 
 	// Attestor signs the build's output after the Job has terminated. The key stays in this
@@ -538,6 +539,9 @@ func (r *ImageBuildReconciler) observeJob(ctx context.Context, obj *ociv1alpha1.
 		}
 		// The Job pushed by digest; tagging here is where onConflict is enforced. ADR 0054.
 		conflict, err := r.applyTags(ctx, obj, digest)
+		if gone := (*outputGoneError)(nil); errors.As(err, &gone) {
+			return ctrl.Result{}, r.outputGone(ctx, obj, job, inputHash, gone)
+		}
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -587,6 +591,48 @@ func (r *ImageBuildReconciler) observeJob(ctx context.Context, obj *ociv1alpha1.
 	}
 }
 
+// outputGone handles a succeeded Job whose pushed manifest the registry says it does not have.
+//
+// Inside the grace it stays Pending, as ADR 0054 has it: a registry may lag its own 201. Past it the
+// output is lost, and the attempt is treated exactly like a failed build -- counted once, the Job
+// kept for the backoff, then deleted so the next pass builds afresh. Nothing is deleted on a pass
+// where the registry did not just answer "gone" again, so an outage cannot get here.
+func (r *ImageBuildReconciler) outputGone(ctx context.Context, obj *ociv1alpha1.ImageBuild,
+	job *batchv1.Job, inputHash string, gone *outputGoneError) error {
+
+	done := job.Status.CompletionTime
+	if done == nil || time.Since(done.Time) < recon.PendingRetryInterval {
+		return gone
+	}
+
+	la := obj.Status.LastAttempt
+	counted := la != nil && la.InputHash == inputHash && strings.HasPrefix(la.Message, outputLostPrefix)
+	switch {
+	case !counted:
+		msg := fmt.Sprintf("%s: %s does not serve %s, %s after the build finished, so it is "+
+			"rebuilt once the retry backoff has elapsed. If this build had not been named yet, the "+
+			"registry reclaims untagged manifests faster than a build is named -- check its "+
+			"gcDelay (ADR 0054)",
+			outputLostPrefix, gone.repo, gone.digest, time.Since(done.Time).Round(time.Second))
+		if la == nil || la.InputHash != inputHash {
+			la = &ociv1alpha1.BuildAttempt{InputHash: inputHash}
+			obj.Status.LastAttempt = la
+		}
+		la.FinishedAt = ptr.To(metav1.Now())
+		la.Succeeded = false
+		la.Message = msg
+		obj.Status.BuildRef = nil
+		obj.Status.Failures++
+	case retryDue(obj):
+		// The delete wakes the Job watch, whose reconcile starts the fresh Job.
+		if err := r.Delete(ctx, job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil &&
+			!apierrors.IsNotFound(err) {
+			return fmt.Errorf("deleting the job whose output was lost: %w", err)
+		}
+	}
+	return fmt.Errorf("build failed: %s", obj.Status.LastAttempt.Message)
+}
+
 // buildMetadata is the shape buildctl --metadata-file writes.
 type buildMetadata struct {
 	Digest string `json:"containerimage.digest"`
@@ -598,13 +644,21 @@ func (r *ImageBuildReconciler) readResultDigest(ctx context.Context, obj *ociv1a
 	if err != nil {
 		return "", err
 	}
-	if len(pods.Items) == 0 {
+	// Only this Job's pods: a Job recreated under the same name (outputGone) can briefly coexist
+	// with its predecessor's pod, whose digest is the one that was lost.
+	var own []corev1.Pod
+	for _, p := range pods.Items {
+		if metav1.IsControlledBy(&p, job) {
+			own = append(own, p)
+		}
+	}
+	if len(own) == 0 {
 		return "", recon.Pending("the build pod for %s has not been observed yet", job.Name)
 	}
 
 	// The build container copies buildctl's metadata file to its termination message, which is
 	// readable without exec.
-	for _, p := range pods.Items {
+	for _, p := range own {
 		if digest := podBuildDigest(p); digest != "" {
 			if obj.Status.LastAttempt != nil {
 				obj.Status.LastAttempt.PodName = p.Name

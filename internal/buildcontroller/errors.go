@@ -10,13 +10,27 @@ import (
 
 const (
 	// defaultBuildPollInterval is how often a running Job is re-observed (the Job is also
-	// watched). It also bounds how long a pushed but untagged image is exposed to the registry's
-	// collector (ADR 0054); the chart derives gcDelay from it.
+	// watched). It is how long a pushed but untagged image waits to be named (ADR 0054); the chart
+	// derives gcDelay from it. A collector that is faster anyway costs a rebuild (outputGone).
 	defaultBuildPollInterval = 15 * time.Second
 
 	// maxFailureBackoff caps the retry interval, so a pushed fix is noticed promptly.
 	maxFailureBackoff = 10 * time.Minute
 )
+
+// outputLostPrefix starts the message of an attempt whose output the registry no longer has.
+// It is also how a later pass recognises that the loss has already been counted.
+const outputLostPrefix = "the build's output is gone from the registry"
+
+// outputGoneError is applyTags' read-back answered with a definite "gone" (recon.IsGone). It unwraps
+// to the Pending error it replaces, so it is Pending unless observeJob escalates it.
+type outputGoneError struct {
+	pending      error
+	digest, repo string
+}
+
+func (e *outputGoneError) Error() string { return e.pending.Error() }
+func (e *outputGoneError) Unwrap() error { return e.pending }
 
 // failureBackoff returns how long to wait after n consecutive failures.
 func failureBackoff(n int32) time.Duration {

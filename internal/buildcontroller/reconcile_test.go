@@ -438,6 +438,10 @@ func succeedJob(t *testing.T, r *ImageBuildReconciler, obj *ociv1alpha1.ImageBui
 			Name:      job.Name + "-abcde",
 			Namespace: obj.Namespace,
 			Labels:    map[string]string{"job-name": job.Name},
+			// As the Job controller creates it; readResultDigest reads only its own Job's pod.
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(&job, batchv1.SchemeGroupVersion.WithKind("Job")),
+			},
 		},
 	}
 	if err := r.Create(context.Background(), pod); err != nil {
