@@ -13,8 +13,8 @@ import (
 )
 
 // Readiness tracks which objects this process has reconciled, so retention can tell whether its
-// view is complete: an unobserved object contributes nothing to the live set, and refreshing on a
-// partial view silently under-protects it. (It no longer gates readyz; ADR 0035.)
+// view is complete. Retention reports what is unreconciled and escalates what stays so, but still
+// refreshes it from its status (ADR 0063). (It no longer gates readyz; ADR 0035.)
 type Readiness struct {
 	// Client lists the objects that must be accounted for. The manager's cached client is correct:
 	// before the cache syncs the list fails or blocks, and "not synced" is genuinely not ready.
@@ -62,8 +62,8 @@ func (r *Readiness) Pending(ctx context.Context) ([]string, error) {
 	var pending []string
 	for i := range list.Items {
 		obj := &list.Items[i]
-		// Every object counts, whatever registry it pushes to: exempting any would let retention
-		// read a partial view as complete (ADR 0031).
+		// Every object counts, whatever registry it pushes to: exempting any would hide an
+		// unreconciled object from retention's report (ADR 0063).
 		if !obj.DeletionTimestamp.IsZero() {
 			continue
 		}

@@ -18,7 +18,7 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0007](0007-packaging.md) | Packaging: OCI chart and image published to ghcr | Accepted |
 | [0008](0008-supply-chain.md) | Supply chain: referrers for SBOM and signatures; key-based signing, not keyless | Accepted, amended by 0040 |
 | [0009](0009-flux-conventions-without-dependency.md) | Flux conventions without a Flux dependency, and the name | Accepted, sharpened by 0061 |
-| [0010](0010-workloads-reference-digests.md) | Workloads reference digests, never tags | Accepted, amended by 0060 |
+| [0010](0010-workloads-reference-digests.md) | Workloads reference digests, never tags | Accepted, amended by 0060 and 0063 |
 | [0011](0011-content-tags-expire.md) | Content tags expire: mark-and-sweep garbage collection | Accepted, amends 0010; amended by 0060 |
 | [0012](0012-keep-pkg-registry.md) | Keep `pkg/registry`; own only the blob handler | Moot since [0035](0035-a-registry-is-the-only-publication-path.md) |
 | [0013](0013-persist-manifests.md) | Persist manifests so published builds survive a restart | Moot since [0035](0035-a-registry-is-the-only-publication-path.md) |
@@ -60,7 +60,7 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0050](0050-a-builds-secrets-belong-to-the-build.md) | A build's Secrets belong to the build | **Accepted** |
 | [0051](0051-a-build-that-lost-its-image-rebuilds-it.md) | A build that lost its image rebuilds it | **Accepted** |
 | [0052](0052-a-tag-that-cannot-move-needs-a-source-that-cannot-either.md) | A tag that cannot move needs a source that cannot either | **Accepted** |
-| [0053](0053-a-publish-is-protected-before-the-reconcile-returns.md) | A publish is protected before the reconcile returns | **Accepted** |
+| [0053](0053-a-publish-is-protected-before-the-reconcile-returns.md) | A publish is protected before the reconcile returns | **Accepted**, amended by 0063 |
 | [0054](0054-name-it-after-you-push-it.md) | Name it after you push it | **Accepted**, amended by 0060 |
 | [0055](0055-exporting-a-reference-a-consumer-cannot-compute.md) | Exporting a reference a consumer cannot compute | Superseded in part by 0056 |
 | [0056](0056-the-controller-is-the-namespace-boundary.md) | The controller is the namespace boundary | **Accepted** |
@@ -69,6 +69,7 @@ alternatives are not padding — they are the part that stops the same argument 
 | [0060](0060-every-manifest-carries-its-own-name.md) | Every manifest carries its own name | **Accepted**, supersedes part of 0017 |
 | [0061](0061-ready-names-the-image-the-spec-asks-for.md) | Ready names the image the spec asks for | **Accepted**, sharpens 0009; amended (status writes) |
 | [0062](0062-releases-are-signed-keyless.md) | This project's own releases are signed keyless | **Accepted**, beside 0008 |
+| [0063](0063-a-partial-view-is-refreshed.md) | A partial view is refreshed | **Accepted**, amends 0031 and 0053 |
 
 ## Open questions
 

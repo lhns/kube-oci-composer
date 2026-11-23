@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -44,8 +45,8 @@ const DegradedAfter = 3
 
 // PendingLister reports objects the controller has not yet reconciled.
 //
-// Required: an object missing from a partial view silently stops being refreshed, and the symptom
-// arrives one retention window later. The refresher refuses to run on a partial view.
+// Required: the refresher reports the objects its controller has not reconciled and escalates the
+// ones that stay so. It still refreshes them from the status they have (ADR 0063).
 type PendingLister interface {
 	Pending(ctx context.Context) ([]string, error)
 }
@@ -151,14 +152,16 @@ type Refresher struct {
 	mu sync.Mutex
 	// failures counts consecutive failed cycles per object, keyed by namespace/name.
 	failures map[string]int
-	// skips counts consecutive cycles that refreshed NOTHING because the view was partial.
-	skips int
+	// pendingCycles counts, per object, the consecutive cycles that found it unreconciled. Touched
+	// only by the cycle goroutine.
+	pendingCycles map[string]int
 }
 
 // Result summarises one cycle.
 type Result struct {
-	Skipped     bool
-	SkipReason  string
+	// Pending names the objects their controller had not reconciled when the cycle ran. They were
+	// refreshed like the rest, from the status they have (ADR 0063).
+	Pending     []string
 	Objects     int
 	References  int
 	Refreshed   int
@@ -203,37 +206,51 @@ func (r *Refresher) cycle(ctx context.Context, logger interface {
 	result, err := r.RefreshOnce(ctx)
 	switch {
 	case err != nil:
-		r.skips = 0
 		logger.Error(err, "RETENTION REFRESH FAILED; live images lose their protection if this "+
 			"continues for the registry's retention window")
-	case result.Skipped:
-		// A skipped cycle protects nothing, and one object stuck behind its generation blocks the
-		// refresh for every object in the cluster, so persistent skips escalate like failures.
-		r.skips++
-		if r.skips < DegradedAfter {
-			logger.Info("retention refresh skipped", "reason", result.SkipReason,
-				"consecutiveSkips", r.skips)
-			return
-		}
-		logger.Error(fmt.Errorf("%s", result.SkipReason),
-			"RETENTION REFRESH HAS REFRESHED NOTHING FOR "+
-				"SEVERAL CYCLES; live images lose their protection just as surely as if it were "+
-				"failing, and this will not clear until every object has been reconciled",
-			"consecutiveSkips", r.skips)
 	default:
-		r.skips = 0
 		logger.Info("retention refresh complete",
 			"objects", result.Objects, "references", result.References,
 			"refreshed", result.Refreshed, "failed", result.Failed,
-			"notFound", result.NotFound, "unsupported", result.Unsupported)
+			"notFound", result.NotFound, "unsupported", result.Unsupported,
+			"unreconciled", len(result.Pending))
+		// An unreconciled object costs retention nothing -- it is refreshed from its status like
+		// any other -- but one that STAYS unreconciled is not being served by its controller, and
+		// that must not be silent (ADR 0031).
+		if stuck := r.notePending(result.Pending); len(stuck) > 0 {
+			logger.Error(fmt.Errorf("unreconciled for %d or more cycles: %v", DegradedAfter, stuck),
+				"OBJECTS HAVE GONE UNRECONCILED FOR SEVERAL REFRESH CYCLES; their images are still "+
+					"refreshed from the status they last recorded, but their controller is not "+
+					"acting on them",
+				"objects", len(stuck))
+		} else if len(result.Pending) > 0 {
+			logger.Info("refreshed objects that are not yet reconciled from their recorded status",
+				"unreconciled", result.Pending)
+		}
 	}
+}
+
+// notePending counts consecutive cycles per unreconciled object and returns, sorted, those at or
+// past DegradedAfter. An object that is no longer pending is forgotten.
+func (r *Refresher) notePending(pending []string) []string {
+	next := make(map[string]int, len(pending))
+	var stuck []string
+	for _, key := range pending {
+		next[key] = r.pendingCycles[key] + 1
+		if next[key] >= DegradedAfter {
+			stuck = append(stuck, key)
+		}
+	}
+	r.pendingCycles = next
+	sort.Strings(stuck)
+	return stuck
 }
 
 // RefreshOnce runs one cycle over every object the Source yields.
 func (r *Refresher) RefreshOnce(ctx context.Context) (Result, error) {
 	if r.Pending == nil {
-		return Result{}, fmt.Errorf("no pending lister configured; refusing to refresh on a view " +
-			"that may be incomplete")
+		return Result{}, fmt.Errorf("no pending lister configured; unreconciled objects could not " +
+			"be reported")
 	}
 	if r.Source == nil {
 		return Result{}, fmt.Errorf("no source configured; nothing would be refreshed and every " +
@@ -243,18 +260,16 @@ func (r *Refresher) RefreshOnce(ctx context.Context) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("checking for unreconciled objects: %w", err)
 	}
-	if len(pending) > 0 {
-		return Result{Skipped: true, SkipReason: fmt.Sprintf(
-			"%d objects not yet reconciled (%v); a partial view would under-refresh",
-			len(pending), pending)}, nil
-	}
 
 	targets, err := r.Source.Targets(ctx)
 	if err != nil {
 		return Result{}, err
 	}
 
-	var out Result
+	// Never withheld for an unreconciled object: status is the authority on what was published
+	// (ADR 0031, condition 2), a refresh is a read, and refreshing what is known protects strictly
+	// more than refreshing nothing. The pending set is reported, not obeyed (ADR 0063).
+	out := Result{Pending: pending}
 	for _, target := range targets {
 		r.refreshObject(ctx, target, &out)
 	}
@@ -418,7 +433,7 @@ func (r *Refresher) clearFailure(namespace, objName string) {
 //
 // Called straight after a publish: until then the artifact has no lease (zot can even carry an old
 // pull timestamp onto a new tag for a known digest), and a GC pass in the gap would collect it.
-// Not gated on Pending, which guards against partial views of a whole cycle, not one known object.
+// Not gated on Pending: that is reported, not obeyed (ADR 0063), and here the caller names the object.
 func (r *Refresher) RefreshNow(ctx context.Context, target Target) Result {
 	var out Result
 	r.refreshObject(ctx, target, &out)

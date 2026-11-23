@@ -16,7 +16,7 @@ import (
 )
 
 // TestSuspendingStillAdvancesObservedGeneration: suspending bumps the generation, and an object
-// left "not yet reconciled" makes the retention refresher skip its whole cycle for every object.
+// left "not yet reconciled" is reported by the retention refresher every cycle, then escalated.
 func TestSuspendingStillAdvancesObservedGeneration(t *testing.T) {
 	obj := &ociv1alpha1.ImageBuild{
 		ObjectMeta: metav1.ObjectMeta{
@@ -47,7 +47,7 @@ func TestSuspendingStillAdvancesObservedGeneration(t *testing.T) {
 	}
 	if got.Status.ObservedGeneration != 7 {
 		t.Errorf("observedGeneration = %d, want 7. Left behind, this object reads as pending "+
-			"forever and the refresher skips every cycle -- for every object, not just this one.",
+			"forever and the refresher escalates it as a controller that is not acting on it.",
 			got.Status.ObservedGeneration)
 	}
 	if ready := meta.FindStatusCondition(got.Status.Conditions, ociv1alpha1.ReadyCondition); ready == nil ||

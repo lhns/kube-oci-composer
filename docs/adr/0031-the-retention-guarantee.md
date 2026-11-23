@@ -7,6 +7,8 @@ Date: 2026-08-19
 Accepted, with a correction in the body: a fifth condition added after this was written was inert
 for its whole life, and [0057](0057-the-toolchain-is-an-input.md) says why.
 
+Amended by [0063](0063-a-partial-view-is-refreshed.md): the refresh no longer refuses a partial view. What is unreconciled is reported, and refreshed from the status it has.
+
 Amended by [0060](0060-every-manifest-carries-its-own-name.md): the guarantee now rests on everything the controllers publish carrying a
 tag, not on pull recency protecting untagged content. Two things it did not know are recorded
 there: on zot, moving a manifest's last tag deleted the manifest outright, and `keepUntagged` kept
