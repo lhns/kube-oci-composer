@@ -105,6 +105,19 @@ operator.keepBuilds is 0, which will be clamped to 1. Only the newest build stay
 a commit or rescheduling a pod pinned to an older digest will fail.
 {{- end }}
 
+{{- if and .Values.registry.enabled .Values.registry.retention.deleteUntagged .Values.imageBuild.enabled }}
+{{- $gcDelay := include "kube-oci-composer.durationSeconds" (include "kube-oci-composer.gcDelay" .) | float64 }}
+{{- if and (ge $gcDelay 0.0) (lt $gcDelay 1800.0) }}
+
+WARNING: the registry's gcDelay is {{ include "kube-oci-composer.gcDelay" . }}, under 30m.
+
+A build's output is UNTAGGED from its push until the controller names it, and gcDelay is its only
+cover on the bundled registry; a build can take far longer than this. The collector may reclaim the
+output of a build still in flight (a rebuild, not data loss). This is a test setting. Unset
+registry.retention.gcDelay to derive one (never under 1h), or see docs/registry.md.
+{{- end }}
+{{- end }}
+
 {{- /*
 Shown on the one upgrade that stops keeping untagged content: the live registry config still has
 keepUntagged, and this render does not. Checked against the cluster rather than on every upgrade, so
