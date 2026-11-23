@@ -271,7 +271,6 @@ jobs:
       # and run even after a failure above, so it never masks the real checks.
       - name: Build a mislabelled image
         if: ${{ !cancelled() }}
-
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/bad"
