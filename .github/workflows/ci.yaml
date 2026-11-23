@@ -1,5 +1,5 @@
 # .github/workflows/ci.yaml -- the shared part, copied verbatim into each operator repo (SPEC.md).
-# The repo's own jobs (unit, envtest, chart, e2e lanes) stay alongside these and use the local
+# The repo's own jobs (go, static, e2e lanes) stay alongside these and use the local
 # setup-go action. Only lines marked "# PER-REPO:" differ; SPEC.md has the values.
 name: ci
 
@@ -22,34 +22,73 @@ concurrency:
 env:
   BINARY: /manager             # PER-REPO: entrypoint binary inside the image
   PLATFORMS: linux/amd64,linux/arm64
+  DOCKER_BUILD_RECORD_UPLOAD: "false"   # no build-record artifact per build
+  DOCKER_BUILD_SUMMARY: "false"
 
 jobs:
-  # The fast check; the other jobs run in parallel with it, not behind it.
-  unit:
+  # One job for everything that needs the Go toolchain: one checkout and one restore of the
+  # go.sum-keyed module/build cache, and this job is its only saver. Each step runs even when an
+  # earlier one failed, so a single push reports every failure.
+  go:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-go
 
+      - name: The release image is built with the Go that CI tests
+        # The local setup-go action installs the Dockerfile's Go, so CI tests what ships. A minor
+        # move is a migration: move go.mod and the Dockerfile together.
+        run: |
+          mod=$(awk '/^go /{split($2, v, "."); print v[1] "." v[2]}' go.mod)
+          img=$(grep -m1 -oE '^FROM (--platform=[^ ]+ )?golang:[0-9]+[.][0-9]+' Dockerfile | cut -d: -f2)
+          if [ -z "$img" ] || [ "$mod" != "$img" ]; then
+            echo "go.mod says Go $mod but the Dockerfile builds with golang:${img:-?}"
+            exit 1
+          fi
+          echo "OK: both on Go $mod"
+      - name: go.mod's toolchain line names the Dockerfile's Go
+        # Minor must match. A patch difference only warns: Dependabot's golang bump edits the
+        # Dockerfile alone, and its PR should not go red for that.
+        run: |
+          tc=$(awk '/^toolchain go/{sub(/^go/, "", $2); print $2}' go.mod)
+          img=$(sed -n 's/^FROM .*golang:\([0-9.]*\)@.*/\1/p' Dockerfile)
+          [ -n "$tc" ] || { echo "go.mod has no toolchain line"; exit 1; }
+          [ -n "$img" ] || { echo "no digest-pinned golang tag found in Dockerfile"; exit 1; }
+          if [ "${tc%.*}" != "${img%.*}" ]; then
+            echo "go.mod has toolchain go$tc but the Dockerfile builds with golang:$img"
+            exit 1
+          fi
+          [ "$tc" = "$img" ] || echo "::warning::go.mod has toolchain go$tc, the Dockerfile golang:$img; bump the toolchain line"
+          echo "OK: toolchain go$tc, golang:$img"
+
       - name: Verify generated output is committed
+        if: ${{ !cancelled() }}
         # Generated CRDs, RBAC and deepcopy must match the source and the pinned controller-gen.
         run: make verify
 
-      - run: make test
+      - name: Unit tests
+        if: ${{ !cancelled() }}
+        run: make test
 
-  integration:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: ./.github/actions/setup-go
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        if: ${{ !cancelled() }}
+        with:
+          # Built with the installed Go: prebuilt binaries lag Go releases and refuse a newer go.mod.
+          install-mode: goinstall
+          version: v2.15.0
+
       - name: Cache envtest assets
+        if: ${{ !cancelled() }}
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.local/share/kubebuilder-envtest
           key: envtest-${{ runner.os }}
-      - run: make integration-test
+      - name: Integration tests
+        if: ${{ !cancelled() }}
+        run: make integration-test
 
-  chart:
+  # No Go needed: the chart checks and the source scan, one runner instead of two.
+  static:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -132,54 +171,8 @@ jobs:
           fi
           echo "OK: refused, as intended."
 
-  # Go repos only (PER-REPO: absent in pv-reaper).
-  go-version:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: The release image is built with the Go that CI tests
-        # The local setup-go action installs the Dockerfile's Go, so CI tests what ships. A minor
-        # move is a migration: move go.mod and the Dockerfile together.
-        run: |
-          mod=$(awk '/^go /{split($2, v, "."); print v[1] "." v[2]}' go.mod)
-          img=$(grep -m1 -oE '^FROM (--platform=[^ ]+ )?golang:[0-9]+[.][0-9]+' Dockerfile | cut -d: -f2)
-          if [ -z "$img" ] || [ "$mod" != "$img" ]; then
-            echo "go.mod says Go $mod but the Dockerfile builds with golang:${img:-?}"
-            exit 1
-          fi
-          echo "OK: both on Go $mod"
-      - name: go.mod's toolchain line names the Dockerfile's Go
-        # Minor must match. A patch difference only warns: Dependabot's golang bump edits the
-        # Dockerfile alone, and its PR should not go red for that.
-        run: |
-          tc=$(awk '/^toolchain go/{sub(/^go/, "", $2); print $2}' go.mod)
-          img=$(sed -n 's/^FROM .*golang:\([0-9.]*\)@.*/\1/p' Dockerfile)
-          [ -n "$tc" ] || { echo "go.mod has no toolchain line"; exit 1; }
-          [ -n "$img" ] || { echo "no digest-pinned golang tag found in Dockerfile"; exit 1; }
-          if [ "${tc%.*}" != "${img%.*}" ]; then
-            echo "go.mod has toolchain go$tc but the Dockerfile builds with golang:$img"
-            exit 1
-          fi
-          [ "$tc" = "$img" ] || echo "::warning::go.mod has toolchain go$tc, the Dockerfile golang:$img; bump the toolchain line"
-          echo "OK: toolchain go$tc, golang:$img"
-
-  # Go repos that adopt golangci-lint (PER-REPO, see SPEC.md), with .golangci.yml from SPEC.md.
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: ./.github/actions/setup-go
-      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
-        with:
-          # Built with the installed Go: prebuilt binaries lag Go releases and refuse a newer go.mod.
-          install-mode: goinstall
-          version: v2.15.0
-
-  trivy-fs:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Trivy filesystem scan (sources, go.sum)
+        if: ${{ !cancelled() }}
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
@@ -192,7 +185,8 @@ jobs:
 
   # Both platforms of both images, pushed by digest to a throwaway registry and checked with the
   # release's own script, so an arm64 break fails the PR rather than the release. The only writer of
-  # the layer cache (scope=image) that e2e, upgrade and release read.
+  # the layer cache (scope=image) that e2e, upgrade and release read. Also proves the arch check can
+  # fail (last steps), so it shares this job's registry, builder and crane.
   image:
     runs-on: ubuntu-latest
     services:
@@ -206,6 +200,7 @@ jobs:
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           driver-opts: network=host   # the builder must reach the registry service on localhost
+          cleanup: false              # the runner is discarded anyway
       - uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
         with:
           version: v0.20.6
@@ -230,7 +225,8 @@ jobs:
           outputs: type=image,name=localhost:5000/kube-oci-builder,push-by-digest=true,name-canonical=true,push=true
           build-args: CMD=oci-builder
           cache-from: type=gha,scope=image
-          cache-to: type=gha,mode=max,scope=image
+          # Nothing can read a tag ref's cache (scopes are per ref), so tag runs skip the export.
+          cache-to: ${{ startsWith(github.ref, 'refs/tags/') && '' || 'type=gha,mode=max,scope=image' }}
       - name: Verify every platform's binary architecture
         run: |
           set -euo pipefail
@@ -270,24 +266,12 @@ jobs:
           exit-code: '1'
           ignore-unfixed: true
           vuln-type: 'os,library'
-
-  # The check must be able to fail: an image whose arm64 platform carries an x86-64 binary, the
-  # shape of the bug it exists for, must be rejected with exit 1 on arm64 and nothing else.
-  arch-check-fails:
-    runs-on: ubuntu-latest
-    services:
-      registry:
-        image: registry:3@sha256:82f6ff4a7f982960c8aa51617fea3aabc485df6e55cce80d22deb1de36f1bc3c
-        ports: ['5000:5000']
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-        with:
-          driver-opts: network=host
-      - uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
-        with:
-          version: v0.20.6
+      # The check must be able to fail: an image whose arm64 platform carries an x86-64 binary, the
+      # shape of the bug it exists for, must be rejected with exit 1 on arm64 and nothing else. Last,
+      # and run even after a failure above, so it never masks the real checks.
       - name: Build a mislabelled image
+        if: ${{ !cancelled() }}
+
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/bad"
@@ -302,6 +286,7 @@ jobs:
             --metadata-file "$RUNNER_TEMP/meta.json" "$RUNNER_TEMP/bad"
           echo "REF=localhost:5000/mislabelled@$(jq -r '."containerimage.digest"' "$RUNNER_TEMP/meta.json")" >> "$GITHUB_ENV"
       - name: The check rejects it
+        if: ${{ !cancelled() }}
         run: |
           set +e -uo pipefail
           out=$(bash scripts/check-binary-arch.sh "$REF" "$BINARY" "$PLATFORMS" 2>&1); rc=$?
