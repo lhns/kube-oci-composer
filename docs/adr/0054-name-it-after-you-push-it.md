@@ -106,6 +106,13 @@ was added as a second entry whose patterns also matched everything and zot stops
 match. Any claim here that push recency protected tagged content was describing a rule that was not
 running; see [ADR 0057](0057-the-toolchain-is-an-input.md).
 
+**Amended (2026-11-23):** the window is not bounded by the controller's Job poll. The controller is
+watch-driven (it owns the Job), and push to `applyTags` spans the build's cache export, buildkit
+teardown, the pod's status, the Job completing and a serial work queue: 8.6s for one build at a 3s
+poll, 6.6-21s under parallel load. The `3x buildPollInterval` floor is therefore a heuristic, and
+the 240x margin above is overstated; the decision stands, and `gcDelay` of minutes or more is the
+real cover.
+
 **A read-back that fails is PENDING, not a failure.** Nothing about this object's spec would fix
 it, so ADR 0009's third path applies: a short fixed requeue rather than exponential backoff. But
 retrying only helps if the registry is catching up; if a collector took the manifest, the content

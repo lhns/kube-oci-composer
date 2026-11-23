@@ -122,8 +122,10 @@ Per-component override; empty means the shared one. Not `default`, which treats 
 {{- end -}}
 
 {{- /*
-The naming gap: how long a build's manifest can sit untagged. The controller names it within one
-buildPollInterval of the push; tripled for its round trips, since losing this race costs a build.
+The naming gap: how long a build's manifest can sit untagged. NOT bounded by buildPollInterval: the
+controller is watch-driven, and the gap is the Job's cache export, buildkit teardown, pod status,
+Job completion and a serial work queue (measured 6-21s under load, 8.6s for one build at a 3s
+poll). This floor is only a heuristic, 3x the poll; real cover is a gcDelay of minutes or more.
 */ -}}
 {{- define "kube-oci-composer.namingGapSeconds" -}}
   {{- $poll := include "kube-oci-composer.durationSeconds" .Values.imageBuild.buildPollInterval | float64 -}}
