@@ -217,9 +217,11 @@ refreshed() { kubectl -n "$NS" logs deploy/"$RELEASE" | grep -q '"retention refr
 for _ in $(seq 60); do refreshed && break; sleep 2; done
 refreshed || fail "the refresher never completed a cycle"
 # The window must outlast the controller's restart and first refresh; 2m does, with room to spare.
+# gcDelay is explicit: the derived one is never under 1h, which would hold the retired content past
+# this test.
 helm upgrade "$RELEASE" "$CHART" "${COMMON[@]}" "${NEW_IMAGES[@]}" "${FAST[@]}" \
   --set retention.window=2m --set registry.retention.gcFactor=6 --set imageBuild.buildPollInterval=3s \
-  --set registry.retention.gcMaxSchedulerDelay=1s --wait --timeout 5m
+  --set registry.retention.gcDelay=2m --set registry.retention.gcMaxSchedulerDelay=1s --wait --timeout 5m
 
 # The control: nothing refreshes the retired object's content, so it must actually go. Otherwise
 # "everything live still resolves" below would hold just as well for a registry collecting nothing.

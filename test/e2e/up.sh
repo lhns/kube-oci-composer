@@ -40,7 +40,7 @@ E2E_BUILD_POLL="${E2E_BUILD_POLL:-3s}"
 # Set explicitly, to the window. A build's manifest is untagged from its push until the controller
 # names it, and gcDelay is its only cover. That gap is NOT bounded by the build poll: it is the
 # Job's cache export, the pod's teardown, the Job completing and the controller's queue. Measured
-# 5-21s for these fixtures on a slow machine, against the 9s the chart derives from a 3s poll.
+# 5-21s for these fixtures on a slow machine, against the 9s a 3s poll alone would allow (the chart's derived delay is never under 1h).
 E2E_GC_DELAY="${E2E_GC_DELAY:-$E2E_WINDOW}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
