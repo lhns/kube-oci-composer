@@ -8,7 +8,9 @@
 package e2e
 
 import (
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -25,21 +27,42 @@ const manifestAccept = "application/vnd.oci.image.manifest.v1+json," +
 	"application/vnd.docker.distribution.manifest.v2+json," +
 	"application/vnd.docker.distribution.manifest.list.v2+json,*/*"
 
+var (
+	curlPodOnce sync.Once
+	curlPodErr  error
+)
+
 // ensureCurlPod starts the helper pod once per suite run. It is deliberately left running between
-// tests; the cluster's teardown removes it.
+// tests; the cluster's teardown removes it. Parallel tests call it concurrently, so the start runs
+// under a sync.Once and its error is recorded for every caller to fail on (not t.Fatal inside the
+// Once, which would fail only the first test and leave the rest with a half-started pod).
 func ensureCurlPod(t *testing.T) {
+	t.Helper()
+
+	curlPodOnce.Do(func() { curlPodErr = startCurlPod(t) })
+	if curlPodErr != nil {
+		t.Fatalf("starting the %s helper pod: %v", curlPod, curlPodErr)
+	}
+}
+
+func startCurlPod(t *testing.T) error {
 	t.Helper()
 
 	if out, err := kubectl(t, "-n", buildNamespace, "get", "pod", curlPod,
 		"-o", "jsonpath={.status.phase}"); err == nil && strings.TrimSpace(out) == "Running" {
-		return
+		return nil
 	}
 
 	_, _ = kubectl(t, "-n", buildNamespace, "delete", "pod", curlPod, "--ignore-not-found")
-	mustKubectl(t, "-n", buildNamespace, "run", curlPod,
-		"--restart=Never", "--image="+curlImage, "--command", "--", "sleep", "3600")
-	mustKubectl(t, "-n", buildNamespace, "wait", "--for=condition=Ready",
-		"pod/"+curlPod, "--timeout=120s")
+	if out, err := kubectl(t, "-n", buildNamespace, "run", curlPod,
+		"--restart=Never", "--image="+curlImage, "--command", "--", "sleep", "3600"); err != nil {
+		return fmt.Errorf("run: %w: %s", err, out)
+	}
+	if out, err := kubectl(t, "-n", buildNamespace, "wait", "--for=condition=Ready",
+		"pod/"+curlPod, "--timeout=120s"); err != nil {
+		return fmt.Errorf("wait: %w: %s", err, out)
+	}
+	return nil
 }
 
 // registryRequest performs one HTTP request against the in-cluster registry and returns the

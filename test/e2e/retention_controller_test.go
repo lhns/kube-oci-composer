@@ -18,8 +18,10 @@ import (
 // negative control is the same image after its object is deleted: everything else held constant, so
 // the controller's refresh is the only explanation for the difference.
 func TestALiveObjectKeepsItsImagesAlive(t *testing.T) {
-	// Not parallel: it ends waiting for a real deletion, and concurrent tests add repositories that
-	// slow the collector's rotation.
+	// Parallel: contention only slows the collector's rotation (gcMaxSchedulerDelay is 1s and the
+	// deletion deadline has a 600s floor), which makes the wait longer, not red.
+	t.Parallel()
+
 	repo := keepaliveRepo("live")
 	digest := buildInto(t, "keepalive-live", repo, "v1")
 
@@ -46,7 +48,8 @@ func TestALiveObjectKeepsItsImagesAlive(t *testing.T) {
 // TestTwoObjectsSharingADigestKeepItAliveIndependently -- two objects publishing one digest both
 // refresh it, so it survives while EITHER lives (ADR 0031), with no cross-object bookkeeping.
 func TestTwoObjectsSharingADigestKeepItAliveIndependently(t *testing.T) {
-	// Not parallel: it ends waiting for a real deletion (see TestALiveObjectKeepsItsImagesAlive).
+	// Parallel for the same reason as TestALiveObjectKeepsItsImagesAlive.
+	t.Parallel()
 
 	repo := keepaliveRepo("shared")
 
