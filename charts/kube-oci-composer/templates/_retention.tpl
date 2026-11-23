@@ -204,7 +204,7 @@ documented instead.
 {{- $delay := include "kube-oci-composer.durationSeconds" (include "kube-oci-composer.gcDelay" .) | float64 -}}
 {{- $gap := include "kube-oci-composer.namingGapSeconds" . | float64 -}}
 {{- if and (ge $delay 0.0) (lt $delay $gap) -}}
-{{- fail (printf "the registry's gcDelay resolves to %s, shorter than the %s a build's manifest can spend untagged while this controller names it (3x imageBuild.buildPollInterval, which is %s). The collector would be free to reclaim a build's own output. Lengthen gcDelay, shorten buildPollInterval, or set registry.retention.deleteUntagged=false to remove the race instead of out-running it. See ADR 0054." (include "kube-oci-composer.gcDelay" .) (include "kube-oci-composer.formatDuration" $gap) $.Values.imageBuild.buildPollInterval) -}}
+{{- fail (printf "the registry's gcDelay resolves to %s, below the %s floor (3x imageBuild.buildPollInterval, which is %s) for the time a build's manifest spends untagged until this controller names it; that time is a build's whole completion path, so the floor is a minimum, not cover. The collector would be free to reclaim a build's own output. Lengthen gcDelay, shorten buildPollInterval, or set registry.retention.deleteUntagged=false to remove the race instead of out-running it. See ADR 0054." (include "kube-oci-composer.gcDelay" .) (include "kube-oci-composer.formatDuration" $gap) $.Values.imageBuild.buildPollInterval) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

@@ -173,8 +173,8 @@ down, but never below a floor that is a heuristic for that gap, and the chart re
 that goes under it. The gap is not bounded by the poll: the controller is watch-driven, and the gap
 is the build's cache export, buildkit teardown, pod status, Job completion and the controller's
 queue (one worker). Measured: 8.6s for a single build, 6-21s under parallel load. The default
-`gcDelay` of `1h` covers that by a wide margin; a short one is a choice to test, not to run. With `keepUntagged` off (below) it is
-the only cover for that gap. Losing the race costs a rebuild, not data: nothing references a build's
+`gcDelay` of `1h` covers that by a wide margin; a short one is a choice to test, not to run. With
+`keepUntagged` off (below) it is the only cover for that gap. Losing the race costs a rebuild, not data: nothing references a build's
 output before it is named.
 
 **If you run your own registry, this is yours to check.** Any registry that reclaims untagged
