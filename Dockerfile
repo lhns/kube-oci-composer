@@ -22,15 +22,18 @@ ARG TARGETOS
 ARG TARGETARCH
 # Compile every command once, with no stamp ARGs in scope: an ARG is in the cache key of every RUN
 # after it, and VERSION/COMMIT/BUILD_DATE change on every build. Both images share this layer.
-# PER-REPO: oci-composer compiles ./cmd/... here and stamps its single binary below.
-RUN : "${TARGETOS:?}" "${TARGETARCH:?}" &&     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" ./cmd/...
+# PER-REPO: oci-composer has two commands; both are compiled here and stamped below.
+RUN : "${TARGETOS:?}" "${TARGETARCH:?}" && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" ./cmd/...
 
 # Only package main is relinked here (-X reaches it alone); the compiled dependencies come from the
 # build cache of the RUN above.
 ARG VERSION=dev
 ARG COMMIT=none
 ARG BUILD_DATE=unknown
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath       -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${BUILD_DATE}"       -o /out/ ./cmd/...
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
+      -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${BUILD_DATE}" \
+      -o /out/ ./cmd/...
 
 # PER-REPO: distroless nonroot: no shell, package manager or libc. This sits in the supply chain, so
 # the smaller its attack surface the better; its writable paths are volumes, so the root

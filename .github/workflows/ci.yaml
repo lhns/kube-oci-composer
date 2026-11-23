@@ -220,7 +220,7 @@ jobs:
           outputs: type=image,name=localhost:5000/kube-oci-composer,push-by-digest=true,name-canonical=true,push=true
           build-args: CMD=oci-composer
           cache-from: type=gha,scope=image
-          cache-to: type=gha,mode=max,scope=image
+          # No cache-to: the builder step below exports the same shared layers once.
       - name: Build kube-oci-builder, both platforms, push by digest to the local registry
         id: build-builder
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
