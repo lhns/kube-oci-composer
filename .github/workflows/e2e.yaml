@@ -3,7 +3,9 @@ name: e2e
 on:
   push:
     branches: [main]
+    paths-ignore: ['docs/**', '**.md']
   pull_request:
+    paths-ignore: ['docs/**', '**.md']
   # Callable, so release gates on the e2e itself.
   workflow_call:
 
@@ -15,6 +17,10 @@ permissions:
 concurrency:
   group: e2e-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  DOCKER_BUILD_RECORD_UPLOAD: "false"   # no build-record artifact per build
+  DOCKER_BUILD_SUMMARY: "false"
 
 jobs:
   e2e:
@@ -28,6 +34,8 @@ jobs:
         with:
           cache: false   # the e2e package is standard library only; its Go cache is 760 MB to restore for nothing
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          cleanup: false
       # Both images, built here from the layer cache ci's image job writes (scope=image; read-only
       # here). Tags must match up.sh's defaults: the chart installs with pullPolicy=Never (up.sh
       # checks every node has both after loading).
