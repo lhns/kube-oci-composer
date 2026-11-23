@@ -60,22 +60,15 @@ BUILDER_IMG="${BUILDER_IMG:-ghcr.io/lhns/kube-oci-builder:e2e}"
 # Everything publishes here (ADR 0035); the drop-in above makes it pullable by pods.
 E2E_REGISTRY="$REGISTRY_HOST"
 
-# Load both images before the install (pullPolicy is Never). Images already in the local Docker
-# daemon (CI builds them in the job) are used as they are; otherwise they are built here. A prebuilt
-# archive may be passed instead; a set-but-missing archive is an error, not a fallback.
-E2E_IMAGE_ARCHIVE="${E2E_IMAGE_ARCHIVE:-}"
-if [ -n "$E2E_IMAGE_ARCHIVE" ]; then
-  if [ ! -f "$E2E_IMAGE_ARCHIVE" ]; then
-    echo "E2E_IMAGE_ARCHIVE=$E2E_IMAGE_ARCHIVE does not exist" >&2
-    exit 1
-  fi
-  kind load image-archive "$E2E_IMAGE_ARCHIVE" --name "$CLUSTER"
-else
-  docker image inspect "$IMG" >/dev/null 2>&1 || make docker-build IMG="$IMG"
-  docker image inspect "$BUILDER_IMG" >/dev/null 2>&1 || make docker-build-builder BUILDER_IMG="$BUILDER_IMG"
-  kind load docker-image "$IMG" --name "$CLUSTER"
-  kind load docker-image "$BUILDER_IMG" --name "$CLUSTER"
+# Load both images before the install (pullPolicy is Never). Built here from the working tree,
+# unless E2E_PREBUILT=1 says the caller already built them (CI, from its layer cache). Opt-in, so a
+# local run never tests a stale image left in the daemon.
+if [ "${E2E_PREBUILT:-}" != 1 ]; then
+  make docker-build IMG="$IMG"
+  make docker-build-builder BUILDER_IMG="$BUILDER_IMG"
 fi
+kind load docker-image "$IMG" --name "$CLUSTER"
+kind load docker-image "$BUILDER_IMG" --name "$CLUSTER"
 
 # Fail now rather than as a helm --wait timeout (ErrImageNeverPull) five minutes later.
 for node in $(kind get nodes --name "$CLUSTER"); do
