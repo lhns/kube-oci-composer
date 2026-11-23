@@ -45,7 +45,8 @@ jobs:
           tags: ghcr.io/lhns/kube-oci-composer:upgrade
           build-args: |
             CMD=oci-composer
-          cache-from: type=gha
+          # Read-only: ci's image job is the one writer of scope=image.
+          cache-from: type=gha,scope=image
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -54,7 +55,7 @@ jobs:
           tags: ghcr.io/lhns/kube-oci-builder:upgrade
           build-args: |
             CMD=oci-builder
-          cache-from: type=gha
+          cache-from: type=gha,scope=image
       - uses: helm/kind-action@ea822c7bf1874f08e5a491df991c228edffc3376 # v1.15.2
         with:
           version: v0.32.0
