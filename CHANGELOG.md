@@ -7,10 +7,9 @@ may change between minor versions.
 
 ### Build
 
-- Faster pipeline: one compile shared by both images, a single layer-cache writer (ci), no cache
-  export on release, the release image build runs parallel to the gates, and e2e runs 8 tests at once.
-- Fewer CI jobs per push: unit, lint, integration and go-version run as one `go` job (one writer of
-  the Go cache), chart and trivy-fs as `static`, arch-check-fails inside `image`; e2e skips docs-only pushes.
+- Faster pipeline: both images share one compile, ci is the only layer-cache writer, the release
+  builds its images alongside the gates, ci runs three jobs instead of eight, e2e runs 8 tests at
+  once and skips docs-only pushes.
 
 ## [0.6.5] - 2026-11-22
 
