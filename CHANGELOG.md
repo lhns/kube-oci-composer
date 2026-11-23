@@ -5,6 +5,10 @@ may change between minor versions.
 
 ## [Unreleased]
 
+## [0.6.6] - 2026-11-23
+
+No upgrade steps.
+
 ### Fixed
 
 - e2e: the keepalive retention test no longer expires its own fixture during a second fixture's
@@ -21,6 +25,8 @@ may change between minor versions.
 - Faster pipeline: both images share one compile, ci is the only layer-cache writer, the release
   builds its images alongside the gates, ci runs three jobs instead of eight, e2e runs 8 tests at
   once and skips docs-only pushes.
+- Runtime base `gcr.io/distroless/static-debian13:nonroot` moved to digest `8ce6dd8` (routine; no
+  known vulnerabilities in either digest).
 
 ## [0.6.5] - 2026-11-22
 
