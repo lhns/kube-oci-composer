@@ -8,7 +8,7 @@ Retention is ONE decision: `retention.window` is the base and everything else de
                   early is not. It does not simply set how soon a repository is collected (zot walks
                   repositories in rounds); measure before tuning it.
   gcDelay         minimum age before collection. Derived from the refresh interval, but never below
-                  the naming-gap floor: a build's manifest is untagged from push until the controller
+                  an hour (and the naming-gap floor): a build's manifest is untagged from push until the controller
                   names it (ADR 0054), and untagged is what a collector reclaims.
 
 With an external registry the operator DECLARES its window, so the refresh check runs in both cases.
@@ -132,14 +132,20 @@ poll). This floor is only a heuristic, 3x the poll; real cover is a gcDelay of m
   {{- mulf (max $poll 1.0) 3.0 -}}
 {{- end -}}
 
-{{- /* Derived like the rest, but never below the naming gap. */ -}}
+{{- /*
+Derived like the rest, but never below an hour. The refresh interval follows the window down (24h ->
+2m), but a build's output is unprotected from push until it is named and gcDelay is its only cover; a
+build can run its whole timeout (30m). Costs no retention at windows of 1h or more: gcDelay only
+delays UNTAGGED manifests, and a retired one is already older than the delay. An explicit value is
+accepted down to the naming-gap refusal (checkUntaggedWindow).
+*/ -}}
 {{- define "kube-oci-composer.gcDelay" -}}
   {{- if .Values.registry.retention.gcDelay -}}
     {{- .Values.registry.retention.gcDelay -}}
   {{- else -}}
     {{- $refresh := include "kube-oci-composer.durationSeconds" (include "kube-oci-composer.refreshInterval" .) | float64 -}}
     {{- $floor := include "kube-oci-composer.namingGapSeconds" . | float64 -}}
-    {{- include "kube-oci-composer.formatDuration" (max $refresh $floor) -}}
+    {{- include "kube-oci-composer.formatDuration" (max $refresh $floor 3600.0) -}}
   {{- end -}}
 {{- end -}}
 

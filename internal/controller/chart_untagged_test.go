@@ -52,16 +52,36 @@ func TestTheDerivedDefaultsMatchTheValuesTheyReplaced(t *testing.T) {
 	}
 }
 
-// TestTheNamingGapFloorTracksThePollInterval: the gcDelay floor scales with buildPollInterval, so
-// tests can compress the whole clock.
-func TestTheNamingGapFloorTracksThePollInterval(t *testing.T) {
+// TestAnExplicitGCDelayAboveTheNamingGapFloorIsAccepted: the refusal floor is still 3x the poll
+// (the e2e relies on it); only the DERIVED delay is raised to 1h.
+func TestAnExplicitGCDelayAboveTheNamingGapFloorIsAccepted(t *testing.T) {
 	out := render(t,
 		"--set", "retention.window=30s",
 		"--set", "retention.refreshInterval=1s",
-		"--set", "registry.retention.gcFactor=6",
+		"--set", "registry.retention.gcDelay=30s",
 		"--set", "imageBuild.buildPollInterval=3s")
-	if !strings.Contains(out, `"gcDelay": "9s"`) {
-		t.Errorf("gcDelay did not follow buildPollInterval down to 3x it:\n%s", out)
+	if !strings.Contains(out, `"gcDelay": "30s"`) {
+		t.Errorf("an explicit gcDelay of 30s (above 3x a 3s poll) was not accepted as given:\n%s", out)
+	}
+}
+
+// TestADerivedGCDelayIsNeverBelowAnHour: it follows the window down, but a build's output is
+// unprotected while untagged and a build can take its whole timeout (30m), so a short window must
+// not shorten that cover. Retention cost: none for windows of 1h or more, since gcDelay only delays
+// UNTAGGED manifests and a retired one is already older than that.
+func TestADerivedGCDelayIsNeverBelowAnHour(t *testing.T) {
+	for _, window := range []string{"720h", "168h", "24h"} {
+		out := render(t, "--set", "retention.window="+window)
+		if !strings.Contains(out, `"gcDelay": "1h"`) {
+			t.Errorf("window %s: derived gcDelay is not 1h:\n%s", window, out)
+		}
+	}
+	// Above the floor the refresh interval still wins.
+	out := render(t,
+		"--set", "retention.window=720h",
+		"--set", "retention.refreshInterval=2h")
+	if !strings.Contains(out, `"gcDelay": "2h"`) {
+		t.Errorf("a refresh interval above 1h no longer drives the derived gcDelay:\n%s", out)
 	}
 }
 

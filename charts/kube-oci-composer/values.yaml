@@ -207,7 +207,7 @@ imageBuild:
 
   # How often a running build Job is re-observed. It does NOT bound how long a build's image sits
   # UNTAGGED before the controller names it (ADR 0054; that is the whole Job completion path), but
-  # registry.retention.gcDelay is never derived below 3x this. The e2e lowers it to compress
+  # registry.retention.gcDelay is never derived below 3x this (or 1h). The e2e lowers it to compress
   # retention timings.
   buildPollInterval: 15s
 
@@ -288,10 +288,12 @@ registry:
     gcFactor: 120
     gcInterval: ""
 
-    # Minimum age before collection: max(refresh interval, 3x imageBuild.buildPollInterval). The
-    # floor covers a build's manifest between its push and the controller naming it (ADR 0054);
-    # with keepUntagged off it is the only cover. A builder down for longer can lose an unnamed
-    # output (costs a rebuild, not data). Raise it if you prefer.
+    # Minimum age before collection, derived as max(refresh interval, 3x imageBuild.buildPollInterval,
+    # 1h), so a shortened window does not shorten it. It covers a build's manifest between its push
+    # and the controller naming it (ADR 0054); with keepUntagged off it is the only cover. A
+    # builder down for longer can lose an unnamed output (costs a rebuild, not data). An explicit
+    # value is refused below 3x the poll and warned about under 30m (a test setting). Raise it if
+    # you prefer.
     gcDelay: ""
     # Report what collection would remove without removing it. Only safe on v2.1.21+; older
     # versions delete blobs even in a dry run.
