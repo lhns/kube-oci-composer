@@ -180,6 +180,12 @@ that by a wide margin; a short one is a choice to test, not to run. With `keepUn
 it is the only cover for that gap. Losing the race costs a rebuild, not data: nothing references a
 build's output before it is named.
 
+The controller recovers from losing it. Thirty seconds after the Job completed, a registry that
+answers `MANIFEST_UNKNOWN` or `NAME_UNKNOWN` for the build's digest makes the attempt a failed
+build (`BuildFailed`, `the build's output is gone from the registry`). The Job is kept for the usual
+failure backoff (1m, 2m, 4m, up to 10m), and a second such answer after it deletes the Job so the
+next pass builds again. Any other answer (a bare 404, a 5xx, an outage) stays Pending.
+
 **If you run your own registry, this is yours to check.** Any registry that reclaims untagged
 manifests can take a build's output before it is named. Either give it an untagged-manifest
 grace comfortably longer than a build's full completion time, queueing behind other builds
@@ -189,6 +195,9 @@ collection. The symptom is a build that publishes and then reports, every interv
 > the build produced `sha256:…` but `…` does not serve it; the manifest is untagged until this
 > controller names it, so either the registry has not caught up or its collector reclaimed it
 > first — check the registry's gcDelay if this persists
+
+It now lasts only until the loss is certain (see above), then turns into a counted `BuildFailed` and
+a rebuild instead of waiting out the Job's one-hour TTL.
 
 ## A zot configuration that works
 

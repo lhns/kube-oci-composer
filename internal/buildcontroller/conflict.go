@@ -523,11 +523,17 @@ func (r *ImageBuildReconciler) applyTags(
 		// Pending, not terminal: no spec edit fixes it. The manifest is untagged until named here,
 		// so the registry may be lagging or its collector may have reclaimed it (NAME_UNKNOWN if
 		// the repository went with it). The message names both.
-		return nil, recon.Pending(
+		pending := recon.Pending(
 			"the build produced %s but %s does not serve it; the manifest is untagged until this "+
 				"controller names it, so either the registry has not caught up or its collector "+
 				"reclaimed it first -- check the registry's gcDelay if this persists",
 			digest, reg.repo)
+		if recon.IsGone(err) {
+			// Still Pending to every caller that does not look; observeJob decides whether it has
+			// lasted long enough to be a loss.
+			return nil, &outputGoneError{pending: pending, digest: digest, repo: reg.repo}
+		}
+		return nil, pending
 	case err != nil:
 		return nil, fmt.Errorf("reading the pushed manifest %s: %w", digest, err)
 	}

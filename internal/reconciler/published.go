@@ -99,3 +99,20 @@ func IsNotFound(err error) bool {
 	}
 	return false
 }
+
+// IsGone is IsNotFound for callers about to DESTROY something on the strength of it: the 404 must
+// also carry the registry's own MANIFEST_UNKNOWN or NAME_UNKNOWN. A proxy or ingress in front of a
+// registry that is down answers 404 too, with no such body. Only a GET can satisfy this; a HEAD has
+// no body.
+func IsGone(err error) bool {
+	var terr *transport.Error
+	if !errors.As(err, &terr) || terr.StatusCode != http.StatusNotFound {
+		return false
+	}
+	for _, d := range terr.Errors {
+		if d.Code == transport.ManifestUnknownErrorCode || d.Code == transport.NameUnknownErrorCode {
+			return true
+		}
+	}
+	return false
+}

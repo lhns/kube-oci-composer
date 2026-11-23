@@ -125,6 +125,15 @@ it, so ADR 0009's third path applies: a short fixed requeue rather than exponent
 retrying only helps if the registry is catching up; if a collector took the manifest, the content
 is gone and no number of retries returns it. The message says both, and points at `gcDelay`.
 
+**Amended (2026-11-23): a read-back that stays gone is a failed build.** It is still Pending while
+the registry may only be lagging: for 30s after the Job completed, and for as long as the answer is
+anything but the registry's own `MANIFEST_UNKNOWN` or `NAME_UNKNOWN`. Past that, waiting cannot
+help, and what used to happen next was nothing until the Job's one-hour TTL. The attempt is now
+counted like a failed build: `BuildFailed`, the Job kept for the usual backoff, then deleted so the
+next pass builds again. Even a coded 404 can be a storage blip, so nothing is deleted before two
+such answers a backoff apart, and a manifest that turns up late is named on whichever pass finds it.
+Refused builds never get here: `onConflict` is decided before the read-back.
+
 **A failed tagging step fails the reconcile after a successful build.** The content is pushed but
 unnamed, so it is not published; retrying re-reads the same Job and re-applies the same names, which
 is idempotent. Content orphaned by a permanent failure is reclaimed as untagged.

@@ -17,6 +17,14 @@ may change between minor versions.
   notes warn when the effective delay is under 30m. Upgrade note: if you shortened the window, the
   bundled registry now keeps untagged manifests at least 1h.
 
+### Fixed
+
+- A build whose pushed output the registry reclaimed before it was named (or whose published image
+  was lost while its Job still existed) is rebuilt after the failure backoff instead of staying
+  Pending until the Job's one-hour TTL. It is reported as `BuildFailed`, "the build's output is gone
+  from the registry". Only the registry's own `MANIFEST_UNKNOWN`/`NAME_UNKNOWN`, seen at least 30s
+  after the Job completed and twice a backoff apart, deletes the Job.
+
 ## [0.6.6] - 2026-11-23
 
 No upgrade steps.
