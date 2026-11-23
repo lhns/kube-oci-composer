@@ -68,7 +68,11 @@ is what keeps it from being silent.
 interval-paced, so a registry actively deleting content costs at most one build per `spec.interval`.
 No backoff state was needed.
 
-> **Amended (2026-11-23): inside the Job's TTL the rebuild no longer waits for it.** Falling through used to adopt the still-existing Job, read back a digest the registry no longer had, and stay Pending until the TTL removed the Job. That read-back is now a loss in its own right ([0054](0054-name-it-after-you-push-it.md), amended). The rule above still governs, and is stricter where a Job is deleted: the 404 must carry the registry's own error code, twice.
+**Amended (2026-11-23): inside the Job's TTL the rebuild no longer waits for it.** Falling through
+used to adopt the still-existing Job, read back a digest the registry no longer had, and stay
+Pending until the TTL removed the Job. That read-back is now a loss in its own right
+([0054](0054-name-it-after-you-push-it.md), amended). The rule above still governs, and is stricter
+where a Job is deleted: the 404 must carry the registry's own error code, twice.
 
 **One HEAD per tag plus one per digest, per reconcile.** The composer has always paid this.
 
