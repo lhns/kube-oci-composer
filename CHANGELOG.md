@@ -5,6 +5,11 @@ may change between minor versions.
 
 ## [Unreleased]
 
+### Build
+
+- The release retries `helm push` (up to 5 times, with backoff): ghcr can answer 404 for a chart
+  manifest it has just accepted, which failed v0.7.0's chart push.
+
 ## [0.7.0] - 2026-11-24
 
 Upgrade steps: none required. If you shortened `retention.window` and rely on the derived
