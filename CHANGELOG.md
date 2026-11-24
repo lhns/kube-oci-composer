@@ -5,6 +5,13 @@ may change between minor versions.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-24
+
+Upgrade steps: none required. If you shortened `retention.window` and rely on the derived
+`registry.retention.gcDelay`, the bundled registry now keeps untagged manifests for at least 1h;
+set `registry.retention.gcDelay` explicitly to keep a shorter delay (the install notes warn under
+30m).
+
 ### Changed
 
 - The retention refresh no longer skips its cycle while any object is unreconciled. It refreshes
