@@ -253,7 +253,15 @@ jobs:
           mkdir -p dist
           helm package "$CHART_PATH" --version "$CHART_VERSION" --app-version "$APP_VERSION" --destination dist
           echo "$GH_TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-          helm push "dist/$CHART_NAME-$CHART_VERSION.tgz" "oci://$REGISTRY/charts"
+          # Retried: ghcr can answer 404 for a manifest it accepted moments before, and helm's tag
+          # step reads it back by digest first ('failed to perform "Tag" ... not found'). A re-push
+          # uploads the same bytes, so retrying is safe; v0.7.0 failed twice this way.
+          for attempt in 1 2 3 4 5; do
+            if helm push "dist/$CHART_NAME-$CHART_VERSION.tgz" "oci://$REGISTRY/charts"; then break; fi
+            [ "$attempt" -lt 5 ] || { echo "helm push failed $attempt times"; exit 1; }
+            echo "::warning::helm push failed (attempt $attempt), retrying in $((attempt * 10))s"
+            sleep $((attempt * 10))
+          done
           digest=$(crane digest "$REGISTRY/charts/$CHART_NAME:$CHART_VERSION")
           echo "digest=$digest" | tee -a "$GITHUB_OUTPUT"
           if [ "$MODE" = release ]; then cosign sign "$REGISTRY/charts/$CHART_NAME@$digest"; fi
