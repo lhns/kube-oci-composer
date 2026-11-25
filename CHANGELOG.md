@@ -5,6 +5,12 @@ may change between minor versions.
 
 ## [Unreleased]
 
+### Changed
+
+- A release fails unless its tag points at a commit on main.
+- `latest` (the image tag and the release page's Latest badge) moves only for the highest stable
+  release, not for a prerelease or an older patch.
+
 ### Build
 
 - The release retries `helm push` (up to 5 times, with backoff): ghcr can answer 404 for a chart
