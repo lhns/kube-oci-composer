@@ -8,7 +8,8 @@ may change between minor versions.
 ### Changed
 
 - A release fails unless its tag points at a commit on main.
-- `latest` moves only for the highest stable release, not for a prerelease or an older patch.
+- `latest` (the image tag and the release page's Latest badge) moves only for the highest stable
+  release, not for a prerelease or an older patch.
 
 ### Build
 

@@ -109,7 +109,8 @@ jobs:
             # so a prerelease or an older patch tagged later does not take it over.
             stable='^v[0-9]+\.[0-9]+\.[0-9]+$'
             EXTRA_TAGS=""
-            if [[ "$GITHUB_REF_NAME" =~ $stable ]]                 && [ "$(git tag -l 'v*' | grep -E "$stable" | sort -V | tail -n1)" = "$GITHUB_REF_NAME" ]; then
+            highest=$(git tag -l 'v*' | grep -E "$stable" | sort -V | tail -n1 || true)
+            if [[ "$GITHUB_REF_NAME" =~ $stable ]] && [ "$highest" = "$GITHUB_REF_NAME" ]; then
               EXTRA_TAGS=latest
             else
               echo "::notice::not moving latest: $GITHUB_REF_NAME is not the highest stable release"
@@ -335,8 +336,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.build.outputs.chart_version }}
+          EXTRA_TAGS: ${{ needs.build.outputs.extra_tags }}
         run: |
           set -euo pipefail
+          # The release page's Latest badge follows the same rule as the `latest` image tag.
+          latest=false
+          case ",$EXTRA_TAGS," in *,latest,*) latest=true ;; esac
           if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" dist/* --clobber
             exit 0
@@ -348,8 +353,8 @@ jobs:
             p { print }
           ' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
           if [ -s "$RUNNER_TEMP/notes.md" ]; then
-            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md" dist/*
+            gh release create "$GITHUB_REF_NAME" --verify-tag --latest="$latest" --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md" dist/*
           else
             echo "::warning::CHANGELOG.md has no section for $VERSION; using generated notes"
-            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes dist/*
+            gh release create "$GITHUB_REF_NAME" --verify-tag --latest="$latest" --title "$GITHUB_REF_NAME" --generate-notes dist/*
           fi
