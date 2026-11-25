@@ -3,7 +3,8 @@
 name: release
 
 # Two modes, one code path:
-#   release - a `v*` tag: image tags <TAG_PREFIX>X.Y.Z and latest, chart X.Y.Z, GitHub Release.
+#   release - a `v*` tag on a commit of main: image tags <TAG_PREFIX>X.Y.Z (and latest, when this is
+#             the highest stable release), chart X.Y.Z, GitHub Release.
 #   dev     - any other branch push, or run by hand: image tags 0.0.0-dev.g<sha7>, sha-<sha7> and
 #             the branch, chart 0.0.0-dev.g<sha7>. No GitHub Release.
 # Both build linux/amd64 and linux/arm64, push by digest, check each platform's binary, and only
@@ -73,6 +74,8 @@ jobs:
       digest_builder: ${{ steps.build-builder.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0   # release mode: all tags (the `latest` decision) and main's history (the ancestry check)
       # PER-REPO: pv-reaper only, its Dockerfile RUNs on the target platform:
       # - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -93,7 +96,24 @@ jobs:
             MODE=release
             CHART_VERSION="${GITHUB_REF_NAME#v}"
             APP_VERSION="${TAG_PREFIX}${CHART_VERSION}"
-            EXTRA_TAGS=latest
+            # A tag cannot release a commit that never landed on main: the gates and the signing
+            # identity come from the tagged commit's own workflow files, so an unreviewed branch
+            # could otherwise be released by tagging it. This does not stop someone who can edit
+            # this workflow; a tag ruleset restricting who can create v* tags does.
+            git fetch --no-tags origin main
+            if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+              echo "::error::$GITHUB_REF_NAME points at $GITHUB_SHA, which is not on main; release from a commit of main"
+              exit 1
+            fi
+            # `latest` is what unpinned installs pull: move it only for the highest stable release,
+            # so a prerelease or an older patch tagged later does not take it over.
+            stable='^v[0-9]+\.[0-9]+\.[0-9]+$'
+            EXTRA_TAGS=""
+            if [[ "$GITHUB_REF_NAME" =~ $stable ]]                 && [ "$(git tag -l 'v*' | grep -E "$stable" | sort -V | tail -n1)" = "$GITHUB_REF_NAME" ]; then
+              EXTRA_TAGS=latest
+            else
+              echo "::notice::not moving latest: $GITHUB_REF_NAME is not the highest stable release"
+            fi
           else
             MODE=dev
             # The g is required: an all-digit sha with a leading zero (0054012) is an invalid
@@ -208,7 +228,8 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t refs <<< "$REFS"
-          IFS=, read -ra tags <<< "$APP_VERSION,$EXTRA_TAGS"
+          tags=("$APP_VERSION")
+          if [ -n "$EXTRA_TAGS" ]; then IFS=, read -ra extra <<< "$EXTRA_TAGS"; tags+=("${extra[@]}"); fi
           for ref in "${refs[@]}"; do
             name=${ref%@*} digest=${ref#*@}
             for t in "${tags[@]}"; do crane tag "$ref" "$t"; done
